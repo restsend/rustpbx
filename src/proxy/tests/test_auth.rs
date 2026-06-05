@@ -517,6 +517,7 @@ async fn test_guest_call_allowed_extension() {
         session_hooks: Arc::new(Vec::new()),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
+        callrecord_formatter: None,
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 

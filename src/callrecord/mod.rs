@@ -374,6 +374,30 @@ pub trait CallRecordFormatter: Send + Sync {
     fn format_file_name(&self, record: &CallRecord) -> String;
     fn format_transcript_path(&self, record: &CallRecord) -> String;
     fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String;
+
+    fn format_sipflow_media_key(&self, record: &CallRecord) -> String {
+        format!(
+            "{}/{}.wav",
+            record.start_time.format("%Y%m%d"),
+            record.call_id
+        )
+    }
+
+    fn format_sipflow_signaling_key(&self, record: &CallRecord) -> String {
+        format!(
+            "{}/{}.jsonl",
+            record.start_time.format("%Y%m%d"),
+            record.call_id
+        )
+    }
+
+    fn format_sipflow_media_file_name(&self, record: &CallRecord) -> String {
+        format!("{}.wav", record.call_id)
+    }
+
+    fn format_sipflow_signaling_file_name(&self, record: &CallRecord) -> String {
+        format!("{}.jsonl", record.call_id)
+    }
 }
 
 pub struct DefaultCallRecordFormatter {

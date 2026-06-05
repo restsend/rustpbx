@@ -473,6 +473,12 @@ impl BridgePeer {
     /// endpoint that may not be ready to receive it yet.
     pub fn open_caller_gate(&self) {
         self.caller_gate.store(true, Ordering::Release);
+        debug!(bridge_id = %self.id, "Caller gate opened — WebRTC→RTP forwarding enabled");
+    }
+
+    /// Returns whether the caller gate has been opened.
+    pub fn is_caller_gate_open(&self) -> bool {
+        self.caller_gate.load(Ordering::Acquire)
     }
 
     /// Setup the bridge by adding sample tracks to both sides for forwarding

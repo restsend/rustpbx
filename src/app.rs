@@ -228,6 +228,11 @@ impl AppStateBuilder {
         self
     }
 
+    pub fn with_callrecord_formatter(mut self, formatter: Arc<dyn CallRecordFormatter>) -> Self {
+        self.callrecord_formatter = Some(formatter);
+        self
+    }
+
     pub fn with_proxy_builder(mut self, builder: SipServerBuilder) -> Self {
         self.proxy_builder = Some(builder);
         self
@@ -349,6 +354,7 @@ impl AppStateBuilder {
                     backend: backend.clone(),
                     upload_config: upload_cfg.clone(),
                     db: Some(db_conn.clone()),
+                    formatter: callrecord_formatter.clone(),
                 }));
             }
 
@@ -381,7 +387,7 @@ impl AppStateBuilder {
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
                 crate::console::ConsoleState::initialize(
-                    callrecord_formatter,
+                    callrecord_formatter.clone(),
                     db_conn.clone(),
                     console_config,
                 )
@@ -442,6 +448,7 @@ impl AppStateBuilder {
                     .with_storage(core.storage.clone())
                     .with_sipflow_config(config.sipflow.clone())
                     .with_sipflow_backend(sipflow_backend_arc.clone())
+                    .with_callrecord_formatter(Some(callrecord_formatter.clone()))
                     .with_no_bind(self.skip_sip_bind)
                     .with_skip_migrate(self.skip_migrate)
                     .with_addon_registry(Some(addon_registry.clone()))

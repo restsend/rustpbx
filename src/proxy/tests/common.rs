@@ -115,6 +115,7 @@ pub async fn create_test_server_with_config(
         session_hooks: Arc::new(Vec::new()),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
+        callrecord_formatter: None,
     });
     // Add test users
     let enabled_user = SipUser {

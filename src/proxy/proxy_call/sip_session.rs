@@ -15,17 +15,18 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionSnapshot {
-    pub id: SessionId,
-    pub state: SessionState,
-    pub leg_count: usize,
-    pub bridge_active: bool,
-    pub media_path: MediaPathMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answer_sdp: Option<String>,
-    #[serde(skip)]
-    pub callee_dialogs: Vec<DialogId>,
-}
+ pub struct SessionSnapshot {
+     pub id: SessionId,
+     pub state: SessionState,
+     pub leg_count: usize,
+     pub bridge_active: bool,
+     pub caller_gate_open: bool,
+     pub media_path: MediaPathMode,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub answer_sdp: Option<String>,
+     #[serde(skip)]
+     pub callee_dialogs: Vec<DialogId>,
+ }
 use crate::call::domain::SessionPolicy;
 use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
@@ -1803,6 +1804,11 @@ impl SipSession {
             state: self.state,
             leg_count: self.legs.len(),
             bridge_active: self.bridge.active,
+            caller_gate_open: self
+                .media
+                .media_bridge
+                .as_ref()
+                .map_or(true, |b| b.is_caller_gate_open()),
             media_path: self.media_profile.path,
             answer_sdp: self.media.answer.clone(),
             callee_dialogs,
@@ -3941,6 +3947,11 @@ impl SipSession {
             self.media.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
 
         if self.media.answer.is_some() && !sdp_changed && !force_regenerate {
+            if !is_early_media {
+                if let Some(ref bridge) = self.media.media_bridge {
+                    bridge.open_caller_gate();
+                }
+            }
             return self.media.answer.clone();
         }
 

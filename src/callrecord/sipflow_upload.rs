@@ -8,7 +8,7 @@ use sea_orm::DatabaseConnection;
 use tracing::{info, warn};
 
 use crate::{
-    callrecord::{CallRecord, CallRecordHook},
+    callrecord::{CallRecord, CallRecordFormatter, CallRecordHook},
     config::SipFlowUploadConfig,
     sipflow::SipFlowBackend,
 };
@@ -17,6 +17,7 @@ pub struct SipFlowUploadHook {
     pub backend: Arc<dyn SipFlowBackend>,
     pub upload_config: SipFlowUploadConfig,
     pub db: Option<DatabaseConnection>,
+    pub formatter: Arc<dyn CallRecordFormatter>,
 }
 
 #[async_trait]
@@ -29,22 +30,31 @@ impl CallRecordHook for SipFlowUploadHook {
         let backend = self.backend.clone();
         let upload_config = self.upload_config.clone();
         let db = self.db.clone();
+        let formatter = self.formatter.clone();
         let call_id = record.call_id.clone();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
         let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
-        let date_prefix = record.start_time.format("%Y%m%d").to_string();
+
+        let media_key = formatter.format_sipflow_media_key(record);
+        let signaling_key = formatter.format_sipflow_signaling_key(record);
+        let media_file_name = formatter.format_sipflow_media_file_name(record);
+        let signaling_file_name = formatter.format_sipflow_signaling_file_name(record);
 
         crate::utils::spawn(async move {
             crate::callrecord::sipflow_upload::do_upload(
                 backend,
                 upload_config,
+                formatter,
                 db,
                 &call_id,
                 start,
                 end,
                 duration_secs,
-                &date_prefix,
+                &media_key,
+                &signaling_key,
+                &media_file_name,
+                &signaling_file_name,
             )
             .await;
         });
@@ -53,15 +63,20 @@ impl CallRecordHook for SipFlowUploadHook {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_upload(
     backend: Arc<dyn SipFlowBackend>,
     upload_config: SipFlowUploadConfig,
+    _formatter: Arc<dyn CallRecordFormatter>,
     db: Option<DatabaseConnection>,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
     duration_secs: i32,
-    date_prefix: &str,
+    media_key: &str,
+    signaling_key: &str,
+    media_file_name: &str,
+    signaling_file_name: &str,
 ) {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
@@ -81,7 +96,8 @@ async fn do_upload(
             call_id,
             start,
             end,
-            date_prefix,
+            media_key,
+            media_file_name,
             db.as_ref(),
             duration_secs,
         )
@@ -94,18 +110,28 @@ async fn do_upload(
     };
 
     if signaling {
-        upload_signaling_flow(&upload_config, backend.as_ref(), call_id, start, end, date_prefix)
-            .await;
+        upload_signaling_flow(
+            &upload_config,
+            backend.as_ref(),
+            call_id,
+            start,
+            end,
+            signaling_key,
+            signaling_file_name,
+        )
+        .await;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_media(
     backend: &dyn SipFlowBackend,
     upload_config: &SipFlowUploadConfig,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
-    date_prefix: &str,
+    media_key: &str,
+    media_file_name: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
 ) {
@@ -121,8 +147,6 @@ async fn upload_media(
         return;
     }
 
-    let key = format!("{}/{}.wav", date_prefix, call_id);
-
     let wav_len = wav_bytes.len();
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
@@ -136,9 +160,9 @@ async fn upload_media(
             ..
         } => {
             let full_key = if root.is_empty() {
-                key.clone()
+                media_key.to_string()
             } else {
-                format!("{}/{}", root.trim_end_matches('/'), key)
+                format!("{}/{}", root.trim_end_matches('/'), media_key)
             };
             upload_s3(
                 vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
@@ -154,7 +178,7 @@ async fn upload_media(
             })
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http(url, headers.as_ref(), call_id, wav_bytes).await
+            upload_http(url, headers.as_ref(), media_file_name, wav_bytes).await
         }
     };
 
@@ -188,13 +212,15 @@ async fn upload_media(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_signaling_flow(
     upload_config: &SipFlowUploadConfig,
     backend: &dyn SipFlowBackend,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
-    date_prefix: &str,
+    signaling_key: &str,
+    signaling_file_name: &str,
 ) {
     let flow_items = match backend.query_flow(call_id, start, end).await {
         Ok(items) => items,
@@ -211,8 +237,6 @@ async fn upload_signaling_flow(
     let jsonl = crate::sipflow::SipFlowQuery::export_jsonl(&flow_items);
     let data = jsonl.into_bytes();
 
-    let key = format!("{}/{}.jsonl", date_prefix, call_id);
-
     let result = match upload_config {
         SipFlowUploadConfig::S3 {
             vendor,
@@ -225,9 +249,9 @@ async fn upload_signaling_flow(
             ..
         } => {
             let full_key = if root.is_empty() {
-                key.clone()
+                signaling_key.to_string()
             } else {
-                format!("{}/{}", root.trim_end_matches('/'), key)
+                format!("{}/{}", root.trim_end_matches('/'), signaling_key)
             };
             upload_s3(
                 vendor, bucket, region, access_key, secret_key, endpoint, &full_key, data,
@@ -235,7 +259,7 @@ async fn upload_signaling_flow(
             .await
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http_jsonl(url, headers.as_ref(), call_id, data).await
+            upload_http_jsonl(url, headers.as_ref(), signaling_file_name, data).await
         }
     };
 
@@ -279,13 +303,12 @@ async fn upload_s3(
 async fn upload_http(
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
-    call_id: &str,
+    file_name: &str,
     data: Vec<u8>,
 ) -> Result<String> {
     let client = reqwest::Client::new();
-    let file_name = format!("{}.wav", call_id);
     let part = reqwest::multipart::Part::bytes(data)
-        .file_name(file_name)
+        .file_name(file_name.to_string())
         .mime_str("audio/wav")?;
     let form = reqwest::multipart::Form::new().part("recording", part);
 
@@ -298,7 +321,6 @@ async fn upload_http(
     let response = req.send().await?;
     if response.status().is_success() {
         let body = response.text().await.unwrap_or_default();
-        // Return a URL: use the posted URL or parse from response if it looks like one.
         let recording_url = if body.starts_with("http") {
             body.trim().to_string()
         } else {
@@ -317,13 +339,12 @@ async fn upload_http(
 async fn upload_http_jsonl(
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
-    call_id: &str,
+    file_name: &str,
     data: Vec<u8>,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let file_name = format!("{}.jsonl", call_id);
     let part = reqwest::multipart::Part::bytes(data)
-        .file_name(file_name)
+        .file_name(file_name.to_string())
         .mime_str("application/jsonl")?;
     let form = reqwest::multipart::Form::new().part("signaling", part);
 
@@ -350,13 +371,12 @@ async fn upload_http_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::callrecord::DefaultCallRecordFormatter;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
     use chrono::{DateTime, Local};
 
     struct MockBackend {
-        /// WAV bytes returned by query_media
         media: Vec<u8>,
-        /// Track flush call count
         flush_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -429,17 +449,14 @@ mod tests {
                 media: None,
             },
             db: None,
+            formatter: Arc::new(DefaultCallRecordFormatter::default()),
         };
         let mut record = make_record();
-        // Hook returns immediately without blocking
         let start = std::time::Instant::now();
         hook.on_record_completed(&mut record).await.unwrap();
         let elapsed = start.elapsed();
-        // Should return in well under 100ms (no actual work done synchronously)
         assert!(elapsed.as_millis() < 100, "hook blocked for {elapsed:?}");
-        // URL should NOT be set (the background task would set it later)
         assert!(record.details.recording_url.is_none());
-        // Give background task time to run, then check flush was called
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
