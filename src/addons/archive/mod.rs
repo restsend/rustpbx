@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::time;
 use tracing::{error, info};
@@ -39,9 +40,92 @@ pub struct ArchiveAddon {
     state: ArchiveState,
 }
 
+fn archive_config_path(config_path: &Option<String>) -> PathBuf {
+    config_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .map(|dir| dir.join("archive.toml"))
+        .unwrap_or_else(|| PathBuf::from("archive.toml"))
+}
+
 impl Default for ArchiveAddon {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_config_path_uses_main_config_directory() {
+        let path = Some("config/rustpbx.toml".to_string());
+
+        assert_eq!(
+            archive_config_path(&path),
+            std::path::PathBuf::from("config/archive.toml")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_config_reads_archive_toml_next_to_main_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_config = dir.path().join("rustpbx.toml");
+        let archive_config = dir.path().join("archive.toml");
+        std::fs::write(&main_config, "[proxy]\naddons = [\"archive\"]\n").unwrap();
+        std::fs::write(
+            &archive_config,
+            r#"enabled = true
+archive_time = "03:00"
+timezone = "Asia/Shanghai"
+retention_days = 30
+archive_after_days = 7
+archive_dir = "/tmp/rustpbx-archive"
+"#,
+        )
+        .unwrap();
+
+        let loaded =
+            ArchiveAddon::load_config(&Some(main_config.to_string_lossy().to_string())).await;
+        let loaded = loaded.expect("archive config should load");
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.archive_time, "03:00");
+        assert_eq!(loaded.timezone.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(loaded.retention_days, 30);
+        assert_eq!(loaded.archive_after_days, 7);
+        assert_eq!(loaded.archive_dir.as_deref(), Some("/tmp/rustpbx-archive"));
+    }
+
+    #[tokio::test]
+    async fn load_config_falls_back_to_archive_table_in_main_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_config = dir.path().join("rustpbx.toml");
+        std::fs::write(
+            &main_config,
+            r#"[proxy]
+addons = ["archive"]
+
+[archive]
+enabled = true
+archive_time = "04:00"
+timezone = "UTC"
+retention_days = 14
+archive_after_days = 3
+"#,
+        )
+        .unwrap();
+
+        let loaded =
+            ArchiveAddon::load_config(&Some(main_config.to_string_lossy().to_string())).await;
+        let loaded = loaded.expect("archive config should load from main config");
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.archive_time, "04:00");
+        assert_eq!(loaded.timezone.as_deref(), Some("UTC"));
+        assert_eq!(loaded.retention_days, 14);
+        assert_eq!(loaded.archive_after_days, 3);
     }
 }
 
@@ -58,30 +142,63 @@ impl ArchiveAddon {
 
     /// Load configuration from addon-specific config file.
     pub async fn load_config(config_path: &Option<String>) -> Option<ArchiveConfig> {
-        if let Some(path) = config_path {
-            let config_dir = std::path::Path::new(path).parent()?;
-            let addon_config_path = config_dir.join("archive.toml");
-            if addon_config_path.exists() {
-                match tokio::fs::read_to_string(&addon_config_path).await {
-                    Ok(content) => match toml::from_str::<ArchiveConfig>(&content) {
-                        Ok(config) => {
-                            tracing::info!(
-                                "Archive config loaded from {}",
-                                addon_config_path.display()
-                            );
-                            return Some(config);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse archive.toml: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("Failed to read archive.toml: {}", e);
+        let addon_config_path = archive_config_path(config_path);
+        if addon_config_path.exists() {
+            match tokio::fs::read_to_string(&addon_config_path).await {
+                Ok(content) => match toml::from_str::<ArchiveConfig>(&content) {
+                    Ok(config) => {
+                        tracing::info!(
+                            "Archive config loaded from {}",
+                            addon_config_path.display()
+                        );
+                        return Some(config);
                     }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse archive.toml: {}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to read archive.toml: {}", e);
                 }
             }
         }
-        tracing::info!("Archive using default configuration (no archive.toml found)");
+
+        if let Some(path) = config_path {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                    Ok(value) => {
+                        if let Some(archive_value) = value.get("archive") {
+                            match archive_value.clone().try_into::<ArchiveConfig>() {
+                                Ok(config) => {
+                                    tracing::info!(
+                                        "Archive config loaded from [archive] in {}",
+                                        path
+                                    );
+                                    return Some(config);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to parse [archive] from {}: {}",
+                                        path,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse {} while checking [archive]: {}", path, e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to read {} while checking [archive]: {}", path, e);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Archive using default configuration (no archive.toml or [archive] config found)"
+        );
         None
     }
 

@@ -4,15 +4,26 @@ This addon provides functionality to archive old call records to compressed CSV 
 
 ## Configuration
 
-Add the following section to your `config.toml` (or `rustpbx.toml`):
+Enable the addon in your main `config.toml` (or `rustpbx.toml`):
 
 ```toml
-[archive]
+[proxy]
+addons = ["archive"]
+```
+
+Then add the following settings to `archive.toml` in the same directory as your main config file:
+
+```toml
 enabled = true
 archive_time = "03:00"       # Time to run the archive job (HH:MM)
 timezone = "Asia/Shanghai"   # Timezone for the schedule
 retention_days = 30          # Keep data for 30 days
+archive_after_days = 0       # 0 archives yesterday's records
+# archive_dir = "/var/lib/rustpbx/archive"
 ```
+
+For compatibility, the addon also accepts the same settings under `[archive]` in the main config
+when `archive.toml` is not present. The console UI saves archive settings to `archive.toml`.
 
 ## Features
 
