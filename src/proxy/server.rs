@@ -8,7 +8,7 @@ use crate::{
     auto_external_ip,
     call::{TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
-        CallRecordSender,
+        CallRecordFormatter, CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder},
     },
     config::{ProxyConfig, RtpConfig, SipFlowConfig},
@@ -108,6 +108,7 @@ pub struct SipServerInner {
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
     pub rtc_cname: String,
+    pub callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
 }
 
 fn random_hex() -> String {
@@ -145,6 +146,7 @@ pub struct SipServerBuilder {
     sipflow_config: Option<SipFlowConfig>,
     /// Pre-built SipFlow backend (takes precedence over sipflow_config).
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
+    callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
     no_bind: bool,
     /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
@@ -189,6 +191,7 @@ impl SipServerBuilder {
             storage: None,
             sipflow_config: None,
             sipflow_backend: None,
+            callrecord_formatter: None,
             no_bind: false,
             addon_registry: None,
             rwi_gateway: None,
@@ -228,6 +231,11 @@ impl SipServerBuilder {
     /// `SipFlowUploadHook`, avoiding duplicate writers to the same spool directory.
     pub fn with_sipflow_backend(mut self, backend: Option<Arc<dyn SipFlowBackend>>) -> Self {
         self.sipflow_backend = backend;
+        self
+    }
+
+    pub fn with_callrecord_formatter(mut self, formatter: Option<Arc<dyn CallRecordFormatter>>) -> Self {
+        self.callrecord_formatter = formatter;
         self
     }
 
@@ -781,6 +789,7 @@ impl SipServerBuilder {
                 .clone()
                 .unwrap_or_else(random_hex),
             rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
+            callrecord_formatter: self.callrecord_formatter,
         });
 
         let inner_weak = Arc::downgrade(&inner);
