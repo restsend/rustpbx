@@ -264,7 +264,6 @@ impl CallRecordHook for RecordingUploadHook {
                     upload_time: Some(chrono::Utc::now().to_rfc3339()),
                     switch_flag: None,
                     process_flag: None,
-                    kz_conn_id: None,
                     root_call_id: None,
                 };
                 let event = RwiEvent::RecordingMetadataAvailable {

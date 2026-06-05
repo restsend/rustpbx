@@ -923,8 +923,6 @@ pub enum RwiEvent {
         event_name: String,
         system_time: String,
         call_id: Option<String>,
-        #[serde(default)]
-        kz_conn_id: Option<String>,
         agent_id: Option<String>,
         other_dn: Option<String>,
         ani: Option<String>,
@@ -1986,7 +1984,6 @@ pub struct RecordingMetadata {
     pub upload_time: Option<String>,
     pub switch_flag: Option<String>,
     pub process_flag: Option<String>,
-    pub kz_conn_id: Option<String>,
     pub root_call_id: Option<String>,
 }
 
@@ -2341,7 +2338,6 @@ mod tests {
                     "upload_time": null,
                     "switch_flag": "ks",
                     "process_flag": "ks_22_normal",
-                    "kz_conn_id": null,
                     "root_call_id": null
                 }
             }
@@ -2482,7 +2478,6 @@ mod tests {
                 "event_name": "ESTABLISHED",
                 "system_time": "2026-05-14T17:54:49.003Z",
                 "call_id": "call-abc",
-                "kz_conn_id": "kc-12345",
                 "agent_id": "10001",
                 "other_dn": null,
                 "ani": "19534519769",
@@ -2504,7 +2499,6 @@ mod tests {
                 event_code,
                 ref event_name,
                 ref call_id,
-                ref kz_conn_id,
                 ref agent_id,
                 ref ani,
                 ref dnis,
@@ -2514,7 +2508,6 @@ mod tests {
                 assert_eq!(event_code, 64);
                 assert_eq!(event_name, "ESTABLISHED");
                 assert_eq!(call_id.as_deref(), Some("call-abc"));
-                assert_eq!(kz_conn_id.as_deref(), Some("kc-12345"));
                 assert_eq!(agent_id.as_deref(), Some("10001"));
                 assert_eq!(ani.as_deref(), Some("19534519769"));
                 assert_eq!(dnis.as_deref(), Some("39989"));
@@ -2597,7 +2590,6 @@ mod tests {
             event_name: "RINGING".into(),
             system_time: "t".into(),
             call_id: Some("c-3".into()),
-            kz_conn_id: None,
             agent_id: None,
             other_dn: None,
             ani: None,
@@ -2640,7 +2632,6 @@ mod tests {
                 upload_time: None,
                 switch_flag: None,
                 process_flag: None,
-                kz_conn_id: None,
                 root_call_id: None,
             },
         };
@@ -2693,7 +2684,6 @@ mod tests {
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
-            kz_conn_id: Some("kc-12345".into()),
             agent_id: Some("10001".into()),
             other_dn: None,
             ani: Some("19534519769".into()),
@@ -2734,7 +2724,6 @@ mod tests {
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
-            kz_conn_id: Some("kc-12345".into()),
             agent_id: Some("10001".into()),
             other_dn: None,
             ani: Some("19534519769".into()),
@@ -2777,7 +2766,6 @@ mod tests {
             event_name: "REGISTERED".into(),
             system_time: "t".into(),
             call_id: None,
-            kz_conn_id: None,
             agent_id: None,
             other_dn: None,
             ani: None,
@@ -2830,7 +2818,6 @@ mod tests {
                 upload_time: Some("2026-05-14T16:14:46Z".into()),
                 switch_flag: Some("ks".into()),
                 process_flag: Some("ks_22_normal".into()),
-                kz_conn_id: None,
                 root_call_id: Some("call-root-42".into()),
             },
         };

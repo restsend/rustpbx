@@ -7736,7 +7736,7 @@ impl SipSession {
              use crate::rwi::proto::RwiEvent;
              let dn = dn.unwrap_or("unknown").to_string();
              let dn_call_id = call_id.clone().unwrap_or_default();
-             let (agent_id, agent_name, routing_target) = gw
+             let (agent_id, _agent_name, routing_target) = gw
                  .read()
                  .meta_store
                  .get_sync(&dn_call_id)
@@ -7748,7 +7748,6 @@ impl SipSession {
                  event_name: event_name.to_string(),
                  system_time: chrono::Utc::now().to_rfc3339(),
                  call_id,
-                 kz_conn_id: None,
                  agent_id,
                  other_dn: None,
                  ani: ani.map(|s| s.to_string()),
