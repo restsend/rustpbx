@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjindi@fourz.cn>"]
@@ -118,7 +118,7 @@ toml_edit = { version = "0.25.11", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.11"
+rsipstack = "0.5.12"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.38"

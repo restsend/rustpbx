@@ -2,7 +2,7 @@ use crate::call::Location;
 use crate::config::LocatorWebhookConfig;
 use crate::proxy::locator::{LocatorEvent, LocatorEventReceiver};
 use serde::Serialize;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 #[derive(Serialize)]
 pub struct LocationDto {

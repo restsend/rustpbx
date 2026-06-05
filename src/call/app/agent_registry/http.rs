@@ -50,22 +50,6 @@ impl HttpRegistry {
         self
     }
 
-    /// Build HTTP headers with API key if present
-    fn build_headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        );
-        if let Some(ref key) = self.api_key {
-            headers.insert(
-                "X-API-Key",
-                reqwest::header::HeaderValue::from_str(key).unwrap(),
-            );
-        }
-        headers
-    }
-
     /// Build headers as a `HashMap<String, String>` for `http_util`.
     fn headers_map(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();

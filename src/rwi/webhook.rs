@@ -3,7 +3,7 @@ use crate::rwi::gateway::EventCacheEntry;
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Buffer size for the broadcast channel between gateway and webhook handler.
 const WEBHOOK_CHANNEL_SIZE: usize = 512;
@@ -391,7 +391,6 @@ mod tests {
                 event_name: "ESTABLISHED".into(),
                 system_time: "2026-05-14T17:54:49.003Z".into(),
                 call_id: Some("call-dn-1".into()),
-                kz_conn_id: Some("kc-12345".into()),
                 agent_id: Some("10001".into()),
                 other_dn: None,
                 ani: Some("19534519769".into()),
@@ -419,7 +418,6 @@ mod tests {
             body["event"]["dn_state_changed"]["event_name"],
             "ESTABLISHED"
         );
-        assert_eq!(body["event"]["dn_state_changed"]["kz_conn_id"], "kc-12345");
     }
 
     #[tokio::test]
