@@ -10,7 +10,6 @@ use chrono::NaiveDate;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
-use toml_edit::{DocumentMut, value};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -136,11 +135,6 @@ pub async fn update_config(
     Extension(archive_state): Extension<ArchiveState>,
     Json(payload): Json<UpdateConfigPayload>,
 ) -> impl IntoResponse {
-    let config_path = state
-        .config_path
-        .clone()
-        .unwrap_or_else(|| "config.toml".to_string());
-
     // Validate timezone before touching the config file
     let tz_str = payload.timezone.trim();
     if tz_str.parse::<chrono_tz::Tz>().is_err() {
@@ -156,62 +150,38 @@ pub async fn update_config(
         ).into_response();
     }
 
+    let archive_config_path = super::archive_config_path(&state.config_path);
+    let new_archive_dir = payload
+        .archive_dir
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let new_config = crate::addons::archive::ArchiveConfig {
+        enabled: payload.enabled,
+        archive_time: payload.archive_time.trim().to_string(),
+        timezone: Some(tz_str.to_string()),
+        retention_days: payload.retention_days,
+        archive_after_days: payload.archive_after_days,
+        archive_dir: new_archive_dir,
+    };
+
     let res = (|| -> anyhow::Result<()> {
-        let config_content = std::fs::read_to_string(&config_path)?;
-        let mut doc = config_content.parse::<DocumentMut>()?;
-
-        let needs_archive_init = doc
-            .as_table()
-            .get("archive")
-            .map(|item| !item.is_table())
-            .unwrap_or(true);
-        if needs_archive_init {
-            doc.insert("archive", toml_edit::table());
+        if let Some(parent) = archive_config_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
-        let archive_table = doc
-            .as_table_mut()
-            .get_mut("archive")
-            .and_then(toml_edit::Item::as_table_mut)
-            .ok_or_else(|| anyhow::anyhow!("[archive] must be a table"))?;
-
-        archive_table["enabled"] = value(payload.enabled);
-        archive_table["archive_time"] = value(payload.archive_time.trim());
-        archive_table["timezone"] = value(tz_str);
-        archive_table["retention_days"] = value(payload.retention_days as i64);
-        archive_table["archive_after_days"] = value(payload.archive_after_days as i64);
-        match payload.archive_dir.as_deref() {
-            Some(d) if !d.trim().is_empty() => {
-                archive_table["archive_dir"] = value(d.trim());
-            }
-            _ => {
-                // Remove override → fall back to derived default
-                archive_table.remove("archive_dir");
-            }
-        }
-        std::fs::write(&config_path, doc.to_string())?;
-        info!("Updated archive config in {}", config_path);
+        let config_content = toml::to_string_pretty(&new_config)?;
+        std::fs::write(&archive_config_path, config_content)?;
+        info!("Updated archive config in {}", archive_config_path.display());
         Ok(())
     })();
 
     match res {
         Ok(_) => {
             // Update in-memory config
-            let tz_str = tz_str.to_string();
-            let mut config_guard = archive_state.config.write().unwrap();
-            let new_archive_dir = payload
-                .archive_dir
-                .as_deref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            *config_guard = Some(crate::addons::archive::ArchiveConfig {
-                enabled: payload.enabled,
-                archive_time: payload.archive_time.trim().to_string(),
-                timezone: Some(tz_str.to_string()),
-                retention_days: payload.retention_days,
-                archive_after_days: payload.archive_after_days,
-                archive_dir: new_archive_dir,
-            });
+            *archive_state.config.write().unwrap() = Some(new_config);
             Json(serde_json::json!({"success": true})).into_response()
         }
         Err(e) => {
