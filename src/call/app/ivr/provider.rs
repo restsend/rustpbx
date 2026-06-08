@@ -22,7 +22,7 @@ pub trait ActionProvider: Send + Sync {
         Ok(())
     }
 
-    async fn on_session_end(&self, reason: &EndReason) -> anyhow::Result<()> {
+    async fn on_session_end(&self, reason: &EndReason, _session_id: &str) -> anyhow::Result<()> {
         let _ = reason;
         Ok(())
     }
@@ -186,6 +186,9 @@ impl Default for RetryConfig {
                     prompt_voice: None,
                 },
                 next: None,
+                step_id: None,
+                step_name: None,
+                extra: None,
             }),
         }
     }
@@ -234,6 +237,9 @@ impl TreeProvider {
                 ActionNode {
                     action: entry.action.clone(),
                     next: None,
+                    step_id: None,
+                    step_name: None,
+                    extra: None,
                 },
             );
         }
@@ -241,6 +247,9 @@ impl TreeProvider {
             Box::new(ActionNode {
                 action: a,
                 next: None,
+                step_id: None,
+                step_name: None,
+                extra: None,
             })
         });
         let invalid_action = if menu.invalid_prompt.is_some() || menu.invalid_text.is_some() {
@@ -276,6 +285,9 @@ impl TreeProvider {
                 greeting_api_url: None,
             },
             next: None,
+            step_id: None,
+            step_name: None,
+            extra: None,
         }
     }
 }
@@ -291,30 +303,35 @@ impl ActionProvider for TreeProvider {
             Some(ProviderEvent::SessionStart) => Ok(self.build_dtmf_menu_action()),
             Some(ProviderEvent::Dtmf { digit }) => {
                 let menu = self.current_menu().cloned().unwrap_or_default();
-                // Try matching DTMF key
                 if let Some(entry) = menu.entries.iter().find(|e| e.key == digit.as_str()) {
                     return Ok(ActionNode {
                         action: entry.action.clone(),
                         next: None,
+                        step_id: None,
+                        step_name: None,
+                        extra: None,
                     });
                 }
-                // Unknown key
                 if let Some(ref unknown) = menu.unknown_key_action {
                     return Ok(ActionNode {
                         action: unknown.clone(),
                         next: None,
+                        step_id: None,
+                        step_name: None,
+                        extra: None,
                     });
                 }
-                // No match → return Repeat
                 Ok(ActionNode::new(EntryAction::Repeat))
             }
             Some(ProviderEvent::DtmfMenuTimeout) | Some(ProviderEvent::DtmfTimeout) => {
-                // Timeout → repeat or timeout_action
                 let menu = self.current_menu().cloned().unwrap_or_default();
                 if let Some(ta) = menu.timeout_action {
                     Ok(ActionNode {
                         action: ta,
                         next: None,
+                        step_id: None,
+                        step_name: None,
+                        extra: None,
                     })
                 } else {
                     Ok(ActionNode::new(EntryAction::Repeat))
@@ -457,9 +474,12 @@ impl ActionProvider for StepProvider {
         Ok(())
     }
 
-    async fn on_session_end(&self, reason: &EndReason) -> anyhow::Result<()> {
+    async fn on_session_end(&self, reason: &EndReason, session_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/end", self.url);
-        let body = serde_json::json!({ "reason": format!("{:?}", reason) });
+        let body = serde_json::json!({
+            "session_id": session_id,
+            "reason": format!("{:?}", reason),
+        });
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         info!(
             url = %url,

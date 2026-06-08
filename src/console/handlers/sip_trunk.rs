@@ -21,7 +21,7 @@ use axum::{
     extract::{Form, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, patch, put},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Order;
@@ -62,6 +62,18 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_sip_trunk_detail)
                 .patch(update_sip_trunk)
                 .delete(delete_sip_trunk),
+        )
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route(
+            "/sip-trunk",
+            put(create_sip_trunk).post(query_sip_trunks),
+        )
+        .route(
+            "/sip-trunk/{id}",
+            patch(update_sip_trunk).delete(delete_sip_trunk),
         )
 }
 

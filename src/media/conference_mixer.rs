@@ -24,6 +24,21 @@ pub struct AudioFrame {
     pub timestamp: u64,
 }
 
+/// A frame captured from a participant's input, sent to the recorder tap.
+/// Each participant's raw PCM is forwarded here before mixing so the
+/// recorder can write per-leg audio to the corresponding WAV channel.
+#[derive(Debug, Clone)]
+pub struct RecorderFrame {
+    /// Which participant this audio came from.
+    pub leg_id: LegId,
+    /// PCM samples (16-bit signed, mono).
+    pub samples: Vec<i16>,
+    /// Sample rate of the samples.
+    pub sample_rate: u32,
+    /// Monotonic timestamp for ordering.
+    pub timestamp: u64,
+}
+
 impl AudioFrame {
     pub fn new(samples: Vec<i16>, sample_rate: u32) -> Self {
         Self {
@@ -76,6 +91,9 @@ pub struct ConferenceAudioMixer {
     /// Per-(source, destination) gain overrides for supervisor modes.
     /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
     route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
+    /// Optional recorder tap: each participant's input PCM is cloned here
+    /// before mixing so the recorder can write per-leg audio.
+    recorder_sink: Arc<tokio::sync::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
 }
 
 impl std::fmt::Debug for ConferenceAudioMixer {
@@ -102,7 +120,16 @@ impl ConferenceAudioMixer {
             cancel_token: CancellationToken::new(),
             mixing_task: Arc::new(std::sync::Mutex::new(None)),
             route_gains: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            recorder_sink: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Install a recorder tap.  Every 20ms tick, the mixer will send each
+    /// participant's raw input PCM to the provided channel **before**
+    /// N-1 mixing, so the recorder can write per-leg audio.
+    pub async fn set_recorder_sink(&self, sink: Option<mpsc::Sender<RecorderFrame>>) {
+        let mut guard = self.recorder_sink.lock().await;
+        *guard = sink;
     }
 
     /// Add a participant to the conference
@@ -246,6 +273,7 @@ impl ConferenceAudioMixer {
         let sample_rate = self.sample_rate;
         let conf_id = self.conf_id.clone();
         let route_gains = self.route_gains.clone();
+        let recorder_sink = self.recorder_sink.clone();
 
         let task = crate::utils::spawn(async move {
             Self::mixing_loop(
@@ -255,6 +283,7 @@ impl ConferenceAudioMixer {
                 frame_size,
                 sample_rate,
                 route_gains,
+                recorder_sink,
             )
             .await;
         });
@@ -291,6 +320,7 @@ impl ConferenceAudioMixer {
         frame_size: usize,
         sample_rate: u32,
         route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
+        recorder_sink: Arc<tokio::sync::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
     ) {
         let interval_ms = (frame_size as f64 / sample_rate as f64 * 1000.0) as u64;
         let interval = tokio::time::Duration::from_millis(interval_ms.max(1));
@@ -341,6 +371,23 @@ impl ConferenceAudioMixer {
                     let participants_guard = participants.lock().await;
                     let participant_ids: Vec<LegId> = participants_guard.keys().cloned().collect();
                     drop(participants_guard);
+
+                    // ── Recorder tap: forward raw per-leg PCM before mixing ─────
+                    if !participant_audio.is_empty() {
+                        let sink_guard = recorder_sink.lock().await;
+                        if let Some(ref sink) = *sink_guard {
+                            for (leg_id, frame) in &participant_audio {
+                                let rf = RecorderFrame {
+                                    leg_id: leg_id.clone(),
+                                    samples: frame.samples.clone(),
+                                    sample_rate: frame.sample_rate,
+                                    timestamp: frame.timestamp,
+                                };
+                                let _ = sink.try_send(rf);
+                            }
+                        }
+                        drop(sink_guard);
+                    }
 
                     if !participant_audio.is_empty() {
                         for output_leg in &participant_ids {

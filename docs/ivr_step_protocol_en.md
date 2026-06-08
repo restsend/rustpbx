@@ -138,6 +138,35 @@ Every response is a JSON object with a `"type"` field. Two categories:
 { "type": "torecord",      "prompt": "leave_msg.wav", "beep": true }
 ```
 
+### Transparent Passthrough Fields
+
+Every `ActionNode` response can include three optional top-level fields for node identification and data passthrough:
+
+```json
+{
+  "type": "prompt",
+  "file": "hello.wav",
+  "step_id": "1000602002200750100",
+  "step_name": "欢迎语",
+  "extra": {
+    "tenantId": "didi",
+    "gvpFlow": "CTCDaiJiaKeFu",
+    "callPath": "F_11,F",
+    "businessType": "6",
+    "customerType": "1",
+    "routePoint": "39325"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_id` | `string` or null | Node identifier — stored and emitted in `ivr_step_trace` events as `step_id` |
+| `step_name` | `string` or null | Node name — stored and emitted as `step_name` |
+| `extra` | `JSON Object` or null | Transparent passthrough data — provider returns the complete object each time; RustPBX stores it and includes it verbatim in every subsequent `ivr_step_trace` event |
+
+> **Passthrough behavior**: After `session_start`, the provider should include `extra` in every response. RustPBX stores the latest `extra` value and echoes it in all `ivr_step_trace` events until the provider updates it. The `step_id` and `step_name` from the most recent provider response are used for the current step's trace.
+
 ### Next Chaining
 
 Non-terminal actions can include a `next` field to chain multiple actions without a round-trip:

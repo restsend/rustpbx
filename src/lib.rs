@@ -1,4 +1,5 @@
 pub mod addons;
+pub mod api;
 pub mod app;
 pub mod auto_external_ip;
 pub mod call;

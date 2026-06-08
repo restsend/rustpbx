@@ -13,7 +13,7 @@ use axum::{
     extract::{Json, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -45,6 +45,21 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_routing_edit)
                 .patch(update_routing)
                 .delete(delete_routing),
+        )
+        .route("/routing/{id}/clone", post(clone_routing))
+        .route("/routing/{id}/toggle", post(toggle_routing))
+        .route("/routing/{id}/data", get(route_detail_data))
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route(
+            "/routing",
+            post(query_routing).put(create_routing),
+        )
+        .route(
+            "/routing/{id}",
+            patch(update_routing).delete(delete_routing),
         )
         .route("/routing/{id}/clone", post(clone_routing))
         .route("/routing/{id}/toggle", post(toggle_routing))

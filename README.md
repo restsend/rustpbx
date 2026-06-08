@@ -177,13 +177,39 @@ Per-channel overhead: ~0.06% CPU / 0.24 MB (signaling); ~0.19% CPU / 0.33 MB (wi
 # Linux: apt-get install cmake pkg-config libasound2-dev libssl-dev libopus-dev
 # macOS: brew install cmake openssl pkg-config
 
-git clone https://github.com/restsend/rustpbx
+git clone --recurse-submodules https://github.com/restsend/rustpbx
 cd rustpbx
 cargo build --release
 cargo run --bin rustpbx -- --conf config.toml.example
 ```
 
 > Cross-compile via [cross](https://github.com/cross-rs/cross): `cargo install cross && cross build --release --target aarch64-unknown-linux-gnu`
+
+### Submodules
+
+Commerce addons are managed as git submodules under `src/addons/`:
+
+| Submodule | Repository |
+|-----------|-----------|
+| `src/addons/cc` | https://cnb.cool/miuda.ai/cc |
+| `src/addons/wholesale` | https://cnb.cool/miuda.ai/wholesale |
+| `src/addons/endpoint_manager` | https://cnb.cool/miuda.ai/endpoint_manager |
+| `src/addons/enterprise_auth` | https://cnb.cool/miuda.ai/enterprise_auth |
+| `src/addons/ivr_editor` | https://cnb.cool/miuda.ai/ivr_editor |
+| `src/addons/sbc` | https://cnb.cool/miuda.ai/sbc |
+| `src/addons/telemetry` | https://cnb.cool/miuda.ai/telemetry |
+| `src/addons/voicemail` | https://cnb.cool/miuda.ai/voicemail |
+
+```bash
+# Initialize submodules after clone
+git submodule update --init --recursive
+
+# Pull latest changes for all submodules
+git submodule update --remote
+
+# Pull latest for a specific submodule
+git submodule update --remote src/addons/cc
+```
 
 ---
 

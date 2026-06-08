@@ -366,17 +366,32 @@ pub struct ActionNode {
     pub action: EntryAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Box<ActionNode>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 impl ActionNode {
     pub fn new(action: EntryAction) -> Self {
-        Self { action, next: None }
+        Self {
+            action,
+            next: None,
+            step_id: None,
+            step_name: None,
+            extra: None,
+        }
     }
 
     pub fn with_next(action: EntryAction, next: ActionNode) -> Self {
         Self {
             action,
             next: Some(Box::new(next)),
+            step_id: None,
+            step_name: None,
+            extra: None,
         }
     }
 }

@@ -10,7 +10,7 @@
             algorithms: {{ selection_algorithms | tojson }},
             directionOptions: {{ direction_options | tojson }},
             statusOptions: {{ status_options | tojson }},
-            formAction: {{ form_action | tojson }},
+            formAction: {{ form_action | tojson }}.replace('/console', '{{ api_prefix | safe }}'),
             listUrl: {{ back_url | tojson }}
     })'>
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">

@@ -21,8 +21,8 @@ pub struct FileAudioSource {
     decoder: Box<dyn Decoder>,
     file_path: String,
     loop_playback: bool,
-    eof_reached: bool,
-    wav_reader: Option<WavReader<BufReader<File>>>,
+    pub(crate) eof_reached: bool,
+    pub(crate) wav_reader: Option<WavReader<BufReader<File>>>,
     mp3_decoder: Option<minimp3::Decoder<BufReader<File>>>,
     mp3_buffer: Vec<i16>,
     mp3_buffer_pos: usize,
@@ -31,6 +31,12 @@ pub struct FileAudioSource {
     raw_file: Option<BufReader<File>>,
     raw_frame_size: usize,
     temp_file_path: Option<String>,
+    /// Pre-decoded PCM cache — populated once at construction.
+    /// All subsequent `read_samples` calls copy from here.
+    pub(crate) pcm_cache: Vec<i16>,
+    pub(crate) pcm_cache_pos: usize,
+    pub(crate) cached_channels: u16,
+    pub(crate) cached_sample_rate: u32,
 }
 
 impl FileAudioSource {
@@ -101,7 +107,7 @@ impl FileAudioSource {
             _ => 160,
         };
 
-        Ok(Self {
+        let mut source = Self {
             decoder,
             file_path: actual_path,
             loop_playback,
@@ -115,7 +121,155 @@ impl FileAudioSource {
             raw_file,
             raw_frame_size,
             temp_file_path,
-        })
+            pcm_cache: Vec::new(),
+            pcm_cache_pos: 0,
+            cached_channels: 1,
+            cached_sample_rate: 8000,
+        };
+
+        // Pre-decode if the source is small enough to fit in a few MB.
+        source.decode_all_if_small()?;
+        Ok(source)
+    }
+
+    /// Pre-decode if the raw data is ≤ ~10 MB (≈ 20 minutes of 8 kHz PCMU).
+    /// Larger files fall back to the per-frame streaming path to avoid
+    /// unbounded heap usage.
+    fn decode_all_if_small(&mut self) -> Result<()> {
+        // 5 MB of encoded data ≈ 10-20 minutes of 8 kHz audio.
+        const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+        let file_size = std::fs::metadata(&self.file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if file_size > MAX_FILE_BYTES {
+            debug!(
+                file = %self.file_path,
+                bytes = file_size,
+                "Skipping pre-decode — file too large"
+            );
+            return Ok(());
+        }
+
+        self.decode_all()
+    }
+
+    /// Decode the entire source into `pcm_cache` (mono, native sample rate).
+    fn decode_all(&mut self) -> Result<()> {
+        let (channels, sample_rate) = self.meta();
+
+        // WAV path — drain the WavReader iterator.
+        if self.wav_reader.is_some() {
+            let mut pcm: Vec<i16> = Vec::new();
+            // collect() borrowed through a cell-like pattern — read one by one.
+            loop {
+                let sample = self.read_single_wav_sample();
+                match sample {
+                    Some(s) => pcm.push(s),
+                    None => break,
+                }
+            }
+            if channels > 1 {
+                pcm = mix_stereo_to_mono(&pcm, channels as usize);
+            }
+            self.cached_channels = 1;
+            self.cached_sample_rate = sample_rate;
+            self.pcm_cache = pcm;
+            debug!(
+                file = %self.file_path,
+                samples = self.pcm_cache.len(),
+                channels = channels,
+                rate = sample_rate,
+                "Pre-decoded WAV into PCM cache"
+            );
+            return Ok(());
+        }
+
+        // MP3 path — decode all frames.
+        if let Some(ref mut decoder) = self.mp3_decoder {
+            let mut pcm: Vec<i16> = Vec::new();
+            // Drain the initial buffer.
+            pcm.extend_from_slice(&self.mp3_buffer[self.mp3_buffer_pos..]);
+            loop {
+                match decoder.next_frame() {
+                    Ok(frame) => pcm.extend_from_slice(&frame.data),
+                    Err(minimp3::Error::Eof) => break,
+                    Err(e) => {
+                        warn!(file = %self.file_path, error = %e, "MP3 decode error during pre-decode");
+                        break;
+                    }
+                }
+            }
+            if channels > 1 {
+                pcm = mix_stereo_to_mono(&pcm, channels as usize);
+            }
+            self.cached_channels = 1;
+            self.cached_sample_rate = sample_rate;
+            self.pcm_cache = pcm;
+            self.mp3_decoder = None; // no longer needed
+            self.mp3_buffer.clear();
+            self.mp3_buffer_pos = 0;
+            debug!(
+                file = %self.file_path,
+                samples = self.pcm_cache.len(),
+                channels = channels,
+                rate = sample_rate,
+                "Pre-decoded MP3 into PCM cache"
+            );
+            return Ok(());
+        }
+
+        // Raw file path — read all frames and decode.
+        if let Some(ref mut reader) = self.raw_file {
+            let mut pcm: Vec<i16> = Vec::new();
+            let mut encoded_buf = vec![0u8; self.raw_frame_size];
+            loop {
+                match reader.read_exact(&mut encoded_buf) {
+                    Ok(_) => {
+                        let decoded = self.decoder.decode(&encoded_buf);
+                        pcm.extend_from_slice(&decoded);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        warn!(file = %self.file_path, error = %e, "Raw file read error during pre-decode");
+                        break;
+                    }
+                }
+            }
+            self.cached_channels = 1;
+            self.cached_sample_rate = sample_rate;
+            self.pcm_cache = pcm;
+            self.raw_file = None; // no longer needed
+            debug!(
+                file = %self.file_path,
+                samples = self.pcm_cache.len(),
+                rate = sample_rate,
+                "Pre-decoded raw file into PCM cache"
+            );
+            return Ok(());
+        }
+
+        // No source — empty cache.
+        Ok(())
+    }
+
+    /// Read a single decoded i16 sample from the WAV reader.
+    fn read_single_wav_sample(&mut self) -> Option<i16> {
+        self.wav_reader
+            .as_mut()
+            .and_then(|r| r.samples().next())
+            .and_then(|r| r.ok())
+    }
+
+    /// Return (channels, sample_rate) from the underlying source.
+    fn meta(&self) -> (u16, u32) {
+        if let Some(ref reader) = self.wav_reader {
+            return (reader.spec().channels, reader.spec().sample_rate);
+        }
+        if self.mp3_decoder.is_some() {
+            return (self.mp3_channels, self.mp3_sample_rate);
+        }
+        (1, self.decoder.sample_rate())
     }
 
     async fn download_file(url: &str) -> Result<String> {
@@ -176,6 +330,19 @@ impl FileAudioSource {
     }
 }
 
+/// Mix interleaved multichannel PCM down to mono.
+pub(crate) fn mix_stereo_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
+    if channels == 1 {
+        return samples.to_vec();
+    }
+    let mut mono = Vec::with_capacity(samples.len() / channels);
+    for chunk in samples.chunks(channels) {
+        let sum: i32 = chunk.iter().map(|&s| s as i32).sum();
+        mono.push((sum / channels as i32) as i16);
+    }
+    mono
+}
+
 impl AudioSource for FileAudioSource {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
         if self.eof_reached && !self.loop_playback {
@@ -189,6 +356,24 @@ impl AudioSource for FileAudioSource {
             return 0;
         }
 
+        // Pre-decoded cache — fast path.
+        if !self.pcm_cache.is_empty() {
+            let remaining = self.pcm_cache.len() - self.pcm_cache_pos;
+            if remaining == 0 {
+                self.eof_reached = true;
+                return 0;
+            }
+            let copy = remaining.min(buffer.len());
+            buffer[..copy]
+                .copy_from_slice(&self.pcm_cache[self.pcm_cache_pos..self.pcm_cache_pos + copy]);
+            self.pcm_cache_pos += copy;
+            if self.pcm_cache_pos >= self.pcm_cache.len() {
+                self.eof_reached = true;
+            }
+            return copy;
+        }
+
+        // Legacy per-frame paths (should not be reached after pre-decode).
         if let Some(ref mut reader) = self.wav_reader {
             let mut samples_read = 0;
             for sample in buffer.iter_mut() {
@@ -208,10 +393,11 @@ impl AudioSource for FileAudioSource {
                     }
                 }
             }
-            samples_read
-        } else if let Some(ref mut decoder) = self.mp3_decoder {
-            let mut samples_read = 0;
+            return samples_read;
+        }
 
+        if let Some(ref mut decoder) = self.mp3_decoder {
+            let mut samples_read = 0;
             while samples_read < buffer.len() {
                 if self.mp3_buffer_pos < self.mp3_buffer.len() {
                     let available = (self.mp3_buffer.len() - self.mp3_buffer_pos)
@@ -221,12 +407,8 @@ impl AudioSource for FileAudioSource {
                     );
                     self.mp3_buffer_pos += available;
                     samples_read += available;
-
-                    if samples_read >= buffer.len() {
-                        break;
-                    }
+                    if samples_read >= buffer.len() { break; }
                 }
-
                 match decoder.next_frame() {
                     Ok(frame) => {
                         self.mp3_buffer = frame.data;
@@ -243,60 +425,61 @@ impl AudioSource for FileAudioSource {
                     }
                 }
             }
-            samples_read
-        } else if let Some(ref mut reader) = self.raw_file {
+            return samples_read;
+        }
+
+        if let Some(ref mut reader) = self.raw_file {
             let mut encoded_buf = vec![0u8; self.raw_frame_size];
             match reader.read_exact(&mut encoded_buf) {
                 Ok(_) => {
                     let pcm = self.decoder.decode(&encoded_buf);
                     let copy_len = pcm.len().min(buffer.len());
                     buffer[..copy_len].copy_from_slice(&pcm[..copy_len]);
-                    copy_len
+                    return copy_len;
                 }
                 Err(e) => {
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        self.eof_reached = true;
-                    } else {
+                    self.eof_reached = e.kind() == std::io::ErrorKind::UnexpectedEof;
+                    if !self.eof_reached {
                         warn!("Raw file read error: {}", e);
                         self.eof_reached = true;
                     }
-                    0
+                    return 0;
                 }
             }
-        } else {
-            for sample in buffer.iter_mut() {
-                *sample = 0;
-            }
-            buffer.len()
         }
+
+        for sample in buffer.iter_mut() { *sample = 0; }
+        buffer.len()
     }
 
     fn sample_rate(&self) -> u32 {
-        if let Some(ref reader) = self.wav_reader {
-            reader.spec().sample_rate
-        } else if self.mp3_decoder.is_some() {
-            self.mp3_sample_rate
-        } else {
-            self.decoder.sample_rate()
-        }
+        if !self.pcm_cache.is_empty() { return self.cached_sample_rate; }
+        if let Some(ref reader) = self.wav_reader { reader.spec().sample_rate }
+        else if self.mp3_decoder.is_some() { self.mp3_sample_rate }
+        else { self.decoder.sample_rate() }
     }
 
     fn channels(&self) -> u16 {
-        if let Some(ref reader) = self.wav_reader {
-            reader.spec().channels
-        } else if self.mp3_decoder.is_some() {
-            self.mp3_channels
-        } else {
-            1
-        }
+        if !self.pcm_cache.is_empty() { return self.cached_channels; }
+        if let Some(ref reader) = self.wav_reader { reader.spec().channels }
+        else if self.mp3_decoder.is_some() { self.mp3_channels }
+        else { 1 }
     }
 
     fn has_data(&self) -> bool {
+        if !self.pcm_cache.is_empty() {
+            return self.pcm_cache_pos < self.pcm_cache.len() || self.loop_playback;
+        }
         !self.eof_reached || self.loop_playback
     }
 
     fn reset(&mut self) -> Result<()> {
         self.eof_reached = false;
+
+        if !self.pcm_cache.is_empty() {
+            self.pcm_cache_pos = 0;
+            return Ok(());
+        }
 
         if self.wav_reader.is_some() {
             self.wav_reader = Some(WavReader::open(&self.file_path)?);
@@ -904,3 +1087,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod audio_source_predecode_tests;

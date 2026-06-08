@@ -5,9 +5,7 @@ use std::{
     io::{Cursor, Seek, SeekFrom, Write},
 };
 
-use crate::media::{
-    StreamWriter, negotiate::MediaNegotiator, recorder::DtmfGenerator, wav_writer::CodecWavWriter,
-};
+use crate::media::{negotiate::MediaNegotiator, recorder::DtmfGenerator};
 use crate::sipflow::{SipFlowItem, SipFlowMsgType, extract_rtp_addr, extract_sdp};
 
 #[derive(Debug, Clone, Copy)]
@@ -286,21 +284,6 @@ fn mix_pcm_chunks(audio_chunk: &[u8], dtmf_chunk: &[u8]) -> Vec<u8> {
     mixed
 }
 
-fn compose_leg_chunk(
-    audio_chunk: Option<&Vec<u8>>,
-    dtmf_chunk: Option<&Vec<u8>>,
-    silence_frame: &[u8],
-    target_codec: Option<CodecType>,
-) -> Vec<u8> {
-    match (audio_chunk, dtmf_chunk) {
-        (Some(audio), Some(dtmf)) if target_codec.is_none() => mix_pcm_chunks(audio, dtmf),
-        (Some(_audio), Some(dtmf)) => dtmf.clone(),
-        (Some(audio), None) => audio.clone(),
-        (None, Some(dtmf)) => dtmf.clone(),
-        (None, None) => silence_frame.to_vec(),
-    }
-}
-
 pub fn write_wav_header<W: Write + Seek>(
     writer: &mut W,
     codec: Option<CodecType>,
@@ -373,26 +356,41 @@ pub fn generate_wav_from_packets_ex(
     generate_wav_from_packets_with_map_ex(packets, &HashMap::new(), force_pcm)
 }
 
+pub fn generate_wav_to_writer_ex<W: Write + Seek>(
+    packets: &[(i32, u64, Vec<u8>)],
+    force_pcm: bool,
+    writer: &mut W,
+) -> Result<u64> {
+    generate_wav_to_writer(packets, &HashMap::new(), &HashMap::new(), force_pcm, writer)
+}
+
 pub(crate) fn generate_wav_from_packets_with_map_ex(
     packets: &[(i32, u64, Vec<u8>)],
     payload_map: &PayloadTypeMap,
     force_pcm: bool,
 ) -> Result<Vec<u8>> {
-    generate_wav_from_packets_with_leg_map_ex(packets, payload_map, &HashMap::new(), force_pcm)
+    let mut cursor = Cursor::new(Vec::new());
+    generate_wav_to_writer(
+        packets,
+        payload_map,
+        &HashMap::new(),
+        force_pcm,
+        &mut cursor,
+    )?;
+    Ok(cursor.into_inner())
 }
 
-pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
+pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     packets: &[(i32, u64, Vec<u8>)],
     payload_map: &PayloadTypeMap,
     leg_payload_map: &LegPayloadTypeMap,
     force_pcm: bool,
-) -> Result<Vec<u8>> {
+    writer: &mut W,
+) -> Result<u64> {
     if packets.is_empty() {
         return Err(anyhow!("No RTP packets found"));
     }
 
-    // The tuple timestamp is receive/capture time. Media timing and output
-    // ordering must come from the RTP header.
     let mut parsed_packets = Vec::new();
     for (leg, _, raw_packet) in packets {
         if let Some(packet) = parse_borrowed_rtp_packet(*leg, raw_packet) {
@@ -406,7 +404,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
 
     parsed_packets.sort_by_key(|rtp| (rtp.leg, rtp.rtp_timestamp, rtp.sequence_number));
 
-    // 1. Analyze codecs to determine output format
     let mut legs_codecs: HashMap<i32, Vec<CodecType>> = HashMap::new();
     let mut leg_audio_clock_rates: HashMap<i32, u32> = HashMap::new();
 
@@ -426,7 +423,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         legs_codecs.entry(rtp.leg).or_default().push(codec_type);
     }
 
-    // Determine target codec
     let has_other = legs_codecs.values().any(|s| {
         s.iter()
             .any(|c| *c != CodecType::PCMU && *c != CodecType::PCMA)
@@ -434,7 +430,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
     let has_pcmu = legs_codecs.values().any(|s| s.contains(&CodecType::PCMU));
     let has_pcma = legs_codecs.values().any(|s| s.contains(&CodecType::PCMA));
 
-    // If force_pcm is true, always output PCM format (for ASR compatibility)
     let (target_codec, target_sample_rate) = if force_pcm {
         (None, 16000)
     } else if !has_other && has_pcmu && !has_pcma {
@@ -459,13 +454,11 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
     };
     let silence_frame = silence_chunk(target_codec, step_samples);
 
-    // 2. Process streams
     let mut buffer_a: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut buffer_b: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut dtmf_buffer_a: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut dtmf_buffer_b: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
 
-    // Decoding State
     let mut decoders: HashMap<(i32, u8), Box<dyn Decoder>> = HashMap::new();
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
     let mut base_timestamps: HashMap<i32, u64> = HashMap::new();
@@ -479,10 +472,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         if descriptor.codec != CodecType::TelephoneEvent && looks_like_dtmf_payload(payload) {
             descriptor = PayloadDescriptor {
                 codec: CodecType::TelephoneEvent,
-                clock_rate: leg_audio_clock_rates
-                    .get(&rtp.leg)
-                    .copied()
-                    .unwrap_or(8000),
+                clock_rate: leg_audio_clock_rates.get(&rtp.leg).copied().unwrap_or(8000),
             };
         }
         let codec = descriptor.codec;
@@ -519,10 +509,8 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
             continue;
         }
 
-        // Decoding logic...
         let decoder_needed = target_codec.is_none();
 
-        // ... (existing decoding code)
         let processed_data: Vec<u8> = if decoder_needed {
             let decoder = decoders
                 .entry((rtp.leg, pt))
@@ -539,7 +527,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
                 samples
             };
 
-            // Target is L16 (None)
             audio_codec::samples_to_bytes(&final_samples)
         } else {
             payload.to_vec()
@@ -552,10 +539,12 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         }
     }
 
-    // 3. Write WAV
-    let mut cursor = Cursor::new(Vec::new());
-    let mut writer = CodecWavWriter::new_with_writer(&mut cursor, target_sample_rate, 2, target_codec);
-    writer.write_header()?;
+    drop(parsed_packets);
+    drop(decoders);
+    drop(resamplers);
+    drop(base_timestamps);
+    drop(leg_audio_clock_rates);
+    drop(legs_codecs);
 
     let max_time_a = buffer_a.keys().max().cloned().unwrap_or(0);
     let max_time_b = buffer_b.keys().max().cloned().unwrap_or(0);
@@ -577,26 +566,29 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         max_duration
     );
 
-    let mut current_ts = 0;
-    let mut silence_count = 0;
-    let mut chunk_count = 0;
+    write_wav_header(writer, target_codec, target_sample_rate, 2, 0)?;
+
+    let mut current_ts = 0u32;
+    let mut silence_count = 0u64;
+    let mut chunk_count = 0u64;
+    let mut data_size = 0u64;
+    let mut interleaved = Vec::with_capacity(bytes_per_chunk * 2);
 
     while current_ts < max_duration {
-        let audio_a = find_chunk(&buffer_a, current_ts, step_samples);
-        let dtmf_a = find_chunk(&dtmf_buffer_a, current_ts, step_samples);
-        let chunk_a = compose_leg_chunk(audio_a, dtmf_a, &silence_frame, target_codec);
+        let audio_a = find_and_remove_chunk(&mut buffer_a, current_ts, step_samples);
+        let dtmf_a = find_and_remove_chunk(&mut dtmf_buffer_a, current_ts, step_samples);
+        let chunk_a = compose_leg_chunk_owned(audio_a, dtmf_a, &silence_frame, target_codec);
         if chunk_a == silence_frame {
             silence_count += 1;
         } else {
             chunk_count += 1;
         }
 
-        let audio_b = find_chunk(&buffer_b, current_ts, step_samples);
-        let dtmf_b = find_chunk(&dtmf_buffer_b, current_ts, step_samples);
-        let chunk_b = compose_leg_chunk(audio_b, dtmf_b, &silence_frame, target_codec);
+        let audio_b = find_and_remove_chunk(&mut buffer_b, current_ts, step_samples);
+        let dtmf_b = find_and_remove_chunk(&mut dtmf_buffer_b, current_ts, step_samples);
+        let chunk_b = compose_leg_chunk_owned(audio_b, dtmf_b, &silence_frame, target_codec);
 
-        let mut interleaved = Vec::with_capacity(chunk_a.len() + chunk_b.len());
-
+        interleaved.clear();
         if target_codec.is_none() {
             let count = chunk_a.len().min(chunk_b.len()) / 2;
             for i in 0..count {
@@ -611,9 +603,11 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
             }
         }
 
-        writer.write_packet(&interleaved, 0)?;
+        writer.write_all(&interleaved)?;
+        data_size += interleaved.len() as u64;
         current_ts += step_samples;
     }
+
     tracing::info!(
         "Wav Gen: chunks={} silences={} total_steps={}",
         chunk_count,
@@ -621,20 +615,42 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         current_ts / step_samples
     );
 
-    writer.finalize()?;
-    Ok(cursor.into_inner())
+    let data_size_u32 = data_size.try_into().unwrap_or(u32::MAX);
+    write_wav_header(writer, target_codec, target_sample_rate, 2, data_size_u32)?;
+
+    Ok(data_size)
 }
 
-fn find_chunk(buffer: &BTreeMap<u32, Vec<u8>>, ts: u32, step: u32) -> Option<&Vec<u8>> {
-    let tolerance = step / 2; // tighter tolerance for RTP sequence
+fn find_and_remove_chunk(
+    buffer: &mut BTreeMap<u32, Vec<u8>>,
+    ts: u32,
+    step: u32,
+) -> Option<Vec<u8>> {
+    let tolerance = step / 2;
     let start = ts.saturating_sub(tolerance);
     let end = ts + tolerance;
 
-    // Find absolute closest match in the window
-    buffer
+    let best_key = buffer
         .range(start..end)
         .min_by_key(|(k, _)| (**k as i64 - ts as i64).abs())
-        .map(|(_, v)| v)
+        .map(|(k, _)| *k)?;
+
+    buffer.remove(&best_key)
+}
+
+fn compose_leg_chunk_owned(
+    audio_chunk: Option<Vec<u8>>,
+    dtmf_chunk: Option<Vec<u8>>,
+    silence_frame: &[u8],
+    target_codec: Option<CodecType>,
+) -> Vec<u8> {
+    match (audio_chunk, dtmf_chunk) {
+        (Some(audio), Some(dtmf)) if target_codec.is_none() => mix_pcm_chunks(&audio, &dtmf),
+        (Some(_audio), Some(dtmf)) => dtmf,
+        (Some(audio), None) => audio,
+        (None, Some(dtmf)) => dtmf,
+        (None, None) => silence_frame.to_vec(),
+    }
 }
 
 #[cfg(test)]

@@ -2,10 +2,11 @@ use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use anyhow::Result;
 use axum::{
-    Json,
+    Json, Router,
     extract::{Query, State},
     http::HeaderMap,
     response::Response,
+    routing::get,
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use sea_orm::{
@@ -37,6 +38,16 @@ where
 
     sea_query::SimpleExpr::from(sea_query::Func::sum(expr))
         .cast_as(sea_query::Alias::new(cast_type))
+}
+
+pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/", get(dashboard))
+        .route("/dashboard/data", get(dashboard_data))
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new().route("/dashboard/data", get(dashboard_data))
 }
 
 pub async fn dashboard(

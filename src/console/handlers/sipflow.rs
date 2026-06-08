@@ -36,6 +36,13 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/sipflow/media/{call_id}", get(query_media))
 }
 
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/sipflow/settings", get(get_settings).put(update_settings))
+        .route("/sipflow/flow/{call_id}", get(query_flow))
+        .route("/sipflow/media/{call_id}", get(query_media))
+}
+
 async fn get_settings(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_user): AuthRequired,
@@ -514,9 +521,18 @@ async fn query_media(
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
 
-    match backend.query_media(&call_id, start_time, end_time).await {
-        Ok(data) => {
-            if data.is_empty() {
+    match backend
+        .generate_wav_file(&call_id, start_time, end_time, None)
+        .await
+    {
+        Ok(temp_file) => {
+            let temp_path = temp_file.path().to_owned();
+            let file_len = match std::fs::metadata(&temp_path) {
+                Ok(m) => m.len(),
+                Err(_) => 0,
+            };
+
+            if file_len <= 44 {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({
@@ -527,16 +543,36 @@ async fn query_media(
             }
 
             use axum::http::header;
+            use tokio_util::io::ReaderStream;
 
-            Response::builder()
+            let file = match tokio::fs::File::open(&temp_path).await {
+                Ok(f) => f,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "Failed to open temp file" })),
+                    )
+                        .into_response();
+                }
+            };
+            let path_str = temp_path.to_string_lossy().to_string();
+            std::mem::forget(temp_file);
+
+            let stream = ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+
+            let response = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "audio/wav")
                 .header(
                     header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{}.wav\"", call_id),
                 )
-                .body(axum::body::Body::from(data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                .body(body)
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+
+            let _ = std::fs::remove_file(&path_str);
+            response
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -470,18 +470,50 @@ impl QueueApp {
     }
 
     /// Announce queue position.
-    async fn announce_position(&self, _ctrl: &mut CallController) -> anyhow::Result<()> {
-        // TODO: Implement position announcement using TTS
-        // For now, just log
-        debug!("Queue: position announcement (not implemented)");
+    ///
+    /// Plays `voice_prompts.position_prompt` if configured; otherwise emits a
+    /// warning so operators know the announcement was requested but unconfigured.
+    async fn announce_position(&self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+
+        if let Some(path) = prompts.and_then(|p| p.position_prompt.as_ref()) {
+            debug!(file = %path, "Queue: playing position announcement");
+            ctrl.play_audio(path.clone(), false).await?;
+        } else {
+            warn!(
+                queue = %self.config.name,
+                "Queue: announce_position is enabled but voice_prompts.position_prompt \
+                 is not configured — skipping announcement"
+            );
+        }
         Ok(())
     }
 
     /// Announce estimated wait time.
-    async fn announce_wait_time(&self, _ctrl: &mut CallController) -> anyhow::Result<()> {
-        // TODO: Implement wait time announcement using TTS
-        // For now, just log
-        debug!("Queue: wait time announcement (not implemented)");
+    ///
+    /// Plays `voice_prompts.wait_time_prompt` if configured; otherwise emits a
+    /// warning so operators know the announcement was requested but unconfigured.
+    async fn announce_wait_time(&self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+
+        if let Some(path) = prompts.and_then(|p| p.wait_time_prompt.as_ref()) {
+            debug!(file = %path, "Queue: playing wait-time announcement");
+            ctrl.play_audio(path.clone(), false).await?;
+        } else {
+            warn!(
+                queue = %self.config.name,
+                "Queue: announce_wait_time is enabled but voice_prompts.wait_time_prompt \
+                 is not configured — skipping announcement"
+            );
+        }
         Ok(())
     }
 
@@ -966,9 +998,7 @@ impl CallApp for QueueApp {
             "agent_ring_timeout" => {
                 info!("Queue: agent ring timeout, handling no-answer");
 
-                // Notify that agent didn't answer
                 if let Some(ref registry) = self.agent_registry {
-                    // Find the agent that was ringing and set back to available
                     let agents = registry.list_agents().await;
                     for agent in agents {
                         if matches!(agent.presence, PresenceState::Ringing { .. }) {
@@ -976,7 +1006,6 @@ impl CallApp for QueueApp {
                                 .update_presence(&agent.agent_id, PresenceState::Available)
                                 .await;
 
-                            // Notify external systems
                             ctrl.notify_event(
                                 "queue.agent_no_answer",
                                 serde_json::json!({

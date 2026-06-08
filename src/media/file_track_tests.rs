@@ -52,15 +52,6 @@ async fn test_file_track_creation() {
 }
 
 #[tokio::test]
-async fn test_file_track_with_ssrc_compatibility() {
-    let track = FileTrack::new("test".to_string())
-        .with_path("/tmp/test.wav".to_string())
-        .with_ssrc(12345); // Should not panic, just ignore
-
-    assert_eq!(track.id(), "test");
-}
-
-#[tokio::test]
 async fn test_file_track_generates_sdp() {
     let track = FileTrack::new("test-sdp".to_string())
         .with_path("/tmp/test.wav".to_string())

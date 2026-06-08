@@ -1,0 +1,24 @@
+[submodule "src/addons/sbc"]
+	path = src/addons/sbc
+	url = https://cnb.cool/miuda.ai/sbc
+[submodule "src/addons/cc"]
+	path = src/addons/cc
+	url = https://cnb.cool/miuda.ai/cc
+[submodule "src/addons/wholesale"]
+	path = src/addons/wholesale
+	url = https://cnb.cool/miuda.ai/wholesale
+[submodule "src/addons/endpoint_manager"]
+	path = src/addons/endpoint_manager
+	url = https://cnb.cool/miuda.ai/endpoint_manager
+[submodule "src/addons/enterprise_auth"]
+	path = src/addons/enterprise_auth
+	url = https://cnb.cool/miuda.ai/enterprise_auth
+[submodule "src/addons/ivr_editor"]
+	path = src/addons/ivr_editor
+	url = https://cnb.cool/miuda.ai/ivr_editor
+[submodule "src/addons/telemetry"]
+	path = src/addons/telemetry
+	url = https://cnb.cool/miuda.ai/telemetry
+[submodule "src/addons/voicemail"]
+	path = src/addons/voicemail
+	url = https://cnb.cool/miuda.ai/voicemail

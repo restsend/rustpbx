@@ -387,14 +387,13 @@ mod tests {
             call_id: "call-dn-1".into(),
             event: RwiEvent::DnStateChanged {
                 dn: "80001".into(),
-                event_code: 64,
                 event_name: "ESTABLISHED".into(),
                 system_time: "2026-05-14T17:54:49.003Z".into(),
                 call_id: Some("call-dn-1".into()),
                 agent_id: Some("10001".into()),
                 other_dn: None,
-                ani: Some("19534519769".into()),
-                dnis: Some("39989".into()),
+                caller_name: Some("19534519769".into()),
+                callee_name: Some("39989".into()),
                 reason_code: None,
                 agent_work_mode: None,
                 releasing_party: None,
@@ -413,7 +412,6 @@ mod tests {
         let received = server.received.lock().unwrap();
         let body = &received[0];
         assert_eq!(body["event_type"], "dn_state_changed");
-        assert_eq!(body["event"]["dn_state_changed"]["event_code"], 64);
         assert_eq!(
             body["event"]["dn_state_changed"]["event_name"],
             "ESTABLISHED"

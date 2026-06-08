@@ -11,7 +11,7 @@ use crate::models::{
     },
 };
 use crate::proxy::server::SipServerRef;
-use axum::routing::get;
+use axum::routing::{get, patch, put};
 use axum::{Json, Router};
 use axum::{
     extract::{Path as AxumPath, State},
@@ -259,6 +259,18 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_extension_detail)
                 .patch(update_extension)
                 .delete(delete_extension),
+        )
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route(
+            "/extensions",
+            put(create_extension).post(query_extensions),
+        )
+        .route(
+            "/extensions/{id}",
+            patch(update_extension).delete(delete_extension),
         )
 }
 

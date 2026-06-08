@@ -449,7 +449,8 @@
     document.addEventListener('alpine:init', () => {
         Alpine.data('sipTrunkPage', (options) => ({
             basePath: options.basePath || '/console',
-            listEndpoint: `${options.basePath || '/console'}/sip-trunk`,
+            apiBase: '{{ api_prefix | safe }}',
+            listEndpoint: '{{ api_prefix | safe }}/sip-trunk',
             createUrl: options.createUrl || `${options.basePath || '/console'}/sip-trunk/new`,
             amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
             filtersRaw: options.filters || {},
@@ -916,7 +917,7 @@
                 }
                 this.processingDelete = trunk.id;
                 try {
-                    const response = await fetch(this.detailUrl(trunk.id), {
+                    const response = await fetch(`${this.apiBase}/sip-trunk/${trunk.id}`, {
                         method: 'DELETE',
                         headers: {
                             'Accept': 'application/json',

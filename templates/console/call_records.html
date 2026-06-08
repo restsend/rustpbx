@@ -508,7 +508,8 @@
         Alpine.data('callRecordsConsole', (payload) => ({
             t: {},
             basePath: '/console',
-            listEndpoint: '/console/call-records',
+            apiBase: '{{ api_prefix | safe }}',
+            listEndpoint: '{{ api_prefix | safe }}/call-records',
             records: [],
             summary: {
                 total: 0,
@@ -674,19 +675,7 @@
                     this.basePath = data.basePath;
                 }
 
-                if (typeof data.list_url === 'string' && data.list_url) {
-                    this.listEndpoint = data.list_url;
-                } else {
-                    const normalizedBase = this.basePath === '/'
-                        ? ''
-                        : (this.basePath.endsWith('/')
-                            ? this.basePath.slice(0, -1)
-                            : this.basePath);
-                    this.listEndpoint = `${normalizedBase}/call-records` || '/call-records';
-                }
-                if (!this.listEndpoint.startsWith('/')) {
-                    this.listEndpoint = `/${this.listEndpoint}`;
-                }
+                this.listEndpoint = '{{ api_prefix | safe }}/call-records';
 
                 this.detailBase = this.normalizeBasePath(this.basePath);
                 this.sortOrder = this.defaultSort();
@@ -1166,8 +1155,7 @@
                 if (!id) {
                     return '#';
                 }
-                const base = this.detailBase ? this.detailBase : '';
-                const path = `${base}/call-records/${encodeURIComponent(id)}`;
+                const path = `${this.apiBase}/call-records/${encodeURIComponent(id)}`;
                 return path.startsWith('/') ? path : `/${path}`;
             },
             async deleteRecord(record) {

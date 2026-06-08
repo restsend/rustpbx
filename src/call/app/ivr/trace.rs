@@ -12,14 +12,20 @@ pub struct IvrTraceEntry {
     pub callee: String,
     pub timestamp: DateTime<Utc>,
     pub step_index: u32,
-    pub event_type: String, // "session_start" | "audio_complete" | "dtmf" | "timeout" | "provider_response"
+    pub event_type: String,
     pub event_detail: Option<String>,
     pub provider_url: Option<String>,
-    pub action_type: String, // "Prompt" | "DtmfMenu" | "Transfer" | ...
-    pub action_json: Option<String>, // serialized ActionNode
-    pub result_kind: String, // "terminal" | "continue" | "chain_next" | "error" | "provider_call"
+    pub action_type: String,
+    pub action_json: Option<String>,
+    pub result_kind: String,
     pub duration_ms: u64,
     pub error: Option<String>,
+    pub step_id: Option<String>,
+    pub step_name: Option<String>,
+    pub step_start_time: Option<String>,
+    pub step_end_time: Option<String>,
+    pub step_execute_duration: Option<u64>,
+    pub extra: Option<serde_json::Value>,
 }
 
 /// A summary of a trace session.
@@ -139,6 +145,12 @@ mod tests {
             result_kind: "terminal".to_string(),
             duration_ms: 0,
             error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_execute_duration: None,
+            extra: None,
         }
     }
 

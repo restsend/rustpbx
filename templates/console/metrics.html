@@ -264,7 +264,7 @@ path = "/metrics"
     </div>
 </div>
 
-<div id="metrics-bootstrap" class="hidden" data-endpoint="{{ base_path }}/metrics/runtime/data"
+<div id="metrics-bootstrap" class="hidden" data-endpoint="{{ api_prefix | safe }}/metrics/runtime/data"
     data-prometheus-path="{{ prometheus.path | default('/metrics') }}"></div>
 <script>
     (function () {

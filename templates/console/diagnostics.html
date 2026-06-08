@@ -1390,6 +1390,7 @@
                         this.routingResultSummary = null;
                         this.routingError = null;
                         this.basePath = "{{ base_path |safe }}"
+                        this.apiBase = '{{ api_prefix | safe }}';
                         this.tabs = [
                             { id: 'dialer', label: this.t.tab_dialer || 'Web Dialer' },
                             { id: 'connection', label: this.t.tab_connection || 'Connection' },
@@ -1425,6 +1426,7 @@
                     callMode: 'standard',
                     activePlugins: [],
                     basePath: '',
+                    apiBase: '{{ api_prefix | safe }}',
                     lastAudit: null,
                     trunks: [],
                     routingChecks: [],
@@ -3024,7 +3026,7 @@
                     },
                     buildUrl(path) {
                         const clean = path.startsWith('/') ? path : `/${path}`;
-                        return `${this.basePath}${clean}`;
+                        return `${this.apiBase}${clean}`;
                     },
                     async fetchDialogs(force = false) {
                         if (this.dialogsLoading) {

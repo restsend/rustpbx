@@ -298,7 +298,7 @@ impl ThirdPartyTreeProvider {
         let next = next_id.and_then(|id| {
             tree.nodes.get(&id).map(|n| Box::new(Self::build_linear_chain(tree, n)))
         });
-        ActionNode { action, next }
+        ActionNode { action, next, step_id: None, step_name: None, extra: None }
     }
 
     fn is_terminal_nodetype(nodetype: &str) -> bool {
@@ -742,7 +742,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
         Ok(())
     }
 
-    async fn on_session_end(&self, _reason: &EndReason) -> anyhow::Result<()> {
+    async fn on_session_end(&self, _reason: &EndReason, _session_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
 }

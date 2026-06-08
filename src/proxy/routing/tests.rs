@@ -951,6 +951,8 @@ fn test_queue_busy_prompt_maps_to_failure_audio() {
             busy_prompt: Some("config/sounds/queue-busy-zh.wav".to_string()),
             off_hours_prompt: None,
             no_answer_prompt: None,
+            position_prompt: None,
+            wait_time_prompt: None,
         }),
         ..RouteQueueConfig::default()
     };

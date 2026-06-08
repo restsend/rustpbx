@@ -93,6 +93,14 @@ pub struct VoicePrompts {
     pub off_hours_prompt: Option<String>,
     #[serde(default)]
     pub no_answer_prompt: Option<String>,
+    /// Audio file to play for queue-position announcement.
+    /// The file should contain a pre-recorded message such as
+    /// "You are number N in the queue" that the operator supplies.
+    #[serde(default)]
+    pub position_prompt: Option<String>,
+    /// Audio file to play for estimated-wait-time announcement.
+    #[serde(default)]
+    pub wait_time_prompt: Option<String>,
 }
 
 impl VoicePrompts {
@@ -102,6 +110,8 @@ impl VoicePrompts {
             busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_ZH.to_string()),
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH.to_string()),
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH.to_string()),
+            position_prompt: None,
+            wait_time_prompt: None,
         }
     }
 
@@ -111,6 +121,8 @@ impl VoicePrompts {
             busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_EN.to_string()),
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN.to_string()),
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN.to_string()),
+            position_prompt: None,
+            wait_time_prompt: None,
         }
     }
 }

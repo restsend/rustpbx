@@ -13,7 +13,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use chrono::Utc;
 use sea_orm::{
@@ -42,6 +42,20 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_queue_edit)
                 .patch(update_queue)
                 .delete(delete_queue),
+        )
+        .route("/queues/{id}/export", post(export_queue))
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/queues", post(query_queues).put(create_queue))
+        .route("/queues/export", post(export_all_queues))
+        .route("/queues/reload", post(reload_queues_handler))
+        .route("/queues/download-audio", post(download_audio_handler))
+        .route("/queues/sound/{*file_path}", get(serve_sound_handler))
+        .route(
+            "/queues/{id}",
+            patch(update_queue).delete(delete_queue),
         )
         .route("/queues/{id}/export", post(export_queue))
 }

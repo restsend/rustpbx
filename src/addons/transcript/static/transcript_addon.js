@@ -4,6 +4,7 @@
     document.addEventListener('alpine:init', () => {
         Alpine.data('transcriptAddon', (recordId) => ({
             recordId: recordId,
+            apiPrefix: window.__consoleApiPrefix || '/api',
             transcript: {
                 available: false,
                 content: null,
@@ -35,7 +36,7 @@
                 if (!this.recordId) return;
 
                 try {
-                    const response = await fetch(`/console/call-records/${this.recordId}/transcript`);
+                    const response = await fetch(`${this.apiPrefix}/call-records/${this.recordId}/transcript`);
                     if (response.ok) {
                         const data = await response.json();
                         if (data && data.transcript) {
@@ -62,7 +63,7 @@
 
                 this.asrProcessing = true;
                 try {
-                    const response = await fetch(`/console/call-records/${this.recordId}/transcript`, {
+                    const response = await fetch(`${this.apiPrefix}/call-records/${this.recordId}/transcript`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',

@@ -671,6 +671,7 @@
 
             return {
                 basePath: options.basePath || '/console',
+                apiBase: '{{ api_prefix | safe }}',
                 apiPrefix: options.apiPrefix || options.basePath || '/console',
                 mode: options.mode || 'create',
                 model: options.model || {},
@@ -792,9 +793,9 @@
                 },
                 submitUrl() {
                     if (this.mode === 'edit' && this.model?.id) {
-                        return `${this.basePath}/extensions/${this.model.id}`;
+                        return `${this.apiBase}/extensions/${this.model.id}`;
                     }
-                    return `${this.basePath}/extensions`;
+                    return `${this.apiBase}/extensions`;
                 },
                 submitMethod() {
                     return this.mode === 'edit' ? 'PATCH' : 'PUT';

@@ -16,12 +16,23 @@
 
 use sipbot::{
     audio_quality::AudioQualityConfig,
-    config::{AccountConfig, AnswerConfig, Config as SipBotConfig, RingConfig},
+    config::{AccountConfig, AnswerConfig, Config as SipBotConfig, HangupConfig, RingConfig},
     sip::SipBot,
     stats::CallStats,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+struct BuildCallee {
+    sip_port: u16,
+    username: String,
+    ring_secs: u64,
+    refer_reject: Option<u16>,
+    record_path: Option<String>,
+    reject_code: Option<u16>,
+    answer: Option<Option<AnswerConfig>>,
+    hangup_after_secs: Option<u64>,
+}
 
 /// A SIP UA backed by `sipbot`.
 pub struct TestUa {
@@ -108,8 +119,105 @@ impl TestUa {
         }
     }
 
+    /// Create a callee that immediately rejects with the given SIP code (e.g. 486 Busy, 480 Temporarily Unavailable).
+    pub async fn callee_reject(sip_port: u16, username: &str, reject_code: u16) -> Self {
+        Self::build_callee(BuildCallee {
+            sip_port, username: username.to_string(), ring_secs: 0, refer_reject: None, record_path: None,
+            reject_code: Some(reject_code), answer: None, hangup_after_secs: None,
+        }).await
+    }
+
+    pub async fn callee_no_answer(sip_port: u16, username: &str, ring_secs: u64) -> Self {
+        Self::build_callee(BuildCallee {
+            sip_port, username: username.to_string(), ring_secs, refer_reject: None, record_path: None,
+            reject_code: None, answer: Some(None), hangup_after_secs: None,
+        }).await
+    }
+
+    pub async fn callee_answer_then_hangup(sip_port: u16, ring_secs: u64, username: &str, after_secs: u64) -> Self {
+        Self::build_callee(BuildCallee {
+            sip_port, username: username.to_string(), ring_secs, refer_reject: None, record_path: None,
+            reject_code: None, answer: Some(Some(AnswerConfig::Echo)), hangup_after_secs: Some(after_secs),
+        }).await
+    }
+
+    async fn build_callee(opts: BuildCallee) -> Self {
+        let cancel_token = CancellationToken::new();
+        let domain = format!("127.0.0.1:{}", opts.sip_port);
+
+        let answer_val = match opts.answer {
+            Some(a) => a,
+            None => Some(AnswerConfig::Echo),
+        };
+
+        let account = AccountConfig {
+            username: opts.username,
+            domain: domain.clone(),
+            password: None,
+            register: Some(false),
+            ring: if opts.ring_secs > 0 {
+                Some(RingConfig { duration_secs: opts.ring_secs, ringback: None, local: None })
+            } else {
+                None
+            },
+            answer: answer_val,
+            refer_reject: opts.refer_reject,
+            record: opts.record_path,
+            reject_prob: opts.reject_code.map(|_| 100),
+            hangup: opts.reject_code.map(|code| HangupConfig { code, after_secs: None }).or_else(|| opts.hangup_after_secs.map(|after| HangupConfig { code: 200, after_secs: Some(after) })),
+            audio_quality: Some(AudioQualityConfig { enabled: true, ..Default::default() }),
+            ..Default::default()
+        };
+
+        let global_config = SipBotConfig {
+            addr: Some(format!("127.0.0.1:{}", opts.sip_port)),
+            external_ip: None,
+            recorders: None,
+            accounts: vec![account.clone()],
+        };
+
+        let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
+        let ct = cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                res = bot.run_wait() => {
+                    if let Err(e) = res { tracing::error!("sipbot run_wait error: {e:?}"); }
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self { cancel_token, domain, stats, record_path: None }
+    }
+
     /// Create and start an outbound caller UA that will place calls to `target_uri`.
     pub async fn caller_with_target(sip_port: u16, username: &str, target_uri: String) -> Self {
+        Self::caller_with_options(sip_port, username, target_uri, None).await
+    }
+
+    /// Create and start an outbound caller UA that sends DTMF after answer.
+    /// `dtmf_flows` format: "1s:2,1.5s:#" (delay:digit pairs)
+    pub async fn caller_with_dtmf(
+        sip_port: u16,
+        username: &str,
+        target_uri: String,
+        dtmf_flows: &str,
+    ) -> Self {
+        Self::caller_with_options(sip_port, username, target_uri, Some(dtmf_flows.to_string()))
+            .await
+    }
+
+    async fn caller_with_options(
+        sip_port: u16,
+        username: &str,
+        target_uri: String,
+        dtmf_flows: Option<String>,
+    ) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
 
@@ -119,6 +227,11 @@ impl TestUa {
             password: None,
             register: Some(false),
             target: Some(target_uri),
+            dtmf_flows,
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 

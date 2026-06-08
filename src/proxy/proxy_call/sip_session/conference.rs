@@ -72,6 +72,14 @@ impl SipSession {
                 }
             }
         }
+
+        self.emit_dn_event(
+            "PARTYCHANGED",
+            Some(self.context.session_id.clone()),
+            Some(&self.context.original_callee),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
     }
 
     pub(super) async fn start_conference_media_bridge_for_peer(
@@ -454,6 +462,13 @@ impl SipSession {
                 info!(%conf_id, %leg_id, "Conference media bridge started for added leg");
                 self.legs
                     .set_conference_bridge_handle(leg_id.clone(), handle);
+                self.emit_dn_event(
+                    "PARTYADDED",
+                    Some(self.context.session_id.clone()),
+                    Some(&leg_id.to_string()),
+                    Some(&self.context.original_caller),
+                    Some(&self.context.original_callee),
+                );
                 Ok(())
             }
             Err(e) => {
@@ -485,6 +500,14 @@ impl SipSession {
             .conference_manager
             .remove_participant(&conf_id.into(), &leg_id)
             .await?;
+
+        self.emit_dn_event(
+            "PARTYDELETED",
+            Some(self.context.session_id.clone()),
+            Some(&leg_id.to_string()),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
 
         Ok(())
     }

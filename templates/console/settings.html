@@ -2809,6 +2809,7 @@
     document.addEventListener('alpine:init', () => {
         Alpine.data('settingsConsole', (options = {}) => ({
             basePath: options?.basePath || '/console',
+            apiBase: '{{ api_prefix | safe }}',
             rawSettings: options?.settings || {},
             amiEndpoint: options?.amiEndpoint || (options?.ami_path || '/ami/v1'),
             currentUser: options?.currentUser || null,
@@ -3377,7 +3378,7 @@
                 }
             },
             departmentEndpoint() {
-                return `${this.basePath}/settings/departments`;
+                return `${this.apiBase}/settings/departments`;
             },
             departmentDetailEndpoint(id) {
                 return `${this.departmentEndpoint()}/${id}`;
@@ -3737,7 +3738,7 @@
                 }
             },
             userEndpoint() {
-                return `${this.basePath}/settings/users`;
+                return `${this.apiBase}/settings/users`;
             },
             userDetailEndpoint(id) {
                 return `${this.userEndpoint()}/${id}`;
@@ -3883,7 +3884,7 @@
             },
             async fetchAvailableRoles() {
                 try {
-                    const resp = await fetch(this.basePath + '/settings/roles');
+                    const resp = await fetch(this.apiBase + '/settings/roles');
                     if (resp.ok) {
                         const data = await resp.json();
                         this.availableRoles = data.roles || data.items || data || [];
@@ -3897,7 +3898,7 @@
                 this.rolesLoading = true;
                 this.rolesError = null;
                 try {
-                    const r = await fetch(this.basePath + '/settings/roles');
+                    const r = await fetch(this.apiBase + '/settings/roles');
                     const d = await r.json();
                     this.roles = d.roles || d.items || d || [];
                 } catch (e) {
@@ -3915,7 +3916,7 @@
                 if (!this.newRoleName.trim()) return;
                 this.roleSaving = true;
                 try {
-                    const r = await fetch(this.basePath + '/settings/roles', {
+                    const r = await fetch(this.apiBase + '/settings/roles', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ name: this.newRoleName.trim(), description: this.newRoleDesc.trim() }),
@@ -3932,7 +3933,7 @@
             async deleteRole(id) {
                 if (!confirm('Delete this role?')) return;
                 try {
-                    const r = await fetch(this.basePath + '/settings/roles/' + id, { method: 'DELETE' });
+                    const r = await fetch(this.apiBase + '/settings/roles/' + id, { method: 'DELETE' });
                     if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed'); }
                     if (this.selectedRole && this.selectedRole.id === id) this.selectedRole = null;
                     await this.fetchRoles();
@@ -3942,7 +3943,7 @@
             },
             async selectRole(id) {
                 try {
-                    const r = await fetch(this.basePath + '/settings/roles/' + id);
+                    const r = await fetch(this.apiBase + '/settings/roles/' + id);
                     this.selectedRole = await r.json();
                 } catch (e) {
                     this.$dispatch('toast', { title: 'Error', message: e.message });
@@ -3968,7 +3969,7 @@
                 if (!this.selectedRole) return;
                 this.roleSaving = true;
                 try {
-                    const r = await fetch(this.basePath + '/settings/roles/' + this.selectedRole.id, {
+                    const r = await fetch(this.apiBase + '/settings/roles/' + this.selectedRole.id, {
                         method: 'PATCH',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -4039,7 +4040,7 @@
                 await this.fetchAvailableRoles();
                 // Load user roles
                 try {
-                    const resp = await fetch(this.basePath + '/settings/users/' + id + '/roles');
+                    const resp = await fetch(this.apiBase + '/settings/users/' + id + '/roles');
                     if (resp.ok) {
                         const roleData = await resp.json();
                         detail.role_ids = (roleData.roles || roleData || []).map(r => r.id);
@@ -4123,7 +4124,7 @@
                     // Save role assignments
                     if (userId && draft.role_ids) {
                         try {
-                            await fetch(this.basePath + '/settings/users/' + userId + '/roles', {
+                            await fetch(this.apiBase + '/settings/users/' + userId + '/roles', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ role_ids: draft.role_ids }),
@@ -4710,10 +4711,10 @@
                 return `${Math.round(value)}ms`;
             },
             logsRecentEndpoint() {
-                return `${this.basePath}/settings/logs/recent`;
+                return `${this.apiBase}/settings/logs/recent`;
             },
             logsStreamEndpoint() {
-                return `${this.basePath}/settings/logs/stream`;
+                return `${this.apiBase}/settings/logs/stream`;
             },
             ensureLogVisibleTail() {
                 this.$nextTick(() => {
@@ -4952,7 +4953,7 @@
 
                 this.proxyProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/proxy`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/proxy`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -4981,7 +4982,7 @@
                 if (!draft.url) return;
                 this.proxyProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/proxy/locator-webhook/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/proxy/locator-webhook/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
@@ -4999,7 +5000,7 @@
                 if (!draft.url) return;
                 this.proxyProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/proxy/rwi-webhook/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/proxy/rwi-webhook/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
@@ -5017,7 +5018,7 @@
                 if (!draft.url) return;
                 this.proxyProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/proxy/http-router/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/proxy/http-router/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
@@ -5034,7 +5035,7 @@
                 const backend = this.proxyDraft.user_backends[index];
                 this.proxyProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/proxy/user-backend/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/proxy/user-backend/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ backend }),
@@ -5083,7 +5084,7 @@
                 this.platformDraft.auto_external_ip_result = '';
                 const url = this.platformDraft.auto_external_ip.trim() || null;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/platform/auto-external-ip/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/platform/auto-external-ip/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url }),
@@ -5141,7 +5142,7 @@
                 };
                 this.platformProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/platform`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/platform`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -5336,7 +5337,7 @@
                 };
                 this.storageProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/storage`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/storage`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -5375,7 +5376,7 @@
             },
             async fetchSipFlowSettings() {
                 try {
-                    const response = await fetch(`${this.basePath}/sipflow/settings`, {
+                    const response = await fetch(`${this.apiBase}/sipflow/settings`, {
                         method: 'GET',
                         headers: {
                             Accept: 'application/json',
@@ -5471,7 +5472,7 @@
 
                 this.sipflowProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/sipflow/settings`, {
+                    const response = await fetch(`${this.apiBase}/sipflow/settings`, {
                         method: 'PUT',
                         headers: {
                             Accept: 'application/json',
@@ -5541,7 +5542,7 @@
 
                 this.storageProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/storage/test`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/storage/test`, {
                         method: 'POST',
                         headers: {
                             Accept: 'application/json',
@@ -5619,7 +5620,7 @@
                 };
                 this.securityProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/security`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/security`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -5696,7 +5697,7 @@
                 };
                 this.rwiProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/rwi`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/rwi`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -5742,7 +5743,7 @@
             },
             async fetchReloadAddons() {
                 try {
-                    const resp = await fetch(`${this.basePath}/settings/config/cluster/reload-addons`);
+                    const resp = await fetch(`${this.apiBase}/settings/config/cluster/reload-addons`);
                     const data = await resp.json();
                     this.reloadAddonList = data.addons || [];
                     // Auto-check all by default
@@ -5777,7 +5778,7 @@
                 };
                 this.clusterProcessing = true;
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/cluster`, {
+                    const response = await fetch(`${this.apiBase}/settings/config/cluster`, {
                         method: 'PATCH',
                         headers: {
                             Accept: 'application/json',
@@ -5861,7 +5862,7 @@
                 for (const id of addonIds) params.append('addons', id);
 
                 try {
-                    const response = await fetch(`${this.basePath}/settings/config/cluster/reload?${params.toString()}`);
+                    const response = await fetch(`${this.apiBase}/settings/config/cluster/reload?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to connect');
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();

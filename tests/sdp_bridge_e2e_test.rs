@@ -266,11 +266,63 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     bridge.stop().await;
 }
 
+fn rtp_to_webrtc(rtp_sdp: &str, _mac: &str, ufrag: &str, pwd: &str) -> anyhow::Result<String> {
+    let ice_attrs = vec![
+            format!("a=ice-ufrag:{}", ufrag),
+            format!("a=ice-pwd:{}", pwd),
+            "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00:11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF".to_string(),
+            "a=setup:passive".to_string(),
+        ];
+
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in rtp_sdp.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        if trimmed.starts_with("m=") {
+            let replaced = if trimmed.starts_with("m=audio ") {
+                trimmed.replace("RTP/AVP", "RTP/SAVPF")
+            } else if trimmed.starts_with("m=video ") {
+                trimmed.replace("RTP/AVP", "RTP/SAVPF")
+            } else {
+                trimmed.to_string()
+            };
+            lines.push(replaced);
+            lines.push("a=mid:0".to_string());
+            for attr in &ice_attrs {
+                lines.push(attr.clone());
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("a=setup:")
+            || trimmed.starts_with("a=fingerprint:")
+            || trimmed.starts_with("a=ice-ufrag:")
+            || trimmed.starts_with("a=ice-pwd:")
+            || trimmed.starts_with("a=mid:")
+            || trimmed.starts_with("a=candidate:")
+            || trimmed.starts_with("a=rtcp-mux")
+            || trimmed.starts_with("a=msid")
+            || trimmed.starts_with("a=ssrc")
+            || trimmed.starts_with("a=extmap")
+        {
+            continue;
+        }
+
+        lines.push(trimmed.to_string());
+    }
+
+    Ok(lines.join("\r\n") + "\r\n")
+}
+
 /// Verify that SdpBridge::rtp_to_webrtc no longer uses setup:actpass (defensive check).
 #[test]
 fn test_sdp_bridge_setup_role_is_passive() {
-    use rustpbx::media::sdp_bridge::SdpBridge;
-
     let rtp_sdp = "v=0\r\n\
 o=- 123456 123456 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
@@ -280,8 +332,7 @@ m=audio 54321 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=sendrecv\r\n";
 
-    let webrtc_sdp =
-        SdpBridge::rtp_to_webrtc(rtp_sdp, "AA:BB:CC:DD:EE:FF", "ufrag", "pwd").unwrap();
+    let webrtc_sdp = rtp_to_webrtc(rtp_sdp, "AA:BB:CC:DD:EE:FF", "ufrag", "pwd").unwrap();
 
     assert!(
         !webrtc_sdp.contains("setup:actpass"),

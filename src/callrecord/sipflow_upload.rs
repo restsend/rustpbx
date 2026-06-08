@@ -97,7 +97,6 @@ async fn do_upload(
             start,
             end,
             media_key,
-            media_file_name,
             db.as_ref(),
             duration_secs,
         )
@@ -131,23 +130,33 @@ async fn upload_media(
     start: DateTime<Local>,
     end: DateTime<Local>,
     media_key: &str,
-    media_file_name: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
 ) {
-    let wav_bytes = match backend.query_media(call_id, start, end).await {
-        Ok(b) => b,
+    let temp_file: tempfile::NamedTempFile = match backend
+        .generate_wav_file(call_id, start, end, None)
+        .await
+    {
+        Ok(f) => f,
         Err(e) => {
-            warn!(call_id, "SipFlowUploadHook: query_media failed: {e}");
+            warn!(call_id, "SipFlowUploadHook: generate_wav_file failed: {e}");
             return;
         }
     };
 
-    if wav_bytes.is_empty() {
+    let temp_path = temp_file.path().to_owned();
+    let file_size = match std::fs::metadata(&temp_path) {
+        Ok(m) => m.len() as usize,
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: temp file metadata failed: {e}");
+            return;
+        }
+    };
+
+    if file_size <= 44 {
         return;
     }
 
-    let wav_len = wav_bytes.len();
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
             vendor,
@@ -164,6 +173,13 @@ async fn upload_media(
             } else {
                 format!("{}/{}", root.trim_end_matches('/'), media_key)
             };
+            let wav_bytes = match tokio::fs::read(&temp_path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(call_id, "SipFlowUploadHook: read temp file failed: {e}");
+                    return;
+                }
+            };
             upload_s3(
                 vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
             )
@@ -178,7 +194,7 @@ async fn upload_media(
             })
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http(url, headers.as_ref(), media_file_name, wav_bytes).await
+            upload_http_file(url, headers.as_ref(), call_id, &temp_path).await
         }
     };
 
@@ -187,7 +203,7 @@ async fn upload_media(
             info!(
                 call_id,
                 url,
-                bytes = wav_len,
+                bytes = file_size,
                 "SipFlowUploadHook: recording uploaded"
             );
             if let Some(db) = db {
@@ -300,16 +316,20 @@ async fn upload_s3(
     Ok(())
 }
 
-async fn upload_http(
+async fn upload_http_file(
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
-    file_name: &str,
-    data: Vec<u8>,
+    call_id: &str,
+    file_path: &std::path::Path,
 ) -> Result<String> {
     let client = reqwest::Client::new();
-    let part = reqwest::multipart::Part::bytes(data)
-        .file_name(file_name.to_string())
-        .mime_str("audio/wav")?;
+    let file_name = format!("{}.wav", call_id);
+    let file = tokio::fs::File::open(file_path).await?;
+    let part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
+        tokio_util::io::ReaderStream::new(file),
+    ))
+    .file_name(file_name)
+    .mime_str("audio/wav")?;
     let form = reqwest::multipart::Form::new().part("recording", part);
 
     let mut req = client.post(url).multipart(form);
