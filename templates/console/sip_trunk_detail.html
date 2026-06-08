@@ -13,8 +13,9 @@ default('RustPBX') }}{% endblock %}
         model: {{ model_data | tojson }},
         filters: {{ filters | default({}) | tojson }},
         tenants: {{ tenants | default([]) | tojson }},
-        createUrl: ({{ create_url | default(null) | tojson }} || '').replace('/console', '{{ api_prefix | safe }}') || null,
-        updateUrl: ({{ update_url | default(null) | tojson }} || '').replace('/console', '{{ api_prefix | safe }}') || null,
+        createUrl: {{ create_url | default(null) | tojson }},
+        updateUrl: {{ update_url | default(null) | tojson }},
+        apiPrefix: {{ api_prefix | tojson }},
         t: {{ t | tojson }},
         amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
     })' x-init="init()">
@@ -557,6 +558,7 @@ default('RustPBX') }}{% endblock %}
             filters: options.filters || {},
             t: options.t || {},
             amiEndpoint: options.amiEndpoint || '/ami/v1',
+            apiPrefix: options.apiPrefix || '',
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || null,
             updateUrl: options.updateUrl || null,
@@ -612,6 +614,8 @@ default('RustPBX') }}{% endblock %}
             saving: false,
             activeTab: 'general',
             init() {
+                if (this.createUrl) this.createUrl = this.createUrl.replace('/console', this.apiPrefix);
+                if (this.updateUrl) this.updateUrl = this.updateUrl.replace('/console', this.apiPrefix);
                 this.loadOptions();
                 if (this.model) {
                     this.$nextTick(() => {
