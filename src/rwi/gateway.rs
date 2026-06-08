@@ -1,10 +1,10 @@
 use crate::rwi::auth::RwiIdentity;
 use crate::rwi::proto::{CallMetaStore, RwiEvent};
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
-use std::collections::{HashMap, HashSet, VecDeque};
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 
 pub type SessionId = String;
@@ -14,7 +14,7 @@ pub type Context = String;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EventCacheEntry {
     pub sequence: u64,
-    pub timestamp: u64,
+    pub cached_at: DateTime<Utc>,
     pub call_id: CallId,
     pub event: RwiEvent,
 }
@@ -212,11 +212,7 @@ impl RwiGateway {
         }
     }
 
-    pub fn release_call_ownership(
-        &mut self,
-        session_id: &SessionId,
-        call_id: &CallId,
-    ) -> bool {
+    pub fn release_call_ownership(&mut self, session_id: &SessionId, call_id: &CallId) -> bool {
         if let Some(current_owner) = self.call_ownership.get(call_id)
             && current_owner != session_id
         {
@@ -250,11 +246,7 @@ impl RwiGateway {
         }
     }
 
-    pub fn detach_supervisor(
-        &mut self,
-        session_id: &SessionId,
-        target_call_id: &CallId,
-    ) -> bool {
+    pub fn detach_supervisor(&mut self, session_id: &SessionId, target_call_id: &CallId) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
             let mut session = session.write();
             if session.remove_supervisor_target(target_call_id) {
@@ -354,14 +346,6 @@ impl RwiGateway {
         self.call_vars.remove(call_id);
     }
 
-    /// Get current timestamp in seconds
-    fn current_timestamp(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
     /// Enrich an event with call context from `CallMetaStore`.
     /// If no metadata is found, returns the event unchanged.
     fn enrich_event(&self, call_id: &str, event: &RwiEvent) -> RwiEvent {
@@ -378,11 +362,10 @@ impl RwiGateway {
             .event_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let now = self.current_timestamp();
         let max_age = self.max_cache_age_secs;
+        let now = chrono::Utc::now();
         while let Some(front) = cache_state.cache.front() {
-            if now - front.timestamp > max_age {
+            if now.signed_duration_since(front.cached_at).num_seconds() as u64 > max_age {
                 cache_state.cache.pop_front();
             } else {
                 break;
@@ -394,7 +377,7 @@ impl RwiGateway {
 
         let entry = EventCacheEntry {
             sequence,
-            timestamp: now,
+            cached_at: now,
             call_id: call_id.clone(),
             event: event.clone(),
         };
@@ -473,7 +456,7 @@ impl RwiGateway {
         if let Some(tx) = &self.webhook_tx {
             let entry = EventCacheEntry {
                 sequence,
-                timestamp: self.current_timestamp(),
+                cached_at: chrono::Utc::now(),
                 call_id: call_id.clone(),
                 event: event.clone(),
             };
@@ -551,7 +534,7 @@ impl RwiGateway {
         if let Some(tx) = &self.webhook_tx {
             let entry = EventCacheEntry {
                 sequence: 0,
-                timestamp: self.current_timestamp(),
+                cached_at: chrono::Utc::now(),
                 call_id: String::new(),
                 event: event.clone(),
             };
@@ -669,8 +652,7 @@ mod tests {
             vec![session_id.clone()]
         );
 
-        gateway
-            .unsubscribe(&session_id, &["context1".to_string()]);
+        gateway.unsubscribe(&session_id, &["context1".to_string()]);
         assert!(
             gateway
                 .get_sessions_subscribed_to_context("context1")
@@ -690,14 +672,14 @@ mod tests {
         let session_id = session.read().id.clone();
 
         let call_id = "call_001".to_string();
-        let result = gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
+        let result =
+            gateway.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
         assert!(result.is_ok());
 
         assert_eq!(gateway.get_call_owner(&call_id), Some(session_id.clone()));
 
-        let result2 = gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
+        let result2 =
+            gateway.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
         assert!(result2.is_err());
     }
 
@@ -724,8 +706,7 @@ mod tests {
             .claim_call_ownership(&session1_id, call_id.clone(), OwnershipMode::Control)
             .unwrap();
 
-        let result = gateway
-            .claim_call_ownership(&session2_id, call_id, OwnershipMode::Control);
+        let result = gateway.claim_call_ownership(&session2_id, call_id, OwnershipMode::Control);
         assert!(matches!(result, Err(ClaimError::AlreadyOwned)));
     }
 
@@ -756,8 +737,8 @@ mod tests {
 
         let target_call = "call_001".to_string();
 
-        let result = gateway
-            .attach_supervisor(&session_id, target_call.clone(), SupervisorMode::Listen);
+        let result =
+            gateway.attach_supervisor(&session_id, target_call.clone(), SupervisorMode::Listen);
         assert!(result);
         assert!(gateway.is_supervisor(&target_call));
         assert_eq!(
@@ -787,14 +768,12 @@ mod tests {
         let session2 = gateway.create_session(identity2);
         let session2_id = session2.read().id.clone();
 
-        gateway
-            .subscribe(&session1_id, vec!["context1".to_string()], None);
-        gateway
-            .subscribe(
-                &session2_id,
-                vec!["context1".to_string(), "context2".to_string()],
-                None,
-            );
+        gateway.subscribe(&session1_id, vec!["context1".to_string()], None);
+        gateway.subscribe(
+            &session2_id,
+            vec!["context1".to_string(), "context2".to_string()],
+            None,
+        );
 
         let subscribers = gateway.get_sessions_subscribed_to_context("context1");
         assert_eq!(subscribers.len(), 2);
@@ -813,8 +792,7 @@ mod tests {
         let session = gateway.create_session(identity);
         let session_id = session.read().id.clone();
 
-        gateway
-            .subscribe(&session_id, vec!["context1".to_string()], None);
+        gateway.subscribe(&session_id, vec!["context1".to_string()], None);
 
         assert_eq!(
             gateway.get_sessions_subscribed_to_context("context1"),
@@ -1166,12 +1144,11 @@ mod tests {
         gateway.set_session_event_sender(&session_id, tx);
 
         // Subscribe with filter for "call_ringing" only
-        gateway
-            .subscribe(
-                &session_id,
-                vec!["ctx".to_string()],
-                Some(vec!["call_ringing".to_string()]),
-            );
+        gateway.subscribe(
+            &session_id,
+            vec!["ctx".to_string()],
+            Some(vec!["call_ringing".to_string()]),
+        );
 
         // This event should be delivered (type matches filter)
         gateway.send_event_to_session(
@@ -1208,8 +1185,7 @@ mod tests {
         gateway.set_session_event_sender(&session_id, tx);
 
         // Subscribe without filter
-        gateway
-            .subscribe(&session_id, vec!["ctx".to_string()], None);
+        gateway.subscribe(&session_id, vec!["ctx".to_string()], None);
 
         gateway.send_event_to_session(
             &session_id,
@@ -1251,12 +1227,11 @@ mod tests {
         gateway.set_session_event_sender(&session_id, tx);
 
         // Subscribe filtering for two event types
-        gateway
-            .subscribe(
-                &session_id,
-                vec!["ctx".to_string()],
-                Some(vec!["call_ringing".to_string(), "call_hangup".to_string()]),
-            );
+        gateway.subscribe(
+            &session_id,
+            vec!["ctx".to_string()],
+            Some(vec!["call_ringing".to_string(), "call_hangup".to_string()]),
+        );
 
         gateway.send_event_to_session(
             &session_id,
@@ -1309,16 +1284,14 @@ mod tests {
         gateway.set_session_event_sender(&session_id, tx);
 
         // First subscribe with a filter
-        gateway
-            .subscribe(
-                &session_id,
-                vec!["ctx".to_string()],
-                Some(vec!["call_ringing".to_string()]),
-            );
+        gateway.subscribe(
+            &session_id,
+            vec!["ctx".to_string()],
+            Some(vec!["call_ringing".to_string()]),
+        );
 
         // Re-subscribe without filter — should clear the filter
-        gateway
-            .subscribe(&session_id, vec!["ctx".to_string()], None);
+        gateway.subscribe(&session_id, vec!["ctx".to_string()], None);
 
         // Now all events should pass
         gateway.send_event_to_session(
@@ -1343,12 +1316,11 @@ mod tests {
 
         let (tx, _rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
-        gateway
-            .subscribe(
-                &session_id,
-                vec!["ctx".to_string()],
-                Some(vec!["call_ringing".to_string()]),
-            );
+        gateway.subscribe(
+            &session_id,
+            vec!["ctx".to_string()],
+            Some(vec!["call_ringing".to_string()]),
+        );
 
         assert!(
             gateway.session_event_filters.contains_key(&session_id),

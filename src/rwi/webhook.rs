@@ -84,7 +84,7 @@ async fn run_rwi_webhook_handler(
         let payload = json!({
             "rwi": "1.0",
             "sequence": entry.sequence,
-            "timestamp": entry.timestamp,
+            "timestamp": entry.cached_at.to_rfc3339(),
             "call_id": entry.call_id,
             "event_type": event_type,
             "event": entry.event,
@@ -202,10 +202,7 @@ pub async fn send_test_event(
     let test_payload = json!({
         "rwi": "1.0",
         "sequence": 0,
-        "timestamp": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
         "call_id": "test-call-id",
         "event_type": "test",
         "event": {
@@ -230,8 +227,8 @@ mod tests {
     use crate::config::LocatorWebhookConfig;
     use crate::rwi::gateway::{EventCacheEntry, RwiGateway};
     use crate::rwi::proto::{CallIncomingData, RwiEvent};
-    use std::collections::HashMap;
     use axum::{Json, Router, routing::post};
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     struct TestHttpServer {
@@ -307,7 +304,7 @@ mod tests {
 
         let entry = EventCacheEntry {
             sequence: 1,
-            timestamp: 1000000,
+            cached_at: chrono::Utc::now(),
             call_id: "test-call-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "test-call-1".into(),
@@ -345,7 +342,7 @@ mod tests {
 
         let entry = EventCacheEntry {
             sequence: 10,
-            timestamp: 2000000,
+            cached_at: chrono::Utc::now(),
             call_id: "test-call-2".into(),
             event: RwiEvent::CallHangup {
                 call_id: "test-call-2".into(),
@@ -383,7 +380,7 @@ mod tests {
 
         let entry = EventCacheEntry {
             sequence: 99,
-            timestamp: 3000000,
+            cached_at: chrono::Utc::now(),
             call_id: "call-dn-1".into(),
             event: RwiEvent::DnStateChanged {
                 dn: "80001".into(),
@@ -436,7 +433,7 @@ mod tests {
         // Send hangup first (should be filtered OUT)
         tx.send(EventCacheEntry {
             sequence: 1,
-            timestamp: 100,
+            cached_at: chrono::Utc::now(),
             call_id: "c-1".into(),
             event: RwiEvent::CallHangup {
                 call_id: "c-1".into(),
@@ -450,7 +447,7 @@ mod tests {
         // Send ringing (should be delivered)
         tx.send(EventCacheEntry {
             sequence: 2,
-            timestamp: 200,
+            cached_at: chrono::Utc::now(),
             call_id: "c-2".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-2".into(),
@@ -483,7 +480,7 @@ mod tests {
 
         tx.send(EventCacheEntry {
             sequence: 1,
-            timestamp: 100,
+            cached_at: chrono::Utc::now(),
             call_id: "c-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-1".into(),
@@ -493,7 +490,7 @@ mod tests {
         .ok();
         tx.send(EventCacheEntry {
             sequence: 2,
-            timestamp: 200,
+            cached_at: chrono::Utc::now(),
             call_id: "c-2".into(),
             event: RwiEvent::CallAnswered {
                 call_id: "c-2".into(),
@@ -503,7 +500,7 @@ mod tests {
         .ok();
         tx.send(EventCacheEntry {
             sequence: 3,
-            timestamp: 300,
+            cached_at: chrono::Utc::now(),
             call_id: "c-3".into(),
             event: RwiEvent::CallHangup {
                 call_id: "c-3".into(),
@@ -575,7 +572,7 @@ mod tests {
         // Send the same event twice with identical (call_id, sequence).
         let entry = EventCacheEntry {
             sequence: 42,
-            timestamp: 100,
+            cached_at: chrono::Utc::now(),
             call_id: "dedup-test".into(),
             event: RwiEvent::CallRinging {
                 call_id: "dedup-test".into(),
@@ -620,23 +617,26 @@ mod tests {
         let call_id = "e2e-call".to_string();
 
         // 1. Send CallIncoming via send_event_to_call_owner (same path as emit_rwi_event)
-        gateway.send_event_to_call_owner(&call_id, &RwiEvent::CallIncoming(CallIncomingData {
-            call_id: call_id.clone(),
-            context: "default".into(),
-            caller: "alice".into(),
-            callee: "ivr".into(),
-            dial_direction: "inbound".into(),
-            trunk: None,
-            sip_headers: HashMap::new(),
-            root_call_id: None,
-            ani: None,
-            dnis: None,
-            called_phone: None,
-            app_id: None,
-            routing_target: None,
-            uuid: None,
-            routing_path: None,
-        }));
+        gateway.send_event_to_call_owner(
+            &call_id,
+            &RwiEvent::CallIncoming(CallIncomingData {
+                call_id: call_id.clone(),
+                context: "default".into(),
+                caller: "alice".into(),
+                callee: "ivr".into(),
+                dial_direction: "inbound".into(),
+                trunk: None,
+                sip_headers: HashMap::new(),
+                root_call_id: None,
+                caller_name: None,
+                callee_name: None,
+                called_phone: None,
+                app_id: None,
+                routing_target: None,
+                uuid: None,
+                routing_path: None,
+            }),
+        );
 
         // 2. Send CallRinging
         gateway.send_event_to_call_owner(&call_id, &RwiEvent::ringing(call_id.clone()));
@@ -645,33 +645,44 @@ mod tests {
         gateway.send_event_to_call_owner(&call_id, &RwiEvent::answered(call_id.clone()));
 
         // 4. Send CallHangup
-        gateway.send_event_to_call_owner(&call_id, &RwiEvent::hangup(
-            call_id.clone(),
-            Some("ByCaller".into()),
-            Some(200),
-        ));
+        gateway.send_event_to_call_owner(
+            &call_id,
+            &RwiEvent::hangup(call_id.clone(), Some("ByCaller".into()), Some(200)),
+        );
 
         // All 4 events should arrive with correct call_id and unique sequences
         wait_for_events(&server.received, 4, 3000).await;
 
         let received = server.received.lock().unwrap();
-        assert_eq!(received.len(), 4, "expected 4 events, got {}", received.len());
+        assert_eq!(
+            received.len(),
+            4,
+            "expected 4 events, got {}",
+            received.len()
+        );
 
         // Verify each event type and call_id
         let event_types: Vec<String> = received
             .iter()
             .map(|v| v["event_type"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(event_types, vec![
-            "call_incoming",
-            "call_ringing",
-            "call_answered",
-            "call_hangup",
-        ]);
+        assert_eq!(
+            event_types,
+            vec![
+                "call_incoming",
+                "call_ringing",
+                "call_answered",
+                "call_hangup",
+            ]
+        );
 
         // Verify all have the correct call_id (not empty)
         for v in received.iter() {
-            assert_eq!(v["call_id"], call_id, "call_id mismatch for event {}", v["event_type"]);
+            assert_eq!(
+                v["call_id"], call_id,
+                "call_id mismatch for event {}",
+                v["event_type"]
+            );
         }
 
         // Verify sequences are unique and in order
@@ -700,7 +711,7 @@ mod tests {
         // Two different events with different (call_id, sequence) — both must arrive.
         tx.send(EventCacheEntry {
             sequence: 1,
-            timestamp: 100,
+            cached_at: chrono::Utc::now(),
             call_id: "c-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-1".into(),
@@ -710,7 +721,7 @@ mod tests {
         .ok();
         tx.send(EventCacheEntry {
             sequence: 2,
-            timestamp: 200,
+            cached_at: chrono::Utc::now(),
             call_id: "c-2".into(),
             event: RwiEvent::CallHangup {
                 call_id: "c-2".into(),

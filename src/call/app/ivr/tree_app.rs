@@ -156,7 +156,8 @@ impl IvrApp {
         final_result: &str,
         target: Option<&str>,
     ) {
-        let total_duration_ms = self.flow_started_at
+        let total_duration_ms = self
+            .flow_started_at
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
         self.emit_rwi_event(
@@ -380,8 +381,8 @@ impl IvrApp {
                 node_type: "menu".to_string(),
                 app_id: self.definition.name.clone(),
                 entry_time: chrono::Utc::now().to_rfc3339(),
-                ani: Some(ctx.call_info.caller.clone()),
-                dnis: Some(ctx.call_info.callee.clone()),
+                caller_name: Some(ctx.call_info.caller.clone()),
+                callee_name: Some(ctx.call_info.callee.clone()),
                 routing_target: Some(menu_key.to_string()),
                 previous_node_id: previous_node,
                 context: Default::default(),
@@ -447,7 +448,8 @@ impl IvrApp {
         | IvrState::PlayingGreeting { ref menu_key } = self.state
         {
             let node_name = menu_key.clone();
-            let duration_ms = self.node_entered_at
+            let duration_ms = self
+                .node_entered_at
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
             let action_type = match action {

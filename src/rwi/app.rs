@@ -1,10 +1,10 @@
 use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
+use crate::rwi::RwiGatewayRef;
 use crate::rwi::gateway::SessionId;
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::OwnershipMode;
-use crate::rwi::RwiGatewayRef;
 use async_trait::async_trait;
 
 pub const RWI_APP_NAME: &str = "rwi";
@@ -123,8 +123,8 @@ impl CallApp for RwiApp {
                     caller: Some(context.call_info.caller.clone()),
                     callee: Some(context.call_info.callee.clone()),
                     direction: Some(context.call_info.direction.clone()),
-                    ani: Some(context.call_info.caller.clone()),
-                    dnis: Some(context.call_info.callee.clone()),
+                    caller_name: Some(context.call_info.caller.clone()),
+                    callee_name: Some(context.call_info.callee.clone()),
                     trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
                     app_id: None,
                     routing_target: None,
@@ -144,8 +144,8 @@ impl CallApp for RwiApp {
                 trunk: None,
                 sip_headers: std::collections::HashMap::new(),
                 root_call_id: None,
-                ani: None,
-                dnis: None,
+                caller_name: None,
+                callee_name: None,
                 called_phone: None,
                 app_id: None,
                 routing_target: None,
@@ -220,8 +220,8 @@ mod tests {
                 trunk: None,
                 sip_headers: std::collections::HashMap::new(),
                 root_call_id: None,
-                ani: None,
-                dnis: None,
+                caller_name: None,
+                callee_name: None,
                 called_phone: None,
                 app_id: None,
                 routing_target: None,

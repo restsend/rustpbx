@@ -253,8 +253,8 @@ impl CallRecordHook for RecordingUploadHook {
                         .map(|m| m.size)
                         .unwrap_or(0),
                     download_url: Some(url.clone()),
-                    ani: Some(record.caller.clone()),
-                    dnis: Some(record.callee.clone()),
+                    caller_name: Some(record.caller.clone()),
+                    callee_name: Some(record.callee.clone()),
                     called_phone: Some(record.callee.clone()),
                     call_type: record.details.direction.clone(),
                     agent_id: None,

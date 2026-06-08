@@ -224,8 +224,16 @@ impl ThirdPartyTreeProvider {
             },
 
             "TRouteBridge" => {
-                let has_success = node.children.get("0").map(|s| !s.is_empty()).unwrap_or(false);
-                let has_failure = node.children.get("1").map(|s| !s.is_empty()).unwrap_or(false);
+                let has_success = node
+                    .children
+                    .get("0")
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_failure = node
+                    .children
+                    .get("1")
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
                 EntryAction::VoipBridge {
                     create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
                     headers: HashMap::new(),
@@ -261,7 +269,11 @@ impl ThirdPartyTreeProvider {
     fn build_node_api_url(&self, business_node_id: &str) -> String {
         let sess = self.sess.lock().unwrap();
         let phone = sess.variables.get("caller").cloned().unwrap_or_default();
-        let session_id = sess.variables.get("session_id").cloned().unwrap_or_default();
+        let session_id = sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
         format!(
             "{}?nodeid={}&business_node_id={}&phone={}&call_id={}",
             self.base_api_url, business_node_id, business_node_id, phone, session_id
@@ -288,7 +300,11 @@ impl ThirdPartyTreeProvider {
             .cloned()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                node.children.values().next().cloned().filter(|s| !s.is_empty())
+                node.children
+                    .values()
+                    .next()
+                    .cloned()
+                    .filter(|s| !s.is_empty())
             })
     }
 
@@ -296,9 +312,17 @@ impl ThirdPartyTreeProvider {
         let action = convert_node_static(node);
         let next_id = Self::get_next_linear_child(node);
         let next = next_id.and_then(|id| {
-            tree.nodes.get(&id).map(|n| Box::new(Self::build_linear_chain(tree, n)))
+            tree.nodes
+                .get(&id)
+                .map(|n| Box::new(Self::build_linear_chain(tree, n)))
         });
-        ActionNode { action, next, step_id: None, step_name: None, extra: None }
+        ActionNode {
+            action,
+            next,
+            step_id: None,
+            step_name: None,
+            extra: None,
+        }
     }
 
     fn is_terminal_nodetype(nodetype: &str) -> bool {
@@ -363,10 +387,26 @@ impl ThirdPartyTreeProvider {
     fn resolve_branch_key(body: &serde_json::Value) -> String {
         body.as_str()
             .map(|s| s.to_string())
-            .or_else(|| body.get("result").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .or_else(|| body.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .or_else(|| body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .or_else(|| body.get("code").and_then(|v| v.as_u64()).map(|n| n.to_string()))
+            .or_else(|| {
+                body.get("result")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                body.get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                body.get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                body.get("code")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.to_string())
+            })
             .unwrap_or_else(|| "0".to_string())
     }
 }
@@ -425,10 +465,7 @@ fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
             entries: HashMap::new(),
             timeout_action: None,
             invalid_action: None,
-            greeting_api_url: Some(format!(
-                "placeholder://api?nodeid={}",
-                node.businessnodeid
-            )),
+            greeting_api_url: Some(format!("placeholder://api?nodeid={}", node.businessnodeid)),
         },
         "prompt" => EntryAction::Prompt {
             file: Some(node.nodename.clone()).filter(|f| !f.is_empty()),
@@ -512,13 +549,17 @@ impl ActionProvider for ThirdPartyTreeProvider {
         match ctx.event {
             Some(ProviderEvent::SessionStart) => {
                 let tree = self.tree.lock().unwrap();
-                let entry = tree.nodes.get(&tree.entry_id).cloned().ok_or_else(|| {
-                    anyhow::anyhow!("entry node {} not found", tree.entry_id)
-                })?;
+                let entry = tree
+                    .nodes
+                    .get(&tree.entry_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("entry node {} not found", tree.entry_id))?;
                 let first_child_id = entry.children.get("0").cloned().filter(|s| !s.is_empty());
                 drop(tree);
 
-                let node_id = first_child_id.clone().unwrap_or_else(|| self.tree.lock().unwrap().entry_id.clone());
+                let node_id = first_child_id
+                    .clone()
+                    .unwrap_or_else(|| self.tree.lock().unwrap().entry_id.clone());
                 let node = {
                     let tree = self.tree.lock().unwrap();
                     tree.nodes.get(&node_id).cloned()
@@ -550,7 +591,10 @@ impl ActionProvider for ThirdPartyTreeProvider {
                 let menu_children = state.awaiting_dtmf_menu_children.take();
 
                 if let Some(children) = menu_children {
-                    let child_id = children.get(digit.as_str()).cloned().filter(|s| !s.is_empty());
+                    let child_id = children
+                        .get(digit.as_str())
+                        .cloned()
+                        .filter(|s| !s.is_empty());
 
                     if let Some(ref cid) = child_id {
                         state.current_node_id = Some(cid.clone());
@@ -585,7 +629,10 @@ impl ActionProvider for ThirdPartyTreeProvider {
             Some(ProviderEvent::ApiResponse { ref body, .. }) => {
                 let tree = self.tree.lock().unwrap();
                 let current_id = state.current_node_id.clone();
-                let current = current_id.as_ref().and_then(|id| tree.nodes.get(id)).cloned();
+                let current = current_id
+                    .as_ref()
+                    .and_then(|id| tree.nodes.get(id))
+                    .cloned();
 
                 let Some(current) = current else {
                     return Ok(ActionNode::new(EntryAction::Hangup {
@@ -612,7 +659,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                                 t.merge_nodes(parsed);
                             }
                             let tree = self.tree.lock().unwrap();
-                            let next_id = current.children.get("0").cloned().filter(|s| !s.is_empty());
+                            let next_id =
+                                current.children.get("0").cloned().filter(|s| !s.is_empty());
                             if let Some(nid) = next_id {
                                 if let Some(next) = tree.nodes.get(&nid).cloned() {
                                     state.current_node_id = Some(nid.clone());
@@ -729,10 +777,12 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
         let mut sess = self.sess.lock().unwrap();
-        sess.variables.insert("session_id".into(), ctx.session_id.clone());
+        sess.variables
+            .insert("session_id".into(), ctx.session_id.clone());
         sess.variables.insert("caller".into(), ctx.caller.clone());
         sess.variables.insert("callee".into(), ctx.callee.clone());
-        sess.variables.insert("direction".into(), ctx.direction.clone());
+        sess.variables
+            .insert("direction".into(), ctx.direction.clone());
         if let Some(ref tid) = ctx.tenant_id {
             sess.variables.insert("tenant_id".into(), tid.clone());
         }
@@ -830,7 +880,8 @@ mod tests {
                 "ivrid": {"0": ""},
                 "controltype": ""
             }
-        }"#.to_string()
+        }"#
+        .to_string()
     }
 
     #[test]
@@ -921,7 +972,11 @@ mod tests {
         let node = tree.nodes.get("prompt_1").unwrap().clone();
         let chain = ThirdPartyTreeProvider::build_linear_chain(&tree, &node);
         match &chain.action {
-            EntryAction::Prompt { file, interruptible, .. } => {
+            EntryAction::Prompt {
+                file,
+                interruptible,
+                ..
+            } => {
                 assert_eq!(file.as_deref(), Some("welcome.wav"));
                 assert!(*interruptible);
             }
@@ -932,52 +987,5 @@ mod tests {
             EntryAction::DtmfMenu { .. } => {}
             _ => panic!("expected DtmfMenu as next"),
         }
-    }
-
-    #[test]
-    fn test_parse_real_passenger_tree() {
-        let json_str =
-            std::fs::read_to_string("/Users/pi/workspace/rs/rustpbx-cc/ref/快车乘客-tree.txt")
-                .expect("read passenger tree");
-        let tree = ThirdPartyTree::from_json(&json_str).unwrap();
-        assert_eq!(tree.nodes.len(), 298);
-        let entry = tree.nodes.get(&tree.entry_id).unwrap();
-        assert_eq!(entry.nodetype, "entry");
-    }
-
-    #[test]
-    fn test_parse_real_driver_tree() {
-        let json_str =
-            std::fs::read_to_string("/Users/pi/workspace/rs/rustpbx-cc/ref/快车司机-tree.txt")
-                .expect("read driver tree");
-        let tree = ThirdPartyTree::from_json(&json_str).unwrap();
-        assert_eq!(tree.nodes.len(), 951);
-        let entry = tree.nodes.get(&tree.entry_id).unwrap();
-        assert_eq!(entry.nodetype, "entry");
-    }
-
-    #[test]
-    fn test_all_nodetypes_convertible() {
-        let json_str =
-            std::fs::read_to_string("/Users/pi/workspace/rs/rustpbx-cc/ref/快车司机-tree.txt")
-                .expect("read driver tree");
-        let tree = ThirdPartyTree::from_json(&json_str).unwrap();
-        let provider =
-            ThirdPartyTreeProvider::new(tree, "http://localhost:8000/api".into());
-        let tree = provider.tree.lock().unwrap();
-        let mut unknown_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for (id, node) in tree.nodes.iter() {
-            if node.nodetype == "entry" {
-                continue;
-            }
-            let action = provider.convert_node(node);
-            if matches!(action, EntryAction::Hangup { prompt: None, .. }) {
-                if node.nodetype != "syshangup" {
-                    unknown_types.insert(&node.nodetype);
-                    eprintln!("unknown node {}: type={}", id, node.nodetype);
-                }
-            }
-        }
-        assert!(unknown_types.is_empty(), "unknown nodetypes: {:?}", unknown_types);
     }
 }

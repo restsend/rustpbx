@@ -75,7 +75,7 @@ async fn do_upload(
     duration_secs: i32,
     media_key: &str,
     signaling_key: &str,
-    media_file_name: &str,
+    _media_file_name: &str,
     signaling_file_name: &str,
 ) {
     if let Err(e) = backend.flush().await {
