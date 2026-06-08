@@ -1,7 +1,7 @@
 use crate::call::domain::{CallCommand, LegId};
 
-use crate::call::runtime::ConferenceManager;
 use crate::call::runtime::ConferenceId;
+use crate::call::runtime::ConferenceManager;
 use crate::call::runtime::conference_media_bridge::{
     AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
 };
@@ -954,7 +954,7 @@ impl RwiCommandProcessor {
                     .map(|e| {
                         serde_json::json!({
                             "sequence": e.sequence,
-                            "timestamp": e.timestamp,
+                            "timestamp": e.cached_at.to_rfc3339(),
                             "call_id": e.call_id,
                             "event": e.event,
                         })
@@ -978,7 +978,7 @@ impl RwiCommandProcessor {
                     .map(|e| {
                         serde_json::json!({
                             "sequence": e.sequence,
-                            "timestamp": e.timestamp,
+                            "timestamp": e.cached_at.to_rfc3339(),
                             "call_id": e.call_id,
                             "event": e.event,
                         })
@@ -1642,7 +1642,9 @@ impl RwiCommandProcessor {
                 async move {
                     cancel.cancel();
 
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut cmd_task).await {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut cmd_task)
+                        .await
+                    {
                         Ok(_) => {}
                         Err(_) => {
                             if !aborted.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -3147,8 +3149,8 @@ impl RwiCommandProcessor {
             let meta = self.gateway.read().meta_store.get_sync(call_id);
             let (ani, dnis, agent_id, agent_name) = match meta {
                 Some(ref m) => (
-                    m.ani.clone(),
-                    m.dnis.clone(),
+                    m.caller_name.clone(),
+                    m.callee_name.clone(),
                     m.agent_id.clone(),
                     m.agent_name.clone(),
                 ),
@@ -3162,8 +3164,8 @@ impl RwiCommandProcessor {
                 unique_id: Some(call_id.to_string()),
                 file_size: None,
                 download_url: None,
-                ani,
-                dnis,
+                caller_name: ani,
+                callee_name: dnis,
                 called_phone: None,
                 call_type: None,
                 agent_id,
@@ -3640,10 +3642,7 @@ impl RwiCommandProcessor {
 
                 // Now remove old participant
                 if old_was_member {
-                    if let Err(e) = manager
-                        .remove_participant(&conf_id.into(), &old_leg)
-                        .await
-                    {
+                    if let Err(e) = manager.remove_participant(&conf_id.into(), &old_leg).await {
                         warn!(conf_id = %conf_id, old_call_id = %old_call_id, error = %e, "Failed to remove old participant during seat replace");
                     }
 
@@ -3774,9 +3773,13 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway
+            .read()
+            .send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3848,12 +3851,18 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway
+            .read()
+            .send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&agent_leg.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&agent_leg.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3925,12 +3934,18 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway
+            .read()
+            .send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&agent_leg.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&agent_leg.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3988,9 +4003,13 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway
+            .read()
+            .send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -4031,9 +4050,13 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway
+            .read()
+            .send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway
+                .read()
+                .send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }

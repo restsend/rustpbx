@@ -15,18 +15,18 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 
 #[derive(Debug, Clone, serde::Serialize)]
- pub struct SessionSnapshot {
-     pub id: SessionId,
-     pub state: SessionState,
-     pub leg_count: usize,
-     pub bridge_active: bool,
-     pub caller_gate_open: bool,
-     pub media_path: MediaPathMode,
-     #[serde(skip_serializing_if = "Option::is_none")]
-     pub answer_sdp: Option<String>,
-     #[serde(skip)]
-     pub callee_dialogs: Vec<DialogId>,
- }
+pub struct SessionSnapshot {
+    pub id: SessionId,
+    pub state: SessionState,
+    pub leg_count: usize,
+    pub bridge_active: bool,
+    pub caller_gate_open: bool,
+    pub media_path: MediaPathMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_sdp: Option<String>,
+    #[serde(skip)]
+    pub callee_dialogs: Vec<DialogId>,
+}
 use crate::call::domain::SessionPolicy;
 use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
@@ -529,8 +529,8 @@ impl SipSession {
             let meta = crate::rwi::proto::CallMeta {
                 caller: Some(context.original_caller.clone()),
                 callee: Some(context.original_callee.clone()),
-                ani: Some(context.original_caller.clone()),
-                dnis: Some(context.original_callee.clone()),
+                caller_name: Some(context.original_caller.clone()),
+                callee_name: Some(context.original_callee.clone()),
                 direction: Some(context.dialplan.direction.to_string()),
                 trunk: context
                     .metadata
@@ -717,8 +717,8 @@ impl SipSession {
                     trunk: None,
                     sip_headers: std::collections::HashMap::new(),
                     root_call_id: None,
-                    ani: None,
-                    dnis: None,
+                    caller_name: None,
+                    callee_name: None,
                     called_phone: None,
                     app_id: None,
                     routing_target: None,

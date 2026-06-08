@@ -11,9 +11,9 @@ pub const RWI_VERSION: &str = "1.0";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventCallContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ani: Option<String>,
+    pub caller_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dnis: Option<String>,
+    pub callee_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,9 +505,9 @@ pub enum RwiEvent {
         #[serde(default)]
         download_url: Option<String>,
         #[serde(default)]
-        ani: Option<String>,
+        caller_name: Option<String>,
         #[serde(default)]
-        dnis: Option<String>,
+        callee_name: Option<String>,
         #[serde(default)]
         called_phone: Option<String>,
         #[serde(default)]
@@ -873,8 +873,8 @@ pub enum RwiEvent {
         node_type: String,
         app_id: String,
         entry_time: String,
-        ani: Option<String>,
-        dnis: Option<String>,
+        caller_name: Option<String>,
+        callee_name: Option<String>,
         routing_target: Option<String>,
         previous_node_id: Option<String>,
         #[serde(flatten)]
@@ -1839,8 +1839,8 @@ impl RwiEvent {
                 unique_id,
                 file_size,
                 download_url,
-                ani,
-                dnis,
+                caller_name: ani,
+                callee_name: dnis,
                 called_phone,
                 call_type,
                 agent_id,
@@ -1858,9 +1858,9 @@ impl RwiEvent {
                 unique_id,
                 file_size,
                 download_url,
-                ani: ani.or(ctx.ani.clone()),
-                dnis: dnis.or(ctx.dnis.clone()),
-                called_phone: called_phone.or(ctx.dnis.clone()),
+                caller_name: ani.or(ctx.caller_name.clone()),
+                callee_name: dnis.or(ctx.callee_name.clone()),
+                called_phone: called_phone.or(ctx.callee_name.clone()),
                 call_type: call_type.or(ctx.direction.clone()),
                 agent_id: agent_id.or(ctx.agent_id.clone()),
                 agent_name: agent_name.or(ctx.agent_name.clone()),
@@ -1884,8 +1884,8 @@ impl RwiEvent {
 pub struct CallMeta {
     pub caller: Option<String>,
     pub callee: Option<String>,
-    pub ani: Option<String>,
-    pub dnis: Option<String>,
+    pub caller_name: Option<String>,
+    pub callee_name: Option<String>,
     pub direction: Option<String>,
     pub trunk: Option<String>,
     pub app_id: Option<String>,
@@ -1899,8 +1899,8 @@ impl From<CallMeta> for EventCallContext {
         EventCallContext {
             caller: m.caller,
             callee: m.callee,
-            ani: m.ani,
-            dnis: m.dnis,
+            caller_name: m.caller_name,
+            callee_name: m.callee_name,
             direction: m.direction,
             trunk: m.trunk,
             app_id: m.app_id,
@@ -1954,9 +1954,9 @@ pub struct CallIncomingData {
     #[serde(default)]
     pub root_call_id: Option<String>,
     #[serde(default)]
-    pub ani: Option<String>,
+    pub caller_name: Option<String>,
     #[serde(default)]
-    pub dnis: Option<String>,
+    pub callee_name: Option<String>,
     #[serde(default)]
     pub called_phone: Option<String>,
     #[serde(default)]
@@ -1976,8 +1976,8 @@ pub struct RecordingMetadata {
     pub unique_id: String,
     pub file_size: u64,
     pub download_url: Option<String>,
-    pub ani: Option<String>,
-    pub dnis: Option<String>,
+    pub caller_name: Option<String>,
+    pub callee_name: Option<String>,
     pub called_phone: Option<String>,
     pub call_type: String,
     pub agent_id: Option<String>,
@@ -2017,8 +2017,8 @@ pub struct IvrFlowContext {
 #[serde(rename_all = "snake_case")]
 pub struct CallMetadata {
     pub root_call_id: Option<String>,
-    pub ani: Option<String>,
-    pub dnis: Option<String>,
+    pub caller_name: Option<String>,
+    pub callee_name: Option<String>,
     pub called_phone: Option<String>,
     pub dial_direction: Option<String>,
     pub uuid: Option<String>,
@@ -2139,8 +2139,8 @@ mod tests {
             "caller": "1001",
             "callee": "2000",
             "dial_direction": "inbound",
-            "ani": "330909",
-            "dnis": "9242000001",
+            "caller_name": "330909",
+            "callee_name": "9242000001",
             "called_phone": "018659727661",
             "app_id": "ivr-support-main",
             "routing_target": "queue:support",
@@ -2153,8 +2153,8 @@ mod tests {
         assert_eq!(data.caller, "1001");
         assert_eq!(data.callee, "2000");
         assert_eq!(data.dial_direction, "inbound");
-        assert_eq!(data.ani, Some("330909".to_string()));
-        assert_eq!(data.dnis, Some("9242000001".to_string()));
+        assert_eq!(data.caller_name, Some("330909".to_string()));
+        assert_eq!(data.callee_name, Some("9242000001".to_string()));
         assert_eq!(data.called_phone, Some("018659727661".to_string()));
         assert_eq!(data.app_id, Some("ivr-support-main".to_string()));
         assert_eq!(data.routing_target, Some("queue:support".to_string()));
@@ -2177,8 +2177,8 @@ mod tests {
         }"#;
         let data: CallIncomingData = serde_json::from_str(json).unwrap();
         assert_eq!(data.call_id, "c_456");
-        assert!(data.ani.is_none());
-        assert!(data.dnis.is_none());
+        assert!(data.caller_name.is_none());
+        assert!(data.callee_name.is_none());
         assert!(data.called_phone.is_none());
         assert!(data.app_id.is_none());
         assert!(data.routing_target.is_none());
@@ -2231,8 +2231,8 @@ mod tests {
                 "unique_id": "0200M6NJ54CGH3AH1K8482LAES4OTFEL",
                 "file_size": 149517,
                 "download_url": "https://storage.example.com/recording.mp3",
-                "ani": "330909",
-                "dnis": "9242000001",
+                "caller_name": "330909",
+                "callee_name": "9242000001",
                 "called_phone": "018659727661",
                 "call_type": "outbound",
                 "agent_id": "451447",
@@ -2253,8 +2253,8 @@ mod tests {
                 ref filename,
                 ref unique_id,
                 file_size,
-                ref ani,
-                ref dnis,
+                caller_name: ref ani,
+                callee_name: ref dnis,
                 ref called_phone,
                 ref call_type,
                 ref agent_id,
@@ -2303,7 +2303,7 @@ mod tests {
                 ref unique_id,
                 file_size,
                 ref download_url,
-                ref ani,
+                caller_name: ref ani,
                 ..
             } => {
                 assert_eq!(call_id, "call-abc");
@@ -2330,8 +2330,8 @@ mod tests {
                     "unique_id": "uuid-123",
                     "file_size": 149517,
                     "download_url": "https://storage.example.com/rec.mp3",
-                    "ani": "330909",
-                    "dnis": "9242000001",
+                    "caller_name": "330909",
+                    "callee_name": "9242000001",
                     "called_phone": null,
                     "call_type": "inbound",
                     "agent_id": "451447",
@@ -2372,8 +2372,8 @@ mod tests {
                 "node_type": "menu",
                 "app_id": "ivr-support-main",
                 "entry_time": "2026-05-14T17:54:45.537Z",
-                "ani": "17503062824",
-                "dnis": "4000111666",
+                "caller_name": "17503062824",
+                "callee_name": "4000111666",
                 "routing_target": "menu:root",
                 "previous_node_id": null
             }
@@ -2386,7 +2386,7 @@ mod tests {
                 ref node_name,
                 ref node_type,
                 ref app_id,
-                ref ani,
+                caller_name: ref ani,
                 ref routing_target,
                 ref previous_node_id,
                 ..
@@ -2523,8 +2523,8 @@ mod tests {
                 "call_id": "call-abc",
                 "metadata": {
                     "root_call_id": "call-root-42",
-                    "ani": "330909",
-                    "dnis": "9242000001",
+                    "caller_name": "330909",
+                    "callee_name": "9242000001",
                     "called_phone": "018659727661",
                     "dial_direction": "inbound",
                     "uuid": "uuid-abc-123",
@@ -2542,7 +2542,7 @@ mod tests {
                 ref metadata,
             } => {
                 assert_eq!(call_id, "call-abc");
-                assert_eq!(metadata.ani.as_deref(), Some("330909"));
+                assert_eq!(metadata.caller_name.as_deref(), Some("330909"));
                 assert_eq!(metadata.root_call_id.as_deref(), Some("call-root-42"));
                 assert_eq!(metadata.app_id.as_deref(), Some("ivr-support-main"));
                 assert_eq!(metadata.switch_name.as_deref(), Some("SIP_Switch_KS"));
@@ -2564,8 +2564,8 @@ mod tests {
             node_type: "menu".into(),
             app_id: "a-1".into(),
             entry_time: "t".into(),
-            ani: None,
-            dnis: None,
+            caller_name: None,
+            callee_name: None,
             routing_target: None,
             previous_node_id: None,
             context: Default::default(),
@@ -2620,8 +2620,8 @@ mod tests {
                 unique_id: "u".into(),
                 file_size: 100,
                 download_url: None,
-                ani: None,
-                dnis: None,
+                caller_name: None,
+                callee_name: None,
                 called_phone: None,
                 call_type: "inbound".into(),
                 agent_id: None,
@@ -2640,8 +2640,8 @@ mod tests {
             call_id: "c-5".into(),
             metadata: CallMetadata {
                 root_call_id: None,
-                ani: None,
-                dnis: None,
+                caller_name: None,
+                callee_name: None,
                 called_phone: None,
                 dial_direction: None,
                 uuid: None,
@@ -2663,8 +2663,8 @@ mod tests {
             node_type: "menu".into(),
             app_id: "ivr-support".into(),
             entry_time: "2026-05-14T17:54:45.537Z".into(),
-            ani: Some("17503062824".into()),
-            dnis: Some("4000111666".into()),
+            caller_name: Some("17503062824".into()),
+            callee_name: Some("4000111666".into()),
             routing_target: Some("menu:root".into()),
             previous_node_id: None,
             context: Default::default(),
@@ -2803,8 +2803,8 @@ mod tests {
                 unique_id: "uuid-123".into(),
                 file_size: 149517,
                 download_url: Some("https://storage.example.com/rec.mp3".into()),
-                ani: Some("330909".into()),
-                dnis: Some("9242000001".into()),
+                caller_name: Some("330909".into()),
+                callee_name: Some("9242000001".into()),
                 called_phone: None,
                 call_type: "inbound".into(),
                 agent_id: Some("451447".into()),
@@ -2832,8 +2832,8 @@ mod tests {
             call_id: "call-xyz".into(),
             metadata: CallMetadata {
                 root_call_id: Some("call-root-42".into()),
-                ani: Some("330909".into()),
-                dnis: Some("9242000001".into()),
+                caller_name: Some("330909".into()),
+                callee_name: Some("9242000001".into()),
                 called_phone: Some("018659727661".into()),
                 dial_direction: Some("inbound".into()),
                 uuid: Some("uuid-abc".into()),
@@ -2934,8 +2934,8 @@ fn test_enrich_event_adds_context() {
     let ctx = EventCallContext {
         caller: Some("1001".into()),
         callee: Some("2000".into()),
-        ani: Some("330909".into()),
-        dnis: Some("9242000001".into()),
+        caller_name: Some("330909".into()),
+        callee_name: Some("9242000001".into()),
         direction: Some("inbound".into()),
         ..Default::default()
     };
@@ -2945,7 +2945,7 @@ fn test_enrich_event_adds_context() {
         RwiEvent::CallRinging { call_id, context } => {
             assert_eq!(call_id, "call_001");
             assert_eq!(context.caller, Some("1001".into()));
-            assert_eq!(context.dnis, Some("9242000001".into()));
+            assert_eq!(context.callee_name, Some("9242000001".into()));
         }
         _ => panic!("expected CallRinging"),
     }
@@ -2977,8 +2977,8 @@ fn test_event_call_context_json_flat() {
     assert_eq!(json["caller"], "1001");
     assert_eq!(json["callee"], "2000");
     // None fields should be absent
-    assert!(json.get("ani").is_none());
-    assert!(json.get("dnis").is_none());
+    assert!(json.get("caller_name").is_none());
+    assert!(json.get("callee_name").is_none());
 }
 
 #[test]
@@ -3129,8 +3129,8 @@ fn test_enrich_non_context_event_unchanged() {
         dial_direction: "inbound".into(),
         trunk: None,
         sip_headers: HashMap::new(),
-        ani: None,
-        dnis: None,
+        caller_name: None,
+        callee_name: None,
         called_phone: None,
         app_id: None,
         routing_target: None,

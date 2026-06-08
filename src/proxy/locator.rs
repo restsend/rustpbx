@@ -18,7 +18,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub enum LocatorEvent {
@@ -113,18 +113,14 @@ impl TargetLocator for DialogTargetLocator {
                     if self.is_local_home_proxy(home_proxy)
                         && let Some(dest) = &loc.destination
                     {
-                        debug!(%uri, %dest, %home_proxy, "Located local registered AOR target via destination");
                         return Ok(dest.clone());
                     }
-
-                    debug!(%uri, dest = %home_proxy, "Located registered AOR target via home proxy");
                     return Ok(home_proxy.clone());
                 }
             }
 
             if let Some(loc) = locs.first() {
                 if let Some(dest) = &loc.destination {
-                    debug!(%uri, %dest, "Located target for dialog");
                     return Ok(dest.clone());
                 }
             }
@@ -171,7 +167,7 @@ impl TransportEventInspector for TransportInspectorLocator {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    debug!(error = %e, "Error unregistering location on transport close");
+                    info!(error = %e, "Error unregistering location on transport close");
                 }
             }
         }
@@ -229,12 +225,10 @@ impl Locator for MemoryLocator {
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm).await;
         if identifier.is_empty() {
-            debug!("skip registering location with empty identifier");
             return Ok(());
         }
         let mut location = location;
         let key = location.binding_key();
-        debug!(identifier, binding = %key, %location, "Registering");
         let mut locations = self.locations.lock().await;
         let entry = locations
             .entry(identifier.clone())
@@ -244,10 +238,12 @@ impl Locator for MemoryLocator {
             if entry.is_empty() {
                 locations.remove(&identifier);
             }
+            info!(identifier, binding = %key, %location, "unregistered location (expires=0)");
         } else {
             if location.last_modified.is_none() {
                 location.last_modified = Some(Instant::now());
             }
+            info!(identifier, binding = %key, %location, "registered location");
             entry.insert(key, location);
         }
         Ok(())

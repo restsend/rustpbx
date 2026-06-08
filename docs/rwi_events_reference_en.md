@@ -72,8 +72,8 @@ Example:
   "rwi": "1.0",
   "call_ringing": {
     "call_id": "call-abc123",
-    "ani": "330909",
-    "dnis": "9242000001",
+    "caller_name": "330909",
+    "callee_name": "9242000001",
     "direction": "inbound"
   }
 }
@@ -113,8 +113,8 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 |-------|------|-------------|
 | `caller` | Option\<String\> | Caller SIP URI |
 | `callee` | Option\<String\> | Callee SIP URI |
-| `ani` | Option\<String\> | Calling party number (normalized digits) |
-| `dnis` | Option\<String\> | Dialed number / DNIS |
+| `caller_name` | Option\<String\> | Calling party number (normalized digits) |
+| `callee_name` | Option\<String\> | Dialed number / DNIS |
 | `direction` | Option\<String\> | `inbound` / `outbound` / `internal` |
 | `trunk` | Option\<String\> | SIP trunk name |
 | `app_id` | Option\<String\> | IVR application ID |
@@ -194,8 +194,8 @@ New call enters the system. First event in any call flow.
 | `trunk` | Option\<String\> | SIP trunk name |
 | `sip_headers` | Map\<String, String\> | Whitelisted SIP headers |
 | `root_call_id` | Option\<String\> | Root call ID (constant across transfers) |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number / DNIS |
+| `caller_name` | Option\<String\> | Calling party number |
+| `callee_name` | Option\<String\> | Dialed number / DNIS |
 | `called_phone` | Option\<String\> | Actual called number (outbound scenario) |
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Routing target |
@@ -216,8 +216,8 @@ New call enters the system. First event in any call flow.
     "trunk": "trunk_sip",
     "sip_headers": { "X-Tenant": "corp_a" },
     "root_call_id": "call-root-42",
-    "ani": "13800138000",
-    "dnis": "4000",
+    "caller_name": "13800138000",
+    "callee_name": "4000",
     "called_phone": null,
     "app_id": "ivr_sales",
     "routing_target": "queue:support",
@@ -243,8 +243,8 @@ Dispatch: call_owner
     "call_id": "call-abc",
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
-    "ani": "13800138000",
-    "dnis": "4000",
+    "caller_name": "13800138000",
+    "callee_name": "4000",
     "direction": "inbound"
   }
 }
@@ -295,8 +295,8 @@ Dispatch: call_owner
     "sip_status": null,
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
-    "ani": "13800138000",
-    "dnis": "4000",
+    "caller_name": "13800138000",
+    "callee_name": "4000",
     "direction": "inbound"
   }
 }
@@ -404,8 +404,8 @@ Dispatch: call_owner
 | `unique_id` | Option\<String\> | Recording UUID |
 | `file_size` | Option\<u64\> | File size in bytes |
 | `download_url` | Option\<String\> | Download URL |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number |
+| `caller_name` | Option\<String\> | Calling party number |
+| `callee_name` | Option\<String\> | Dialed number |
 | `called_phone` | Option\<String\> | Actual called number |
 | `call_type` | Option\<String\> | `inbound`/`outbound`/`internal`/`consult` |
 | `agent_id` | Option\<String\> | Agent ID |
@@ -429,8 +429,8 @@ Dispatch: call_owner
     "unique_id": "uuid-abc-123",
     "file_size": 149517,
     "download_url": "https://storage.example.com/rec.mp3",
-    "ani": "330909",
-    "dnis": "9242000001",
+    "caller_name": "330909",
+    "callee_name": "9242000001",
     "called_phone": "018659727661",
     "call_type": "outbound",
     "agent_id": "451447",
@@ -464,8 +464,8 @@ Triggered when the recording file upload completes, containing full metadata.
 | `unique_id` | String | Recording UUID (required) |
 | `file_size` | u64 | File size in bytes (required) |
 | `download_url` | Option\<String\> | Download URL |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number |
+| `caller_name` | Option\<String\> | Calling party number |
+| `callee_name` | Option\<String\> | Dialed number |
 | `called_phone` | Option\<String\> | Actual called number |
 | `call_type` | String | Call type (required) |
 | `agent_id` | Option\<String\> | Agent ID |
@@ -488,8 +488,8 @@ Triggered when the recording file upload completes, containing full metadata.
       "unique_id": "uuid-abc-123",
       "file_size": 149517,
       "download_url": "https://storage.example.com/rec.mp3",
-      "ani": "330909",
-      "dnis": "9242000001",
+      "caller_name": "330909",
+      "callee_name": "9242000001",
       "called_phone": null,
       "call_type": "inbound",
       "agent_id": "451447",
@@ -525,8 +525,8 @@ Call enters an IVR node (menu, prompt, etc.).
 | `node_type` | String | Node type (`menu`, `prompt`, `transfer`, etc.) |
 | `app_id` | String | IVR application ID |
 | `entry_time` | String | Entry timestamp (ISO 8601) |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number |
+| `caller_name` | Option\<String\> | Calling party number |
+| `callee_name` | Option\<String\> | Dialed number |
 | `routing_target` | Option\<String\> | Routing target |
 | `previous_node_id` | Option\<String\> | Previous node ID |
 | *+ctx* | | Flat context fields |
@@ -905,8 +905,8 @@ Triggered when call metadata is updated after initial `call_incoming`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `root_call_id` | Option\<String\> | Root call ID |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number |
+| `caller_name` | Option\<String\> | Calling party number |
+| `callee_name` | Option\<String\> | Dialed number |
 | `called_phone` | Option\<String\> | Actual called number |
 | `dial_direction` | Option\<String\> | Call direction |
 | `uuid` | Option\<String\> | Global UUID |
@@ -922,8 +922,8 @@ Triggered when call metadata is updated after initial `call_incoming`.
     "call_id": "call-abc",
     "metadata": {
       "root_call_id": "call-root-42",
-      "ani": "330909",
-      "dnis": "9242000001",
+      "caller_name": "330909",
+      "callee_name": "9242000001",
       "called_phone": "018659727661",
       "dial_direction": "inbound",
       "uuid": "uuid-abc-123",
