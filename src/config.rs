@@ -368,6 +368,19 @@ pub struct ConsoleConfig {
     pub locales: std::collections::HashMap<String, LocaleInfo>,
     /// Static files HTTP path prefix (default: "/static")
     pub static_path: Option<String>,
+    /// Static API tokens for authenticating to /api endpoints.
+    /// Each token has an optional list of scopes (e.g. ["call.control", "recording"]).
+    #[serde(default)]
+    pub api_tokens: Vec<ApiTokenConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ApiTokenConfig {
+    pub token: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Default for ConsoleConfig {
@@ -385,6 +398,7 @@ impl Default for ConsoleConfig {
             locale_default: default_locale(),
             locales: default_locales(),
             static_path: None,
+            api_tokens: Vec::new(),
         }
     }
 }
@@ -691,6 +705,7 @@ pub struct ProxyConfig {
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
     pub ami_path: Option<String>,
+    pub rwi_path: Option<String>,
     pub ice_servers_path: Option<String>,
     pub http_router: Option<HttpRouterConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1083,6 +1098,7 @@ impl Default for ProxyConfig {
             realms: Some(vec![]),
             ws_handler: None,
             ami_path: None,
+            rwi_path: None,
             ice_servers_path: None,
             http_router: None,
             routes_files: Vec::new(),

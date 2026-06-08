@@ -4,8 +4,23 @@
 
 use crate::call::domain::*;
 use crate::callrecord::CallRecordHangupReason;
-use crate::console::handlers::call_control::CallCommandPayload;
+use crate::console::handlers::call_control::{CallCommandPayload, ConsoleMediaSource};
 use anyhow::Result;
+
+fn convert_console_source(src: ConsoleMediaSource) -> MediaSource {
+    match src {
+        ConsoleMediaSource::File { path } => MediaSource::file(path),
+        ConsoleMediaSource::Url { url } => MediaSource::url(url),
+        ConsoleMediaSource::Silence => MediaSource::Silence,
+        ConsoleMediaSource::Tone {
+            frequency,
+            duration_ms,
+        } => MediaSource::Tone {
+            frequency,
+            duration_ms,
+        },
+    }
+}
 
 /// Convert hangup reason string to CallRecordHangupReason
 fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
@@ -66,6 +81,25 @@ pub fn console_to_call_command(
         CallCommandPayload::Mute { track_id } => Ok(CallCommand::MuteTrack { track_id }),
 
         CallCommandPayload::Unmute { track_id } => Ok(CallCommand::UnmuteTrack { track_id }),
+
+        CallCommandPayload::Play {
+            source,
+            leg_id,
+            interrupt_on_dtmf,
+            loop_playback,
+        } => Ok(CallCommand::Play {
+            leg_id: leg_id.map(LegId::new).or(Some(LegId::new(session_id))),
+            source: convert_console_source(source),
+            options: Some(PlayOptions {
+                interrupt_on_dtmf,
+                loop_playback,
+                ..Default::default()
+            }),
+        }),
+
+        CallCommandPayload::StopPlayback { leg_id } => Ok(CallCommand::StopPlayback {
+            leg_id: leg_id.map(LegId::new),
+        }),
     }
 }
 
@@ -118,6 +152,82 @@ mod tests {
             assert_eq!(track_id, "track-audio-1");
         } else {
             panic!("Expected MuteTrack command");
+        }
+    }
+
+    #[test]
+    fn test_play_file_conversion() {
+        let payload = CallCommandPayload::Play {
+            source: ConsoleMediaSource::File {
+                path: "/audio/announce.wav".to_string(),
+            },
+            leg_id: None,
+            interrupt_on_dtmf: true,
+            loop_playback: false,
+        };
+        let cmd = console_to_call_command(payload, "session-abc").unwrap();
+        if let CallCommand::Play {
+            leg_id,
+            source,
+            options,
+        } = cmd
+        {
+            assert_eq!(leg_id.as_ref().unwrap().as_str(), "session-abc");
+            assert!(matches!(source, MediaSource::File { .. }));
+            let opts = options.unwrap();
+            assert!(opts.interrupt_on_dtmf);
+            assert!(!opts.loop_playback);
+        } else {
+            panic!("Expected Play command");
+        }
+    }
+
+    #[test]
+    fn test_play_with_leg_id() {
+        let payload = CallCommandPayload::Play {
+            source: ConsoleMediaSource::Silence,
+            leg_id: Some("leg-callee".to_string()),
+            interrupt_on_dtmf: false,
+            loop_playback: true,
+        };
+        let cmd = console_to_call_command(payload, "session-abc").unwrap();
+        if let CallCommand::Play {
+            leg_id,
+            source,
+            options,
+        } = cmd
+        {
+            assert_eq!(leg_id.as_ref().unwrap().as_str(), "leg-callee");
+            assert!(matches!(source, MediaSource::Silence));
+            let opts = options.unwrap();
+            assert!(opts.loop_playback);
+            assert!(!opts.interrupt_on_dtmf);
+        } else {
+            panic!("Expected Play command");
+        }
+    }
+
+    #[test]
+    fn test_stop_playback_conversion() {
+        let payload = CallCommandPayload::StopPlayback { leg_id: None };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        if let CallCommand::StopPlayback { leg_id } = cmd {
+            assert!(leg_id.is_none());
+        } else {
+            panic!("Expected StopPlayback command");
+        }
+    }
+
+    #[test]
+    fn test_stop_playback_with_leg_conversion() {
+        let payload = CallCommandPayload::StopPlayback {
+            leg_id: Some("leg-callee".to_string()),
+        };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        if let CallCommand::StopPlayback { leg_id } = cmd {
+            assert_eq!(leg_id.unwrap().as_str(), "leg-callee");
+        } else {
+            panic!("Expected StopPlayback command");
         }
     }
 }

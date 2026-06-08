@@ -59,6 +59,16 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/diagnostics/locator/clear", post(locator_clear))
 }
 
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/diagnostics/dialogs", get(list_dialogs))
+        .route("/diagnostics/trunks/test", post(test_trunk))
+        .route("/diagnostics/trunks/options", post(probe_trunk_options))
+        .route("/diagnostics/routes/evaluate", post(route_evaluate))
+        .route("/diagnostics/locator/lookup", post(locator_lookup))
+        .route("/diagnostics/locator/clear", post(locator_clear))
+}
+
 const DEFAULT_OPTIONS_TIMEOUT_MS: u64 = 1_500;
 const MIN_OPTIONS_TIMEOUT_MS: u64 = 100;
 const MAX_OPTIONS_TIMEOUT_MS: u64 = 20_000;

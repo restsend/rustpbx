@@ -796,7 +796,7 @@ endblock %}
                     : type === 'noanswer' ? 'downloadingNoAnswer' : 'downloadingOffHours';
                 this[loadingKey] = true;
                 try {
-                    const resp = await fetch(`${this.basePath}/queues/download-audio`, {
+                    const resp = await fetch(`${this.apiPrefix}/queues/download-audio`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                         body: JSON.stringify({ url }),

@@ -19,7 +19,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{self, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, patch},
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use sea_orm::sea_query::Order;
@@ -102,6 +102,24 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_call_record_detail)
                 .patch(update_call_record)
                 .delete(delete_call_record),
+        )
+        .route(
+            "/call-records/{id}/metadata",
+            get(download_call_record_metadata),
+        )
+        .route(
+            "/call-records/{id}/sip-flow",
+            get(download_call_record_sip_flow),
+        )
+        .route("/call-records/{id}/recording", get(stream_call_recording))
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/call-records", get(query_call_records).post(query_call_records))
+        .route(
+            "/call-records/{id}",
+            patch(update_call_record).delete(delete_call_record),
         )
         .route(
             "/call-records/{id}/metadata",
@@ -389,18 +407,36 @@ async fn stream_call_recording(
             );
         }
 
-        if let Ok(audio_data) = backend
-            .query_media_stream(&record.call_id, start_time, end_time, stream_leg)
-            .await
-            && !audio_data.is_empty()
+        let wav_result: Result<tempfile::NamedTempFile, _> = backend
+            .generate_wav_file(&record.call_id, start_time, end_time, stream_leg)
+            .await;
+
+        if let Ok(temp_file) = wav_result
         {
-            // SipFlow can briefly generate a one-frame silent WAV before media is flushed.
-            // Treat that as not ready so the same local endpoint can work on a later page load.
-            let data_size = audio_data
-                .get(40..44)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(u32::from_le_bytes)
-                .unwrap_or(0);
+            let temp_path = temp_file.path().to_owned();
+            let file_len = match std::fs::metadata(&temp_path) {
+                Ok(m) => m.len(),
+                Err(_) => 0,
+            };
+
+            if file_len <= 44 {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header(http::header::CACHE_CONTROL, "no-store")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "message": "Recording is not ready" }).to_string(),
+                    ))
+                    .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
+            }
+
+            let mut header_buf = [0u8; 4];
+            if let Ok(mut f) = std::fs::File::open(&temp_path) {
+                use std::io::{Read, Seek, SeekFrom};
+                let _ = f.seek(SeekFrom::Start(40));
+                let _ = f.read_exact(&mut header_buf);
+            }
+            let data_size = u32::from_le_bytes(header_buf);
             if record.duration_secs > 1 && data_size <= 1280 {
                 return Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -412,18 +448,11 @@ async fn stream_call_recording(
                     .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
             }
 
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(http::header::CONTENT_TYPE, "audio/wav")
-                .header(http::header::CONTENT_LENGTH, audio_data.len())
-                .header(http::header::CACHE_CONTROL, "no-store")
-                .header("x-available-streams", "A,B,mixed")
-                .header(
-                    http::header::CONTENT_DISPOSITION,
-                    "inline; filename=\"recording.wav\"",
-                )
-                .body(Body::from(audio_data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            let path_str = temp_path.to_string_lossy().to_string();
+            std::mem::forget(temp_file);
+            let response = stream_file_with_range(&path_str, file_len, &headers).await;
+            let _ = std::fs::remove_file(&path_str);
+            return response;
         }
     }
 

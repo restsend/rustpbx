@@ -606,7 +606,7 @@ IVR flow completes (terminal action executed: Transfer, Queue, Voicemail, Hangup
 
 Dispatch: fan_out_to_context
 
-Step-mode IVR debug trace — one entry per provider round-trip.
+Step-mode IVR trace event. Emitted on each provider round-trip or action execution completion.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -614,14 +614,29 @@ Step-mode IVR debug trace — one entry per provider round-trip.
 | `session_id` | String | Session ID |
 | `caller` | String | Caller |
 | `callee` | String | Callee |
-| `timestamp` | String | Timestamp |
+| `timestamp` | String | Event record time (ISO UTC) |
 | `step_index` | u32 | Step index |
-| `event_type` | String | Event type (e.g., `provider_response`) |
-| `action_type` | String | Action type (e.g., `Transfer`, `Prompt`) |
+| `event_type` | String | Event type (e.g., `session_start`, `dtmf`, `audio_complete`, `action_execute`) |
+| `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |
-| `result_kind` | String | Result type (`terminal`, `continue`, etc.) |
-| `duration_ms` | u64 | Duration in milliseconds |
+| `result_kind` | String | Result type (`terminal`, `continue`, `error`) |
+| `duration_ms` | u64 | Provider HTTP call duration (ms) |
 | `error` | Option\<String\> | Error message |
+| `step_id` | Option\<String\> | Current node ID, returned by provider via ActionNode.step_id |
+| `step_name` | Option\<String\> | Current node name, returned by provider via ActionNode.step_name |
+| `step_start_time` | Option\<String\> | Current step start time (ISO UTC) |
+| `step_end_time` | Option\<String\> | Current step end time (ISO UTC). Only present when step execution completes (terminal/error); null during WaitFor (waiting for user input) |
+| `step_execute_duration` | Option\<u64\> | execute_node action execution duration (ms). Only present when step completes; null during WaitFor |
+| `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
+
+> **Timing fields**:
+> - `timestamp` — the time this trace entry was recorded
+> - `step_start_time` — when the current step started (previous step end or session start)
+> - `step_end_time` — when the step ended (only on completion)
+>
+> **Duration fields**:
+> - `duration_ms` — HTTP round-trip time to the provider, always present
+> - `step_execute_duration` — action execution time (audio playback, DTMF collection, etc.), only present on step completion
 
 ---
 
@@ -802,14 +817,13 @@ Granular extension-level signaling events.
 | Field | Type | Description |
 |-------|------|-------------|
 | `dn` | String | Extension / DN |
-| `event_code` | u16 | Event code |
-| `event_name` | String | Event name |
+| `event_name` | String | Event name (see table below) |
 | `system_time` | String | System timestamp |
 | `call_id` | Option\<String\> | Associated call ID |
 | `agent_id` | Option\<String\> | Agent ID |
 | `other_dn` | Option\<String\> | Other party DN |
-| `ani` | Option\<String\> | Calling party number |
-| `dnis` | Option\<String\> | Dialed number |
+| `caller_name` | Option\<String\> | Calling party name/number |
+| `callee_name` | Option\<String\> | Called party name/number |
 | `reason_code` | Option\<String\> | Reason code |
 | `agent_work_mode` | Option\<String\> | Agent work mode |
 | `releasing_party` | Option\<String\> | Releasing party (`"1 Local"` / `"2 Remote"`) |
@@ -820,39 +834,40 @@ Granular extension-level signaling events.
 | `target_dn` | Option\<String\> | Target DN |
 | `extra` | Option\<Map\<String, Value\>\> | Extension fields (omitted when absent) |
 
-**Common DN event codes**:
+**event_name values**:
 
-| Code | Name | Description |
-|------|------|-------------|
-| 53 | REGISTERED | Extension registered |
-| 57 | QUEUED | Entered virtual queue |
-| 58 | DIVERTED | Queue/route assignment |
-| 59 | ABANDONED | Abandoned during ringing |
-| 60 | RINGING | Ringing |
-| 61 | DIALING | Outbound dialing |
-| 64 | ESTABLISHED | Call established |
-| 65 | RELEASED | Released |
-| 66 | HELD | Held |
-| 67 | RETRIEVED | Retrieved from hold |
-| 73 | AGENTLOGIN | Agent login |
-| 74 | AGENTLOGOUT | Agent logout |
-| 75 | AGENTREADY | Agent ready |
-| 76 | AGENTNOTREADY | Agent not ready |
-| 87 | ONHOOK | On hook |
-| 102 | REMOTECONNECTIONFAILED | Remote connection failed |
+| event_name | Description | Trigger |
+|------------|-------------|---------|
+| `REGISTERED` | Extension registered | SIP REGISTER success |
+| `DIALING` | Outbound dialing | Agent outbound or manual dial |
+| `RINGING` | Ringing | Agent-side ringing |
+| `ESTABLISHED` | Call established | Call answered |
+| `RELEASED` | Released | Hangup or transfer completed |
+| `ABANDONED` | Abandoned | Caller abandoned during ringing |
+| `HELD` | Held | Agent held, user hears music |
+| `RETRIEVED` | Retrieved from hold | Held party retrieved |
+| `PARTYCHANGED` | Multi-party state changed | Conference state changed |
+| `PARTYADDED` | Multi-party added | Party added to conference |
+| `PARTYDELETED` | Multi-party removed | Party removed from conference |
+| `AGENTLOGIN` | Agent login | Agent went from offline to online (CC addon) |
+| `AGENTLOGOUT` | Agent logout | Agent went from online to offline (CC addon) |
+| `AGENTREADY` | Agent ready | Agent entered idle state (CC addon) |
+| `AGENTNOTREADY` | Agent not ready | Agent entered busy/ringing/wrapup etc. (CC addon) |
+| `ONHOOK` | On hook | Phone on hook |
+
+> **Note**: Use `event_name` for event routing and matching.
 
 ```json
 {
   "rwi": "1.0",
   "dn_state_changed": {
     "dn": "80001",
-    "event_code": 64,
     "event_name": "ESTABLISHED",
     "system_time": "2026-05-14T17:54:49.003Z",
     "call_id": "call-abc",
     "agent_id": "10001",
-    "ani": "19534519769",
-    "dnis": "39989",
+    "caller_name": "19534519769",
+    "callee_name": "39989",
     "extra": {
       "source": "KS",
       "kz_conn_id": "kc-12345",

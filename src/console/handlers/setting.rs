@@ -255,6 +255,80 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         )
 }
 
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    let router = Router::new()
+        .route("/settings/logs/recent", get(fetch_recent_logs))
+        .route("/settings/logs/follow", get(follow_logs))
+        .route("/settings/logs/stream", get(stream_logs))
+        .route("/settings/config/platform", patch(update_platform_settings))
+        .route(
+            "/settings/config/platform/auto-external-ip/test",
+            post(test_auto_external_ip),
+        )
+        .route("/settings/config/proxy", patch(update_proxy_settings))
+        .route("/settings/config/storage", patch(update_storage_settings))
+        .route(
+            "/settings/config/storage/test",
+            post(test_storage_connection),
+        )
+        .route(
+            "/settings/config/proxy/locator-webhook/test",
+            post(test_locator_webhook),
+        )
+        .route(
+            "/settings/config/proxy/rwi-webhook/test",
+            post(test_rwi_webhook),
+        )
+        .route(
+            "/settings/config/proxy/http-router/test",
+            post(test_http_router),
+        )
+        .route(
+            "/settings/config/proxy/user-backend/test",
+            post(test_user_backend),
+        )
+        .route("/settings/config/security", patch(update_security_settings))
+        .route("/settings/config/rwi", patch(update_rwi_settings));
+
+    #[cfg(feature = "commerce")]
+    let router = router
+        .route("/settings/config/cluster", patch(update_cluster_settings))
+        .route(
+            "/settings/config/cluster/reload",
+            get(cluster_reload_sse_handler),
+        )
+        .route(
+            "/settings/config/cluster/reload-addons",
+            get(list_reload_addons_handler),
+        );
+
+    router
+        .route(
+            "/settings/departments",
+            post(query_departments).put(create_department),
+        )
+        .route(
+            "/settings/departments/{id}",
+            get(get_department)
+                .patch(update_department)
+                .delete(delete_department),
+        )
+        .route("/settings/users", post(query_users).put(create_user))
+        .route(
+            "/settings/users/{id}",
+            get(get_user).patch(update_user).delete(delete_user),
+        )
+        .route(
+            "/settings/users/{id}/roles",
+            get(get_user_roles).post(assign_user_roles),
+        )
+        .route("/settings/roles", get(list_roles).post(create_role))
+        .route(
+            "/settings/roles/{id}",
+            get(get_role).patch(update_role).delete(delete_role_handler),
+        )
+}
+
 pub async fn page_settings(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,

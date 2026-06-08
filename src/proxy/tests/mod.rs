@@ -35,3 +35,4 @@ mod test_trunk_b2bua_e2e;
 mod test_trunk_e2e;
 mod test_trunk_options;
 mod test_voip_bridge_e2e;
+mod test_dn_events_e2e;

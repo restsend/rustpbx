@@ -456,7 +456,8 @@
 
             return {
                 basePath: options.basePath || '/console',
-                listEndpoint: `${options.basePath || '/console'}/extensions`,
+                apiBase: '{{ api_prefix | safe }}',
+                listEndpoint: '{{ api_prefix | safe }}/extensions',
                 createUrl: options.createUrl || `${options.basePath || '/console'}/extensions/new`,
                 filtersRaw: options.filters || {},
                 departments: [],
@@ -901,7 +902,7 @@
                         const nextDisabled = this.loginAllowed(extension);
                         const body = new URLSearchParams();
                         body.set('login_disabled', nextDisabled ? 'true' : 'false');
-                        const response = await fetch(this.detailUrl(extension.id), {
+                        const response = await fetch(`${this.apiBase}/extensions/${extension.id}`, {
                             method: 'PATCH',
                             headers: {
                                 'Accept': 'application/json',
@@ -942,7 +943,7 @@
                     this.processing.delete = extension.id;
                     this.error = null;
                     try {
-                        const response = await fetch(this.detailUrl(extension.id), {
+                        const response = await fetch(`${this.apiBase}/extensions/${extension.id}`, {
                             method: 'DELETE',
                             headers: {
                                 'Accept': 'application/json',

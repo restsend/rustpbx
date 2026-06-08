@@ -801,6 +801,7 @@
     document.addEventListener('alpine:init', () => {
         Alpine.data('routingConsole', (options = {}) => ({
             basePath: '',
+            apiBase: '{{ api_prefix | safe }}',
             listEndpoint: '',
             createUrl: '',
             amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
@@ -892,7 +893,7 @@
 
             init() {
                 this.basePath = this.normalizeBasePath(options.basePath);
-                this.listEndpoint = this.resolvePath(`${this.basePath}/routing`);
+                this.listEndpoint = this.resolvePath(`${this.apiBase}/routing`);
                 this.createUrl = options.createUrl || this.resolvePath(`${this.basePath}/routing/new`);
                 this.filtersRaw = options.filters || {};
                 this.forwardingCatalog = options.forwardingCatalog || {};
@@ -919,7 +920,7 @@
             },
             buildUrl(path) {
                 const clean = path.startsWith('/') ? path : `/${path}`;
-                return `${this.basePath}${clean}`;
+                return `${this.apiBase}${clean}`;
             },
             setupFilterOptions() {
                 const raw = this.filtersRaw || {};

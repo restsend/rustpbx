@@ -927,6 +927,19 @@ impl RwiCommandProcessor {
                     .supervisor_stop(supervisor_call_id, target_call_id)
                     .await;
             }
+            RwiCommandPayload::MediaPlay(req) => {
+                return self
+                    .media_play(
+                        &req.call_id,
+                        req.source.clone(),
+                        req.interrupt_on_dtmf,
+                        req.leg_id.clone(),
+                    )
+                    .await;
+            }
+            RwiCommandPayload::MediaStop { call_id, leg_id } => {
+                return self.media_stop(call_id, leg_id.clone()).await;
+            }
             _ => {}
         }
 
@@ -4032,6 +4045,10 @@ impl RwiCommandProcessor {
         _direction: &str,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
+        // State-tracking only: records that the stream is logically active and
+        // fires the event.  Actual bidirectional WebSocket/RTP wiring is handled
+        // by the caller after receiving MediaStreamStarted.
+        tracing::debug!(call_id, "media_stream_start: tracking state, firing event");
         let mut states = self.media_stream_states.write().await;
         states.insert(call_id.to_string(), MediaStreamState);
         let event = RwiEvent::MediaStreamStarted {
@@ -4045,6 +4062,7 @@ impl RwiCommandProcessor {
 
     async fn media_stream_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
+        tracing::debug!(call_id, "media_stream_stop: clearing state, firing event");
         let mut states = self.media_stream_states.write().await;
         states.remove(call_id);
         let event = RwiEvent::MediaStreamStopped {
@@ -4063,6 +4081,10 @@ impl RwiCommandProcessor {
         _format: &crate::rwi::session::MediaFormat,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
+        // State-tracking only: records that injection is logically active and
+        // fires the event.  Actual PCM/RTP injection is handled by the caller
+        // via the WebSocket media stream after receiving MediaStreamStarted.
+        tracing::debug!(call_id, "media_inject_start: tracking state, firing event");
         let mut states = self.media_inject_states.write().await;
         states.insert(call_id.to_string(), MediaInjectState);
         let event = RwiEvent::MediaStreamStarted {
@@ -4076,6 +4098,7 @@ impl RwiCommandProcessor {
 
     async fn media_inject_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
+        tracing::debug!(call_id, "media_inject_stop: clearing state, firing event");
         let mut states = self.media_inject_states.write().await;
         states.remove(call_id);
         let event = RwiEvent::MediaStreamStopped {

@@ -109,6 +109,8 @@ pub struct SipServerInner {
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
     pub rtc_cname: String,
     pub callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
+    /// In-process media engine: handles bridge/playback/recording/MCU for all sessions.
+    pub media_engine: crate::media::engine::MediaEngine,
 }
 
 fn random_hex() -> String {
@@ -790,6 +792,12 @@ impl SipServerBuilder {
                 .unwrap_or_else(random_hex),
             rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
             callrecord_formatter: self.callrecord_formatter,
+            media_engine: {
+                use crate::media::engine::{MediaEngine, MediaEngineConfig};
+                let (engine, handle) = MediaEngine::new(MediaEngineConfig::default());
+                let _task = engine.spawn(handle);
+                engine
+            },
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -1201,8 +1209,13 @@ impl SipServerInner {
                         }
                     }
                 }
+                let realms_empty = self.proxy_config.realms.as_ref().map_or(true, |v| v.is_empty());
                 if self.endpoint.get_addrs().iter().any(|addr| {
-                    if addr.addr.host.to_string() == host {
+                    let addr_host = addr.addr.host.to_string();
+                    if addr_host == host {
+                        port.map(|p| addr.addr.port == Some(p.into()))
+                            .unwrap_or(true)
+                    } else if realms_empty && (addr_host == "0.0.0.0" || addr_host == "::") {
                         port.map(|p| addr.addr.port == Some(p.into()))
                             .unwrap_or(true)
                     } else {

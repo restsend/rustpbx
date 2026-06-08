@@ -6,6 +6,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 /// Options for an HTTP fetch request.
 #[derive(Debug, Clone, Default)]
@@ -104,6 +105,34 @@ pub async fn fetch_bytes(
     resp.bytes()
         .await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))
+}
+
+/// Fetch raw bytes from a URL and stream the response body into a writer.
+pub async fn fetch_to_writer<W: tokio::io::AsyncWrite + Unpin>(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    options: &HttpFetchOptions,
+    writer: &mut W,
+) -> Result<u64> {
+    let req = client.request(method, url);
+    let resp = execute_request(req, &options.headers, options.timeout).await?;
+    let mut total = 0u64;
+    let mut stream = resp.bytes_stream();
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow!("Failed to read response chunk: {}", e))?;
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|e| anyhow!("Failed to write chunk: {}", e))?;
+        total += chunk.len() as u64;
+    }
+    writer
+        .flush()
+        .await
+        .map_err(|e| anyhow!("Failed to flush writer: {}", e))?;
+    Ok(total)
 }
 
 /// Fetch text from a URL via GET.

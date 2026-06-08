@@ -28,6 +28,8 @@ pub struct StepIvrApp {
     route_headers: Option<HashMap<String, String>>,
     /// Passthrough data set by the external provider (echoed back each step).
     custom_data: Option<serde_json::Value>,
+    /// Transparent extra JSON object from provider — stored and passed through in events.
+    extra: Option<serde_json::Value>,
     /// Previous step start time (RFC3339) for timing reporting.
     step_prev_start_time: Option<String>,
     /// Previous step wall-clock duration in ms.
@@ -36,6 +38,11 @@ pub struct StepIvrApp {
     transferred_from: Option<String>,
     /// Last transfer target string (for EndReason classification).
     last_transfer_target: Option<String>,
+    /// Current step start time (ISO UTC) — set when a step begins, used for step_start_time.
+    current_step_start_time: Option<String>,
+    /// Current step provider response metadata.
+    current_step_id: Option<String>,
+    current_step_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -65,10 +72,14 @@ impl StepIvrApp {
             route_name: None,
             route_headers: None,
             custom_data: None,
+            extra: None,
             step_prev_start_time: None,
             step_prev_duration_ms: 0,
             transferred_from: None,
             last_transfer_target: None,
+            current_step_start_time: None,
+            current_step_id: None,
+            current_step_name: None,
         }
     }
 
@@ -88,10 +99,14 @@ impl StepIvrApp {
             route_name: None,
             route_headers: None,
             custom_data: None,
+            extra: None,
             step_prev_start_time: None,
             step_prev_duration_ms: 0,
             transferred_from: None,
             last_transfer_target: None,
+            current_step_start_time: None,
+            current_step_id: None,
+            current_step_name: None,
         }
     }
 
@@ -151,7 +166,6 @@ impl StepIvrApp {
                 t.record_entry(ent).await;
             });
         }
-        // Emit RWI event for real-time monitoring
         if let Some(ref gw) = self.rwi_gateway {
             let call_id = entry.session_id.clone();
             let event = crate::rwi::proto::RwiEvent::IvrStepTrace {
@@ -167,6 +181,12 @@ impl StepIvrApp {
                 result_kind: entry.result_kind.clone(),
                 duration_ms: entry.duration_ms,
                 error: entry.error.clone(),
+                step_id: entry.step_id,
+                step_name: entry.step_name,
+                step_start_time: entry.step_start_time,
+                step_end_time: entry.step_end_time,
+                step_execute_duration: entry.step_execute_duration,
+                extra: entry.extra,
             };
             let gw = gw.clone();
             crate::utils::spawn(async move {
@@ -266,6 +286,10 @@ impl StepIvrApp {
         let start = std::time::Instant::now();
         let result = self.execute_node(&node, ctrl, ctx).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
+        let step_end = chrono::Utc::now().to_rfc3339();
+
+        let step_id = node.step_id.clone().or_else(|| self.current_step_id.clone());
+        let step_name = node.step_name.clone().or_else(|| self.current_step_name.clone());
 
         match result {
             Ok(action_result) => {
@@ -302,6 +326,12 @@ impl StepIvrApp {
                             result_kind: "terminal".to_string(),
                             duration_ms: elapsed_ms,
                             error: None,
+                            step_id: step_id.clone(),
+                            step_name: step_name.clone(),
+                            step_start_time: self.current_step_start_time.clone(),
+                            step_end_time: Some(step_end),
+                            step_execute_duration: Some(elapsed_ms),
+                            extra: self.extra.clone(),
                         });
                         match terminal {
                     TerminalAction::Transfer(target) => {
@@ -318,7 +348,45 @@ impl StepIvrApp {
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
-                    ActionResult::WaitFor(_) => (AppAction::Continue, "continue"),
+                    ActionResult::WaitFor(_) => {
+                        self.record_trace(IvrTraceEntry {
+                            session_id: self
+                                .sess
+                                .variables
+                                .get("session_id")
+                                .cloned()
+                                .unwrap_or_default(),
+                            caller: self
+                                .sess
+                                .variables
+                                .get("caller")
+                                .cloned()
+                                .unwrap_or_default(),
+                            callee: self
+                                .sess
+                                .variables
+                                .get("callee")
+                                .cloned()
+                                .unwrap_or_default(),
+                            timestamp: chrono::Utc::now(),
+                            step_index: self.step_index,
+                            event_type: "action_execute".to_string(),
+                            event_detail: None,
+                            provider_url: None,
+                            action_type: node_type_str,
+                            action_json,
+                            result_kind: "continue".to_string(),
+                            duration_ms: elapsed_ms,
+                            error: None,
+                            step_id: step_id.clone(),
+                            step_name: step_name.clone(),
+                            step_start_time: self.current_step_start_time.clone(),
+                            step_end_time: None,
+                            step_execute_duration: None,
+                            extra: self.extra.clone(),
+                        });
+                        (AppAction::Continue, "continue")
+                    }
                 };
                 Ok(app_action)
             }
@@ -352,6 +420,12 @@ impl StepIvrApp {
                     result_kind: "error".to_string(),
                     duration_ms: elapsed_ms,
                     error: Some(e.to_string()),
+                    step_id,
+                    step_name,
+                    step_start_time: self.current_step_start_time.clone(),
+                    step_end_time: Some(step_end),
+                    step_execute_duration: Some(elapsed_ms),
+                    extra: self.extra.clone(),
                 });
                 return Err(e);
             }
@@ -417,6 +491,22 @@ impl StepIvrApp {
         self.step_prev_start_time = Some(now_rfc3339);
         self.step_prev_duration_ms = elapsed_ms;
         self.step_index += 1;
+
+        // Extract transparent passthrough data from provider response.
+        if let Ok(ref node) = result {
+            if node.step_id.is_some() {
+                self.current_step_id = node.step_id.clone();
+            }
+            if node.step_name.is_some() {
+                self.current_step_name = node.step_name.clone();
+            }
+            if node.extra.is_some() {
+                self.extra = node.extra.clone();
+            }
+        }
+
+        // Mark when this step started executing.
+        self.current_step_start_time = Some(chrono::Utc::now().to_rfc3339());
 
         // Trace the provider call
         let trace_action_type = match &result {
@@ -524,6 +614,12 @@ impl StepIvrApp {
                     result_kind: result_kind.to_string(),
                     duration_ms: elapsed_ms,
                     error: None,
+                    step_id: self.current_step_id.clone(),
+                    step_name: self.current_step_name.clone(),
+                    step_start_time: self.current_step_start_time.clone(),
+                    step_end_time: None,
+                    step_execute_duration: None,
+                    extra: self.extra.clone(),
                 });
             }
             Err(e) => {
@@ -541,6 +637,12 @@ impl StepIvrApp {
                     result_kind: "error".to_string(),
                     duration_ms: elapsed_ms,
                     error: Some(e.to_string()),
+                    step_id: self.current_step_id.clone(),
+                    step_name: self.current_step_name.clone(),
+                    step_start_time: self.current_step_start_time.clone(),
+                    step_end_time: None,
+                    step_execute_duration: None,
+                    extra: self.extra.clone(),
                 });
             }
         }
@@ -896,7 +998,13 @@ impl CallApp for StepIvrApp {
             crate::call::app::ExitReason::Error(e) => EndReason::Error(e),
             _ => EndReason::Normal,
         };
-        self.provider.on_session_end(&end_reason).await.ok();
+        let session_id = self
+            .sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
+        self.provider.on_session_end(&end_reason, &session_id).await.ok();
         let status = match &end_reason {
             EndReason::Normal => "completed",
             EndReason::Transfer(_) => "completed",
@@ -962,7 +1070,7 @@ mod tests {
             Ok(())
         }
 
-        async fn on_session_end(&self, _reason: &EndReason) -> anyhow::Result<()> {
+        async fn on_session_end(&self, _reason: &EndReason, _session_id: &str) -> anyhow::Result<()> {
             *self.end_called.lock().unwrap() = true;
             Ok(())
         }
@@ -1642,7 +1750,7 @@ mod tests {
         );
 
         step_provider
-            .on_session_end(&EndReason::Normal)
+            .on_session_end(&EndReason::Normal, "test-session")
             .await
             .unwrap();
     }

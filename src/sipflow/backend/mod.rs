@@ -55,6 +55,27 @@ pub trait SipFlowBackend: Send + Sync {
         let _ = stream_leg;
         self.query_media(call_id, start_time, end_time).await
     }
+
+    /// Generate WAV audio and write it to a temporary file on disk.
+    ///
+    /// This is the preferred way to export large recordings because it avoids
+    /// holding the full WAV buffer in memory.  The returned `NamedTempFile`
+    /// keeps the underlying file alive and automatically deletes it on drop.
+    async fn generate_wav_file(
+        &self,
+        call_id: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        stream_leg: Option<i32>,
+    ) -> Result<tempfile::NamedTempFile> {
+        let data = self
+            .query_media_stream(call_id, start_time, end_time, stream_leg)
+            .await?;
+        let mut file = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(&mut file, &data)?;
+        std::io::Write::flush(&mut file)?;
+        Ok(file)
+    }
 }
 
 /// Create backend from configuration

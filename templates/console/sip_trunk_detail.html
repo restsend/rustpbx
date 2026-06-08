@@ -13,8 +13,8 @@ default('RustPBX') }}{% endblock %}
         model: {{ model_data | tojson }},
         filters: {{ filters | default({}) | tojson }},
         tenants: {{ tenants | default([]) | tojson }},
-        createUrl: {{ create_url | default(null) | tojson }},
-        updateUrl: {{ update_url | default(null) | tojson }},
+        createUrl: ({{ create_url | default(null) | tojson }} || '').replace('/console', '{{ api_prefix | safe }}') || null,
+        updateUrl: ({{ update_url | default(null) | tojson }} || '').replace('/console', '{{ api_prefix | safe }}') || null,
         t: {{ t | tojson }},
         amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
     })' x-init="init()">
@@ -550,6 +550,7 @@ default('RustPBX') }}{% endblock %}
     document.addEventListener('alpine:init', () => {
         Alpine.data('sipTrunkDetailPage', (options) => ({
             basePath: options.basePath || '/console',
+            apiBase: '{{ api_prefix | safe }}',
             mode: options.mode || 'create',
             model: options.model || null,
             tenantsRaw: Array.isArray(options.tenants) ? options.tenants : [],
@@ -828,12 +829,12 @@ default('RustPBX') }}{% endblock %}
                         return this.updateUrl;
                     }
                     if (this.model?.id) {
-                        return `${this.basePath}/sip-trunk/${this.model.id}`;
+                        return `${this.apiBase}/sip-trunk/${this.model.id}`;
                     }
                 } else if (this.createUrl) {
                     return this.createUrl;
                 }
-                return `${this.basePath}/sip-trunk`;
+                return `${this.apiBase}/sip-trunk`;
             },
             submitMethod() {
                 return this.mode === 'edit' ? 'PATCH' : 'PUT';

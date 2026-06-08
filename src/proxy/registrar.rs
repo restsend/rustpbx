@@ -618,10 +618,32 @@ impl ProxyModule for RegistrarModule {
                 .await
             {
                 Ok(_) => {
-                    // P0: SIP registration success metrics
                     metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
                         locator_events.send(LocatorEvent::Registered(location)).ok();
+                    }
+                    if let Some(ref gw) = self.server.rwi_gateway {
+                        use crate::rwi::proto::RwiEvent;
+                        let event = RwiEvent::DnStateChanged {
+                            dn: user.username.clone(),
+                            event_name: "REGISTERED".to_string(),
+                            system_time: chrono::Utc::now().to_rfc3339(),
+                            call_id: None,
+                            agent_id: None,
+                            other_dn: None,
+                            caller_name: None,
+                            callee_name: None,
+                            reason_code: None,
+                            agent_work_mode: None,
+                            releasing_party: None,
+                            third_party_dn: None,
+                            vq_name: None,
+                            routing_target: None,
+                            skill_group: None,
+                            target_dn: None,
+                            extra: None,
+                        };
+                        gw.read().broadcast_event(&event);
                     }
                 }
                 Err(e) => {

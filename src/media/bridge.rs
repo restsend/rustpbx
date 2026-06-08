@@ -513,6 +513,8 @@ impl BridgePeer {
             self.caller_send.lock().await.clone(),
             Arc::clone(&self.caller_output_state),
             self.cancel_token.clone(),
+            self.recorder.clone(),
+            self.recording_paused.clone(),
         ));
         tasks.push(Self::spawn_file_output_clock(
             self.id.clone(),
@@ -520,6 +522,8 @@ impl BridgePeer {
             self.callee_send.lock().await.clone(),
             Arc::clone(&self.callee_output_state),
             self.cancel_token.clone(),
+            self.recorder.clone(),
+            self.recording_paused.clone(),
         ));
         drop(tasks);
 
@@ -734,8 +738,6 @@ impl BridgePeer {
             let r2w = Arc::clone(&self.callee_to_caller_stats);
             let bridge_id = self.id.clone();
             let cancel = self.cancel_token.clone();
-            let caller_pc = self.caller_pc.clone();
-            let callee_pc = self.callee_pc.clone();
             let rtp_timeout = self.rtp_timeout;
             let rtp_timeout_tx = self.rtp_timeout_tx.clone();
             crate::utils::spawn(async move {
@@ -966,6 +968,111 @@ impl BridgePeer {
         );
     }
 
+    /// Expose the raw output-mode atomic for caller endpoint (tests only).
+    #[cfg(test)]
+    pub fn caller_output_mode_atomic(&self) -> &Arc<AtomicU8> {
+        &self.caller_output_mode
+    }
+
+    /// Send RFC 4733 telephone-event DTMF packets to `endpoint`.
+    ///
+    /// For each digit in `digits` the method injects three telephone-event RTP
+    /// frames into the endpoint's sender:
+    ///   1. Begin packet  (marker=true,  E=0, duration=160)
+    ///   2. Middle packet (marker=false, E=0, duration=320)
+    ///   3. End packet    (marker=false, E=1, duration=480)
+    ///
+    /// The DTMF payload type is taken from the `caller_to_callee` or
+    /// `callee_to_caller` mapping if available, falling back to the RFC
+    /// conventional default of 101.
+    pub async fn send_dtmf_to_endpoint(
+        &self,
+        endpoint: BridgeEndpoint,
+        digits: &str,
+    ) -> Result<()> {
+        let sender = match endpoint {
+            BridgeEndpoint::Caller => self.get_caller_sender().await,
+            BridgeEndpoint::Callee => self.get_callee_sender().await,
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!("bridge {:?} sender not ready for DTMF injection", endpoint)
+        })?;
+
+        // Resolve DTMF payload type from negotiated mapping.
+        let dtmf_pt = {
+            let mapping = match endpoint {
+                BridgeEndpoint::Caller => self.callee_to_caller_dtmf_mapping.read(),
+                BridgeEndpoint::Callee => self.caller_to_callee_dtmf_mapping.read(),
+            };
+            mapping.as_ref().map(|m| m.target_pt).unwrap_or(101u8)
+        };
+
+        // Audio clock rate used for DTMF timing (8000 Hz ≡ 160 samples/20ms).
+        const CLOCK_RATE: u32 = 8000;
+        const TICKS_20MS: u32 = 160;
+
+        let mut rtp_timestamp: u32 = 0;
+        let mut sequence_number: u16 = 0;
+
+        for c in digits.chars() {
+            let event_code = crate::media::telephone_event::dtmf_char_to_code(c)
+                .ok_or_else(|| anyhow::anyhow!("Unknown DTMF digit: {:?}", c))?;
+
+            // RFC 4733 §2.3 — three packets per event (begin, middle, end).
+            for (packet_idx, (duration, is_end)) in [
+                (TICKS_20MS, false),
+                (TICKS_20MS * 2, false),
+                (TICKS_20MS * 3, true),
+            ]
+            .iter()
+            .enumerate()
+            {
+                // Telephone-event payload: [event, E|R|volume, duration_hi, duration_lo]
+                let mut payload = [0u8; 4];
+                payload[0] = event_code;
+                payload[1] = if *is_end { 0x80 } else { 0x00 }; // E bit
+                payload[2] = (duration >> 8) as u8;
+                payload[3] = (*duration & 0xFF) as u8;
+
+                let frame = AudioFrame {
+                    rtp_timestamp,
+                    clock_rate: CLOCK_RATE,
+                    data: bytes::Bytes::copy_from_slice(&payload),
+                    sequence_number: Some(sequence_number),
+                    payload_type: Some(dtmf_pt),
+                    marker: packet_idx == 0, // marker on first packet of each event
+                    header_extension: None,
+                    raw_packet: None,
+                    source_addr: None,
+                };
+
+                if let Err(e) = sender.send(MediaSample::Audio(frame)).await {
+                    warn!(
+                        bridge_id = %self.id,
+                        endpoint = ?endpoint,
+                        digit = %c,
+                        error = %e,
+                        "DTMF telephone-event send failed"
+                    );
+                }
+
+                sequence_number = sequence_number.wrapping_add(1);
+            }
+
+            // Advance RTP timestamp by one event duration (3 × 20ms = 60ms).
+            rtp_timestamp = rtp_timestamp.wrapping_add(TICKS_20MS * 3);
+        }
+
+        info!(
+            bridge_id = %self.id,
+            endpoint = ?endpoint,
+            digits = %digits,
+            dtmf_pt,
+            "Sent RFC 4733 DTMF telephone-event packets"
+        );
+        Ok(())
+    }
+
     /// Add a peer to the N-peer bridge.
     pub async fn add_peer(&self, peer_id: PeerId, entry: PeerEntry) -> Result<()> {
         let mut peers = self.peers.lock().await;
@@ -1129,7 +1236,14 @@ impl BridgePeer {
         sender: Option<MediaSender>,
         output_state: Arc<AsyncMutex<OutputState>>,
         cancel_token: CancellationToken,
+        recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+        recording_paused: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
+        let recorder_leg = match endpoint {
+            BridgeEndpoint::Callee => Some(RecLeg::A),
+            BridgeEndpoint::Caller => Some(RecLeg::B),
+        };
+
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1200,6 +1314,20 @@ impl BridgePeer {
                             guard.next_sequence_number = Some(mapped_seq.wrapping_add(1));
                             guard.next_rtp_timestamp =
                                 Some(mapped_ts.wrapping_add(frame_ticks_20ms(frame.clock_rate)));
+                        }
+
+                        if let (Some(rec), Some(leg)) = (&recorder, recorder_leg)
+                            && !recording_paused.load(Ordering::Relaxed)
+                            && let Some(mut guard) = rec.try_write()
+                            && let Some(r) = guard.as_mut()
+                        {
+                            let _ = r.write_sample(
+                                leg,
+                                &sample,
+                                None,
+                                None::<u32>,
+                                None::<AudioCodecType>,
+                            );
                         }
 
                         let Some(sender) = sender.as_ref() else {
@@ -1704,6 +1832,19 @@ impl BridgePeer {
                             packet_count += 1;
                             let received_at_micros = receive_clock.now_micros();
                             if !is_video {
+                                let (dtmf_pt, dtmf_clock_rate) = {
+                                    let sink_guard = dtmf_sink.read();
+                                    let dtmf_pt = sink_guard.as_ref()
+                                        .filter(|s| s.endpoint == path.source_endpoint())
+                                        .and_then(|s| s.payload_types.first().copied());
+                                    let dtmf_clock_rate = dtmf_pt.and_then(|pt| {
+                                        let mapping_guard = dtmf_mapping.as_ref()?.read();
+                                        mapping_guard.as_ref()
+                                            .filter(|m| m.source_pt == pt)
+                                            .map(|m| m.source_clock_rate)
+                                    }).unwrap_or(8000);
+                                    (dtmf_pt, dtmf_clock_rate)
+                                };
                                 if let (Some(rec), Some(leg)) = (&recorder, recorder_leg)
                                     && !recording_paused.load(std::sync::atomic::Ordering::Relaxed)
                                     && let Some(mut guard) = rec.try_write()
@@ -1712,8 +1853,8 @@ impl BridgePeer {
                                     let _ = r.write_sample(
                                         leg,
                                         &sample,
-                                        None,
-                                        None,
+                                        dtmf_pt,
+                                        Some(dtmf_clock_rate),
                                         None::<AudioCodecType>,
                                     );
                                 }

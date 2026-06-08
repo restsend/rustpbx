@@ -73,7 +73,26 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(metrics::api_urls())
         .merge(addons::api_urls());
     #[cfg(feature = "addon-cc")]
-    let api_routes = api_routes.merge(crate::addons::cc::console_handlers::api_urls());
+    let api_routes = {
+        let cc_api_routes = crate::addons::cc::console_handlers::api_urls();
+        let cc_api_routes = if let Some(app_state) = state.app_state() {
+            if let Some(cc_state) = app_state.get_addon_state::<crate::addons::cc::CcAddonState>() {
+                let auth_state = crate::addons::cc::phone_auth::PhoneAuthState {
+                    phone_auth: cc_state.phone_auth.clone(),
+                    console_state: Some(state.clone()),
+                };
+                cc_api_routes.layer(axum::middleware::from_fn_with_state(
+                    auth_state,
+                    crate::addons::cc::phone_auth::phone_auth_middleware,
+                ))
+            } else {
+                cc_api_routes
+            }
+        } else {
+            cc_api_routes
+        };
+        api_routes.merge(cc_api_routes)
+    };
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

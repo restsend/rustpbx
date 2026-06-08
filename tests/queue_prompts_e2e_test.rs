@@ -134,6 +134,8 @@ async fn test_queue_prompts_hold_music() {
                 busy_prompt: Some(busy_prompt_path.to_string_lossy().to_string()),
                 no_answer_prompt: Some(no_answer_prompt_path.to_string_lossy().to_string()),
                 off_hours_prompt: None,
+                position_prompt: None,
+                wait_time_prompt: None,
             }),
             ..Default::default()
         },
@@ -259,6 +261,8 @@ async fn test_queue_agent_transfer_flow() {
                 busy_prompt: Some(busy_prompt_path.to_string_lossy().to_string()),
                 no_answer_prompt: Some(no_answer_prompt_path.to_string_lossy().to_string()),
                 off_hours_prompt: None,
+                position_prompt: None,
+                wait_time_prompt: None,
             }),
             ..Default::default()
         },

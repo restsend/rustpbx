@@ -324,6 +324,14 @@ impl MediaMixer {
     }
 
     /// The main mixing loop
+    ///
+    /// # Design note
+    /// `MediaMixer` is a **metadata / routing-config container** used by
+    /// `MixerRegistry` to record supervisor-session participants and their
+    /// routing matrices.  Actual PCM audio mixing is performed by
+    /// `ConferenceAudioMixer` (`conference_mixer.rs`), which the conference
+    /// runtime wires up independently.  This loop exists only for lifecycle
+    /// management (cancel token handling) and does not process audio samples.
     async fn mixing_loop(mixer_id: &str, cancel_token: CancellationToken) {
         info!("Mixing loop started for {}", mixer_id);
 

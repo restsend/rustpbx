@@ -842,13 +842,19 @@ pub fn create_router(state: AppState) -> Router {
         state.core.rwi_gateway.clone(),
         state.core.rwi_call_registry.clone(),
     ) {
+        let rwi_path = state
+            .config()
+            .proxy
+            .rwi_path
+            .clone()
+            .unwrap_or_else(|| "/rwi/v1".to_string());
         let rwi_auth = auth;
         let rwi_gateway = gateway.clone();
         let rwi_call_registry = call_registry.clone();
         let rwi_sip_server: Option<crate::proxy::server::SipServerRef> =
             Some(state.sip_server().get_inner());
         router = router.route(
-            "/rwi/v1",
+            &rwi_path,
             axum::routing::get(
                 async move |client_addr: crate::handler::middleware::clientaddr::ClientAddr,
                             ws: axum::extract::ws::WebSocketUpgrade,
@@ -877,7 +883,8 @@ pub fn create_router(state: AppState) -> Router {
 
     #[cfg(feature = "console")]
     if let Some(console_state) = state.console.clone() {
-        router = router.merge(crate::console::router(console_state));
+        router = router.merge(crate::console::router(console_state.clone()));
+        router = router.merge(crate::api::router(console_state));
     }
 
     let access_log_skip_paths = Arc::new(state.config().http_access_skip_paths.clone());

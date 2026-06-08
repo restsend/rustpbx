@@ -1,3 +1,5 @@
+pub mod engine;
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
@@ -29,7 +31,6 @@ pub mod mixer;
 mod mixer_e2e_tests;
 pub mod mixer_registry;
 pub mod negotiate;
-pub mod sdp_bridge;
 pub mod telephone_event;
 pub mod transcoder;
 pub mod transcoding_pipeline;
@@ -869,10 +870,6 @@ impl FileTrack {
         self.pc = PeerConnection::new(config);
         self.pc
             .add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
-    }
-
-    pub fn with_ssrc(self, _ssrc: u32) -> Self {
-        self
     }
 
     async fn init_audio_source(&mut self) -> Result<()> {

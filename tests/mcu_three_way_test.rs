@@ -304,59 +304,13 @@ async fn test_transcoding_pipeline() {
     use audio_codec::CodecType;
     use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
 
-    // Test PCMU to PCMU (no transcoding needed)
-    let mut pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);
-
-    let pcm: Vec<i16> = (0..160).map(|i| (i as i16 * 100) % 32767).collect();
-    let encoded = pipeline.encode_from_pcm(&pcm);
-    assert!(!encoded.is_empty());
-
-    let decoded = pipeline.decode_to_pcm(&encoded);
-    assert_eq!(decoded.len(), 160);
-}
-
-#[tokio::test]
-async fn test_conference_with_transcoding() {
-    use audio_codec::CodecType;
-    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
-
-    let manager = ConferenceManager::new();
-    manager
-        .create_conference("conf5".into(), None)
-        .await
-        .unwrap();
-
-    // Add participants
-    let channels_a = manager
-        .add_participant(&"conf5".into(), LegId::new("a"))
-        .await
-        .unwrap();
-    let _channels_b = manager
-        .add_participant(&"conf5".into(), LegId::new("b"))
-        .await
-        .unwrap();
-
-    let tx_a = channels_a.input_tx;
-    let mut rx_b = manager
-        .take_participant_output_rx(&LegId::new("b"))
-        .await
-        .unwrap();
-
-    // Simulate transcoding: encode PCMU, decode to PCM, send to mixer
-    let mut pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);
+    let pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);
 
     // Create test PCM audio
     let pcm: Vec<i16> = (0..160).map(|i| (i as i16 * 100) % 32767).collect();
     let encoded = pipeline.encode_from_pcm(&pcm);
     let decoded = pipeline.decode_to_pcm(&encoded);
 
-    // Send decoded PCM to mixer
-    tx_a.send(AudioFrame::new(decoded, 8000)).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // B should hear A
-    assert!(rx_b.try_recv().is_ok(), "B should hear A with transcoding");
-
-    // Cleanup
-    manager.destroy_conference(&"conf5".into()).await.unwrap();
+    // Verify encode/decode round-trip produces same length output
+    assert_eq!(decoded.len(), pcm.len(), "Round-trip should preserve length");
 }

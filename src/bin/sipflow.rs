@@ -7,11 +7,12 @@ use axum::{
 };
 use chrono::{Local, TimeZone};
 use clap::Parser;
+use rustpbx::config::SipFlowSubdirs;
 use rustpbx::sipflow::{
     protocol::{Packet, parse_packet},
     storage::{StorageManager, process_packet},
+    wav_utils::generate_wav_to_writer_ex,
 };
-use rustpbx::{config::SipFlowSubdirs, sipflow::wav_utils::generate_wav_from_packets_ex};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -234,17 +235,62 @@ async fn media_handler(
             .unwrap_or_default()
     };
 
-    match generate_wav_from_packets_ex(&packets, force_pcm) {
-        Ok(wav_data) => axum::response::Response::builder()
-            .header("Content-Type", "audio/wav")
-            .header(
-                "Content-Disposition",
-                format!("attachment; filename=\"{}.wav\"", callid),
+    if packets.is_empty() {
+        return (axum::http::StatusCode::NOT_FOUND, "No media found").into_response();
+    }
+
+    let mut temp_file = match tempfile::NamedTempFile::new() {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
             )
-            .body(axum::body::Body::from(wav_data))
-            .unwrap()
+                .into_response();
+        }
+    };
+
+    match generate_wav_to_writer_ex(&packets, force_pcm, &mut temp_file) {
+        Ok(_) => {
+            let file_len = match temp_file.as_file().metadata() {
+                Ok(m) => m.len(),
+                Err(_) => 0,
+            };
+            let path = temp_file.path().to_owned();
+            std::mem::forget(temp_file);
+
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        e.to_string(),
+                    )
+                        .into_response();
+                }
+            };
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+
+            let response = axum::response::Response::builder()
+                .header("Content-Type", "audio/wav")
+                .header(
+                    "Content-Disposition",
+                    format!("attachment; filename=\"{}.wav\"", callid),
+                )
+                .header("Content-Length", file_len)
+                .body(body)
+                .unwrap();
+
+            let _ = std::fs::remove_file(&path);
+            response
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            e.to_string(),
+        )
             .into_response(),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

@@ -385,7 +385,7 @@
             async _pollTask() {
                 if (!this.manual.taskId) return;
                 try {
-                    const res = await fetch(`/api/archive/task/${this.manual.taskId}`);
+                    const res = await fetch(`{{ api_prefix | safe }}/archive/task/${this.manual.taskId}`);
                     const data = await res.json();
                     if (!data.success) return;
                     this.manual.taskStatus = data.status;

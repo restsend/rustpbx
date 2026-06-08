@@ -919,14 +919,13 @@ pub enum RwiEvent {
     // DN events
     DnStateChanged {
         dn: String,
-        event_code: u16,
         event_name: String,
         system_time: String,
         call_id: Option<String>,
         agent_id: Option<String>,
         other_dn: Option<String>,
-        ani: Option<String>,
-        dnis: Option<String>,
+        caller_name: Option<String>,
+        callee_name: Option<String>,
         reason_code: Option<String>,
         agent_work_mode: Option<String>,
         releasing_party: Option<String>,
@@ -967,6 +966,12 @@ pub enum RwiEvent {
         result_kind: String,
         duration_ms: u64,
         error: Option<String>,
+        step_id: Option<String>,
+        step_name: Option<String>,
+        step_start_time: Option<String>,
+        step_end_time: Option<String>,
+        step_execute_duration: Option<u64>,
+        extra: Option<serde_json::Value>,
     },
 }
 
@@ -1713,9 +1718,7 @@ impl RwiEvent {
                 context: ctx,
             },
             Self::ConferenceAutoEnded {
-                conf_id,
-                reason,
-                ..
+                conf_id, reason, ..
             } => Self::ConferenceAutoEnded {
                 conf_id,
                 reason,
@@ -2474,14 +2477,13 @@ mod tests {
         let json = r#"{
             "dn_state_changed": {
                 "dn": "80001",
-                "event_code": 64,
                 "event_name": "ESTABLISHED",
                 "system_time": "2026-05-14T17:54:49.003Z",
                 "call_id": "call-abc",
                 "agent_id": "10001",
                 "other_dn": null,
-                "ani": "19534519769",
-                "dnis": "39989",
+                "caller_name": "19534519769",
+                "callee_name": "39989",
                 "reason_code": null,
                 "agent_work_mode": null,
                 "releasing_party": null,
@@ -2496,21 +2498,19 @@ mod tests {
         match event {
             RwiEvent::DnStateChanged {
                 ref dn,
-                event_code,
                 ref event_name,
                 ref call_id,
                 ref agent_id,
-                ref ani,
-                ref dnis,
+                ref caller_name,
+                ref callee_name,
                 ..
             } => {
                 assert_eq!(dn, "80001");
-                assert_eq!(event_code, 64);
                 assert_eq!(event_name, "ESTABLISHED");
                 assert_eq!(call_id.as_deref(), Some("call-abc"));
                 assert_eq!(agent_id.as_deref(), Some("10001"));
-                assert_eq!(ani.as_deref(), Some("19534519769"));
-                assert_eq!(dnis.as_deref(), Some("39989"));
+                assert_eq!(caller_name.as_deref(), Some("19534519769"));
+                assert_eq!(callee_name.as_deref(), Some("39989"));
             }
             _ => panic!("Expected DnStateChanged"),
         }
@@ -2586,14 +2586,13 @@ mod tests {
 
         let dn_state = RwiEvent::DnStateChanged {
             dn: "8001".into(),
-            event_code: 60,
             event_name: "RINGING".into(),
             system_time: "t".into(),
             call_id: Some("c-3".into()),
             agent_id: None,
             other_dn: None,
-            ani: None,
-            dnis: None,
+            caller_name: None,
+            callee_name: None,
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
@@ -2680,14 +2679,13 @@ mod tests {
     fn test_rwi_event_roundtrip_dn_state_changed() {
         let original = RwiEvent::DnStateChanged {
             dn: "80001".into(),
-            event_code: 64,
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
             agent_id: Some("10001".into()),
             other_dn: None,
-            ani: Some("19534519769".into()),
-            dnis: Some("39989".into()),
+            caller_name: Some("19534519769".into()),
+            callee_name: Some("39989".into()),
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
@@ -2720,14 +2718,13 @@ mod tests {
 
         let original = RwiEvent::DnStateChanged {
             dn: "80001".into(),
-            event_code: 64,
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
             agent_id: Some("10001".into()),
             other_dn: None,
-            ani: Some("19534519769".into()),
-            dnis: Some("39989".into()),
+            caller_name: Some("19534519769".into()),
+            callee_name: Some("39989".into()),
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
@@ -2762,14 +2759,13 @@ mod tests {
     fn test_dn_state_changed_without_extra_omits_field() {
         let original = RwiEvent::DnStateChanged {
             dn: "80001".into(),
-            event_code: 53,
             event_name: "REGISTERED".into(),
             system_time: "t".into(),
             call_id: None,
             agent_id: None,
             other_dn: None,
-            ani: None,
-            dnis: None,
+            caller_name: None,
+            callee_name: None,
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
@@ -2786,8 +2782,8 @@ mod tests {
 
     #[test]
     fn test_dn_state_changed_extra_backward_compat() {
-        // DnStateChanged JSON without extra field should deserialize fine
-        let json = r#"{"dn_state_changed":{"dn":"80001","event_code":53,"event_name":"REGISTERED","system_time":"t"}}"#;
+        let json =
+            r#"{"dn_state_changed":{"dn":"80001","event_name":"REGISTERED","system_time":"t"}}"#;
         let event: RwiEvent = serde_json::from_str(json).unwrap();
         match event {
             RwiEvent::DnStateChanged { extra, .. } => {
@@ -2900,6 +2896,12 @@ mod tests {
             result_kind: "terminal".into(),
             duration_ms: 42,
             error: None,
+            step_id: Some("node_001".into()),
+            step_name: Some("Transfer".into()),
+            step_start_time: Some("2026-05-21T16:30:00Z".into()),
+            step_end_time: Some("2026-05-21T16:30:01Z".into()),
+            step_execute_duration: Some(100),
+            extra: Some(serde_json::json!({"tenantId": "tenant_123"})),
         };
         let json = serde_json::to_value(&event).unwrap();
         // With rename_all = "snake_case", variant wraps as "ivr_step_trace"

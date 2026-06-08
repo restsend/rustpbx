@@ -11,6 +11,9 @@ use tracing::warn;
 
 pub struct AuthRequired(pub crate::models::user::Model);
 
+#[derive(Clone)]
+pub struct ApiTokenAuth(pub crate::models::user::Model);
+
 impl<S> FromRequestParts<S> for AuthRequired
 where
     Arc<ConsoleState>: FromRef<S>,
@@ -19,6 +22,10 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(api_auth) = parts.extensions.get::<ApiTokenAuth>() {
+            return Ok(AuthRequired(api_auth.0.clone()));
+        }
+
         let state = Arc::<ConsoleState>::from_ref(state);
         let next = Some(parts.uri.path().to_string());
         let session_token = extract_session_cookie(&parts.headers);

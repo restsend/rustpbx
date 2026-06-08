@@ -320,6 +320,40 @@ impl SipFlowBackend for RemoteBackend {
         .await?;
         Ok(bytes.to_vec())
     }
+
+    async fn generate_wav_file(
+        &self,
+        call_id: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        _stream_leg: Option<i32>,
+    ) -> Result<tempfile::NamedTempFile> {
+        let node = self.select_node(call_id);
+        let url = format!(
+            "{}/media?callid={}&start={}&end={}",
+            node.http_addr,
+            call_id,
+            start_time.timestamp(),
+            end_time.timestamp()
+        );
+
+        let file = tokio::task::spawn_blocking(|| tempfile::NamedTempFile::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("temp file creation failed: {e}"))??;
+
+        let std_file = file.reopen()?;
+        let mut tokio_file = tokio::fs::File::from_std(std_file);
+        crate::http_util::fetch_to_writer(
+            &self.client,
+            reqwest::Method::GET,
+            &url,
+            &HttpFetchOptions::new(),
+            &mut tokio_file,
+        )
+        .await?;
+
+        Ok(file)
+    }
 }
 
 impl Drop for RemoteBackend {
