@@ -88,7 +88,10 @@ async fn do_upload(
     };
 
     if !media_enabled {
-        info!(call_id, "SipFlowUploadHook: media upload disabled, skipping");
+        info!(
+            call_id,
+            "SipFlowUploadHook: media upload disabled, skipping"
+        );
     } else {
         upload_media(
             backend.as_ref(),
@@ -133,16 +136,14 @@ async fn upload_media(
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
 ) {
-    let temp_file: tempfile::NamedTempFile = match backend
-        .generate_wav_file(call_id, start, end, None)
-        .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            warn!(call_id, "SipFlowUploadHook: generate_wav_file failed: {e}");
-            return;
-        }
-    };
+    let temp_file: tempfile::NamedTempFile =
+        match backend.generate_wav_file(call_id, start, end, None).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(call_id, "SipFlowUploadHook: generate_wav_file failed: {e}");
+                return;
+            }
+        };
 
     let temp_path = temp_file.path().to_owned();
     let file_size = match std::fs::metadata(&temp_path) {
@@ -710,7 +711,9 @@ signaling = true
             crate::config::SipFlowConfig::Remote { upload, .. } => {
                 let upload = upload.expect("upload should be set");
                 match upload {
-                    SipFlowUploadConfig::S3 { signaling, bucket, .. } => {
+                    SipFlowUploadConfig::S3 {
+                        signaling, bucket, ..
+                    } => {
                         assert_eq!(signaling, Some(true));
                         assert_eq!(bucket, "my-bucket");
                     }
