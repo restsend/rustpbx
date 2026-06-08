@@ -10,7 +10,8 @@
             algorithms: {{ selection_algorithms | tojson }},
             directionOptions: {{ direction_options | tojson }},
             statusOptions: {{ status_options | tojson }},
-            formAction: {{ form_action | tojson }}.replace('/console', '{{ api_prefix | safe }}'),
+            formAction: {{ form_action | tojson }},
+            apiPrefix: {{ api_prefix | tojson }},
             listUrl: {{ back_url | tojson }}
     })'>
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -796,6 +797,7 @@
                 activeTab: 'overview',
                 listUrl: options.listUrl || '/console/routing',
                 formAction: options.formAction || options.listUrl || '/console/routing',
+                apiPrefix: options.apiPrefix || '',
                 directionOptions: Array.isArray(options.directionOptions) ? options.directionOptions : [],
                 statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
                 trunkOptions: [],
@@ -907,7 +909,7 @@
                 },
                 init() {
                     this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
-                    this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
+                    this.formAction = ((this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '')).replace('/console', this.apiPrefix);
                     // Translate algorithm option labels
                     this.algorithmOptions = (Array.isArray(options.algorithms) ? options.algorithms : []).map(opt => ({
                         value: opt.value,
