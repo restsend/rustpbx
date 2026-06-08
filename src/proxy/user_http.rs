@@ -71,8 +71,8 @@ impl HttpUserBackend {
 
 #[async_trait]
 impl UserBackend for HttpUserBackend {
-    async fn is_same_realm(&self, realm: &str) -> bool {
-        self.get_user("", Some(realm), None).await.is_ok()
+    async fn is_same_realm(&self, _realm: &str) -> bool {
+        false
     }
     async fn get_user(
         &self,
