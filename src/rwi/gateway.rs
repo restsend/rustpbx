@@ -295,18 +295,18 @@ impl RwiGateway {
         self.call_ownership.len()
     }
 
-    /// Send a pre-serialized JSON value to a single session.
+    /// Send a pre-serialized flat JSON value to a single session.
     /// Applies per-session event type filter before sending.
-    fn send_json_to_session(&self, session_id: &SessionId, value: &serde_json::Value) {
+    fn send_json_to_session(
+        &self,
+        session_id: &SessionId,
+        value: &serde_json::Value,
+        event_type: &str,
+    ) {
         if let Some(sender) = self.session_event_senders.get(session_id) {
             if let Some(filter) = self.session_event_filters.get(session_id) {
-                let event_type = value
-                    .as_object()
-                    .and_then(|o| o.keys().next().map(|k| k.as_str()));
-                if let Some(et) = event_type {
-                    if !filter.contains(et) {
-                        return;
-                    }
+                if !filter.contains(event_type) {
+                    return;
                 }
             }
             let _ = sender.send(value.clone());
@@ -314,16 +314,15 @@ impl RwiGateway {
     }
 
     /// Send an event to a single session by session_id.
-    /// Auto-enriches from `CallMetaStore` then serializes to JSON.
+    /// Auto-enriches from `CallMetaStore`, flattens to remove variant wrapper.
     pub fn send_event_to_session(&self, session_id: &SessionId, event: &RwiEvent) {
         let enriched = if let Some(call_id) = event.call_id() {
             self.enrich_event(call_id, event)
         } else {
             event.clone()
         };
-        if let Ok(value) = serde_json::to_value(&enriched) {
-            self.send_json_to_session(session_id, &value);
-        }
+        let (value, event_type) = enriched.to_flat_value();
+        self.send_json_to_session(session_id, &value, event_type);
     }
 
     /// Set a channel variable for the given call.
@@ -1264,12 +1263,12 @@ mod tests {
         let s1 = serde_json::to_string(&e1).unwrap();
         let s3 = serde_json::to_string(&e3).unwrap();
         assert!(
-            s1.contains("call_ringing"),
-            "first should be call_ringing: {s1}"
+            s1.contains("\"call_id\""),
+            "first should have call_id: {s1}"
         );
         assert!(
-            s3.contains("call_hangup"),
-            "second should be call_hangup: {s3}"
+            s3.contains("reason"),
+            "second should have reason field: {s3}"
         );
     }
 

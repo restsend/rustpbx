@@ -286,7 +286,6 @@ pub struct QueueStats {
 #[derive(Clone)]
 #[allow(dead_code)]
 struct RecordState {
-    recording_id: String,
     _mode: String,
     _path: String,
     is_paused: bool,
@@ -3040,7 +3039,6 @@ impl RwiCommandProcessor {
         use crate::call::domain::RecordConfig;
 
         let handle = self.get_handle(&req.call_id).await?;
-        let recording_id = Uuid::new_v4().to_string();
         let path = req.storage.path.clone();
         handle
             .send_command(CallCommand::StartRecording {
@@ -3053,7 +3051,6 @@ impl RwiCommandProcessor {
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         let record_state = RecordState {
-            recording_id: recording_id.clone(),
             _mode: req.mode,
             _path: path,
             is_paused: false,
@@ -3062,7 +3059,6 @@ impl RwiCommandProcessor {
         states.insert(req.call_id.clone(), record_state);
         let event = RwiEvent::RecordStarted {
             call_id: req.call_id.clone(),
-            recording_id,
             context: Default::default(),
         };
         let gw = self.gateway.read();
@@ -3085,19 +3081,12 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::PauseRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        let recording_id = {
-            let states = self.record_states.read().await;
-            states.get(call_id).map(|s| s.recording_id.clone())
+        let event = RwiEvent::RecordPaused {
+            call_id: call_id.to_string(),
+            context: Default::default(),
         };
-        if let Some(rid) = recording_id {
-            let event = RwiEvent::RecordPaused {
-                call_id: call_id.to_string(),
-                recording_id: rid,
-                context: Default::default(),
-            };
-            let gw = self.gateway.read();
-            gw.send_event_to_call_owner(&call_id.to_string(), &event);
-        }
+        let gw = self.gateway.read();
+        gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
 
@@ -3116,36 +3105,25 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::ResumeRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        let recording_id = {
-            let states = self.record_states.read().await;
-            states.get(call_id).map(|s| s.recording_id.clone())
+        let event = RwiEvent::RecordResumed {
+            call_id: call_id.to_string(),
+            context: Default::default(),
         };
-        if let Some(rid) = recording_id {
-            let event = RwiEvent::RecordResumed {
-                call_id: call_id.to_string(),
-                recording_id: rid,
-                context: Default::default(),
-            };
-            let gw = self.gateway.read();
-            gw.send_event_to_call_owner(&call_id.to_string(), &event);
-        }
+        let gw = self.gateway.read();
+        gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
 
     async fn record_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let (recording_id, duration) = {
+        let has_recording = {
             let mut states = self.record_states.write().await;
-            if let Some(state) = states.remove(call_id) {
-                (Some(state.recording_id), None)
-            } else {
-                (None, None)
-            }
+            states.remove(call_id).is_some()
         };
         handle
             .send_command(CallCommand::StopRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        if let Some(rid) = recording_id {
+        if has_recording {
             let meta = self.gateway.read().meta_store.get_sync(call_id);
             let (ani, dnis, agent_id, agent_name) = match meta {
                 Some(ref m) => (
@@ -3158,8 +3136,7 @@ impl RwiCommandProcessor {
             };
             let event = RwiEvent::RecordStopped {
                 call_id: call_id.to_string(),
-                recording_id: rid,
-                duration_secs: duration,
+                duration_secs: None,
                 filename: None,
                 unique_id: Some(call_id.to_string()),
                 file_size: None,
@@ -5187,7 +5164,7 @@ mod tests {
                     Ok(Some(ev)) => {
                         let s = serde_json::to_string(&ev).unwrap();
                         assert!(
-                            s.contains("call_bridged"),
+                            s.contains("\"leg_a\"") && s.contains("\"leg_b\""),
                             "Expected call_bridged event, got: {}",
                             s
                         );
@@ -6825,7 +6802,7 @@ mod tests {
 
         let mut found = false;
         while let Ok(event) = event_rx.try_recv() {
-            if event.get("conference_seat_replace_failed").is_some() {
+            if event.get("reason").is_some() {
                 found = true;
                 break;
             }

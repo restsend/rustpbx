@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{CallRecord, CallRecordFormatter, CallRecordHook},
     config::SipFlowUploadConfig,
+    rwi::RwiGatewayRef,
     sipflow::SipFlowBackend,
 };
 
@@ -18,6 +19,7 @@ pub struct SipFlowUploadHook {
     pub upload_config: SipFlowUploadConfig,
     pub db: Option<DatabaseConnection>,
     pub formatter: Arc<dyn CallRecordFormatter>,
+    pub rwi_gateway: Option<RwiGatewayRef>,
 }
 
 #[async_trait]
@@ -35,6 +37,7 @@ impl CallRecordHook for SipFlowUploadHook {
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
         let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
+        let rwi_gateway = self.rwi_gateway.clone();
 
         let media_key = formatter.format_sipflow_media_key(record);
         let signaling_key = formatter.format_sipflow_signaling_key(record);
@@ -55,6 +58,7 @@ impl CallRecordHook for SipFlowUploadHook {
                 &signaling_key,
                 &media_file_name,
                 &signaling_file_name,
+                rwi_gateway,
             )
             .await;
         });
@@ -77,6 +81,7 @@ async fn do_upload(
     signaling_key: &str,
     _media_file_name: &str,
     signaling_file_name: &str,
+    rwi_gateway: Option<RwiGatewayRef>,
 ) {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
@@ -87,13 +92,15 @@ async fn do_upload(
         SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
     };
 
+    let mut first_uploaded_url = None;
+    let mut uploaded_file_size = 0u64;
     if !media_enabled {
         info!(
             call_id,
             "SipFlowUploadHook: media upload disabled, skipping"
         );
     } else {
-        upload_media(
+        if let Some((url, size)) = upload_media(
             backend.as_ref(),
             &upload_config,
             call_id,
@@ -103,7 +110,11 @@ async fn do_upload(
             db.as_ref(),
             duration_secs,
         )
-        .await;
+        .await
+        {
+            first_uploaded_url = Some(url);
+            uploaded_file_size = size;
+        }
     }
 
     let signaling = match &upload_config {
@@ -123,9 +134,26 @@ async fn do_upload(
         )
         .await;
     }
+
+    // Emit RecordEnd after successful sipflow upload.
+    if let Some(url) = first_uploaded_url {
+        if let Some(ref gw) = rwi_gateway {
+            use crate::rwi::proto::RwiEvent;
+            let event = RwiEvent::RecordEnd {
+                call_id: call_id.to_string(),
+                url: Some(url),
+                duration_secs: duration_secs as u64,
+                file_size: uploaded_file_size,
+            };
+            let gw_ref = gw.read();
+            gw_ref.send_event_to_call_owner(&call_id.to_string(), &event);
+            info!(call_id, "SipFlowUploadHook: RecordEnd event emitted");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Returns the upload URL and file size on success, None otherwise.
 async fn upload_media(
     backend: &dyn SipFlowBackend,
     upload_config: &SipFlowUploadConfig,
@@ -135,13 +163,13 @@ async fn upload_media(
     media_key: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
-) {
+) -> Option<(String, u64)> {
     let temp_file: tempfile::NamedTempFile =
         match backend.generate_wav_file(call_id, start, end, None).await {
             Ok(f) => f,
             Err(e) => {
                 warn!(call_id, "SipFlowUploadHook: generate_wav_file failed: {e}");
-                return;
+                return None;
             }
         };
 
@@ -150,12 +178,12 @@ async fn upload_media(
         Ok(m) => m.len() as usize,
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: temp file metadata failed: {e}");
-            return;
+            return None;
         }
     };
 
     if file_size <= 44 {
-        return;
+        return None;
     }
 
     let url_result = match upload_config {
@@ -178,7 +206,7 @@ async fn upload_media(
                 Ok(b) => b,
                 Err(e) => {
                     warn!(call_id, "SipFlowUploadHook: read temp file failed: {e}");
-                    return;
+                    return None;
                 }
             };
             upload_s3(
@@ -222,9 +250,11 @@ async fn upload_media(
                     );
                 }
             }
+            Some((url, file_size as u64))
         }
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: upload failed: {e}");
+            None
         }
     }
 }
@@ -471,6 +501,7 @@ mod tests {
             },
             db: None,
             formatter: Arc::new(DefaultCallRecordFormatter::default()),
+            rwi_gateway: None,
         };
         let mut record = make_record();
         let start = std::time::Instant::now();

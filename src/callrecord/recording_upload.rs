@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{CallRecord, CallRecordHook},
     config::{RecordingPolicy, RecordingType},
-    rwi::RwiGatewayRef,
+    rwi::{proto::RwiEvent, RwiGatewayRef},
     storage::{Storage, StorageConfig},
 };
 
@@ -159,10 +159,6 @@ impl CallRecordHook for RecordingUploadHook {
             return Ok(());
         }
 
-        if !self.policy.uploads_recording() {
-            return Ok(());
-        }
-
         let mut first_uploaded_url = None;
         for index in 0..record.recorder.len() {
             let (track_id, path) = {
@@ -227,7 +223,12 @@ impl CallRecordHook for RecordingUploadHook {
             }
         }
 
-        if let Some(url) = first_uploaded_url {
+        // Determine the url/path for RecordEnd (upload URL or local file path).
+        let recording_url = first_uploaded_url
+            .clone()
+            .or_else(|| record.recorder.first().map(|m| m.path.clone()));
+
+        if let Some(ref url) = first_uploaded_url {
             record.details.recording_url = Some(url.clone());
             record.details.recording_duration_secs =
                 Some((record.end_time - record.start_time).num_seconds().max(0) as i32);
@@ -235,7 +236,7 @@ impl CallRecordHook for RecordingUploadHook {
             // Emit RecordingMetadataAvailable webhook so external systems
             // (e.g. MQ consumers) are notified that the recording is ready.
             if let Some(ref gw) = self.rwi_gateway {
-                use crate::rwi::proto::{RwiEvent, RecordingMetadata};
+                use crate::rwi::proto::RecordingMetadata;
                 let metadata = RecordingMetadata {
                     filename: record
                         .recorder
@@ -268,7 +269,6 @@ impl CallRecordHook for RecordingUploadHook {
                 };
                 let event = RwiEvent::RecordingMetadataAvailable {
                     call_id: record.call_id.clone(),
-                    recording_id: record.call_id.clone(),
                     metadata,
                 };
                 let gw_ref = gw.read();
@@ -279,6 +279,22 @@ impl CallRecordHook for RecordingUploadHook {
                     "RecordingMetadataAvailable event emitted"
                 );
             }
+        }
+
+        // Emit RecordEnd with url (upload URL or local path), duration and file size.
+        if let Some(ref gw) = self.rwi_gateway {
+            let event = RwiEvent::RecordEnd {
+                call_id: record.call_id.clone(),
+                url: recording_url,
+                duration_secs: (record.end_time - record.start_time).num_seconds().max(0) as u64,
+                file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
+            };
+            let gw_ref = gw.read();
+            gw_ref.send_event_to_call_owner(&record.call_id, &event);
+            info!(
+                call_id = %record.call_id,
+                "RecordEnd event emitted"
+            );
         }
 
         Ok(())

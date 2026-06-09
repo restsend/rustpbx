@@ -66,18 +66,11 @@ async fn run_rwi_webhook_handler(
             }
         }
 
-        // Determine the RWI event type name from the enum variant.
-        let event_type = event_type_name(&entry.event);
-        let event_type = match event_type {
-            Some(name) => name,
-            None => {
-                debug!("RWI webhook: skipping event without type name");
-                continue;
-            }
-        };
+        // Determine the RWI event type name and flat value from the enum variant.
+        let (event_value, event_type) = entry.event.to_flat_value();
 
         // Apply event type filter if configured.
-        if !config.events.is_empty() && !config.events.contains(&event_type.to_string()) {
+        if !config.events.is_empty() && !config.events.iter().any(|e| e == event_type) {
             continue;
         }
 
@@ -87,10 +80,7 @@ async fn run_rwi_webhook_handler(
             "timestamp": entry.cached_at.to_rfc3339(),
             "call_id": entry.call_id,
             "event_type": event_type,
-            "event": serde_json::to_value(&entry.event)
-                .ok()
-                .and_then(|v| v.as_object().and_then(|obj| obj.values().next().cloned()))
-                .unwrap_or(serde_json::Value::Null),
+            "event": event_value,
         });
 
         let header_map = config.headers.clone().unwrap_or_default();
@@ -104,98 +94,7 @@ async fn run_rwi_webhook_handler(
     }
 }
 
-fn event_type_name(event: &crate::rwi::proto::RwiEvent) -> Option<&'static str> {
-    use crate::rwi::proto::RwiEvent::*;
-    Some(match event {
-        CallIncoming(_) => "call_incoming",
-        CallRinging { .. } => "call_ringing",
-        CallEarlyMedia { .. } => "call_early_media",
-        CallAnswered { .. } => "call_answered",
-        CallBridged { .. } => "call_bridged",
-        CallUnbridged { .. } => "call_unbridged",
-        CallTransferred { .. } => "call_transferred",
-        CallTransferAccepted { .. } => "call_transfer_accepted",
-        CallTransferFailed { .. } => "call_transfer_failed",
-        CallHangup { .. } => "call_hangup",
-        CallNoAnswer { .. } => "call_no_answer",
-        CallBusy { .. } => "call_busy",
-        MediaHoldStarted { .. } => "media_hold_started",
-        MediaHoldStopped { .. } => "media_hold_stopped",
-        MediaRingbackPassthroughStarted { .. } => "media_ringback_passthrough_started",
-        MediaRingbackPassthroughStopped { .. } => "media_ringback_passthrough_stopped",
-        MediaPlayStarted { .. } => "media_play_started",
-        MediaPlayFinished { .. } => "media_play_finished",
-        MediaStreamStarted { .. } => "media_stream_started",
-        MediaStreamStopped { .. } => "media_stream_stopped",
-        RecordStarted { .. } => "record_started",
-        RecordPaused { .. } => "record_paused",
-        RecordResumed { .. } => "record_resumed",
-        RecordStopped { .. } => "record_stopped",
-        RecordFailed { .. } => "record_failed",
-        QueueJoined { .. } => "queue_joined",
-        QueuePositionChanged { .. } => "queue_position_changed",
-        QueueAgentOffered { .. } => "queue_agent_offered",
-        QueueAgentConnected { .. } => "queue_agent_connected",
-        QueueLeft { .. } => "queue_left",
-        QueueWaitTimeout { .. } => "queue_wait_timeout",
-        QueueOverflowed { .. } => "queue_overflowed",
-        QueueVoicemailRedirected { .. } => "queue_voicemail_redirected",
-        SupervisorListenStarted { .. } => "supervisor_listen_started",
-        SupervisorWhisperStarted { .. } => "supervisor_whisper_started",
-        SupervisorBargeStarted { .. } => "supervisor_barge_started",
-        SupervisorTakeoverStarted { .. } => "supervisor_takeover_started",
-        SupervisorModeStopped { .. } => "supervisor_mode_stopped",
-        SipMessageReceived { .. } => "sip_message_received",
-        SipNotifyReceived { .. } => "sip_notify_received",
-        Dtmf { .. } => "dtmf",
-        DtmfCollected { .. } => "dtmf_collected",
-        DtmfCollectionTimeout { .. } => "dtmf_collection_timeout",
-        ConferenceCreated { .. } => "conference_created",
-        ConferenceMemberJoined { .. } => "conference_member_joined",
-        ConferenceMemberLeft { .. } => "conference_member_left",
-        ConferenceMemberMuted { .. } => "conference_member_muted",
-        ConferenceMemberUnmuted { .. } => "conference_member_unmuted",
-        ConferenceDestroyed { .. } => "conference_destroyed",
-        ConferenceEndedByHost { .. } => "conference_ended_by_host",
-        ConferenceAutoEnded { .. } => "conference_auto_ended",
-        ConferenceError { .. } => "conference_error",
-        ConferenceConsultDialing { .. } => "conference_consult_dialing",
-        ConferenceConsultConnected { .. } => "conference_consult_connected",
-        ConferenceMergeRequested { .. } => "conference_merge_requested",
-        ConferenceMerged { .. } => "conference_merged",
-        ConferenceMergeFailed { .. } => "conference_merge_failed",
-        AgentStateChanged { .. } => "agent_state_changed",
-        QueueCandidatesFound { .. } => "queue_candidates_found",
-        QueueAgentRinging { .. } => "queue_agent_ringing",
-        QueueAgentNoAnswer { .. } => "queue_agent_no_answer",
-        QueueAgentRejected { .. } => "queue_agent_rejected",
-        QueueFallbackExecuted { .. } => "queue_fallback_executed",
-        QueueAlert { .. } => "queue_alert",
-        ConferenceSeatReplaceStarted { .. } => "conference_seat_replace_started",
-        ConferenceSeatReplaceSucceeded { .. } => "conference_seat_replace_succeeded",
-        ConferenceSeatReplaceFailed { .. } => "conference_seat_replace_failed",
-        ConferenceSeatReplaceRollbackFailed { .. } => "conference_seat_replace_rollback_failed",
-        CallOwnershipChanged { .. } => "call_ownership_changed",
-        SessionResumed { .. } => "session_resumed",
-        ParallelOriginateStarted { .. } => "parallel_originate_started",
-        ParallelOriginateLegRinging { .. } => "parallel_originate_leg_ringing",
-        ParallelOriginateWinner { .. } => "parallel_originate_winner",
-        ParallelOriginateLegCancelled { .. } => "parallel_originate_leg_cancelled",
-        ParallelOriginateCompleted { .. } => "parallel_originate_completed",
-        ParallelOriginateFailed { .. } => "parallel_originate_failed",
-        // New events from rwi_event.md
-        RecordingMetadataAvailable { .. } => "recording_metadata_available",
-        IvrNodeEntered { .. } => "ivr_node_entered",
-        IvrNodeExited { .. } => "ivr_node_exited",
-        IvrFlowTransitioned { .. } => "ivr_flow_transitioned",
-        IvrFlowCompleted { .. } => "ivr_flow_completed",
-        DnStateChanged { .. } => "dn_state_changed",
-        DnRegistered { .. } => "dn_registered",
-        DnUnregistered { .. } => "dn_unregistered",
-        CallMetadataUpdated { .. } => "call_metadata_updated",
-        IvrStepTrace { .. } => "ivr_step_trace",
-    })
-}
+
 
 /// Send a test RWI event to a webhook URL.
 pub async fn send_test_event(
@@ -325,7 +224,7 @@ mod tests {
         assert_eq!(body["event_type"], "call_ringing");
         assert_eq!(body["call_id"], "test-call-1");
         assert_eq!(body["sequence"], 1);
-        assert!(body["event"]["call_ringing"]["call_id"].is_string());
+        assert!(body["event"]["call_id"].is_string());
     }
 
     #[tokio::test]
@@ -362,8 +261,8 @@ mod tests {
         let body = &received[0];
         assert_eq!(body["event_type"], "call_hangup");
         assert_eq!(body["call_id"], "test-call-2");
-        assert_eq!(body["event"]["call_hangup"]["reason"], "normal_clearing");
-        assert_eq!(body["event"]["call_hangup"]["sip_status"], 200);
+        assert_eq!(body["event"]["reason"], "normal_clearing");
+        assert_eq!(body["event"]["sip_status"], 200);
     }
 
     #[tokio::test]
@@ -412,10 +311,7 @@ mod tests {
         let received = server.received.lock().unwrap();
         let body = &received[0];
         assert_eq!(body["event_type"], "dn_state_changed");
-        assert_eq!(
-            body["event"]["dn_state_changed"]["event_name"],
-            "ESTABLISHED"
-        );
+        assert_eq!(body["event"]["event_name"], "ESTABLISHED");
     }
 
     #[tokio::test]
