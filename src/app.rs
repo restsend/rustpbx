@@ -355,6 +355,7 @@ impl AppStateBuilder {
                     upload_config: upload_cfg.clone(),
                     db: Some(db_conn.clone()),
                     formatter: callrecord_formatter.clone(),
+                    rwi_gateway: rwi_gateway.clone(),
                 }));
             }
 

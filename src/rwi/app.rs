@@ -234,7 +234,7 @@ mod tests {
         let ev = event_rx.try_recv().expect("CallIncoming should arrive");
         let ev_str = serde_json::to_string(&ev).unwrap();
         assert!(
-            ev_str.contains("call_incoming") || ev_str.contains("CallIncoming"),
+            ev_str.contains("dial_direction"),
             "expected call_incoming, got: {ev_str}"
         );
         assert!(

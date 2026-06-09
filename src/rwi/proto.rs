@@ -476,25 +476,21 @@ pub enum RwiEvent {
     },
     RecordStarted {
         call_id: String,
-        recording_id: String,
         #[serde(flatten)]
         context: EventCallContext,
     },
     RecordPaused {
         call_id: String,
-        recording_id: String,
         #[serde(flatten)]
         context: EventCallContext,
     },
     RecordResumed {
         call_id: String,
-        recording_id: String,
         #[serde(flatten)]
         context: EventCallContext,
     },
     RecordStopped {
         call_id: String,
-        recording_id: String,
         duration_secs: Option<u64>,
         #[serde(default)]
         filename: Option<String>,
@@ -529,14 +525,21 @@ pub enum RwiEvent {
     },
     RecordFailed {
         call_id: String,
-        recording_id: String,
         error: String,
         #[serde(flatten)]
         context: EventCallContext,
     },
+    /// Recording finalisation — emitted after upload completes (or when no upload is configured).
+    /// Contains the access URL/path/key, duration and file size.
+    RecordEnd {
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        duration_secs: u64,
+        file_size: u64,
+    },
     RecordingMetadataAvailable {
         call_id: String,
-        recording_id: String,
         metadata: RecordingMetadata,
     },
     QueueJoined {
@@ -1002,6 +1005,7 @@ impl RwiEvent {
             RwiEvent::RecordResumed { call_id, .. } => Some(call_id),
             RwiEvent::RecordStopped { call_id, .. } => Some(call_id),
             RwiEvent::RecordFailed { call_id, .. } => Some(call_id),
+            RwiEvent::RecordEnd { call_id, .. } => Some(call_id),
             RwiEvent::QueueJoined { call_id, .. } => Some(call_id),
             RwiEvent::QueuePositionChanged { call_id, .. } => Some(call_id),
             RwiEvent::QueueAgentOffered { call_id, .. } => Some(call_id),
@@ -1090,6 +1094,110 @@ impl RwiEvent {
             // IVR step trace
             RwiEvent::IvrStepTrace { call_id, .. } => Some(call_id),
         }
+    }
+
+    /// Return the RWI event type name for this variant (e.g. "call_ringing", "ivr_step_trace").
+    pub fn event_type_name(&self) -> &'static str {
+        use RwiEvent::*;
+        match self {
+            CallIncoming(_) => "call_incoming",
+            CallRinging { .. } => "call_ringing",
+            CallEarlyMedia { .. } => "call_early_media",
+            CallAnswered { .. } => "call_answered",
+            CallBridged { .. } => "call_bridged",
+            CallUnbridged { .. } => "call_unbridged",
+            CallTransferred { .. } => "call_transferred",
+            CallTransferAccepted { .. } => "call_transfer_accepted",
+            CallTransferFailed { .. } => "call_transfer_failed",
+            CallHangup { .. } => "call_hangup",
+            CallNoAnswer { .. } => "call_no_answer",
+            CallBusy { .. } => "call_busy",
+            MediaHoldStarted { .. } => "media_hold_started",
+            MediaHoldStopped { .. } => "media_hold_stopped",
+            MediaRingbackPassthroughStarted { .. } => "media_ringback_passthrough_started",
+            MediaRingbackPassthroughStopped { .. } => "media_ringback_passthrough_stopped",
+            MediaPlayStarted { .. } => "media_play_started",
+            MediaPlayFinished { .. } => "media_play_finished",
+            MediaStreamStarted { .. } => "media_stream_started",
+            MediaStreamStopped { .. } => "media_stream_stopped",
+            RecordStarted { .. } => "record_started",
+            RecordPaused { .. } => "record_paused",
+            RecordResumed { .. } => "record_resumed",
+            RecordStopped { .. } => "record_stopped",
+            RecordFailed { .. } => "record_failed",
+            QueueJoined { .. } => "queue_joined",
+            QueuePositionChanged { .. } => "queue_position_changed",
+            QueueAgentOffered { .. } => "queue_agent_offered",
+            QueueAgentConnected { .. } => "queue_agent_connected",
+            QueueLeft { .. } => "queue_left",
+            QueueWaitTimeout { .. } => "queue_wait_timeout",
+            QueueOverflowed { .. } => "queue_overflowed",
+            QueueVoicemailRedirected { .. } => "queue_voicemail_redirected",
+            SupervisorListenStarted { .. } => "supervisor_listen_started",
+            SupervisorWhisperStarted { .. } => "supervisor_whisper_started",
+            SupervisorBargeStarted { .. } => "supervisor_barge_started",
+            SupervisorTakeoverStarted { .. } => "supervisor_takeover_started",
+            SupervisorModeStopped { .. } => "supervisor_mode_stopped",
+            SipMessageReceived { .. } => "sip_message_received",
+            SipNotifyReceived { .. } => "sip_notify_received",
+            Dtmf { .. } => "dtmf",
+            DtmfCollected { .. } => "dtmf_collected",
+            DtmfCollectionTimeout { .. } => "dtmf_collection_timeout",
+            ConferenceCreated { .. } => "conference_created",
+            ConferenceMemberJoined { .. } => "conference_member_joined",
+            ConferenceMemberLeft { .. } => "conference_member_left",
+            ConferenceMemberMuted { .. } => "conference_member_muted",
+            ConferenceMemberUnmuted { .. } => "conference_member_unmuted",
+            ConferenceDestroyed { .. } => "conference_destroyed",
+            ConferenceEndedByHost { .. } => "conference_ended_by_host",
+            ConferenceAutoEnded { .. } => "conference_auto_ended",
+            ConferenceError { .. } => "conference_error",
+            ConferenceConsultDialing { .. } => "conference_consult_dialing",
+            ConferenceConsultConnected { .. } => "conference_consult_connected",
+            ConferenceMergeRequested { .. } => "conference_merge_requested",
+            ConferenceMerged { .. } => "conference_merged",
+            ConferenceMergeFailed { .. } => "conference_merge_failed",
+            AgentStateChanged { .. } => "agent_state_changed",
+            QueueCandidatesFound { .. } => "queue_candidates_found",
+            QueueAgentRinging { .. } => "queue_agent_ringing",
+            QueueAgentNoAnswer { .. } => "queue_agent_no_answer",
+            QueueAgentRejected { .. } => "queue_agent_rejected",
+            QueueFallbackExecuted { .. } => "queue_fallback_executed",
+            QueueAlert { .. } => "queue_alert",
+            ConferenceSeatReplaceStarted { .. } => "conference_seat_replace_started",
+            ConferenceSeatReplaceSucceeded { .. } => "conference_seat_replace_succeeded",
+            ConferenceSeatReplaceFailed { .. } => "conference_seat_replace_failed",
+            ConferenceSeatReplaceRollbackFailed { .. } => "conference_seat_replace_rollback_failed",
+            CallOwnershipChanged { .. } => "call_ownership_changed",
+            SessionResumed { .. } => "session_resumed",
+            ParallelOriginateStarted { .. } => "parallel_originate_started",
+            ParallelOriginateLegRinging { .. } => "parallel_originate_leg_ringing",
+            ParallelOriginateWinner { .. } => "parallel_originate_winner",
+            ParallelOriginateLegCancelled { .. } => "parallel_originate_leg_cancelled",
+            ParallelOriginateCompleted { .. } => "parallel_originate_completed",
+            ParallelOriginateFailed { .. } => "parallel_originate_failed",
+            RecordingMetadataAvailable { .. } => "recording_metadata_available",
+            IvrNodeEntered { .. } => "ivr_node_entered",
+            IvrNodeExited { .. } => "ivr_node_exited",
+            IvrFlowTransitioned { .. } => "ivr_flow_transitioned",
+            IvrFlowCompleted { .. } => "ivr_flow_completed",
+            DnStateChanged { .. } => "dn_state_changed",
+            DnRegistered { .. } => "dn_registered",
+            DnUnregistered { .. } => "dn_unregistered",
+            CallMetadataUpdated { .. } => "call_metadata_updated",
+            IvrStepTrace { .. } => "ivr_step_trace",
+            RecordEnd { .. } => "record_end",
+        }
+    }
+
+    /// Serialize to a flat JSON value (without the variant wrapper) and return the event type name.
+    pub fn to_flat_value(&self) -> (serde_json::Value, &'static str) {
+        let event_type = self.event_type_name();
+        let value = serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_object().and_then(|obj| obj.values().next().cloned()))
+            .unwrap_or(serde_json::Value::Null);
+        (value, event_type)
     }
 
     // ── Helper constructors ──
@@ -1190,35 +1298,30 @@ impl RwiEvent {
             context: Default::default(),
         }
     }
-    pub fn record_start(call_id: impl Into<String>, recording_id: impl Into<String>) -> Self {
+    pub fn record_start(call_id: impl Into<String>) -> Self {
         Self::RecordStarted {
             call_id: call_id.into(),
-            recording_id: recording_id.into(),
             context: Default::default(),
         }
     }
-    pub fn record_pause(call_id: impl Into<String>, recording_id: impl Into<String>) -> Self {
+    pub fn record_pause(call_id: impl Into<String>) -> Self {
         Self::RecordPaused {
             call_id: call_id.into(),
-            recording_id: recording_id.into(),
             context: Default::default(),
         }
     }
-    pub fn record_resume(call_id: impl Into<String>, recording_id: impl Into<String>) -> Self {
+    pub fn record_resume(call_id: impl Into<String>) -> Self {
         Self::RecordResumed {
             call_id: call_id.into(),
-            recording_id: recording_id.into(),
             context: Default::default(),
         }
     }
     pub fn record_failed(
         call_id: impl Into<String>,
-        recording_id: impl Into<String>,
         error: impl Into<String>,
     ) -> Self {
         Self::RecordFailed {
             call_id: call_id.into(),
-            recording_id: recording_id.into(),
             error: error.into(),
             context: Default::default(),
         }
@@ -1393,41 +1496,22 @@ impl RwiEvent {
                 call_id,
                 context: ctx,
             },
-            Self::RecordStarted {
+            Self::RecordStarted { call_id, .. } => Self::RecordStarted {
                 call_id,
-                recording_id,
-                ..
-            } => Self::RecordStarted {
-                call_id,
-                recording_id,
                 context: ctx,
             },
-            Self::RecordPaused {
+            Self::RecordPaused { call_id, .. } => Self::RecordPaused {
                 call_id,
-                recording_id,
-                ..
-            } => Self::RecordPaused {
-                call_id,
-                recording_id,
                 context: ctx,
             },
-            Self::RecordResumed {
+            Self::RecordResumed { call_id, .. } => Self::RecordResumed {
                 call_id,
-                recording_id,
-                ..
-            } => Self::RecordResumed {
-                call_id,
-                recording_id,
                 context: ctx,
             },
             Self::RecordFailed {
-                call_id,
-                recording_id,
-                error,
-                ..
+                call_id, error, ..
             } => Self::RecordFailed {
                 call_id,
-                recording_id,
                 error,
                 context: ctx,
             },
@@ -1833,7 +1917,6 @@ impl RwiEvent {
             },
             Self::RecordStopped {
                 call_id,
-                recording_id,
                 duration_secs,
                 filename,
                 unique_id,
@@ -1852,7 +1935,6 @@ impl RwiEvent {
                 root_call_id,
             } => Self::RecordStopped {
                 call_id,
-                recording_id,
                 duration_secs,
                 filename,
                 unique_id,
@@ -2225,7 +2307,6 @@ mod tests {
         let json = r#"{
             "record_stopped": {
                 "call_id": "call-abc",
-                "recording_id": "rec-xyz",
                 "duration_secs": 51,
                 "filename": "recording_2026-05-14_08-11-49.mp3",
                 "unique_id": "0200M6NJ54CGH3AH1K8482LAES4OTFEL",
@@ -2248,7 +2329,6 @@ mod tests {
         match event {
             RwiEvent::RecordStopped {
                 call_id,
-                recording_id,
                 duration_secs,
                 ref filename,
                 ref unique_id,
@@ -2262,7 +2342,6 @@ mod tests {
                 ..
             } => {
                 assert_eq!(call_id, "call-abc");
-                assert_eq!(recording_id, "rec-xyz");
                 assert_eq!(duration_secs, Some(51));
                 assert_eq!(
                     filename.as_deref(),
@@ -2289,7 +2368,6 @@ mod tests {
         let json = r#"{
             "record_stopped": {
                 "call_id": "call-abc",
-                "recording_id": "rec-xyz",
                 "duration_secs": 51
             }
         }"#;
@@ -2297,7 +2375,6 @@ mod tests {
         match event {
             RwiEvent::RecordStopped {
                 call_id,
-                recording_id,
                 duration_secs,
                 ref filename,
                 ref unique_id,
@@ -2307,7 +2384,6 @@ mod tests {
                 ..
             } => {
                 assert_eq!(call_id, "call-abc");
-                assert_eq!(recording_id, "rec-xyz");
                 assert_eq!(duration_secs, Some(51));
                 assert!(filename.is_none());
                 assert!(unique_id.is_none());
@@ -2324,7 +2400,6 @@ mod tests {
         let json = r#"{
             "recording_metadata_available": {
                 "call_id": "call-abc",
-                "recording_id": "rec-xyz",
                 "metadata": {
                     "filename": "rec_20260514.mp3",
                     "unique_id": "uuid-123",
@@ -2349,11 +2424,9 @@ mod tests {
         match event {
             RwiEvent::RecordingMetadataAvailable {
                 call_id,
-                recording_id,
                 ref metadata,
             } => {
                 assert_eq!(call_id, "call-abc");
-                assert_eq!(recording_id, "rec-xyz");
                 assert_eq!(metadata.filename, "rec_20260514.mp3");
                 assert_eq!(metadata.file_size, 149517);
                 assert_eq!(metadata.call_type, "inbound");
@@ -2614,7 +2687,6 @@ mod tests {
 
         let recording_meta = RwiEvent::RecordingMetadataAvailable {
             call_id: "c-4".into(),
-            recording_id: "r-1".into(),
             metadata: RecordingMetadata {
                 filename: "f".into(),
                 unique_id: "u".into(),
@@ -2797,7 +2869,6 @@ mod tests {
     fn test_rwi_event_roundtrip_recording_metadata_available() {
         let original = RwiEvent::RecordingMetadataAvailable {
             call_id: "call-abc".into(),
-            recording_id: "rec-xyz".into(),
             metadata: RecordingMetadata {
                 filename: "recording.mp3".into(),
                 unique_id: "uuid-123".into(),

@@ -61,23 +61,21 @@ events = ["call_hangup", "record_stopped", "dn_state_changed"]   # empty = all e
 
 ```json
 {
-  "rwi": "1.0",
-  "<event_type>": { /* event data */ }
+  /* Event fields are flattened directly at the top level, no extra wrapping */
 }
 ```
 
 Example:
 ```json
 {
-  "rwi": "1.0",
-  "call_ringing": {
-    "call_id": "call-abc123",
-    "caller_name": "330909",
-    "callee_name": "9242000001",
-    "direction": "inbound"
-  }
+  "call_id": "call-abc123",
+  "caller_name": "330909",
+  "callee_name": "9242000001",
+  "direction": "inbound"
 }
 ```
+
+> WebSocket events are sent with the event fields directly as top-level JSON keys, without a `"rwi"` or event-type-name wrapper. Clients identify events through the subscription rules negotiated at connection time.
 
 ### Webhook Envelope
 
@@ -89,10 +87,9 @@ Example:
   "call_id": "call-abc123",
   "event_type": "call_ringing",
   "event": {
-    "call_ringing": { /* identical to WS event content */ }
+    /* identical to WS event content (no event_type wrapper) */
   }
 }
-```
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -101,7 +98,7 @@ Example:
 | `timestamp` | u64 | Unix epoch seconds |
 | `call_id` | string | Call identifier (empty string for broadcast-only events) |
 | `event_type` | string | snake_case event type name |
-| `event` | object | Full event payload keyed by event_type |
+| `event` | object | Event payload with fields flattened directly (no event_type wrapper) |
 
 ---
 
@@ -384,10 +381,11 @@ Dispatch: call_owner
 
 Dispatch: call_owner
 
+> Trigger: Via `RecordStart` / `RecordPause` / `RecordResume` / `RecordStop` RWI commands. **Not automatic** — recording does not start automatically when a call is answered.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
-| `recording_id` | String | Recording ID |
 | `error` | String | `record_failed` only: error message |
 | *+ctx* | | Flat context fields |
 
@@ -398,7 +396,6 @@ Dispatch: call_owner
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
-| `recording_id` | String | Recording ID |
 | `duration_secs` | Option\<u64\> | Recording duration in seconds |
 | `filename` | Option\<String\> | Recording filename |
 | `unique_id` | Option\<String\> | Recording UUID |
@@ -423,7 +420,6 @@ Dispatch: call_owner
   "rwi": "1.0",
   "record_stopped": {
     "call_id": "call-abc",
-    "recording_id": "rec-xyz",
     "duration_secs": 51,
     "filename": "uuid_2026-05-14_08-11-49.mp3",
     "unique_id": "uuid-abc-123",
@@ -453,7 +449,6 @@ Triggered when the recording file upload completes, containing full metadata.
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
-| `recording_id` | String | Recording ID |
 | `metadata` | RecordingMetadata | Recording metadata (see below) |
 
 **RecordingMetadata fields**:
@@ -482,7 +477,6 @@ Triggered when the recording file upload completes, containing full metadata.
   "rwi": "1.0",
   "recording_metadata_available": {
     "call_id": "call-abc",
-    "recording_id": "rec-xyz",
     "metadata": {
       "filename": "uuid_2026-05-14.mp3",
       "unique_id": "uuid-abc-123",
@@ -504,6 +498,24 @@ Triggered when the recording file upload completes, containing full metadata.
   }
 }
 ```
+
+#### record_end
+
+Dispatch: call_owner
+
+Recording finalisation event. Emitted after the recording upload completes; if no upload is configured, it fires when the local recording file is ready (using the local path as url). Also emitted after SipFlow media upload completes.
+
+> **Trigger conditions**:
+> - Regular recording: automatically emitted by `RecordingUploadHook` after `CallRecordManager` processes the record
+> - SipFlow recording: emitted after SipFlow media file upload to S3/HTTP completes
+> - **Not** triggered by the `RecordStop` command — unlike `record_started`/`record_stopped` which require an explicit command
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `url` | Option\<String\> | Upload URL (if uploaded), local file path (no upload), or SipFlow media file URL |
+| `duration_secs` | u64 | Recording duration (seconds) |
+| `file_size` | u64 | File size (bytes) |
 
 ---
 
