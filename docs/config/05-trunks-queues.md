@@ -55,3 +55,27 @@ action = "redirect" # or "hangup", "queue"
 redirect = "sip:voicemail@local"
 # queue_ref = "overflow_queue"
 ```
+
+### Queue Transfer Query Parameters
+
+When transferring a call to a queue via `queue:<name>`, you can append query parameters to override queue configuration at runtime.
+
+**`?return_ivr=<name>`** — Override the fallback action to transfer to an IVR instead of the configured fallback when no agents are available:
+
+```
+queue:support?return_ivr=main_menu
+```
+
+**`?target=<value>`** — Override the queue's configured agent targets with the given value. Supports `skillgroup:<id>` (resolved via AgentRegistry) or a SIP URI. Multiple `&target=` params are supported and dialed sequentially:
+
+```
+queue:support?target=skillgroup:sales                            # Single skill group
+queue:support?target=sip:agent@pbx.com                           # Single SIP agent
+queue:support?target=skillgroup:sales&target=skillgroup:support  # Multiple targets (sequential)
+```
+
+**Combined usage:**
+
+```
+queue:support?target=skillgroup:sales&return_ivr=main_menu
+```

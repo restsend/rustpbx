@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 /// Snapshot of call session state for CDR/reporting
 pub struct CallSessionRecordSnapshot {
@@ -543,7 +544,6 @@ pub enum ProxyCallEvent {
 pub(crate) type SessionActionSender = mpsc::Sender<SessionAction>;
 pub(crate) type SessionActionReceiver = mpsc::Receiver<SessionAction>;
 
-const SESSION_CHANNEL_CAPACITY: usize = 256;
 pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
 
 #[derive(Clone)]
@@ -557,9 +557,9 @@ impl SipSessionHandle {
     /// Create a new handle with the given shared state
     /// Note: event_tx is set up for app event forwarding but the receiver is
     /// currently not actively polled. This is a placeholder for future app framework integration.
-    pub fn with_shared(shared: SipSessionShared) -> (Self, SessionActionReceiver) {
+    pub fn with_shared(shared: SipSessionShared, capacity: usize) -> (Self, SessionActionReceiver) {
         let session_id = shared.session_id();
-        let (cmd_tx, cmd_rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel(capacity);
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         shared.set_event_sender(event_tx);
         let handle = Self {
@@ -580,7 +580,10 @@ impl SipSessionHandle {
     }
 
     pub fn send_command(&self, action: SessionAction) -> Result<()> {
-        self.cmd_tx.try_send(action).map_err(Into::into)
+        self.cmd_tx.try_send(action).map_err(|e| {
+            warn!(session_id = %self.session_id, "SipSessionHandle state cmd_tx channel full, action dropped: {e}");
+            e.into()
+        })
     }
 
     pub fn set_queue_name(&self, queue: Option<String>) {
@@ -622,7 +625,7 @@ mod tests {
             Some("callee".to_string()),
             None,
         );
-        SipSessionHandle::with_shared(shared)
+        SipSessionHandle::with_shared(shared, 256)
     }
 
     /// Test that handle and shared are properly dropped
@@ -647,7 +650,7 @@ mod tests {
         assert!(!shared.has_app_event_sender());
 
         // Create handle which sets up event sender (for ProxyCallEvent)
-        let (handle, _rx) = SipSessionHandle::with_shared(shared.clone());
+        let (handle, _rx) = SipSessionHandle::with_shared(shared.clone(), 256);
 
         // Note: with_shared sets up ProxyCallEvent sender (events), not app_event_tx
         // The app_event_tx is set separately by run_application
@@ -682,8 +685,8 @@ mod tests {
         );
 
         // Create multiple handles
-        let (handle1, rx1) = SipSessionHandle::with_shared(shared.clone());
-        let (handle2, rx2) = SipSessionHandle::with_shared(shared.clone());
+        let (handle1, rx1) = SipSessionHandle::with_shared(shared.clone(), 256);
+        let (handle2, rx2) = SipSessionHandle::with_shared(shared.clone(), 256);
 
         // Drop everything
         drop(handle1);

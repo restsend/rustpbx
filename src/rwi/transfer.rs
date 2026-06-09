@@ -573,13 +573,13 @@ impl TransferController {
         let handle = self.get_handle(&consultation_call_id).await;
         if let Some(handle) = handle {
             let _leg_id = LegId::new(&consultation_call_id);
-            let _ = handle.send_command(CallCommand::Hangup(
+            let _ = handle.send_command_async(CallCommand::Hangup(
                 crate::call::domain::HangupCommand::local(
                     "transfer",
                     Some(crate::callrecord::CallRecordHangupReason::BySystem),
                     Some(487),
                 ),
-            ));
+            )).await;
         }
 
         if let Some(ref original_call_id) = transaction.original_leg {

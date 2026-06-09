@@ -1624,6 +1624,38 @@
                             <hr class="border-slate-200">
 
                             <div>
+                                <h3 class="text-sm font-semibold text-slate-800 mb-3">Channel Capacities (restart required)</h3>
+                                <div class="grid gap-3 sm:grid-cols-2">
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Session cmd channel</label>
+                                        <input type="number" min="64" x-model.number="securityDraft.session_cmd_channel_capacity" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-0.5 text-xs text-slate-400">SipSession command channel (per-session, default 256)</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Session state channel</label>
+                                        <input type="number" min="64" x-model.number="securityDraft.session_state_channel_capacity" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-0.5 text-xs text-slate-400">SipSession state channel (per-session, default 256)</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Media engine cmd channel</label>
+                                        <input type="number" min="128" x-model.number="securityDraft.media_cmd_channel_capacity" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-0.5 text-xs text-slate-400">MediaEngine command channel (global, default 512)</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Media engine event channel</label>
+                                        <input type="number" min="128" x-model.number="securityDraft.media_event_channel_capacity" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-0.5 text-xs text-slate-400">MediaEngine event broadcast channel (global, default 1024)</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <hr class="border-slate-200">
+
+                            <div>
                                 <h3 class="text-sm font-semibold text-slate-800 mb-3">URI Normalization</h3>
                                 <div class="grid gap-3 sm:grid-cols-2">
                                     <label class="flex items-center gap-2 text-sm text-slate-700">
@@ -2921,6 +2953,10 @@
                 emergency_enabled: false,
                 emergency_numbers: '',
                 emergency_trunk: '',
+                session_cmd_channel_capacity: 256,
+                session_state_channel_capacity: 256,
+                media_cmd_channel_capacity: 512,
+                media_event_channel_capacity: 1024,
             },
             securityProcessing: false,
             aclReloading: false,
@@ -5595,6 +5631,10 @@
                 this.securityDraft.emergency_enabled = emg.enabled ?? false;
                 this.securityDraft.emergency_numbers = Array.isArray(emg.numbers) ? emg.numbers.join(', ') : '';
                 this.securityDraft.emergency_trunk = emg.emergency_trunk || '';
+                this.securityDraft.session_cmd_channel_capacity = p.session_cmd_channel_capacity ?? 256;
+                this.securityDraft.session_state_channel_capacity = p.session_state_channel_capacity ?? 256;
+                this.securityDraft.media_cmd_channel_capacity = p.media_cmd_channel_capacity ?? 512;
+                this.securityDraft.media_event_channel_capacity = p.media_event_channel_capacity ?? 1024;
             },
             resetSecurityDraft() {
                 this.initSecurityDraft();
@@ -5610,6 +5650,10 @@
                     dos_max_concurrent_per_ip: Number(this.securityDraft.dos_max_concurrent_per_ip),
                     dos_scan_probe_threshold: Number(this.securityDraft.dos_scan_probe_threshold),
                     dos_scan_block_duration_secs: Number(this.securityDraft.dos_scan_block_duration_secs),
+                    session_cmd_channel_capacity: Number(this.securityDraft.session_cmd_channel_capacity),
+                    session_state_channel_capacity: Number(this.securityDraft.session_state_channel_capacity),
+                    media_cmd_channel_capacity: Number(this.securityDraft.media_cmd_channel_capacity),
+                    media_event_channel_capacity: Number(this.securityDraft.media_event_channel_capacity),
                     uri_max_length: Number(this.securityDraft.uri_max_length),
                     uri_reject_malformed: this.securityDraft.uri_reject_malformed,
                     emergency: {

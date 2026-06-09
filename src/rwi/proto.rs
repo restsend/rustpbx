@@ -972,6 +972,8 @@ pub enum RwiEvent {
         step_end_time: Option<String>,
         step_execute_duration: Option<u64>,
         extra: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sip_headers: Option<HashMap<String, String>>,
     },
 }
 
@@ -2902,6 +2904,7 @@ mod tests {
             step_end_time: Some("2026-05-21T16:30:01Z".into()),
             step_execute_duration: Some(100),
             extra: Some(serde_json::json!({"tenantId": "tenant_123"})),
+            sip_headers: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         // With rename_all = "snake_case", variant wraps as "ivr_step_trace"

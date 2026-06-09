@@ -142,7 +142,7 @@ impl CallApp for RwiApp {
                 callee: context.call_info.callee.clone(),
                 dial_direction: context.call_info.direction.clone(),
                 trunk: None,
-                sip_headers: std::collections::HashMap::new(),
+                sip_headers: context.call_info.sip_headers.clone(),
                 root_call_id: None,
                 caller_name: None,
                 callee_name: None,

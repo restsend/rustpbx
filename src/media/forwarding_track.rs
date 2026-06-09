@@ -9,6 +9,7 @@ use rustrtc::media::frame::{MediaKind, MediaSample};
 use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::trace;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioMapping {
@@ -255,12 +256,16 @@ impl MediaStreamTrack for ForwardingTrack {
             let received_at_micros = self.receive_clock.now_micros();
 
             if let Some(tx) = &self.recorder_tx {
-                let _ = tx.try_send((self.recorder_leg, sample.clone()));
+                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone())) {
+                    trace!(track_id = %self.track_id, "ForwardingTrack recorder channel full: {e}");
+                }
             }
 
             // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
             if let Some(tx) = &self.sipflow_tx {
-                let _ = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros));
+                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros)) {
+                    trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
+                }
             }
 
             if let MediaSample::Audio(ref frame) = sample {

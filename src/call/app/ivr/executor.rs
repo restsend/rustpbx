@@ -187,6 +187,7 @@ impl StepIvrApp {
                 step_end_time: entry.step_end_time,
                 step_execute_duration: entry.step_execute_duration,
                 extra: entry.extra,
+                sip_headers: Some(self.sess.sip_headers.clone()),
             };
             let gw = gw.clone();
             crate::utils::spawn(async move {
