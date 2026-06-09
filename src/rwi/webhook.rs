@@ -87,7 +87,10 @@ async fn run_rwi_webhook_handler(
             "timestamp": entry.cached_at.to_rfc3339(),
             "call_id": entry.call_id,
             "event_type": event_type,
-            "event": entry.event,
+            "event": serde_json::to_value(&entry.event)
+                .ok()
+                .and_then(|v| v.as_object().and_then(|obj| obj.values().next().cloned()))
+                .unwrap_or(serde_json::Value::Null),
         });
 
         let header_map = config.headers.clone().unwrap_or_default();

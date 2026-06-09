@@ -958,7 +958,6 @@ pub enum RwiEvent {
         session_id: String,
         caller: String,
         callee: String,
-        timestamp: String,
         step_index: u32,
         event_type: String,
         action_type: String,
@@ -970,7 +969,6 @@ pub enum RwiEvent {
         step_name: Option<String>,
         step_start_time: Option<String>,
         step_end_time: Option<String>,
-        step_execute_duration: Option<u64>,
         extra: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sip_headers: Option<HashMap<String, String>>,
@@ -2890,19 +2888,17 @@ mod tests {
             session_id: "sess_001".into(),
             caller: "1001".into(),
             callee: "2000".into(),
-            timestamp: "2026-05-21T16:30:01Z".into(),
             step_index: 1,
             event_type: "provider_response".into(),
             action_type: "Transfer".into(),
             action_json: Some(r#"{"type":"transfer","target":"2001"}"#.into()),
             result_kind: "terminal".into(),
-            duration_ms: 42,
             error: None,
             step_id: Some("node_001".into()),
             step_name: Some("Transfer".into()),
             step_start_time: Some("2026-05-21T16:30:00Z".into()),
             step_end_time: Some("2026-05-21T16:30:01Z".into()),
-            step_execute_duration: Some(100),
+            duration_ms: 100,
             extra: Some(serde_json::json!({"tenantId": "tenant_123"})),
             sip_headers: None,
         };
@@ -2912,7 +2908,7 @@ mod tests {
         assert_eq!(inner["call_id"], "call_001");
         assert_eq!(inner["step_index"], 1);
         assert_eq!(inner["action_type"], "Transfer");
-        assert_eq!(inner["duration_ms"], 42);
+        assert_eq!(inner["duration_ms"], 100);
 
         let deserialized: RwiEvent = serde_json::from_value(json).unwrap();
         match &deserialized {
