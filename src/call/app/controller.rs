@@ -139,7 +139,8 @@ impl CallController {
         code: Option<u16>,
     ) -> anyhow::Result<()> {
         self.session
-            .send_command(CallCommand::Hangup(HangupCommand::all(reason, code)))?;
+            .send_command_async(CallCommand::Hangup(HangupCommand::all(reason, code)))
+            .await?;
         Ok(())
     }
 

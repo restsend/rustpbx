@@ -168,6 +168,27 @@ To disable explicitly:
 dialog_auth_cache = { enabled = false }
 ```
 
+## Channel Capacity
+
+Controls the size of internal async channels used for session and media command/event passing. Increasing these values may help under high concurrency at the cost of memory, while decreasing them can reduce backpressure latency.
+
+```toml
+[proxy]
+# Session command channel capacity (default: 256)
+session_cmd_channel_capacity = 256
+# Session state change channel capacity (default: 256)
+session_state_channel_capacity = 256
+# Media engine command channel capacity (default: 512)
+media_cmd_channel_capacity = 512
+# Media engine event channel capacity (default: 1024)
+media_event_channel_capacity = 1024
+```
+
+- **`session_cmd_channel_capacity`**: Max pending commands per SIP session (e.g., hangup, transfer, play). Default: `256`.
+- **`session_state_channel_capacity`**: Max pending state-change notifications per session. Default: `256`.
+- **`media_cmd_channel_capacity`**: Max pending commands per media engine instance (e.g., play, stop, record). Default: `512`.
+- **`media_event_channel_capacity`**: Max pending media events per engine instance (e.g., DTMF, playback complete). Default: `1024`.
+
 ## Identity & Privacy
 
 These settings control how the PBX identifies itself in SIP signaling and SDP media attributes.

@@ -486,6 +486,10 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "uri_max_length": config.proxy.uri_max_length,
             "uri_reject_malformed": config.proxy.uri_reject_malformed,
             "emergency": config.proxy.emergency.clone(),
+            "session_cmd_channel_capacity": config.proxy.session_cmd_channel_capacity,
+            "session_state_channel_capacity": config.proxy.session_state_channel_capacity,
+            "media_cmd_channel_capacity": config.proxy.media_cmd_channel_capacity,
+            "media_event_channel_capacity": config.proxy.media_event_channel_capacity,
             "stats": proxy_stats_value.clone(),
         });
 
@@ -1649,6 +1653,11 @@ pub(crate) struct SecuritySettingsPayload {
     uri_reject_malformed: Option<bool>,
     // Emergency routing
     emergency: Option<Option<EmergencySettingsPayload>>,
+    // Channel capacities
+    session_cmd_channel_capacity: Option<usize>,
+    session_state_channel_capacity: Option<usize>,
+    media_cmd_channel_capacity: Option<usize>,
+    media_event_channel_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2287,6 +2296,28 @@ pub(crate) async fn update_security_settings(
     if let Some(val) = payload.dos_scan_block_duration_secs {
         let table = ensure_table_mut(&mut doc, "proxy");
         table["dos_scan_block_duration_secs"] = value(val as i64);
+        modified = true;
+    }
+
+    // Channel capacities
+    if let Some(val) = payload.session_cmd_channel_capacity {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["session_cmd_channel_capacity"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.session_state_channel_capacity {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["session_state_channel_capacity"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.media_cmd_channel_capacity {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["media_cmd_channel_capacity"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.media_event_channel_capacity {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["media_event_channel_capacity"] = value(val as i64);
         modified = true;
     }
 

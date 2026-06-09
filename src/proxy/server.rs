@@ -418,6 +418,8 @@ impl SipServerBuilder {
         let mut rtp_config = self.rtp_config.unwrap_or_default();
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
+        #[cfg(unix)]
+        log_rlimit_nofile();
         let transport_layer = TransportLayer::new(cancel_token.clone());
         // Clone of TLS listener for hot-reload support (initialized inside if !self.no_bind block)
         let mut tls_listener_clone: Option<rsipstack::transport::TlsListenerConnection> = None;
@@ -794,7 +796,10 @@ impl SipServerBuilder {
             callrecord_formatter: self.callrecord_formatter,
             media_engine: {
                 use crate::media::engine::{MediaEngine, MediaEngineConfig};
-                let (engine, handle) = MediaEngine::new(MediaEngineConfig::default());
+                let (engine, handle) = MediaEngine::new(MediaEngineConfig {
+                    command_channel_capacity: self.config.media_cmd_channel_capacity,
+                    event_channel_capacity: self.config.media_event_channel_capacity,
+                });
                 let _task = engine.spawn(handle);
                 engine
             },
@@ -1256,4 +1261,21 @@ impl MessageInspector for CompositeMessageInspector {
         }
         msg
     }
+}
+
+#[cfg(unix)]
+fn log_rlimit_nofile() {
+    if let Ok(content) = std::fs::read_to_string("/proc/self/limits") {
+        for line in content.lines() {
+            if line.contains("open files") || line.contains("Max open files") {
+                info!("{line}");
+                return;
+            }
+        }
+    }
+    // Fallback: check current fd count vs a reasonable estimate
+    let count = std::fs::read_dir("/proc/self/fd")
+        .map(|d| d.count())
+        .unwrap_or(0);
+    info!("RLIMIT_NOFILE: current fd count ~{count}");
 }

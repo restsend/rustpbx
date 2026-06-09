@@ -309,6 +309,7 @@ impl SipSession {
                         LegId::from("caller"),
                         queue_name,
                         None,
+                        Vec::new(),
                         callee_state_rx,
                     ))
                     .await
@@ -392,6 +393,7 @@ impl SipSession {
                         LegId::from("caller"),
                         name,
                         None,
+                        Vec::new(),
                         callee_state_rx,
                     ))
                     .await

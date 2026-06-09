@@ -189,7 +189,17 @@ impl SipSessionHandle {
     pub fn send_command(&self, cmd: CallCommand) -> anyhow::Result<()> {
         self.cmd_tx
             .try_send(cmd)
-            .map_err(|e| anyhow::anyhow!("channel error: {}", e))
+            .map_err(|e| {
+                warn!(session_id = %self.session_id.0, "SipSession cmd_tx channel full, cmd dropped: {e}");
+                anyhow::anyhow!("channel error: {}", e)
+            })
+    }
+
+    pub async fn send_command_async(&self, cmd: CallCommand) -> anyhow::Result<()> {
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|e| anyhow::anyhow!("channel closed: {}", e))
     }
 
     pub fn session_id(&self) -> &str {
@@ -477,7 +487,9 @@ impl SipSession {
             MediaRuntimeProfile::from_media_path(MediaPathMode::Bypass)
         };
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
+        let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
+        let state_capacity = server.proxy_config.session_state_channel_capacity;
+        let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
             RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>,
@@ -559,7 +571,10 @@ impl SipSession {
             None,
         );
         let (bridge_handle, _action_rx) =
-            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
+            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(
+                bridge_shared,
+                state_capacity,
+            );
 
         // Wire the bridge into the sip handle so send_app_event forwards events.
         let mut slot = app_event_bridge.write();
@@ -706,6 +721,16 @@ impl SipSession {
             .register_dialog(server_dialog.id().to_string(), handle.clone());
 
         // Emit CallIncoming event via RWI gateway if configured.
+        let incoming_sip_headers = {
+            let mut hdrs =
+                crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+            if let Some(ref routed) = context.dialplan.routed_headers {
+                for h in routed {
+                    hdrs.insert(h.name().to_string(), h.value().to_string());
+                }
+            }
+            hdrs
+        };
         if let Some(ref gw) = server.rwi_gateway {
             let event =
                 crate::rwi::proto::RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
@@ -715,7 +740,7 @@ impl SipSession {
                     callee: context.original_callee.clone(),
                     dial_direction: "inbound".into(),
                     trunk: None,
-                    sip_headers: std::collections::HashMap::new(),
+                    sip_headers: incoming_sip_headers,
                     root_call_id: None,
                     caller_name: None,
                     callee_name: None,

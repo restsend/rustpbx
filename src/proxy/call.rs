@@ -1417,7 +1417,7 @@ impl CallModule {
 
                                 let _ =
                                     old_handle_clone
-                                        .send_command(crate::call::domain::CallCommand::Hangup(
+                                        .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
                                             "replaced_by_replaces",
                                             Some(
@@ -1425,7 +1425,7 @@ impl CallModule {
                                             ),
                                             Some(200),
                                         ),
-                                    ));
+                                    )).await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
@@ -1504,7 +1504,7 @@ impl CallModule {
 
                                 let _ =
                                     old_handle_clone
-                                        .send_command(crate::call::domain::CallCommand::Hangup(
+                                        .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
                                             "replaced_by_replaces",
                                             Some(
@@ -1517,7 +1517,7 @@ impl CallModule {
                                                 crate::call::domain::LegId::from("caller"),
                                             ]),
                                         ),
-                                    ));
+                                    )).await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::CallTransferred {

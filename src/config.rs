@@ -720,6 +720,14 @@ pub struct ProxyConfig {
     pub session_expires: Option<u64>,
     #[serde(default = "default_rtp_timeout")]
     pub rtp_timeout: Option<u64>,
+    #[serde(default = "default_session_cmd_channel_capacity")]
+    pub session_cmd_channel_capacity: usize,
+    #[serde(default = "default_session_state_channel_capacity")]
+    pub session_state_channel_capacity: usize,
+    #[serde(default = "default_media_cmd_channel_capacity")]
+    pub media_cmd_channel_capacity: usize,
+    #[serde(default = "default_media_event_channel_capacity")]
+    pub media_event_channel_capacity: usize,
     #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -814,6 +822,18 @@ fn default_dos_scan_block_secs() -> u64 {
 }
 fn default_uri_max_length() -> usize {
     256
+}
+fn default_session_cmd_channel_capacity() -> usize {
+    256
+}
+fn default_session_state_channel_capacity() -> usize {
+    256
+}
+fn default_media_cmd_channel_capacity() -> usize {
+    512
+}
+fn default_media_event_channel_capacity() -> usize {
+    1024
 }
 
 fn default_auth_cache_size() -> usize {
@@ -1108,6 +1128,10 @@ impl Default for ProxyConfig {
             session_timer_always: false,
             session_expires: None,
             rtp_timeout: default_rtp_timeout(),
+            session_cmd_channel_capacity: default_session_cmd_channel_capacity(),
+            session_state_channel_capacity: default_session_state_channel_capacity(),
+            media_cmd_channel_capacity: default_media_cmd_channel_capacity(),
+            media_event_channel_capacity: default_media_event_channel_capacity(),
             queues: HashMap::new(),
             queues_files: Vec::new(),
             trunks: HashMap::new(),

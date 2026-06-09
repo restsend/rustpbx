@@ -24,6 +24,7 @@ pub(crate) enum TransferTarget {
     Queue {
         name: String,
         return_ivr: Option<String>,
+        target_overrides: Vec<String>,
     },
     Ivr {
         name: String,
@@ -48,17 +49,41 @@ pub(crate) enum TransferTarget {
 pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
     if let Some(rest) = target.strip_prefix("queue:") {
         let remainder = rest.trim();
-        let (queue_name, return_ivr) = if let Some(pos) = remainder.find("?return_ivr=") {
-            let q = remainder[..pos].trim();
-            let ivr = remainder[pos + "?return_ivr=".len()..].to_string();
-            (q, Some(ivr))
-        } else {
-            (remainder, None)
+        let (queue_name, query_str) = match remainder.find('?') {
+            Some(pos) => (remainder[..pos].trim(), Some(&remainder[pos + 1..])),
+            None => (remainder, None),
         };
-        if !queue_name.is_empty() {
+        if queue_name.is_empty() {
+            // empty name → fall through to Sip
+        } else {
+            let mut return_ivr = None;
+            let mut target_overrides = Vec::new();
+            if let Some(query) = query_str {
+                for pair in query.split('&') {
+                    if pair.is_empty() {
+                        continue;
+                    }
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next().unwrap_or("");
+                    let value = parts.next().unwrap_or("");
+                    let decoded = {
+                        let s = value.replace('+', " ");
+                        match urlencoding::decode(&s) {
+                            Ok(c) => c.into_owned(),
+                            Err(_) => s,
+                        }
+                    };
+                    match key {
+                        "return_ivr" => return_ivr = Some(decoded),
+                        "target" => target_overrides.push(decoded),
+                        _ => {}
+                    }
+                }
+            }
             return TransferTarget::Queue {
                 name: queue_name.to_string(),
                 return_ivr,
+                target_overrides,
             };
         }
     }
@@ -204,10 +229,20 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         match parse_transfer_target(&target) {
-            TransferTarget::Queue { name, return_ivr } => {
-                info!(%leg_id, queue = %name, ?return_ivr, "Handling queue transfer");
-                self.handle_queue_transfer(leg_id, &name, return_ivr, callee_state_rx)
-                    .await
+            TransferTarget::Queue {
+                name,
+                return_ivr,
+                target_overrides,
+            } => {
+                info!(%leg_id, queue = %name, ?return_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
+                self.handle_queue_transfer(
+                    leg_id,
+                    &name,
+                    return_ivr,
+                    target_overrides,
+                    callee_state_rx,
+                )
+                .await
             }
             TransferTarget::Ivr { name } => {
                 info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
@@ -373,9 +408,10 @@ impl SipSession {
         leg_id: LegId,
         queue_name: &str,
         return_ivr: Option<String>,
+        target_overrides: Vec<String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        info!(%leg_id, queue = %queue_name, ?return_ivr, "Starting queue transfer");
+        info!(%leg_id, queue = %queue_name, ?return_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
 
         let queue_config = self
             .server
@@ -393,6 +429,42 @@ impl SipSession {
         let mut queue_plan = queue_config
             .to_queue_plan()
             .map_err(|e| anyhow!("Invalid queue config: {}", e))?;
+
+        if !target_overrides.is_empty() {
+            use crate::call::{DialStrategy, Location};
+            let mut locations = Vec::new();
+            for target in &target_overrides {
+                let trimmed = target.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let location = if trimmed.starts_with("skillgroup:") {
+                    let id = trimmed.strip_prefix("skillgroup:").unwrap_or(trimmed).trim();
+                    Location {
+                        aor: rsipstack::sip::Uri::try_from(format!("skill-group:{}", id))
+                            .map_err(|e| anyhow!("invalid target '{}': {}", trimmed, e))?,
+                        contact_raw: Some(trimmed.to_string()),
+                        ..Default::default()
+                    }
+                } else {
+                    let uri = rsipstack::sip::Uri::try_from(trimmed)
+                        .map_err(|e| anyhow!("invalid target '{}': {}", trimmed, e))?;
+                    Location {
+                        aor: uri.clone(),
+                        contact_raw: Some(uri.to_string()),
+                        ..Default::default()
+                    }
+                };
+                locations.push(location);
+            }
+            if !locations.is_empty() {
+                info!(
+                    overrides = %locations.len(),
+                    "Queue transfer: overriding targets from query params"
+                );
+                queue_plan.dial_strategy = Some(DialStrategy::Sequential(locations));
+            }
+        }
 
         let return_ivr_fallback_audio: Option<String> = if return_ivr.is_some() {
             queue_plan.failure_audio.clone().or_else(|| {
@@ -1133,6 +1205,7 @@ mod tests {
             TransferTarget::Queue {
                 name: "support".to_string(),
                 return_ivr: Some("main".to_string()),
+                target_overrides: vec![],
             }
         );
     }
@@ -1145,6 +1218,7 @@ mod tests {
             TransferTarget::Queue {
                 name: "support".to_string(),
                 return_ivr: None,
+                target_overrides: vec![],
             }
         );
     }
@@ -1157,6 +1231,82 @@ mod tests {
             TransferTarget::Queue {
                 name: "sales".to_string(),
                 return_ivr: None,
+                target_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_target_skillgroup() {
+        let t = parse_transfer_target("queue:support?target=skillgroup:sales");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: None,
+                target_overrides: vec!["skillgroup:sales".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_target_sip_uri() {
+        let t = parse_transfer_target("queue:support?target=sip:agent@pbx.com");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: None,
+                target_overrides: vec!["sip:agent@pbx.com".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_multiple_targets() {
+        let t = parse_transfer_target("queue:support?target=skillgroup:sales&target=skillgroup:support");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: None,
+                target_overrides: vec![
+                    "skillgroup:sales".to_string(),
+                    "skillgroup:support".to_string(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_target_and_return_ivr() {
+        let t = parse_transfer_target(
+            "queue:support?target=skillgroup:sales&return_ivr=main_menu",
+        );
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: Some("main_menu".to_string()),
+                target_overrides: vec!["skillgroup:sales".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_multiple_targets_and_return_ivr() {
+        let t = parse_transfer_target(
+            "queue:support?target=sip:a@pbx&target=sip:b@pbx&return_ivr=ivr_main",
+        );
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: Some("ivr_main".to_string()),
+                target_overrides: vec![
+                    "sip:a@pbx".to_string(),
+                    "sip:b@pbx".to_string(),
+                ],
             }
         );
     }
