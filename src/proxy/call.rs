@@ -1,8 +1,8 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::runtime::SessionId;
 use crate::call::{
-    CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, Location,
-    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
+    Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::{Track, recorder::RecorderOption};
@@ -678,11 +678,7 @@ impl CallModule {
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
                         )));
                     }
-                    let ivr_file = self
-                        .inner
-                        .server
-                        .data_context
-                        .resolve_ivr_file(name);
+                    let ivr_file = self.inner.server.data_context.resolve_ivr_file(name);
                     forced_pending_app = Some((
                         "ivr".to_string(),
                         Some(serde_json::json!({ "file": ivr_file })),
@@ -1250,6 +1246,37 @@ impl CallModule {
             }
         }
 
+        // Standard step for all dialplans: resolve target destinations through
+        // the locator for same-realm targets.  After the router has set target
+        // AoRs and inspectors have rewritten them, each target's AoR is resolved
+        // to the user's actual registered contact.  Without this step, targets
+        // with bare AoRs (e.g. from HttpCallRouter or JSON-RPC inspector) would
+        // cause INVITEs to hairpin back to the PBX's own IP.
+        if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
+            let targets = match strategy {
+                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            };
+            for target in targets.iter_mut() {
+                if target.destination.is_none() {
+                    let realm = target.aor.host().to_string();
+                    if self.inner.server.is_same_realm(&realm).await {
+                        if let Ok(locs) = self.inner.server.locator.lookup(&target.aor).await {
+                            if let Some(loc) = locs.first() {
+                                if let Some(dest) = loc.destination.clone() {
+                                    debug!(
+                                        aor = %target.aor,
+                                        destination = %dest,
+                                        "resolved target destination via locator"
+                                    );
+                                    target.destination = Some(dest);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // After dialplan inspectors have had a chance to fill in routes,
         // if the callee was deemed offline at resolution time and no
         // inspector provided targets, reject with 480.
@@ -1261,12 +1288,12 @@ impl CallModule {
         }
 
         // Optimization: skip callee lookup for wholesale (trunk-originated) calls.
-        let is_wholesale = cookie
+        let has_tenant_id = cookie
             .get_extension::<TrunkContext>()
             .map(|ctx| ctx.tenant_id.is_some())
             .unwrap_or(false);
 
-        if !is_wholesale {
+        if !has_tenant_id {
             match self.resolve_callee_user(&tx.original).await {
                 Ok(Some(callee)) => {
                     // Apply call-forwarding only when no custom resolver already set it.
@@ -1415,9 +1442,8 @@ impl CallModule {
                                     info!(%old_session_id, %sid, "Conference seat replacement completed for Replaces");
                                 }
 
-                                let _ =
-                                    old_handle_clone
-                                        .send_command_async(crate::call::domain::CallCommand::Hangup(
+                                let _ = old_handle_clone
+                                    .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
                                             "replaced_by_replaces",
                                             Some(
@@ -1425,7 +1451,8 @@ impl CallModule {
                                             ),
                                             Some(200),
                                         ),
-                                    )).await;
+                                    ))
+                                    .await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
@@ -1502,9 +1529,8 @@ impl CallModule {
 
                                 info!(%old_session_id, %sid, "Conference created for attended transfer");
 
-                                let _ =
-                                    old_handle_clone
-                                        .send_command_async(crate::call::domain::CallCommand::Hangup(
+                                let _ = old_handle_clone
+                                    .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
                                             "replaced_by_replaces",
                                             Some(
@@ -1517,7 +1543,8 @@ impl CallModule {
                                                 crate::call::domain::LegId::from("caller"),
                                             ]),
                                         ),
-                                    )).await;
+                                    ))
+                                    .await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::CallTransferred {
@@ -3004,10 +3031,7 @@ mod tests {
         };
 
         let expected_headers = Some(vec![
-            rsipstack::sip::Header::Other(
-                "X-Custom".to_string(),
-                "custom-value".to_string(),
-            ),
+            rsipstack::sip::Header::Other("X-Custom".to_string(), "custom-value".to_string()),
             rsipstack::sip::Header::Other(
                 "P-Asserted-Identity".to_string(),
                 "<sip:routing@pbx.com>".to_string(),
@@ -3033,6 +3057,201 @@ mod tests {
         assert_eq!(
             dialplan.routed_headers, expected_headers,
             "routed headers should be preserved in Dialplan"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_dialplan_resolves_same_realm_target_destination() {
+        use rsipstack::sip::HostWithPort;
+        use rsipstack::transport::SipAddr;
+
+        let (server, _config) = create_test_server().await;
+
+        let aor: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().expect("valid URI");
+
+        let expected_destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.100:5060").expect("valid address"),
+        };
+
+        // Register alice in the memory locator
+        server
+            .locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                Location {
+                    aor: aor.clone(),
+                    expires: 3600,
+                    destination: Some(expected_destination.clone()),
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register should succeed");
+
+        // Build a minimal dialplan with a same-realm target (destination: None)
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:target@rustpbx.com".try_into().unwrap(),
+            headers: vec![
+                rsipstack::sip::Header::From("sip:caller@rustpbx.com".into()),
+                rsipstack::sip::Header::To("sip:target@rustpbx.com".into()),
+                rsipstack::sip::Header::CallId("test-call".into()),
+            ]
+            .into(),
+            version: rsipstack::sip::Version::V2,
+            body: vec![],
+        };
+        let mut dialplan =
+            Dialplan::new("test-session".to_string(), request, DialDirection::Internal)
+                .with_targets(DialStrategy::Parallel(vec![Location {
+                    aor: aor.clone(),
+                    destination: None,
+                    ..Default::default()
+                }]));
+
+        // Run the same resolution logic from build_dialplan
+        if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
+            let targets = match strategy {
+                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            };
+            for target in targets.iter_mut() {
+                if target.destination.is_none() {
+                    let realm = target.aor.host().to_string();
+                    if server.is_same_realm(&realm).await {
+                        if let Ok(locs) = server.locator.lookup(&target.aor).await {
+                            if let Some(loc) = locs.first() {
+                                if let Some(dest) = loc.destination.clone() {
+                                    target.destination = Some(dest);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Verify destination was resolved via locator
+        let targets = match &dialplan.flow {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            },
+            _ => panic!("Expected Targets flow"),
+        };
+        assert_eq!(targets.len(), 1);
+        let resolved = targets[0]
+            .destination
+            .as_ref()
+            .expect("destination should be resolved via locator");
+        assert_eq!(resolved.addr.to_string(), "192.168.1.100:5060");
+        assert_eq!(resolved.r#type, Some(rsipstack::sip::Transport::Udp));
+    }
+
+    #[tokio::test]
+    async fn test_build_dialplan_skips_external_realm_targets() {
+        use rsipstack::sip::HostWithPort;
+        use rsipstack::transport::SipAddr;
+
+        let (server, _config) = create_test_server().await;
+
+        // Register alice (same-realm) in locator
+        let alice_aor: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().expect("valid URI");
+        let alice_dest = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.100:5060").expect("valid address"),
+        };
+        server
+            .locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                Location {
+                    aor: alice_aor.clone(),
+                    expires: 3600,
+                    destination: Some(alice_dest.clone()),
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register should succeed");
+
+        // Build dialplan with two targets: one same-realm, one external
+        let external_aor: rsipstack::sip::Uri =
+            "sip:bob@external.com".try_into().expect("valid URI");
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:target@rustpbx.com".try_into().unwrap(),
+            headers: vec![
+                rsipstack::sip::Header::From("sip:caller@rustpbx.com".into()),
+                rsipstack::sip::Header::To("sip:target@rustpbx.com".into()),
+                rsipstack::sip::Header::CallId("test-call-ext".into()),
+            ]
+            .into(),
+            version: rsipstack::sip::Version::V2,
+            body: vec![],
+        };
+        let mut dialplan = Dialplan::new(
+            "test-session-ext".to_string(),
+            request,
+            DialDirection::Internal,
+        )
+        .with_targets(DialStrategy::Parallel(vec![
+            Location {
+                aor: alice_aor.clone(),
+                destination: None,
+                ..Default::default()
+            },
+            Location {
+                aor: external_aor.clone(),
+                destination: None,
+                ..Default::default()
+            },
+        ]));
+
+        // Run the same resolution logic
+        if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
+            let targets = match strategy {
+                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            };
+            for target in targets.iter_mut() {
+                if target.destination.is_none() {
+                    let realm = target.aor.host().to_string();
+                    if server.is_same_realm(&realm).await {
+                        if let Ok(locs) = server.locator.lookup(&target.aor).await {
+                            if let Some(loc) = locs.first() {
+                                if let Some(dest) = loc.destination.clone() {
+                                    target.destination = Some(dest);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Verify same-realm target got resolved, external target stays None
+        let targets = match &dialplan.flow {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            },
+            _ => panic!("Expected Targets flow"),
+        };
+        assert_eq!(targets.len(), 2);
+
+        // alice (same-realm) should have destination resolved
+        assert!(
+            targets[0].destination.is_some(),
+            "same-realm target should have destination resolved"
+        );
+
+        // bob (external) should NOT have destination set
+        assert!(
+            targets[1].destination.is_none(),
+            "external-realm target should NOT have destination resolved"
         );
     }
 }

@@ -173,19 +173,17 @@ impl StepIvrApp {
                 session_id: entry.session_id.clone(),
                 caller: entry.caller.clone(),
                 callee: entry.callee.clone(),
-                timestamp: entry.timestamp.to_rfc3339(),
                 step_index: entry.step_index,
                 event_type: entry.event_type.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
                 result_kind: entry.result_kind.clone(),
-                duration_ms: entry.duration_ms,
                 error: entry.error.clone(),
                 step_id: entry.step_id,
                 step_name: entry.step_name,
                 step_start_time: entry.step_start_time,
                 step_end_time: entry.step_end_time,
-                step_execute_duration: entry.step_execute_duration,
+                duration_ms: entry.duration_ms,
                 extra: entry.extra,
                 sip_headers: Some(self.sess.sip_headers.clone()),
             };
@@ -317,7 +315,6 @@ impl StepIvrApp {
                                 .get("callee")
                                 .cloned()
                                 .unwrap_or_default(),
-                            timestamp: chrono::Utc::now(),
                             step_index: self.step_index,
                             event_type: "action_execute".to_string(),
                             event_detail: None,
@@ -325,13 +322,12 @@ impl StepIvrApp {
                             action_type: node_type_str,
                             action_json,
                             result_kind: "terminal".to_string(),
-                            duration_ms: elapsed_ms,
                             error: None,
                             step_id: step_id.clone(),
                             step_name: step_name.clone(),
                             step_start_time: self.current_step_start_time.clone(),
                             step_end_time: Some(step_end),
-                            step_execute_duration: Some(elapsed_ms),
+                            duration_ms: elapsed_ms,
                             extra: self.extra.clone(),
                         });
                         match terminal {
@@ -369,7 +365,6 @@ impl StepIvrApp {
                                 .get("callee")
                                 .cloned()
                                 .unwrap_or_default(),
-                            timestamp: chrono::Utc::now(),
                             step_index: self.step_index,
                             event_type: "action_execute".to_string(),
                             event_detail: None,
@@ -377,13 +372,12 @@ impl StepIvrApp {
                             action_type: node_type_str,
                             action_json,
                             result_kind: "continue".to_string(),
-                            duration_ms: elapsed_ms,
                             error: None,
                             step_id: step_id.clone(),
                             step_name: step_name.clone(),
                             step_start_time: self.current_step_start_time.clone(),
                             step_end_time: None,
-                            step_execute_duration: None,
+                            duration_ms: elapsed_ms,
                             extra: self.extra.clone(),
                         });
                         (AppAction::Continue, "continue")
@@ -411,7 +405,6 @@ impl StepIvrApp {
                         .get("callee")
                         .cloned()
                         .unwrap_or_default(),
-                    timestamp: chrono::Utc::now(),
                     step_index: self.step_index,
                     event_type: "action_execute".to_string(),
                     event_detail: None,
@@ -419,13 +412,12 @@ impl StepIvrApp {
                     action_type: node_type_str,
                     action_json,
                     result_kind: "error".to_string(),
-                    duration_ms: elapsed_ms,
                     error: Some(e.to_string()),
                     step_id,
                     step_name,
                     step_start_time: self.current_step_start_time.clone(),
                     step_end_time: Some(step_end),
-                    step_execute_duration: Some(elapsed_ms),
+                    duration_ms: elapsed_ms,
                     extra: self.extra.clone(),
                 });
                 return Err(e);
@@ -605,7 +597,6 @@ impl StepIvrApp {
                     session_id: ses_id,
                     caller,
                     callee,
-                    timestamp: chrono::Utc::now(),
                     step_index: step_idx,
                     event_type,
                     event_detail: ev_detail,
@@ -613,13 +604,12 @@ impl StepIvrApp {
                     action_type: trace_action_type,
                     action_json,
                     result_kind: result_kind.to_string(),
-                    duration_ms: elapsed_ms,
                     error: None,
                     step_id: self.current_step_id.clone(),
                     step_name: self.current_step_name.clone(),
                     step_start_time: self.current_step_start_time.clone(),
                     step_end_time: None,
-                    step_execute_duration: None,
+                    duration_ms: elapsed_ms,
                     extra: self.extra.clone(),
                 });
             }
@@ -628,7 +618,6 @@ impl StepIvrApp {
                     session_id: ses_id,
                     caller,
                     callee,
-                    timestamp: chrono::Utc::now(),
                     step_index: step_idx,
                     event_type,
                     event_detail: ev_detail,
@@ -636,13 +625,12 @@ impl StepIvrApp {
                     action_type: "error".to_string(),
                     action_json: None,
                     result_kind: "error".to_string(),
-                    duration_ms: elapsed_ms,
                     error: Some(e.to_string()),
                     step_id: self.current_step_id.clone(),
                     step_name: self.current_step_name.clone(),
                     step_start_time: self.current_step_start_time.clone(),
                     step_end_time: None,
-                    step_execute_duration: None,
+                    duration_ms: elapsed_ms,
                     extra: self.extra.clone(),
                 });
             }

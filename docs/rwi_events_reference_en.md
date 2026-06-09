@@ -614,29 +614,25 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `session_id` | String | Session ID |
 | `caller` | String | Caller |
 | `callee` | String | Callee |
-| `timestamp` | String | Event record time (ISO UTC) |
 | `step_index` | u32 | Step index |
 | `event_type` | String | Event type (e.g., `session_start`, `dtmf`, `audio_complete`, `action_execute`) |
 | `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |
 | `result_kind` | String | Result type (`terminal`, `continue`, `error`) |
-| `duration_ms` | u64 | Provider HTTP call duration (ms) |
+| `duration_ms` | u64 | Step execution duration (ms), always present |
 | `error` | Option\<String\> | Error message |
 | `step_id` | Option\<String\> | Current node ID, returned by provider via ActionNode.step_id |
 | `step_name` | Option\<String\> | Current node name, returned by provider via ActionNode.step_name |
 | `step_start_time` | Option\<String\> | Current step start time (ISO UTC) |
 | `step_end_time` | Option\<String\> | Current step end time (ISO UTC). Only present when step execution completes (terminal/error); null during WaitFor (waiting for user input) |
-| `step_execute_duration` | Option\<u64\> | execute_node action execution duration (ms). Only present when step completes; null during WaitFor |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
 
 > **Timing fields**:
-> - `timestamp` — the time this trace entry was recorded
 > - `step_start_time` — when the current step started (previous step end or session start)
 > - `step_end_time` — when the step ended (only on completion)
 >
 > **Duration fields**:
-> - `duration_ms` — HTTP round-trip time to the provider, always present
-> - `step_execute_duration` — action execution time (audio playback, DTMF collection, etc.), only present on step completion
+> - `duration_ms` — step execution duration (ms), always present, includes provider round-trip and action execution time
 
 ---
 

@@ -10,7 +10,6 @@ pub struct IvrTraceEntry {
     pub session_id: String,
     pub caller: String,
     pub callee: String,
-    pub timestamp: DateTime<Utc>,
     pub step_index: u32,
     pub event_type: String,
     pub event_detail: Option<String>,
@@ -24,7 +23,6 @@ pub struct IvrTraceEntry {
     pub step_name: Option<String>,
     pub step_start_time: Option<String>,
     pub step_end_time: Option<String>,
-    pub step_execute_duration: Option<u64>,
     pub extra: Option<serde_json::Value>,
 }
 
@@ -135,7 +133,6 @@ mod tests {
             session_id: session_id.to_string(),
             caller: "1001".to_string(),
             callee: "2000".to_string(),
-            timestamp: Utc::now(),
             step_index: step,
             event_type: "test".to_string(),
             event_detail: None,
@@ -149,7 +146,6 @@ mod tests {
             step_name: None,
             step_start_time: None,
             step_end_time: None,
-            step_execute_duration: None,
             extra: None,
         }
     }

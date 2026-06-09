@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use crate::call::{SipUser, TransactionCookie};
-    use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
-    use crate::proxy::call::CallRouter;
-    use crate::proxy::routing::http::HttpCallRouter;
+use crate::call::{DialplanFlow, DialStrategy, SipUser, TransactionCookie};
+use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
+use crate::proxy::call::CallRouter;
+use crate::proxy::routing::http::HttpCallRouter;
     use axum::{Json, Router, routing::post};
     use serde_json::json;
     use tokio::net::TcpListener;
@@ -680,5 +680,118 @@ mod tests {
         assert_eq!(dialplan.media.external_ip.as_deref(), Some("203.0.113.1"));
         assert_eq!(dialplan.media.rtp_start_port, Some(10000));
         assert_eq!(dialplan.media.rtp_end_port, Some(20000));
+    }
+
+    #[tokio::test]
+    async fn test_http_router_forward_parallel_multi_target() {
+        let app = Router::new().route(
+            "/route",
+            post(|| async {
+                Json(json!({
+                    "action": "forward",
+                    "targets": [
+                        "sip:1001@example.com",
+                        "sip:1002@example.com",
+                        "sip:1003@example.com"
+                    ],
+                    "strategy": "parallel"
+                }))
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = HttpRouterConfig {
+            url: format!("http://{}/route", addr),
+            headers: None,
+            fallback_to_static: false,
+            timeout_ms: Some(1000),
+        };
+
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:target@example.com".try_into().unwrap(),
+            headers: vec![
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
+                rsipstack::sip::Header::CallId("test-parallel-call-id".into()),
+            ]
+            .into(),
+            version: rsipstack::sip::Version::V2,
+            body: vec![],
+        };
+
+        let caller = SipUser {
+            username: "caller".to_string(),
+            realm: Some("example.com".to_string()),
+            from: Some("sip:caller@example.com".try_into().unwrap()),
+            ..Default::default()
+        };
+
+        let cookie = TransactionCookie::default();
+
+        struct DummyRouteInvite;
+        #[async_trait::async_trait]
+        impl crate::call::RouteInvite for DummyRouteInvite {
+            async fn route_invite(
+                &self,
+                _: rsipstack::dialog::invitation::InviteOption,
+                _: &rsipstack::sip::Request,
+                _: &crate::call::DialDirection,
+                _: &TransactionCookie,
+            ) -> anyhow::Result<crate::config::RouteResult> {
+                Ok(crate::config::RouteResult::NotHandled(
+                    rsipstack::dialog::invitation::InviteOption::default(),
+                    None,
+                ))
+            }
+            async fn preview_route(
+                &self,
+                _: rsipstack::dialog::invitation::InviteOption,
+                _: &rsipstack::sip::Request,
+                _: &crate::call::DialDirection,
+                _: &TransactionCookie,
+            ) -> anyhow::Result<crate::config::RouteResult> {
+                Ok(crate::config::RouteResult::NotHandled(
+                    rsipstack::dialog::invitation::InviteOption::default(),
+                    None,
+                ))
+            }
+        }
+
+        let route_invite = Box::new(DummyRouteInvite);
+
+        let dialplan = router
+            .resolve(&request, route_invite, &caller, &cookie)
+            .await
+            .unwrap();
+
+        // Verify Parallel strategy with 3 targets
+        match dialplan.flow {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Parallel(targets) => {
+                    assert_eq!(targets.len(), 3);
+                    assert_eq!(targets[0].aor.to_string(), "sip:1001@example.com");
+                    assert_eq!(targets[1].aor.to_string(), "sip:1002@example.com");
+                    assert_eq!(targets[2].aor.to_string(), "sip:1003@example.com");
+                    // Verify all targets have no destination (will be resolved later)
+                    for target in &targets {
+                        assert!(
+                            target.destination.is_none(),
+                            "HTTP router targets should have no destination set"
+                        );
+                    }
+                }
+                _ => panic!("Expected DialStrategy::Parallel"),
+            },
+            _ => panic!("Expected DialplanFlow::Targets"),
+        }
     }
 }
