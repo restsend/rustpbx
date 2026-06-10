@@ -909,7 +909,7 @@
                 },
                 init() {
                     this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
-                    this.formAction = ((this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '')).replace('/console', this.apiPrefix);
+                    this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
                     // Translate algorithm option labels
                     this.algorithmOptions = (Array.isArray(options.algorithms) ? options.algorithms : []).map(opt => ({
                         value: opt.value,

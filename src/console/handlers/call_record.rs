@@ -1662,8 +1662,8 @@ fn build_detail_payload(
             "download_recording": download_recording,
             "download_metadata": metadata_download,
             "download_sip_flow": sip_flow_download,
-            "transcript_url": state.url_for(&format!("/call-records/{}/transcript", record.id)),
-            "update_record": state.url_for(&format!("/call-records/{}", record.id)),
+            "transcript_url": state.api_url_for(&format!("/call-records/{}/transcript", record.id)),
+            "update_record": state.api_url_for(&format!("/call-records/{}", record.id)),
         }),
     })
 }

@@ -120,6 +120,8 @@ struct AssignRolesPayload {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ProxySettingsPayload {
     pub realms: Option<Vec<String>>,
+    pub registrar_expires: Option<u32>,
+    pub max_registrar_expires: Option<u32>,
     pub locator_webhook: Option<LocatorWebhookConfig>,
     pub rwi_webhook: Option<LocatorWebhookConfig>,
     pub user_backends: Option<Vec<UserBackendConfig>>,
@@ -464,6 +466,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "modules": config.proxy.modules.clone().unwrap_or_default(),
             "max_concurrency": config.proxy.max_concurrency,
             "registrar_expires": config.proxy.registrar_expires,
+            "max_registrar_expires": config.proxy.max_registrar_expires,
             "callid_suffix": config.proxy.callid_suffix.clone(),
             "useragent": config.proxy.useragent.clone(),
             "ua_whitelist": config.proxy.ua_white_list.clone().unwrap_or_default(),
@@ -1817,6 +1820,16 @@ pub(crate) async fn update_proxy_settings(
 
     if let Some(realms) = payload.realms {
         set_string_array(table, "realms", realms);
+        modified = true;
+    }
+
+    if let Some(registrar_expires) = payload.registrar_expires {
+        table["registrar_expires"] = value(i64::from(registrar_expires));
+        modified = true;
+    }
+
+    if let Some(max_registrar_expires) = payload.max_registrar_expires {
+        table["max_registrar_expires"] = value(i64::from(max_registrar_expires));
         modified = true;
     }
 

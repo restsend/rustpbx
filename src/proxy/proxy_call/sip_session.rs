@@ -5956,9 +5956,11 @@ impl SipSession {
             Some(&callee_dn),
         );
 
-        self.emit_rwi_event(crate::rwi::proto::RwiEvent::answered(
-            self.context.session_id.clone(),
-        ));
+        if !self.app_runtime.is_running() {
+            self.emit_rwi_event(crate::rwi::proto::RwiEvent::answered(
+                self.context.session_id.clone(),
+            ));
+        }
 
         let mut timer_headers = vec![];
         if self.server.proxy_config.session_timer_mode().is_enabled() {
@@ -7926,13 +7928,13 @@ impl SipSession {
         &self,
         event_name: &str,
         call_id: Option<String>,
-        dn: Option<&str>,
+        caller: Option<&str>,
         caller_name: Option<&str>,
         callee_name: Option<&str>,
     ) {
         if let Some(ref gw) = self.server.rwi_gateway {
             use crate::rwi::proto::RwiEvent;
-            let dn = dn.unwrap_or("unknown").to_string();
+            let caller = caller.unwrap_or("unknown").to_string();
             let dn_call_id = call_id.clone().unwrap_or_default();
             let (agent_id, _agent_name, routing_target) = gw
                 .read()
@@ -7947,22 +7949,19 @@ impl SipSession {
                 })
                 .unwrap_or((None, None, None));
             let event = RwiEvent::DnStateChanged {
-                dn,
+                caller,
                 event_name: event_name.to_string(),
                 system_time: chrono::Utc::now().to_rfc3339(),
                 call_id,
                 agent_id,
-                other_dn: None,
                 caller_name: caller_name.map(|s| s.to_string()),
                 callee_name: callee_name.map(|s| s.to_string()),
                 reason_code: None,
                 agent_work_mode: None,
                 releasing_party: None,
-                third_party_dn: None,
                 vq_name: None,
                 routing_target,
                 skill_group: None,
-                target_dn: None,
                 extra: None,
             };
             let gw = gw.clone();

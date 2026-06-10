@@ -1377,6 +1377,7 @@
                             : [];
                         this.connectionNotes = Array.isArray(this.connection.notes) ? this.connection.notes : [];
                         this.dialer = data.dialer || { source_options: [], destination_samples: [] };
+                        this.testData = data;
                         this.initializeSipDefaults();
                         this.loadRecentTargets({ overwrite: true });
                         this.ensureIceServers();
@@ -1391,6 +1392,8 @@
                         this.routingError = null;
                         this.basePath = "{{ base_path |safe }}"
                         this.apiBase = '{{ api_prefix | safe }}';
+                        this.wsHandler = {{ ws_handler | tojson }};
+                        this.iceServersPath = {{ ice_servers_path | tojson }};
                         this.tabs = [
                             { id: 'dialer', label: this.t.tab_dialer || 'Web Dialer' },
                             { id: 'connection', label: this.t.tab_connection || 'Connection' },
@@ -1427,6 +1430,8 @@
                     activePlugins: [],
                     basePath: '',
                     apiBase: '{{ api_prefix | safe }}',
+                    wsHandler: {{ ws_handler | tojson }},
+                    iceServersPath: {{ ice_servers_path | tojson }},
                     lastAudit: null,
                     trunks: [],
                     routingChecks: [],
@@ -1617,20 +1622,16 @@
                         }
                     },
                     initializeSipDefaults() {
-                        const transports = Array.isArray(this.connectionTransports) ? this.connectionTransports : [];
                         if (!this.sipForm.wsServer) {
-                            const wsTransport = transports.find((item) => {
-                                const key = (item?.protocol || '').toLowerCase();
-                                return key.includes('ws');
-                            });
-                            if (wsTransport) {
-                                this.sipForm.wsServer = wsTransport.example_uri || wsTransport.address || '';
-                            } else if (typeof window !== 'undefined' && window.location) {
-                                const origin = window.location.origin || '';
-                                if (origin) {
-                                    const base = origin.replace(/^http/i, 'ws');
-                                    const wsPath = (this.testData && this.testData.ws_handler) ? this.testData.ws_handler : '/ws';
-                                    this.sipForm.wsServer = `${base.replace(/\/$/, '')}${wsPath}`;
+                            if (typeof window !== 'undefined' && window.location.origin) {
+                                const base = window.location.origin.replace(/^http/i, 'ws').replace(/\/$/, '');
+                                this.sipForm.wsServer = `${base}${this.wsHandler}`;
+                            }
+                            if (!this.sipForm.wsServer) {
+                                const transports = Array.isArray(this.connectionTransports) ? this.connectionTransports : [];
+                                const wsTransport = transports.find((item) => (item?.protocol || '').toLowerCase().includes('ws'));
+                                if (wsTransport) {
+                                    this.sipForm.wsServer = wsTransport.example_uri || wsTransport.address || '';
                                 }
                             }
                         }
@@ -1801,7 +1802,7 @@
                         this.sipIceServersLoading = true;
                         let servers = [];
                         try {
-                            let icePath = (this.testData && this.testData.ice_servers_path) ? this.testData.ice_servers_path : '/iceservers';
+                            let icePath = this.iceServersPath;
                             let url = icePath;
                             if (typeof window !== 'undefined' && window.location) {
                                 url = new URL(icePath, window.location.origin).toString();

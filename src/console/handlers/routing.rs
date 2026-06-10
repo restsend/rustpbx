@@ -1050,7 +1050,7 @@ pub async fn page_routing_create(
         &trunks,
         &catalog,
         None,
-        state.url_for("/routing"),
+        state.api_url_for("/routing"),
         &headers,
         &current_user,
     )
@@ -1107,7 +1107,7 @@ pub async fn page_routing_edit(
         &trunks,
         &catalog,
         None,
-        state.url_for(&format!("/routing/{}", id)),
+        state.api_url_for(&format!("/routing/{}", id)),
         &headers,
         &current_user,
     )

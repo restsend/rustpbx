@@ -129,6 +129,10 @@ impl ConsoleState {
                 .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
             map.entry("api_prefix")
                 .or_insert_with(|| serde_json::Value::String(self.api_prefix().to_string()));
+            map.entry("ws_handler")
+                .or_insert_with(|| serde_json::Value::String(self.ws_handler()));
+            map.entry("ice_servers_path")
+                .or_insert_with(|| serde_json::Value::String(self.ice_servers_path()));
             // Inject addon sidebar items
             if let Some(app_state) = self.app_state() {
                 let addon_items = app_state
@@ -508,6 +512,36 @@ impl ConsoleState {
 
     pub fn api_prefix(&self) -> &str {
         &self.config.api_prefix
+    }
+
+    /// SIP WebSocket handler path (e.g. "/ws" or "/rustpbx/ws").
+    pub fn ws_handler(&self) -> String {
+        if let Some(app) = self.app_state() {
+            if let Some(v) = &app.config().proxy.ws_handler {
+                return v.clone();
+            }
+        }
+        if let Some(server) = self.sip_server() {
+            if let Some(v) = &server.proxy_config.ws_handler {
+                return v.clone();
+            }
+        }
+        "/ws".to_string()
+    }
+
+    /// ICE servers endpoint path (e.g. "/iceservers" or "/rustpbx/iceservers").
+    pub fn ice_servers_path(&self) -> String {
+        if let Some(app) = self.app_state() {
+            if let Some(v) = &app.config().proxy.ice_servers_path {
+                return v.clone();
+            }
+        }
+        if let Some(server) = self.sip_server() {
+            if let Some(v) = &server.proxy_config.ice_servers_path {
+                return v.clone();
+            }
+        }
+        "/iceservers".to_string()
     }
 
     /// Build API URL with the configured api_prefix
