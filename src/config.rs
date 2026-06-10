@@ -690,6 +690,7 @@ pub struct ProxyConfig {
     pub ua_black_list: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
+    pub max_registrar_expires: Option<u32>,
     pub ensure_user: Option<bool>,
     #[serde(default = "default_user_backends")]
     pub user_backends: Vec<UserBackendConfig>,
@@ -1105,7 +1106,8 @@ impl Default for ProxyConfig {
             tls_port: None,
             ws_port: None,
             max_concurrency: None,
-            registrar_expires: Some(60),
+            registrar_expires: Some(30),
+            max_registrar_expires: Some(50),
             ensure_user: Some(true),
             enable_latching: true,
             latching_probation_max_packets: default_latching_probation_max_packets(),

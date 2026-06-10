@@ -746,7 +746,7 @@ pub enum RwiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_extension: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        dn: Option<String>,
+        caller: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         team_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -921,32 +921,29 @@ pub enum RwiEvent {
     },
     // DN events
     DnStateChanged {
-        dn: String,
+        caller: String,
         event_name: String,
         system_time: String,
         call_id: Option<String>,
         agent_id: Option<String>,
-        other_dn: Option<String>,
         caller_name: Option<String>,
         callee_name: Option<String>,
         reason_code: Option<String>,
         agent_work_mode: Option<String>,
         releasing_party: Option<String>,
-        third_party_dn: Option<String>,
         vq_name: Option<String>,
         routing_target: Option<String>,
         skill_group: Option<String>,
-        target_dn: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra: Option<std::collections::HashMap<String, serde_json::Value>>,
     },
     DnRegistered {
-        dn: String,
+        caller: String,
         agent_id: Option<String>,
         register_time: String,
     },
     DnUnregistered {
-        dn: String,
+        caller: String,
         agent_id: Option<String>,
         unregister_time: String,
     },
@@ -1378,7 +1375,7 @@ impl RwiEvent {
         call_id: Option<String>,
         agent_name: Option<String>,
         agent_extension: Option<String>,
-        dn: Option<String>,
+        caller: Option<String>,
         team_id: Option<String>,
         reason_code: Option<String>,
     ) -> Self {
@@ -1389,7 +1386,7 @@ impl RwiEvent {
             call_id,
             agent_name,
             agent_extension,
-            dn,
+            caller,
             team_id,
             duration_secs: None,
             reason_code,
@@ -2549,28 +2546,25 @@ mod tests {
     fn test_dn_state_changed_event() {
         let json = r#"{
             "dn_state_changed": {
-                "dn": "80001",
+                "caller": "80001",
                 "event_name": "ESTABLISHED",
                 "system_time": "2026-05-14T17:54:49.003Z",
                 "call_id": "call-abc",
                 "agent_id": "10001",
-                "other_dn": null,
                 "caller_name": "19534519769",
                 "callee_name": "39989",
                 "reason_code": null,
                 "agent_work_mode": null,
                 "releasing_party": null,
-                "third_party_dn": null,
                 "vq_name": null,
                 "routing_target": null,
-                "skill_group": null,
-                "target_dn": null
+                "skill_group": null
             }
         }"#;
         let event: RwiEvent = serde_json::from_str(json).unwrap();
         match event {
             RwiEvent::DnStateChanged {
-                ref dn,
+                ref caller,
                 ref event_name,
                 ref call_id,
                 ref agent_id,
@@ -2578,7 +2572,7 @@ mod tests {
                 ref callee_name,
                 ..
             } => {
-                assert_eq!(dn, "80001");
+                assert_eq!(caller, "80001");
                 assert_eq!(event_name, "ESTABLISHED");
                 assert_eq!(call_id.as_deref(), Some("call-abc"));
                 assert_eq!(agent_id.as_deref(), Some("10001"));
@@ -2658,28 +2652,25 @@ mod tests {
         assert_eq!(ivr_completed.call_id(), Some("c-2"));
 
         let dn_state = RwiEvent::DnStateChanged {
-            dn: "8001".into(),
+            caller: "8001".into(),
             event_name: "RINGING".into(),
             system_time: "t".into(),
             call_id: Some("c-3".into()),
             agent_id: None,
-            other_dn: None,
             caller_name: None,
             callee_name: None,
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
-            third_party_dn: None,
             vq_name: None,
             routing_target: None,
             skill_group: None,
-            target_dn: None,
             extra: None,
         };
         assert_eq!(dn_state.call_id(), Some("c-3"));
 
         let dn_reg = RwiEvent::DnRegistered {
-            dn: "8001".into(),
+            caller: "8001".into(),
             agent_id: None,
             register_time: "t".into(),
         };
@@ -2750,22 +2741,19 @@ mod tests {
     #[test]
     fn test_rwi_event_roundtrip_dn_state_changed() {
         let original = RwiEvent::DnStateChanged {
-            dn: "80001".into(),
+            caller: "80001".into(),
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
             agent_id: Some("10001".into()),
-            other_dn: None,
             caller_name: Some("19534519769".into()),
             callee_name: Some("39989".into()),
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
-            third_party_dn: None,
             vq_name: None,
             routing_target: None,
             skill_group: None,
-            target_dn: None,
             extra: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2789,22 +2777,19 @@ mod tests {
         );
 
         let original = RwiEvent::DnStateChanged {
-            dn: "80001".into(),
+            caller: "80001".into(),
             event_name: "ESTABLISHED".into(),
             system_time: "2026-05-14T17:54:49.003Z".into(),
             call_id: Some("call-abc".into()),
             agent_id: Some("10001".into()),
-            other_dn: None,
             caller_name: Some("19534519769".into()),
             callee_name: Some("39989".into()),
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
-            third_party_dn: None,
             vq_name: None,
             routing_target: None,
             skill_group: None,
-            target_dn: None,
             extra: Some(extra),
         };
 
@@ -2830,22 +2815,19 @@ mod tests {
     #[test]
     fn test_dn_state_changed_without_extra_omits_field() {
         let original = RwiEvent::DnStateChanged {
-            dn: "80001".into(),
+            caller: "80001".into(),
             event_name: "REGISTERED".into(),
             system_time: "t".into(),
             call_id: None,
             agent_id: None,
-            other_dn: None,
             caller_name: None,
             callee_name: None,
             reason_code: None,
             agent_work_mode: None,
             releasing_party: None,
-            third_party_dn: None,
             vq_name: None,
             routing_target: None,
             skill_group: None,
-            target_dn: None,
             extra: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2855,7 +2837,7 @@ mod tests {
     #[test]
     fn test_dn_state_changed_extra_backward_compat() {
         let json =
-            r#"{"dn_state_changed":{"dn":"80001","event_name":"REGISTERED","system_time":"t"}}"#;
+            r#"{"dn_state_changed":{"caller":"80001","event_name":"REGISTERED","system_time":"t"}}"#;
         let event: RwiEvent = serde_json::from_str(json).unwrap();
         match event {
             RwiEvent::DnStateChanged { extra, .. } => {
@@ -3072,7 +3054,7 @@ fn test_agent_state_changed_new_fields() {
             call_id,
             agent_name,
             agent_extension,
-            dn,
+            caller,
             team_id,
             reason_code,
             ..
@@ -3083,7 +3065,7 @@ fn test_agent_state_changed_new_fields() {
             assert_eq!(call_id, Some("call_001".into()));
             assert_eq!(agent_name, Some("Alice".into()));
             assert_eq!(agent_extension, Some("8001".into()));
-            assert_eq!(dn, Some("8001".into()));
+            assert_eq!(caller, Some("8001".into()));
             assert_eq!(team_id, Some("sales-team".into()));
             assert_eq!(reason_code, Some("CALL".into()));
         }

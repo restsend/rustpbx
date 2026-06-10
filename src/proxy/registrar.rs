@@ -464,7 +464,7 @@ impl ProxyModule for RegistrarModule {
             }
         };
 
-        let default_expires = self.config.registrar_expires.unwrap_or(60);
+        let default_expires = self.config.registrar_expires.unwrap_or(30);
         let global_expires = tx
             .original
             .expires_header()
@@ -528,12 +528,15 @@ impl ProxyModule for RegistrarModule {
         let path_uris = parse_route_header(&tx.original, "Path");
         let service_routes = parse_route_header(&tx.original, "Service-Route");
 
+        let max_expires = self.config.max_registrar_expires.unwrap_or(50);
+
         let mut response_headers = Vec::new();
         for entry in contact_entries {
             let expires = entry
                 .expires()
                 .or(global_expires)
-                .unwrap_or(default_expires);
+                .unwrap_or(default_expires)
+                .min(max_expires);
 
             let destination = match user
                 .destination
@@ -625,22 +628,19 @@ impl ProxyModule for RegistrarModule {
                     if let Some(ref gw) = self.server.rwi_gateway {
                         use crate::rwi::proto::RwiEvent;
                         let event = RwiEvent::DnStateChanged {
-                            dn: user.username.clone(),
+                            caller: user.username.clone(),
                             event_name: "REGISTERED".to_string(),
                             system_time: chrono::Utc::now().to_rfc3339(),
                             call_id: None,
                             agent_id: None,
-                            other_dn: None,
                             caller_name: None,
                             callee_name: None,
                             reason_code: None,
                             agent_work_mode: None,
                             releasing_party: None,
-                            third_party_dn: None,
                             vq_name: None,
                             routing_target: None,
                             skill_group: None,
-                            target_dn: None,
                             extra: None,
                         };
                         gw.read().broadcast_event(&event);

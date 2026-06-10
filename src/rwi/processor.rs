@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 /// Audio receiver for originated calls to bridge into conference.
 ///
@@ -2701,7 +2700,9 @@ impl RwiCommandProcessor {
                         Some(CallRecordHangupReason::BySystem),
                         Some(480u16),
                     );
-                    let _ = handle.send_command_async(CallCommand::Hangup(hangup_cmd)).await;
+                    let _ = handle
+                        .send_command_async(CallCommand::Hangup(hangup_cmd))
+                        .await;
                 }
                 Ok(CommandResult::Success)
             }
@@ -3635,13 +3636,15 @@ impl RwiCommandProcessor {
                 }
 
                 if old_was_member && let Ok(handle) = self.get_handle(old_call_id).await {
-                    let _ = handle.send_command_async(CallCommand::Hangup(
-                        crate::call::domain::HangupCommand::local(
-                            "conference_seat_replace",
-                            Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                            Some(200),
-                        ),
-                    )).await;
+                    let _ = handle
+                        .send_command_async(CallCommand::Hangup(
+                            crate::call::domain::HangupCommand::local(
+                                "conference_seat_replace",
+                                Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                                Some(200),
+                            ),
+                        ))
+                        .await;
                 }
 
                 let success_event = RwiEvent::ConferenceSeatReplaceSucceeded {

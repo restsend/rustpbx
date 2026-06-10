@@ -135,8 +135,16 @@ queue_dir = "./queues"
 
 ```toml
 [proxy]
-# Registrar expires time (in seconds)
-registrar_expires = 3600
+# Registrar default expires time in seconds (default: 30).
+# This is the fallback value when the REGISTER request does not include
+# an Expires header or Contact expires parameter.
+# Both settings can be changed via the Web Console under Settings > Proxy.
+registrar_expires = 30
+
+# Maximum allowed expires value in seconds (default: 50).
+# Client-requested expires exceeding this limit will be capped.
+# Set to a higher value if clients need longer registration lifetimes.
+max_registrar_expires = 50
 
 # Passthrough failure status codes to caller
 # When true, caller receives the same SIP error code (e.g., 486, 603) from callee

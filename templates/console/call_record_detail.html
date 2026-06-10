@@ -754,9 +754,9 @@
                 this.backUrl = data.back_url || '/console/call-records';
                 const fallbackUpdateUrl = this.determineRecordUrl(this.record.id);
                 this.updateUrl = (this.actions && this.actions.update_record)
-                    ? this.actions.update_record.replace('/console', '{{ api_prefix | safe }}')
+                    ? this.actions.update_record
                     : fallbackUpdateUrl;
-                this.transcriptUrl = (this.actions && this.actions.transcript_url) ? this.actions.transcript_url.replace('/console', '{{ api_prefix | safe }}') : '';
+                this.transcriptUrl = (this.actions && this.actions.transcript_url) ? this.actions.transcript_url : '';
 
                 const initialNotes = (data.notes && typeof data.notes === 'object') ? data.notes : {};
                 this.notes = {

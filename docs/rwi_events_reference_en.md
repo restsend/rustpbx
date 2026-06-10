@@ -776,7 +776,7 @@ Agent state machine transition.
 | `call_id` | Option\<String\> | Associated call ID |
 | `agent_name` | Option\<String\> | Agent display name |
 | `agent_extension` | Option\<String\> | Agent extension number |
-| `dn` | Option\<String\> | Directory number |
+| `caller` | Option\<String\> | Caller / directory number |
 | `team_id` | Option\<String\> | Team ID |
 | `duration_secs` | Option\<u32\> | Duration in previous status |
 | `reason_code` | Option\<String\> | Reason code (e.g., `CALL`, `BREAK`, `TRAINING`) |
@@ -804,7 +804,7 @@ Agent state machine transition.
     "call_id": "call-abc",
     "agent_name": "Alice",
     "agent_extension": "8001",
-    "dn": "8001",
+    "caller": "8001",
     "team_id": "sales",
     "duration_secs": 300,
     "reason_code": "CALL"
@@ -824,22 +824,19 @@ Granular extension-level signaling events.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `dn` | String | Extension / DN |
+| `caller` | String | Extension / caller |
 | `event_name` | String | Event name (see table below) |
 | `system_time` | String | System timestamp |
 | `call_id` | Option\<String\> | Associated call ID |
 | `agent_id` | Option\<String\> | Agent ID |
-| `other_dn` | Option\<String\> | Other party DN |
 | `caller_name` | Option\<String\> | Calling party name/number |
 | `callee_name` | Option\<String\> | Called party name/number |
 | `reason_code` | Option\<String\> | Reason code |
 | `agent_work_mode` | Option\<String\> | Agent work mode |
 | `releasing_party` | Option\<String\> | Releasing party (`"1 Local"` / `"2 Remote"`) |
-| `third_party_dn` | Option\<String\> | Third-party DN |
 | `vq_name` | Option\<String\> | Virtual queue name |
 | `routing_target` | Option\<String\> | Routing target |
 | `skill_group` | Option\<String\> | Skill group |
-| `target_dn` | Option\<String\> | Target DN |
 | `extra` | Option\<Map\<String, Value\>\> | Extension fields (omitted when absent) |
 
 **event_name values**:
@@ -869,7 +866,7 @@ Granular extension-level signaling events.
 {
   "rwi": "1.0",
   "dn_state_changed": {
-    "dn": "80001",
+    "caller": "80001",
     "event_name": "ESTABLISHED",
     "system_time": "2026-05-14T17:54:49.003Z",
     "call_id": "call-abc",
@@ -891,7 +888,7 @@ Dispatch: broadcast
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `dn` | String | Extension number |
+| `caller` | String | Extension number |
 | `agent_id` | Option\<String\> | Agent ID |
 | `register_time` / `unregister_time` | String | Registration/unregistration timestamp |
 

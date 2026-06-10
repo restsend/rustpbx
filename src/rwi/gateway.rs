@@ -510,16 +510,31 @@ impl RwiGateway {
     /// Fan-out an event to all sessions subscribed to a context.
     /// Used for inbound `call.incoming` notifications.
     /// Also caches the event for session resumption.
-    pub fn fan_out_event_to_context(&self, context: &str, event: &RwiEvent, call_id: &CallId) {
-        // Cache the event first
+    pub fn fan_out_event_to_context(
+        &self,
+        context: &str,
+        event: &RwiEvent,
+        call_id: &CallId,
+    ) {
+        self.fan_out_event_to_context_excluding(context, event, call_id, None);
+    }
+
+    pub fn fan_out_event_to_context_excluding(
+        &self,
+        context: &str,
+        event: &RwiEvent,
+        call_id: &CallId,
+        exclude: Option<&SessionId>,
+    ) {
         let sequence = self.cache_event(call_id, event);
 
-        // Forward to webhook handler (if configured)
         self.forward_to_webhook(call_id, event, sequence);
 
-        // Fan out to subscribers
         if let Some(subscribers) = self.context_subscriptions.get(context) {
             for session_id in subscribers {
+                if exclude.map_or(false, |ex| ex == session_id) {
+                    continue;
+                }
                 self.send_event_to_session(session_id, event);
             }
         }

@@ -614,8 +614,6 @@ default('RustPBX') }}{% endblock %}
             saving: false,
             activeTab: 'general',
             init() {
-                if (this.createUrl) this.createUrl = this.createUrl.replace('/console', this.apiPrefix);
-                if (this.updateUrl) this.updateUrl = this.updateUrl.replace('/console', this.apiPrefix);
                 this.loadOptions();
                 if (this.model) {
                     this.$nextTick(() => {
