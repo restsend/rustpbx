@@ -641,6 +641,7 @@ impl ProxyModule for RegistrarModule {
                             vq_name: None,
                             routing_target: None,
                             skill_group: None,
+                            party: None,
                             extra: None,
                         };
                         gw.read().broadcast_event(&event);

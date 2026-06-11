@@ -754,6 +754,22 @@ pub enum RwiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason_code: Option<String>,
     },
+    AgentRegistered {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_extension: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        team_id: Option<String>,
+    },
+    AgentUnregistered {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason_code: Option<String>,
+    },
     QueueCandidatesFound {
         call_id: String,
         queue_id: String,
@@ -935,6 +951,8 @@ pub enum RwiEvent {
         routing_target: Option<String>,
         skill_group: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        party: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         extra: Option<std::collections::HashMap<String, serde_json::Value>>,
     },
     DnRegistered {
@@ -960,6 +978,8 @@ pub enum RwiEvent {
         callee: String,
         step_index: u32,
         event_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_detail: Option<String>,
         action_type: String,
         action_json: Option<String>,
         result_kind: String,
@@ -1058,6 +1078,8 @@ impl RwiEvent {
             RwiEvent::CallBridged { leg_a, .. } => Some(leg_a),
             // CC addon events
             RwiEvent::AgentStateChanged { call_id, .. } => call_id.as_deref(),
+            RwiEvent::AgentRegistered { .. } => None,
+            RwiEvent::AgentUnregistered { .. } => None,
             RwiEvent::QueueCandidatesFound { call_id, .. } => Some(call_id),
             RwiEvent::QueueAgentRinging { call_id, .. } => Some(call_id),
             RwiEvent::QueueAgentNoAnswer { call_id, .. } => Some(call_id),
@@ -1155,6 +1177,8 @@ impl RwiEvent {
             ConferenceMerged { .. } => "conference_merged",
             ConferenceMergeFailed { .. } => "conference_merge_failed",
             AgentStateChanged { .. } => "agent_state_changed",
+            AgentRegistered { .. } => "agent_registered",
+            AgentUnregistered { .. } => "agent_unregistered",
             QueueCandidatesFound { .. } => "queue_candidates_found",
             QueueAgentRinging { .. } => "queue_agent_ringing",
             QueueAgentNoAnswer { .. } => "queue_agent_no_answer",
@@ -2665,6 +2689,7 @@ mod tests {
             vq_name: None,
             routing_target: None,
             skill_group: None,
+            party: None,
             extra: None,
         };
         assert_eq!(dn_state.call_id(), Some("c-3"));
@@ -2754,6 +2779,7 @@ mod tests {
             vq_name: None,
             routing_target: None,
             skill_group: None,
+            party: None,
             extra: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2790,6 +2816,7 @@ mod tests {
             vq_name: None,
             routing_target: None,
             skill_group: None,
+            party: None,
             extra: Some(extra),
         };
 
@@ -2828,6 +2855,7 @@ mod tests {
             vq_name: None,
             routing_target: None,
             skill_group: None,
+            party: None,
             extra: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -2942,7 +2970,8 @@ mod tests {
             caller: "1001".into(),
             callee: "2000".into(),
             step_index: 1,
-            event_type: "provider_response".into(),
+            event_type: "dtmf".into(),
+            event_detail: Some("digit=5".into()),
             action_type: "Transfer".into(),
             action_json: Some(r#"{"type":"transfer","target":"2001"}"#.into()),
             result_kind: "terminal".into(),

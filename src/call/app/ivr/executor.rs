@@ -43,6 +43,10 @@ pub struct StepIvrApp {
     /// Current step provider response metadata.
     current_step_id: Option<String>,
     current_step_name: Option<String>,
+    /// Event type that triggered the current step (e.g. "dtmf", "session_start").
+    current_trigger_event_type: Option<String>,
+    /// Event detail for the current trigger (e.g. "digit=5").
+    current_trigger_event_detail: Option<String>,
 }
 
 #[derive(Clone)]
@@ -80,6 +84,8 @@ impl StepIvrApp {
             current_step_start_time: None,
             current_step_id: None,
             current_step_name: None,
+            current_trigger_event_type: None,
+            current_trigger_event_detail: None,
         }
     }
 
@@ -107,6 +113,8 @@ impl StepIvrApp {
             current_step_start_time: None,
             current_step_id: None,
             current_step_name: None,
+            current_trigger_event_type: None,
+            current_trigger_event_detail: None,
         }
     }
 
@@ -175,6 +183,7 @@ impl StepIvrApp {
                 callee: entry.callee.clone(),
                 step_index: entry.step_index,
                 event_type: entry.event_type.clone(),
+                event_detail: entry.event_detail.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
                 result_kind: entry.result_kind.clone(),
@@ -290,6 +299,34 @@ impl StepIvrApp {
         let step_id = node.step_id.clone().or_else(|| self.current_step_id.clone());
         let step_name = node.step_name.clone().or_else(|| self.current_step_name.clone());
 
+        let trigger_event_type = self
+            .current_trigger_event_type
+            .clone()
+            .unwrap_or_else(|| "action_execute".to_string());
+        let trigger_event_detail = self.current_trigger_event_detail.clone();
+
+        self.current_trigger_event_type = None;
+        self.current_trigger_event_detail = None;
+
+        let session_id = self
+            .sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
+        let caller = self
+            .sess
+            .variables
+            .get("caller")
+            .cloned()
+            .unwrap_or_default();
+        let callee = self
+            .sess
+            .variables
+            .get("callee")
+            .cloned()
+            .unwrap_or_default();
+
         match result {
             Ok(action_result) => {
                 let (app_action, _result_kind) = match action_result {
@@ -297,27 +334,12 @@ impl StepIvrApp {
                         self.step_index += 1;
                         self.increment_total_steps();
                         self.record_trace(IvrTraceEntry {
-                            session_id: self
-                                .sess
-                                .variables
-                                .get("session_id")
-                                .cloned()
-                                .unwrap_or_default(),
-                            caller: self
-                                .sess
-                                .variables
-                                .get("caller")
-                                .cloned()
-                                .unwrap_or_default(),
-                            callee: self
-                                .sess
-                                .variables
-                                .get("callee")
-                                .cloned()
-                                .unwrap_or_default(),
+                            session_id: session_id.clone(),
+                            caller: caller.clone(),
+                            callee: callee.clone(),
                             step_index: self.step_index,
-                            event_type: "action_execute".to_string(),
-                            event_detail: None,
+                            event_type: trigger_event_type.clone(),
+                            event_detail: trigger_event_detail.clone(),
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
@@ -342,32 +364,19 @@ impl StepIvrApp {
                         }
                     }
                     ActionResult::ChainedTo(next) => {
+                        self.current_trigger_event_type = Some("chained".to_string());
+                        self.current_trigger_event_detail = None;
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::WaitFor(_) => {
                         self.record_trace(IvrTraceEntry {
-                            session_id: self
-                                .sess
-                                .variables
-                                .get("session_id")
-                                .cloned()
-                                .unwrap_or_default(),
-                            caller: self
-                                .sess
-                                .variables
-                                .get("caller")
-                                .cloned()
-                                .unwrap_or_default(),
-                            callee: self
-                                .sess
-                                .variables
-                                .get("callee")
-                                .cloned()
-                                .unwrap_or_default(),
+                            session_id: session_id.clone(),
+                            caller: caller.clone(),
+                            callee: callee.clone(),
                             step_index: self.step_index,
-                            event_type: "action_execute".to_string(),
-                            event_detail: None,
+                            event_type: trigger_event_type.clone(),
+                            event_detail: trigger_event_detail.clone(),
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
@@ -387,27 +396,12 @@ impl StepIvrApp {
             }
             Err(e) => {
                 self.record_trace(IvrTraceEntry {
-                    session_id: self
-                        .sess
-                        .variables
-                        .get("session_id")
-                        .cloned()
-                        .unwrap_or_default(),
-                    caller: self
-                        .sess
-                        .variables
-                        .get("caller")
-                        .cloned()
-                        .unwrap_or_default(),
-                    callee: self
-                        .sess
-                        .variables
-                        .get("callee")
-                        .cloned()
-                        .unwrap_or_default(),
+                    session_id,
+                    caller,
+                    callee,
                     step_index: self.step_index,
-                    event_type: "action_execute".to_string(),
-                    event_detail: None,
+                    event_type: trigger_event_type,
+                    event_detail: trigger_event_detail,
                     provider_url: None,
                     action_type: node_type_str,
                     action_json,
@@ -501,36 +495,8 @@ impl StepIvrApp {
         // Mark when this step started executing.
         self.current_step_start_time = Some(chrono::Utc::now().to_rfc3339());
 
-        // Trace the provider call
-        let trace_action_type = match &result {
-            Ok(node) => match &node.action {
-                EntryAction::Transfer { .. } => "Transfer",
-                EntryAction::Queue { .. } => "Queue",
-                EntryAction::Menu { .. } => "Menu",
-                EntryAction::Voicemail { .. } => "Voicemail",
-                EntryAction::Play { .. } => "Play",
-                EntryAction::Repeat => "Repeat",
-                EntryAction::Hangup { .. } => "Hangup",
-                EntryAction::CollectExtension { .. } => "CollectExtension",
-                EntryAction::Collect { .. } => "Collect",
-                EntryAction::Webhook { .. } => "Webhook",
-                EntryAction::PlayAndHangup { .. } => "PlayAndHangup",
-                EntryAction::Back => "Back",
-                EntryAction::Prompt { .. } => "Prompt",
-                EntryAction::DtmfMenu { .. } => "DtmfMenu",
-                EntryAction::CollectDtmf { .. } => "CollectDtmf",
-                EntryAction::InputPhone { .. } => "InputPhone",
-                EntryAction::InputVoice { .. } => "InputVoice",
-                EntryAction::Api { .. } => "Api",
-                EntryAction::Torecord { .. } => "Torecord",
-                EntryAction::JumpIvr { .. } => "JumpIvr",
-                EntryAction::RouteToAgent { .. } => "RouteToAgent",
-                EntryAction::VoipBridge { .. } => "VoipBridge",
-            }
-            .to_string(),
-            Err(_) => "error".to_string(),
-        };
-        let event_type = ctx
+        // Store trigger event info for __exec_node to use when recording trace after node execution
+        self.current_trigger_event_type = Some(ctx
             .event
             .as_ref()
             .map(|e| match e {
@@ -547,94 +513,14 @@ impl StepIvrApp {
                 ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
             })
             .unwrap_or("unknown")
-            .to_string();
-
-        let step_idx = self.step_index;
-        let ses_id = self
-            .sess
-            .variables
-            .get("session_id")
-            .cloned()
-            .unwrap_or_default();
-        let caller = self
-            .sess
-            .variables
-            .get("caller")
-            .cloned()
-            .unwrap_or_default();
-        let callee = self
-            .sess
-            .variables
-            .get("callee")
-            .cloned()
-            .unwrap_or_default();
-        let ev_detail = match &ctx.event {
+            .to_string());
+        self.current_trigger_event_detail = match &ctx.event {
             Some(ProviderEvent::Dtmf { digit }) => Some(format!("digit={}", digit)),
             Some(ProviderEvent::ApiResponse { status, .. }) => Some(format!("status={}", status)),
             Some(ProviderEvent::PhoneCollected { number }) => Some(format!("number={}", number)),
             _ => None,
         };
 
-        match &result {
-            Ok(node) => {
-                let action_json = serde_json::to_string(node).ok();
-                let result_kind = if node.next.is_some() {
-                    "continue"
-                } else {
-                    match &node.action {
-                        EntryAction::Transfer { .. }
-                        | EntryAction::Hangup { .. }
-                        | EntryAction::PlayAndHangup { .. }
-                        | EntryAction::JumpIvr { .. }
-                        | EntryAction::RouteToAgent { .. }
-                        | EntryAction::VoipBridge { .. }
-                        | EntryAction::Queue { .. }
-                        | EntryAction::Voicemail { .. } => "terminal",
-                        _ => "continue",
-                    }
-                };
-                self.record_trace(IvrTraceEntry {
-                    session_id: ses_id,
-                    caller,
-                    callee,
-                    step_index: step_idx,
-                    event_type,
-                    event_detail: ev_detail,
-                    provider_url: Some(self.provider.name().to_string()),
-                    action_type: trace_action_type,
-                    action_json,
-                    result_kind: result_kind.to_string(),
-                    error: None,
-                    step_id: self.current_step_id.clone(),
-                    step_name: self.current_step_name.clone(),
-                    step_start_time: self.current_step_start_time.clone(),
-                    step_end_time: None,
-                    duration_ms: elapsed_ms,
-                    extra: self.extra.clone(),
-                });
-            }
-            Err(e) => {
-                self.record_trace(IvrTraceEntry {
-                    session_id: ses_id,
-                    caller,
-                    callee,
-                    step_index: step_idx,
-                    event_type,
-                    event_detail: ev_detail,
-                    provider_url: Some(self.provider.name().to_string()),
-                    action_type: "error".to_string(),
-                    action_json: None,
-                    result_kind: "error".to_string(),
-                    error: Some(e.to_string()),
-                    step_id: self.current_step_id.clone(),
-                    step_name: self.current_step_name.clone(),
-                    step_start_time: self.current_step_start_time.clone(),
-                    step_end_time: None,
-                    duration_ms: elapsed_ms,
-                    extra: self.extra.clone(),
-                });
-            }
-        }
         // Fallback on provider error instead of propagating
         match result {
             Ok(node) => Ok(node),
@@ -867,9 +753,9 @@ impl CallApp for StepIvrApp {
             self.interrupt_on_dtmf = false;
 
             if let Some(next) = self.handle_menu_dtmf(&digit) {
-                // Notify provider about local DTMF resolution so it stays
-                // informed about user input even without a round-trip.
                 self.provider.on_local_dtmf_match(&digit, &next).await;
+                self.current_trigger_event_type = Some("dtmf_menu".to_string());
+                self.current_trigger_event_detail = Some(format!("digit={}", digit));
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
@@ -910,6 +796,8 @@ impl CallApp for StepIvrApp {
 
         if let Some(ref node) = self.current_node {
             if let Some(ref next) = node.next {
+                self.current_trigger_event_type = Some("audio_complete".to_string());
+                self.current_trigger_event_detail = None;
                 self.current_node = Some(*next.clone());
                 return self.__exec_node(ctrl, context).await;
             }
@@ -959,6 +847,8 @@ impl CallApp for StepIvrApp {
 
         if self.pending_menu.is_some() {
             if let Some(next) = self.handle_menu_timeout() {
+                self.current_trigger_event_type = Some("dtmf_menu_timeout".to_string());
+                self.current_trigger_event_detail = None;
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }

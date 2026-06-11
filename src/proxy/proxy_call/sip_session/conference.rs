@@ -79,6 +79,7 @@ impl SipSession {
             Some(&self.context.original_callee),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            None,
         );
     }
 
@@ -468,6 +469,7 @@ impl SipSession {
                     Some(&leg_id.to_string()),
                     Some(&self.context.original_caller),
                     Some(&self.context.original_callee),
+                    None,
                 );
                 Ok(())
             }
@@ -507,6 +509,7 @@ impl SipSession {
             Some(&leg_id.to_string()),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            None,
         );
 
         Ok(())
