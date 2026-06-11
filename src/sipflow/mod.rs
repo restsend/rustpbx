@@ -103,7 +103,19 @@ impl SipFlowQuery {
 
     pub fn export_jsonl(flow: &[SipFlowItem]) -> String {
         flow.iter()
-            .filter_map(|item| serde_json::to_string(item).ok())
+            .filter_map(|item| {
+                let payload_str = String::from_utf8_lossy(&item.payload);
+                let obj = serde_json::json!({
+                    "timestamp": item.timestamp,
+                    "seq": item.seq,
+                    "leg": item.leg,
+                    "msg_type": item.msg_type,
+                    "src_addr": item.src_addr,
+                    "dst_addr": item.dst_addr,
+                    "payload": payload_str,
+                });
+                serde_json::to_string(&obj).ok()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
