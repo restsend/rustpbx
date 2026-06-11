@@ -213,14 +213,7 @@ async fn upload_media(
                 vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
             )
             .await
-            .map(|_| {
-                format!(
-                    "{}/{}/{}",
-                    endpoint.trim_end_matches('/'),
-                    bucket.trim_matches('/'),
-                    full_key.trim_start_matches('/')
-                )
-            })
+            .map(|_| sipflow_s3_url(endpoint, bucket, &full_key))
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
             upload_http_file(url, headers.as_ref(), call_id, &temp_path).await
@@ -321,6 +314,15 @@ async fn upload_signaling_flow(
 }
 
 // ── Internal upload helpers ───────────────────────────────────────────────────
+
+pub(crate) fn sipflow_s3_url(endpoint: &str, bucket: &str, key: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        endpoint.trim_end_matches('/'),
+        bucket.trim_matches('/'),
+        key.trim_start_matches('/')
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn upload_s3(

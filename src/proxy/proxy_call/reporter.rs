@@ -227,11 +227,8 @@ impl CallReporter {
             } else {
                 format!("{}/{}", root.trim_end_matches('/'), key)
             };
-            details.recording_url = Some(format!(
-                "{}/{}/{}",
-                endpoint.trim_end_matches('/'),
-                bucket.trim_matches('/'),
-                full_key.trim_start_matches('/')
+            details.recording_url = Some(crate::callrecord::sipflow_upload::sipflow_s3_url(
+                endpoint, bucket, &full_key,
             ));
             details.recording_duration_secs = Some((now - start_time).num_seconds().max(0) as i32);
         }

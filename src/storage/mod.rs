@@ -137,8 +137,8 @@ impl Storage {
         }
     }
 
-    fn object_path(&self, path: &str) -> ObjectPath {
-        ObjectPath::from(self.normalize_path(path))
+    fn object_path(&self, path: &str) -> Result<ObjectPath> {
+        Ok(ObjectPath::parse(self.normalize_path(path))?)
     }
 
     pub async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
@@ -148,20 +148,20 @@ impl Storage {
         {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let object_path = self.object_path(path);
+        let object_path = self.object_path(path)?;
         self.inner.put(&object_path, bytes.into()).await?;
         Ok(())
     }
 
     pub async fn read(&self, path: &str) -> Result<Bytes> {
-        let object_path = self.object_path(path);
+        let object_path = self.object_path(path)?;
         let result = self.inner.get(&object_path).await?;
         let bytes = result.bytes().await?;
         Ok(bytes)
     }
 
     pub async fn delete(&self, path: &str) -> Result<()> {
-        let object_path = self.object_path(path);
+        let object_path = self.object_path(path)?;
         self.inner.delete(&object_path).await?;
         Ok(())
     }
@@ -169,7 +169,7 @@ impl Storage {
     pub async fn list(&self, prefix: Option<&str>) -> Result<Vec<ObjectMeta>> {
         let prefix = prefix
             .map(|p| self.object_path(p))
-            .unwrap_or_else(|| self.object_path(""));
+            .unwrap_or_else(|| self.object_path(""))?;
         let mut stream = self.inner.list(Some(&prefix));
         let mut files = Vec::new();
         while let Some(item) = stream.next().await {
