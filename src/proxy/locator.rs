@@ -374,8 +374,11 @@ impl Locator for MemoryLocator {
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
                         let realm_string = registered.host().to_string();
-                        let realm_match =
-                            realm_matches(self, realm_trimmed, realm_string.trim()).await;
+                        let realm_match = if realm_trimmed.ends_with(".invalid") {
+                            true
+                        } else {
+                            realm_matches(self, realm_trimmed, realm_string.trim()).await
+                        };
 
                         if user_match && realm_match {
                             matched = true;
@@ -389,8 +392,11 @@ impl Locator for MemoryLocator {
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
                         let realm_string = loc.aor.host().to_string();
-                        let realm_match =
-                            realm_matches(self, realm_trimmed, realm_string.trim()).await;
+                        let realm_match = if realm_trimmed.ends_with(".invalid") {
+                            true
+                        } else {
+                            realm_matches(self, realm_trimmed, realm_string.trim()).await
+                        };
 
                         if user_match && realm_match {
                             matched = true;
@@ -728,6 +734,46 @@ mod tests {
             "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
         let locations = locator.lookup(&lookup_uri_no_transport).await.unwrap();
         assert_eq!(locations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_with_invalid_host_but_registered_with_real_domain() {
+        // JsSIP registers with Contact using random .invalid hostname
+        // but the registration is stored with the real domain.
+        // Lookup with .invalid should find the registration by username.
+        let locator = MemoryLocator::new();
+        let registered_uri: rsipstack::sip::Uri =
+            "sip:test_user@real-domain.com".try_into().unwrap();
+        let lookup_uri: rsipstack::sip::Uri =
+            "sip:test_user@abcdef123456.invalid;transport=ws".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Ws),
+            addr: HostWithPort::try_from("192.168.1.100:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "test_user",
+                Some("real-domain.com"),
+                Location {
+                    aor: registered_uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    transport: Some(Transport::Ws),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let locations = locator.lookup(&lookup_uri).await.unwrap();
+        assert_eq!(locations.len(), 1, "should find registration via .invalid lookup");
+        assert_eq!(
+            locations[0].destination,
+            Some(destination),
+            "destination should match the WebSocket connection"
+        );
     }
 
     #[tokio::test]
