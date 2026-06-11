@@ -173,6 +173,10 @@ pub struct SipSession {
 
     #[allow(dead_code)]
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
+
+    /// Tracks whether `DestroySession` has already been sent to the media
+    /// engine, so the `Drop` safety-net does not fire a duplicate destroy.
+    engine_session_destroyed: bool,
 }
 
 #[derive(Clone)]
@@ -678,6 +682,7 @@ impl SipSession {
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
+            engine_session_destroyed: false,
         };
 
         (session, sip_handle, cmd_rx)
@@ -6856,6 +6861,7 @@ impl SipSession {
             self.engine_send(MediaCommand::DestroySession {
                 session_id: self.context.session_id.clone(),
             });
+            self.engine_session_destroyed = true;
         }
     }
 
@@ -9266,19 +9272,22 @@ impl Drop for SipSession {
             .active_call_registry
             .remove(&self.context.session_id);
 
-        // Safety net: ensure the engine session is destroyed.
-        if let Err(e) =
-            self.server
-                .media_engine
-                .send(crate::media::engine::MediaCommand::DestroySession {
-                    session_id: self.context.session_id.clone(),
-                })
-        {
-            debug!(
-                session_id = %self.context.session_id,
-                error = %e,
-                "Drop: engine DestroySession failed (session may already be destroyed)"
-            );
+        // Safety net: ensure the engine session is destroyed even if
+        // cleanup() was never called (e.g. tokio task cancellation).
+        if !self.engine_session_destroyed {
+            if let Err(e) =
+                self.server
+                    .media_engine
+                    .send(crate::media::engine::MediaCommand::DestroySession {
+                        session_id: self.context.session_id.clone(),
+                    })
+            {
+                debug!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Drop: engine DestroySession failed (session may already be destroyed)"
+                );
+            }
         }
 
         debug!(session_id = %self.context.session_id, "SipSession drop complete");
