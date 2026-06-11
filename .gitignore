@@ -55,4 +55,4 @@ docs/rustpbx-product-brief.zh.html
 screenshots/
 demo/
 *.local
-extra/
+dist/
