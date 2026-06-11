@@ -526,3 +526,51 @@ async fn test_db_locator_lookup_by_domain_when_registered_with_ip() {
         .unwrap();
     assert!(empty.is_empty(), "Different user should not match");
 }
+
+#[tokio::test]
+async fn test_db_locator_lookup_with_invalid_host() {
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
+
+    let aor = rsipstack::sip::Uri {
+        scheme: Some(Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
+            user: "jssip_user".to_string(),
+            password: None,
+        }),
+        host_with_port: HostWithPort::try_from("pbx.real-domain.com").unwrap(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let destination = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Ws),
+        addr: HostWithPort::try_from("192.168.1.200:5060").unwrap(),
+    };
+
+    locator
+        .register(
+            "jssip_user",
+            Some("pbx.real-domain.com"),
+            Location {
+                aor: aor.clone(),
+                expires: 3600,
+                destination: Some(destination.clone()),
+                transport: Some(rsipstack::sip::transport::Transport::Ws),
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lookup with a random .invalid hostname (like JsSIP's Contact)
+    let lookup_uri: rsipstack::sip::Uri =
+        "sip:jssip_user@abcdef123456.invalid;transport=ws".try_into().unwrap();
+    let locations = locator.lookup(&lookup_uri).await.unwrap();
+    assert_eq!(locations.len(), 1, "should find registration via .invalid lookup");
+    assert_eq!(
+        locations[0].destination,
+        Some(destination),
+        "destination should match the WebSocket connection"
+    );
+}

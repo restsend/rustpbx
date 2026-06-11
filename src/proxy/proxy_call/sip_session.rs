@@ -722,8 +722,7 @@ impl SipSession {
 
         // Emit CallIncoming event via RWI gateway if configured.
         let incoming_sip_headers = {
-            let mut hdrs =
-                crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+            let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
             if let Some(ref routed) = context.dialplan.routed_headers {
                 for h in routed {
                     hdrs.insert(h.name().to_string(), h.value().to_string());
@@ -1710,7 +1709,7 @@ impl SipSession {
         self.media.rtp_timeout_tx = Some(rtp_timeout_tx);
 
         let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
-            info!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
+            debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
             tokio::time::sleep(max_dur).boxed()
         } else {
             futures::future::pending::<()>().boxed()
@@ -2291,6 +2290,10 @@ impl SipSession {
         match state {
             DialogState::Confirmed(_, _) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Connected);
+                info!(
+                    session_id = %self.context.session_id,
+                    "Callee dialog confirmed, call is now connected"
+                );
             }
             DialogState::Updated(dialog_id, request, tx_handle) => {
                 self.handle_updated_dialog(DialogSide::Callee, dialog_id, request, tx_handle)
@@ -4123,7 +4126,7 @@ impl SipSession {
         }
 
         if self.media.callee_answer_sdp.is_some() && sdp_changed {
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 "Callee answer SDP changed after early media; regenerating caller-facing SDP"
             );
@@ -4412,7 +4415,7 @@ impl SipSession {
                         )
                     })
                     .collect();
-                info!(
+                debug!(
                     session_id = %self.context.session_id,
                     rtp_remote_addr = %pair.remote.address,
                     rtp_remote_port = pair.remote.address.port(),
@@ -4951,7 +4954,7 @@ impl SipSession {
             );
             return;
         };
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             dtmf_codec = ?dtmf_codec.codec,
             dtmf_payload_type = dtmf_codec.payload_type,
@@ -5013,12 +5016,6 @@ impl SipSession {
                 }),
             );
             bridge.start_bridge().await;
-            info!(
-                session_id = %self.context.session_id,
-                endpoint = ?endpoint,
-                payload_types = ?dtmf_payload_types,
-                "Installed caller bridge DTMF sink"
-            );
             return;
         }
 
@@ -6733,7 +6730,7 @@ impl SipSession {
 
         // Stop media bridge (closes both WebRTC + RTP PeerConnections)
         if let Some(bridge) = self.media.media_bridge.take() {
-            info!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
+            debug!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
             bridge.stop().await;
             self.media.media_bridge_started = false;
             self.media.bridge_playback_track_id = None;
@@ -6834,7 +6831,7 @@ impl SipSession {
             sip_status,
         ));
 
-        debug!(session_id = %self.context.session_id, "Session cleanup complete");
+        info!(session_id = %self.context.session_id, "Session cleanup complete");
 
         // Destroy the engine session last — after all recording/bridge cleanup.
         {

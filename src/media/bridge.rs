@@ -946,7 +946,7 @@ impl BridgePeer {
             .store(BRIDGE_OUTPUT_PEER, Ordering::Release);
         drop(state);
         drop(old_source);
-        info!(
+        debug!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
             "Bridge output replaced with peer source"
@@ -1063,7 +1063,7 @@ impl BridgePeer {
             rtp_timestamp = rtp_timestamp.wrapping_add(TICKS_20MS * 3);
         }
 
-        info!(
+        debug!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
             digits = %digits,
@@ -1196,7 +1196,7 @@ impl BridgePeer {
             target_clock_rate,
         });
 
-        info!(
+        debug!(
             bridge_id = %self.id,
             from = ?from_endpoint,
             source_pt,
@@ -1517,7 +1517,7 @@ impl BridgePeer {
                                         .keys()
                                         .copied()
                                         .collect::<Vec<_>>();
-                                    info!(
+                                    debug!(
                                         bridge_id = %bridge_id,
                                         direction = "Caller->Callee",
                                         transceiver_id = transceiver.id(),
@@ -1642,7 +1642,7 @@ impl BridgePeer {
                                         .keys()
                                         .copied()
                                         .collect::<Vec<_>>();
-                                    info!(
+                                    debug!(
                                         bridge_id = %bridge_id,
                                         direction = "Callee->Caller",
                                         transceiver_id = transceiver.id(),

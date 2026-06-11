@@ -566,14 +566,19 @@ impl Locator for DbLocator {
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
 
         if models.is_empty() && uri.host().to_string().ends_with(".invalid") {
-            models = Entity::find()
-                .filter(Column::Aor.contains(uri.host().to_string().as_str()))
-                .order_by_desc(Column::LastModified)
-                .order_by_desc(Column::UpdatedAt)
-                .order_by_desc(Column::Id)
-                .all(&self.db)
-                .await
-                .map_err(|e| anyhow::anyhow!("Database error on lookup by invalid host: {}", e))?;
+            if let Some(username) = uri.user() {
+                let username_key = username.trim().to_ascii_lowercase();
+                if !username_key.is_empty() {
+                    models = Entity::find()
+                        .filter(Column::Username.eq(&username_key))
+                        .order_by_desc(Column::LastModified)
+                        .order_by_desc(Column::UpdatedAt)
+                        .order_by_desc(Column::Id)
+                        .all(&self.db)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Database error on lookup by username for .invalid host: {}", e))?;
+                }
+            }
         }
 
         if models.is_empty() {
