@@ -12,12 +12,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// SipFlowCaptureTx — shared type for SipFlow RTP sample forwarding
+// SipFlowCapture channels — shared types for SipFlow RTP sample forwarding
 // ---------------------------------------------------------------------------
 
 /// Channel type used to forward raw RTP samples to the SipFlow capture backend.
 /// Matches the type alias in sip_session.rs so the engine can accept it directly.
 pub type SipFlowCaptureTx = mpsc::Sender<(
+    crate::media::recorder::Leg,
+    rustrtc::media::frame::MediaSample,
+    u64,
+)>;
+pub type SipFlowCaptureRx = mpsc::Receiver<(
     crate::media::recorder::Leg,
     rustrtc::media::frame::MediaSample,
     u64,
@@ -333,15 +338,16 @@ pub enum MediaCommand {
 
     /// Enable SipFlow RTP capture for a session.
     ///
-    /// The engine spawns a drain task that reads raw RTP samples from the
-    /// bridge's tee channel and writes them to `backend`.  Pass `None` for
-    /// `backend` to disable (stop) capture for the session.
+    /// The SIP session creates the channel and keeps the sender while the
+    /// engine drains this receiver into `backend`.
     SetSipFlowCapture {
         session_id: String,
         /// The call-id used as the key in the SipFlow backend store.
         call_id: String,
         /// SipFlow storage backend.  `None` disables capture.
         backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
+        /// Receiver side of the capture channel. Required when `backend` is set.
+        receiver: Option<SipFlowCaptureRx>,
     },
 }
 
