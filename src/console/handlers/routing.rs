@@ -89,7 +89,7 @@ pub(crate) struct RouteDocument {
     rewrite: JsonMap<String, Value>,
     #[serde(default)]
     action: RouteActionDocument,
-    #[serde(default)]
+    #[serde(rename = "source_trunk", default)]
     source_trunk: Option<String>,
     #[serde(default)]
     notes: Vec<String>,

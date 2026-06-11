@@ -1,3 +1,4 @@
+use crate::auth::DynTokenValidator;
 use crate::console::middleware::ApiTokenAuth;
 use crate::console::ConsoleState;
 use axum::http::StatusCode;
@@ -40,7 +41,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         ApiAuthState {
             console: state.clone(),
             api_tokens: Arc::new(token_map),
-            phone_auth: Arc::new(phone_auth),
+            phone_auth,
         },
         api_auth_middleware,
     ));
@@ -49,31 +50,27 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     Router::new().nest(&api_prefix, api_routes).with_state(state)
 }
 
-#[cfg(feature = "addon-cc")]
-fn build_phone_auth(
-    console: &Arc<ConsoleState>,
-) -> Option<crate::addons::cc::phone_auth::PhoneAuthState> {
+fn build_phone_auth(console: &Arc<ConsoleState>) -> Option<DynTokenValidator> {
     let app_state = console.app_state()?;
-    let cc_state = app_state.get_addon_state::<crate::addons::cc::CcAddonState>()?;
-    Some(crate::addons::cc::phone_auth::PhoneAuthState {
-        phone_auth: cc_state.phone_auth.clone(),
-        console_state: Some(console.clone()),
-    })
-}
 
-#[cfg(not(feature = "addon-cc"))]
-fn build_phone_auth(_console: &Arc<ConsoleState>) -> Option<()> {
-    None
+    #[cfg(feature = "addon-cc")]
+    {
+        let cc_state = app_state.get_addon_state::<crate::addons::cc::CcAddonState>()?;
+        Some(Arc::new(cc_state.phone_auth.clone()) as DynTokenValidator)
+    }
+
+    #[cfg(not(feature = "addon-cc"))]
+    {
+        let _ = app_state;
+        None
+    }
 }
 
 #[derive(Clone)]
 struct ApiAuthState {
     console: Arc<ConsoleState>,
     api_tokens: Arc<HashMap<String, Vec<String>>>,
-    #[cfg(feature = "addon-cc")]
-    phone_auth: Arc<Option<crate::addons::cc::phone_auth::PhoneAuthState>>,
-    #[cfg(not(feature = "addon-cc"))]
-    phone_auth: Arc<Option<()>>,
+    phone_auth: Option<DynTokenValidator>,
 }
 
 async fn api_auth_middleware(
@@ -90,9 +87,8 @@ async fn api_auth_middleware(
             return next.run(req).await;
         }
 
-        #[cfg(feature = "addon-cc")]
-        if let Some(ref phone_state) = *auth_state.phone_auth {
-            if let Some(_agent_id) = phone_state.phone_auth.validate(&bearer) {
+        if let Some(ref validator) = auth_state.phone_auth {
+            if let Some(_agent_id) = validator.validate_token(&bearer) {
                 let user = make_synthetic_user();
                 req.extensions_mut().insert(ApiTokenAuth(user));
                 return next.run(req).await;

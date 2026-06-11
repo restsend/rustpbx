@@ -1716,6 +1716,7 @@ impl SipSession {
                     Some(&self.context.original_callee),
                     Some(&self.context.original_caller),
                     Some(&self.context.original_callee),
+                    None,
                 );
             }
 
@@ -2081,6 +2082,7 @@ impl SipSession {
                             Some(&self.context.original_caller),
                             Some(&self.context.original_caller),
                             Some(&self.context.original_callee),
+                            Some("caller"),
                         );
                     }
                     TerminatedReason::UasBye => {
@@ -2092,6 +2094,7 @@ impl SipSession {
                             Some(&self.context.original_caller),
                             Some(&self.context.original_caller),
                             Some(&self.context.original_callee),
+                            Some("caller"),
                         );
                     }
                     _ => {
@@ -2385,6 +2388,7 @@ impl SipSession {
                             Some(&self.context.original_callee),
                             Some(&self.context.original_caller),
                             Some(&self.context.original_callee),
+                            Some("callee"),
                         );
                     }
                     TerminatedReason::UacBye => {
@@ -2396,6 +2400,7 @@ impl SipSession {
                             Some(&self.context.original_callee),
                             Some(&self.context.original_caller),
                             Some(&self.context.original_callee),
+                            Some("callee"),
                         );
                     }
                     _ => {
@@ -2478,6 +2483,7 @@ impl SipSession {
                                 Some(&self.context.original_callee),
                                 Some(&self.context.original_caller),
                                 Some(&self.context.original_callee),
+                                None,
                             );
                         }
                         if let Err(e) = self
@@ -3754,6 +3760,7 @@ impl SipSession {
             Some(&callee_uri.to_string()),
             Some(&caller.to_string()),
             Some(&callee_uri.to_string()),
+            None,
         );
 
         let mut invite_option = InviteOption {
@@ -3959,6 +3966,7 @@ impl SipSession {
                                 Some(&self.context.original_callee),
                                 Some(&self.context.original_caller),
                                 Some(&self.context.original_callee),
+                                Some("callee"),
                             );
                             self.emit_rwi_event(crate::rwi::proto::RwiEvent::ringing(
                                 self.context.session_id.clone(),
@@ -5958,6 +5966,7 @@ impl SipSession {
             Some(&callee_dn),
             Some(&caller_dn),
             Some(&callee_dn),
+            Some("callee"),
         );
 
         if !self.app_runtime.is_running() {
@@ -6727,6 +6736,7 @@ impl SipSession {
             Some(&self.context.original_callee),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            None,
         );
 
         self.stop_caller_ingress_monitor().await;
@@ -7935,6 +7945,7 @@ impl SipSession {
         caller: Option<&str>,
         caller_name: Option<&str>,
         callee_name: Option<&str>,
+        party: Option<&str>,
     ) {
         if let Some(ref gw) = self.server.rwi_gateway {
             use crate::rwi::proto::RwiEvent;
@@ -7966,6 +7977,7 @@ impl SipSession {
                 vq_name: None,
                 routing_target,
                 skill_group: None,
+                party: party.map(|s| s.to_string()),
                 extra: None,
             };
             let gw = gw.clone();
@@ -8656,6 +8668,7 @@ impl SipSession {
             Some(&self.context.original_callee),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            Some("callee"),
         );
 
         let sdp = ringback.as_ref().and_then(|policy| match policy {
@@ -9042,12 +9055,18 @@ impl SipSession {
         } else {
             self.context.original_callee.clone()
         };
+        let party = if leg_id.to_string() == "caller" {
+            "caller"
+        } else {
+            "callee"
+        };
         self.emit_dn_event(
             "HELD",
             Some(self.context.session_id.clone()),
             Some(&dn),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            Some(party),
         );
 
         let hold_sdp = self.generate_hold_sdp().await?;
@@ -9114,12 +9133,18 @@ impl SipSession {
         } else {
             self.context.original_callee.clone()
         };
+        let party = if leg_id.to_string() == "caller" {
+            "caller"
+        } else {
+            "callee"
+        };
         self.emit_dn_event(
             "RETRIEVED",
             Some(self.context.session_id.clone()),
             Some(&dn),
             Some(&self.context.original_caller),
             Some(&self.context.original_callee),
+            Some(party),
         );
 
         self.media.playback_tracks.remove("hold-music");

@@ -298,6 +298,7 @@ mod tests {
                 vq_name: None,
                 routing_target: None,
                 skill_group: None,
+                party: None,
                 extra: None,
             },
         };

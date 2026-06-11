@@ -1,6 +1,7 @@
 pub mod addons;
 pub mod api;
 pub mod app;
+pub mod auth;
 pub mod auto_external_ip;
 pub mod call;
 pub mod callrecord;
