@@ -6,7 +6,6 @@
 //! * a shared [`Recorder`] handle (same `Arc` the bridge writes into)
 //! * active playback tracks keyed by `track_id`
 //! * a [`McuSwitch`] for dynamic Bridge↔MCU transitions
-//! * an optional SipFlow RTP capture channel
 //!
 //! The session is created by [`MediaCommand::CreateSession`] and destroyed by
 //! [`MediaCommand::DestroySession`].  The `BridgePeer` is injected later,
@@ -20,7 +19,6 @@ use parking_lot::RwLock;
 
 use crate::media::FileTrack;
 use crate::media::bridge::{BridgeEndpoint, BridgePeer};
-use crate::media::engine::SipFlowCaptureTx;
 use crate::media::engine::mcu_switch::McuSwitch;
 use crate::media::recorder::Recorder;
 
@@ -64,10 +62,6 @@ pub struct MediaSession {
     /// Manages dynamic switching between direct bridge forwarding (low CPU)
     /// and MCU mixing (needed for TTS injection, conference).
     pub mcu: McuSwitch,
-
-    // ── SipFlow ─────────────────────────────────────────────────────────
-    /// Optional channel to the SipFlow RTP capture backend.
-    pub sipflow_tx: Option<SipFlowCaptureTx>,
 }
 
 impl MediaSession {
@@ -85,7 +79,6 @@ impl MediaSession {
             playback_tracks: HashMap::new(),
             bridge_playback_track_ids: Vec::new(),
             mcu,
-            sipflow_tx: None,
         }
     }
 

@@ -74,6 +74,7 @@ impl Default for MediaEngineConfig {
 pub struct MediaEngine {
     cmd_tx: mpsc::Sender<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
+    #[cfg(test)]
     sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
 }
 
@@ -98,6 +99,7 @@ impl MediaEngine {
         let engine = Self {
             cmd_tx,
             event_tx: event_tx.clone(),
+            #[cfg(test)]
             sessions: sessions.clone(),
         };
 
@@ -147,13 +149,6 @@ impl MediaEngine {
             .map_err(|e| anyhow!("MediaEngine command channel: {}", e))
     }
 
-    /// Return the engine-owned SipFlow capture tx for a session, if enabled.
-    pub fn get_sipflow_capture_tx(&self, session_id: &str) -> Option<SipFlowCaptureTx> {
-        self.sessions
-            .read()
-            .get(session_id)
-            .and_then(|sess| sess.sipflow_tx.clone())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +213,6 @@ impl EngineCore {
                     track.stop().await;
                 }
                 if let Some(mut sess) = sess {
-                    sess.sipflow_tx = None;
                     if sess.mcu.mode() == mcu_switch::MediaMode::Mcu {
                         sess.mcu.switch_to_bridge().await.ok();
                     }
@@ -307,55 +301,44 @@ impl EngineCore {
                 session_id,
                 call_id,
                 backend,
+                receiver,
             } => {
-                let mut sessions = self.sessions.write();
-                if let Some(sess) = sessions.get_mut(&session_id) {
-                    sess.sipflow_tx = None;
+                if !self.sessions.read().contains_key(&session_id) {
+                    debug!(session_id = %session_id, "SipFlow capture skipped for missing session");
+                    return Ok(());
+                }
 
-                    if let Some(backend) = backend {
-                        use crate::media::forwarding_track::ForwardingTrack;
-
-                        let (tx, mut rx) = tokio::sync::mpsc::channel::<(
-                            crate::media::recorder::Leg,
-                            rustrtc::media::frame::MediaSample,
-                            u64,
-                        )>(
-                            ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY
-                        );
-
-                        crate::utils::spawn(async move {
-                            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
-                            while let Some((leg, sample, received_at_micros)) = rx.recv().await {
-                                if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample
-                                    && let Some(ref rtp_packet) = frame.raw_packet
-                                    && let Ok(rtp_bytes) = rtp_packet.marshal()
-                                {
-                                    let leg_id = match leg {
-                                        crate::media::recorder::Leg::A => 0,
-                                        crate::media::recorder::Leg::B => 1,
-                                    };
-                                    let item = SipFlowItem {
-                                        timestamp: received_at_micros,
-                                        seq: frame.sequence_number.unwrap_or(0) as u64,
-                                        leg: Some(leg_id),
-                                        msg_type: SipFlowMsgType::Rtp,
-                                        src_addr: frame
-                                            .source_addr
-                                            .map(|addr| addr.to_string())
-                                            .unwrap_or_default(),
-                                        dst_addr: String::new(),
-                                        payload: bytes::Bytes::from(rtp_bytes),
-                                    };
-                                    let _ = backend.record(&call_id, item);
-                                }
+                if let (Some(backend), Some(mut rx)) = (backend, receiver) {
+                    crate::utils::spawn(async move {
+                        use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+                        while let Some((leg, sample, received_at_micros)) = rx.recv().await {
+                            if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample
+                                && let Some(ref rtp_packet) = frame.raw_packet
+                                && let Ok(rtp_bytes) = rtp_packet.marshal()
+                            {
+                                let leg_id = match leg {
+                                    crate::media::recorder::Leg::A => 0,
+                                    crate::media::recorder::Leg::B => 1,
+                                };
+                                let item = SipFlowItem {
+                                    timestamp: received_at_micros,
+                                    seq: frame.sequence_number.unwrap_or(0) as u64,
+                                    leg: Some(leg_id),
+                                    msg_type: SipFlowMsgType::Rtp,
+                                    src_addr: frame
+                                        .source_addr
+                                        .map(|addr| addr.to_string())
+                                        .unwrap_or_default(),
+                                    dst_addr: String::new(),
+                                    payload: bytes::Bytes::from(rtp_bytes),
+                                };
+                                let _ = backend.record(&call_id, item);
                             }
-                        });
-
-                        sess.sipflow_tx = Some(tx);
-                        debug!(session_id = %session_id, "SipFlow capture started");
-                    } else {
-                        debug!(session_id = %session_id, "SipFlow capture stopped");
-                    }
+                        }
+                    });
+                    debug!(session_id = %session_id, "SipFlow capture started");
+                } else {
+                    debug!(session_id = %session_id, "SipFlow capture stopped");
                 }
             }
 
@@ -606,10 +589,6 @@ impl EngineCore {
             }
 
             MediaCommand::StopSipFlow { session_id } => {
-                let mut sessions = self.sessions.write();
-                if let Some(sess) = sessions.get_mut(&session_id) {
-                    sess.sipflow_tx = None;
-                }
                 let _ = self
                     .event_tx
                     .send(MediaEvent::SipFlowStopped { session_id });
@@ -1349,11 +1328,9 @@ mod tests {
                 session_id: "sf1".into(),
                 call_id: "test-call-1".into(),
                 backend: None,
+                receiver: None,
             })
             .unwrap();
-
-        let tx = engine.get_sipflow_capture_tx("sf1");
-        assert!(tx.is_none());
     }
 
     #[tokio::test]

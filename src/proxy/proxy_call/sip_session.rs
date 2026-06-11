@@ -444,6 +444,41 @@ impl SipSession {
         }
     }
 
+    fn setup_sipflow_capture(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Option<crate::media::engine::SipFlowCaptureTx> {
+        let backend = if self.server.proxy_config.recording.is_none() {
+            self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
+        } else {
+            None
+        }?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(
+            crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY,
+        );
+        if let Err(e) =
+            self.server
+                .media_engine
+                .send(crate::media::engine::MediaCommand::SetSipFlowCapture {
+                    session_id: session_id.to_string(),
+                    call_id: call_id.to_string(),
+                    backend: Some(backend),
+                    receiver: Some(rx),
+                })
+        {
+            warn!(
+                session_id = %session_id,
+                error = %e,
+                "MediaEngine SipFlow capture command rejected"
+            );
+            return None;
+        }
+
+        Some(tx)
+    }
+
     #[inline]
     pub fn caller_peer(&self) -> &Arc<dyn MediaPeer> {
         self.legs.caller_peer().expect("caller peer always present")
@@ -3281,19 +3316,10 @@ impl SipSession {
             bridge_builder =
                 bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
-        if self.server.proxy_config.recording.is_none() && self.server.sip_flow.is_some() {
-            self.engine_send(crate::media::engine::MediaCommand::SetSipFlowCapture {
-                session_id: self.context.session_id.clone(),
-                call_id: self.context.session_id.clone(),
-                backend: self.server.sip_flow.as_ref().and_then(|sf| sf.backend()),
-            });
-            if let Some(sipflow_tx) = self
-                .server
-                .media_engine
-                .get_sipflow_capture_tx(&self.context.session_id)
-            {
-                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
-            }
+        if let Some(sipflow_tx) =
+            self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
+        {
+            bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
         }
 
         let rtp_timeout = self.context.dialplan.rtp_timeout.or_else(|| {
@@ -4822,17 +4848,7 @@ impl SipSession {
 
         let shared_recorder = self.recorder.clone();
 
-        let sipflow_tx =
-            if self.server.proxy_config.recording.is_none() && self.server.sip_flow.is_some() {
-                self.engine_send(crate::media::engine::MediaCommand::SetSipFlowCapture {
-                    session_id: session_id.to_string(),
-                    call_id: session_id.to_string(),
-                    backend: self.server.sip_flow.as_ref().and_then(|sf| sf.backend()),
-                });
-                self.server.media_engine.get_sipflow_capture_tx(session_id)
-            } else {
-                None
-            };
+        let sipflow_tx = self.setup_sipflow_capture(session_id, session_id);
         let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
         match Self::wire_with_forwarding_track(
@@ -5635,19 +5651,10 @@ impl SipSession {
                 bridge_builder = bridge_builder
                     .with_recorder(self.recorder.clone(), self.recording_paused.clone());
             }
-            if self.server.proxy_config.recording.is_none() && self.server.sip_flow.is_some() {
-                self.engine_send(crate::media::engine::MediaCommand::SetSipFlowCapture {
-                    session_id: self.context.session_id.clone(),
-                    call_id: self.context.session_id.clone(),
-                    backend: self.server.sip_flow.as_ref().and_then(|sf| sf.backend()),
-                });
-                if let Some(sipflow_tx) = self
-                    .server
-                    .media_engine
-                    .get_sipflow_capture_tx(&self.context.session_id)
-                {
-                    bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
-                }
+            if let Some(sipflow_tx) =
+                self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
+            {
+                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
             }
 
             let bridge = bridge_builder.build();
