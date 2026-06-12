@@ -1516,7 +1516,7 @@ fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> 
         } => Some(json!({
             "label": "Call record storage",
             "value": format!("Database ({})", table_name),
-            "hint": database_url.as_deref().unwrap_or("default"),
+            "hint": database_url.as_deref().unwrap_or("not configured"),
         })),
     }
 }

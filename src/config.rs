@@ -490,7 +490,7 @@ pub enum CallRecordConfig {
         keep_media_copy: Option<bool>,
     },
     Database {
-        /// Database URL for call records. If not set, uses the global database_url.
+        /// Database URL for call records.
         database_url: Option<String>,
         /// Table name for call records (default: "call_records")
         #[serde(default = "default_call_record_table")]

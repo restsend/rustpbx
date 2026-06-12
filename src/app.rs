@@ -1,7 +1,7 @@
 use crate::{
     callrecord::{
-        CallRecordManagerBuilder, CallRecordSender, noop_saver,
-        recording_upload::RecordingUploadHook, sipflow_upload::SipFlowUploadHook,
+        CallRecordManagerBuilder, CallRecordSender, recording_upload::RecordingUploadHook,
+        sipflow_upload::SipFlowUploadHook,
     },
     config::{ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
@@ -313,16 +313,11 @@ impl AppStateBuilder {
             //  - [sipflow.upload] is configured (post-call WAV upload)
             //  - [recording].type exports live recorder WAV after call completion.
             // DatabaseHook is always included so call records reach the DB.
-            let mut builder = CallRecordManagerBuilder::new()
-                .with_cancel_token(token.child_token());
+            let mut builder =
+                CallRecordManagerBuilder::new().with_cancel_token(token.child_token());
 
             if let Some(ref callrecord) = config.callrecord {
                 builder = builder.with_config(callrecord.clone());
-            } else {
-                // No CDR file output needed – use a no-op saver so only hooks run.
-                builder = builder
-                    .with_config(crate::config::CallRecordConfig::default())
-                    .with_saver(Arc::new(Box::new(noop_saver)));
             }
 
             // Attach the SipFlow upload hook if configured.
@@ -354,7 +349,7 @@ impl AppStateBuilder {
                 builder = builder.with_hook(hook);
             }
 
-            let manager = builder.build();
+            let manager = builder.build().await?;
             let sender = manager.sender.clone();
             callrecord_stats = Some(manager.stats.clone());
             callrecord_manager = Some(manager);
