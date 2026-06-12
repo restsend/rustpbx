@@ -127,6 +127,8 @@ type = "extension"
 [callrecord]
 type = "local"
 root = "./config/cdr"
+# Maximum concurrent post-call CDR save/upload/hook tasks. Minimum is 1.
+max_concurrent = 64
 
 # ── SipFlow ───────────────────────────────────────────────────────────────────
 # Unified SIP + RTP recording system (default).

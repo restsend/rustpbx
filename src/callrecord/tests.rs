@@ -1,5 +1,6 @@
 use super::*;
 use crate::callrecord::CallRecordHangupReason;
+use crate::config::CallRecordStorageConfig;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::io::Write;
@@ -25,9 +26,12 @@ async fn test_builder_without_callrecord_config_uses_noop_saver() {
 #[tokio::test]
 async fn test_database_saver_requires_database_url() {
     let err = CallRecordManagerBuilder::new()
-        .with_config(CallRecordConfig::Database {
-            database_url: None,
-            table_name: "call_records".to_string(),
+        .with_config(CallRecordConfig {
+            max_concurrent: 64,
+            storage: CallRecordStorageConfig::Database {
+                database_url: None,
+                table_name: "call_records".to_string(),
+            },
         })
         .build()
         .await

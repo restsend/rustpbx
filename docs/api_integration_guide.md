@@ -146,6 +146,8 @@ Push call details immediately after a call ends. Recording media upload is confi
   [callrecord]
   type = "http"
   url = "https://your-api.com/pbx/cdr"
+  # Maximum concurrent post-call CDR save/upload/hook tasks. Default: 64, minimum: 1.
+  max_concurrent = 64
   # Accepted for compatibility, but ignored. Use [recording] for media upload.
   with_media = true
   ```

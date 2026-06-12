@@ -1,4 +1,4 @@
-use crate::config::CallRecordConfig;
+use crate::config::{CallRecordConfig, CallRecordStorageConfig};
 use crate::storage::{Storage, StorageConfig};
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -53,13 +53,13 @@ impl CdrStorage {
 }
 
 pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrStorage>> {
-    match config {
-        Some(CallRecordConfig::Local { root }) => {
+    match config.map(|config| &config.storage) {
+        Some(CallRecordStorageConfig::Local { root }) => {
             let storage_config = StorageConfig::Local { path: root.clone() };
             let storage = Storage::new(&storage_config)?;
             Ok(Some(CdrStorage::new(storage)))
         }
-        Some(CallRecordConfig::S3 {
+        Some(CallRecordStorageConfig::S3 {
             vendor,
             bucket,
             region,
@@ -81,8 +81,8 @@ pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrSt
             let storage = Storage::new(&storage_config)?;
             Ok(Some(CdrStorage::new(storage)))
         }
-        Some(CallRecordConfig::Http { .. }) => Ok(None),
-        Some(CallRecordConfig::Database { .. }) => Ok(None),
+        Some(CallRecordStorageConfig::Http { .. }) => Ok(None),
+        Some(CallRecordStorageConfig::Database { .. }) => Ok(None),
         None => Ok(None),
     }
 }
