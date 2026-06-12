@@ -100,11 +100,14 @@ When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be writte
 ## CDR Storage (`[callrecord]`)
 Configure where post-call CDR JSON is stored or sent. This does not control recording media upload.
 
+`max_concurrent` controls how many post-call CDR save/upload/hook tasks may run at once. The default is `64`; values below `1` are clamped to `1`.
+
 ### Local Filesystem
 ```toml
 [callrecord]
 type = "local"
 root = "./cdr_archive"
+max_concurrent = 64
 ```
 
 ### S3 Compatible Object Storage
@@ -121,6 +124,7 @@ access_key = "MINIO_ACCESS_KEY"
 secret_key = "MINIO_SECRET_KEY"
 endpoint = "http://minio:9000" # needed for non-AWS
 root = "/daily-records"
+max_concurrent = 64
 
 # Deprecated and ignored. Recording media upload is configured by [recording].
 with_media = true
@@ -133,6 +137,7 @@ Send CDR JSON to an endpoint.
 [callrecord]
 type = "http"
 url = "http://my-crm/cdr-hook"
+max_concurrent = 64
 
 # Deprecated and ignored. Recording media upload is configured by [recording].
 with_media = true

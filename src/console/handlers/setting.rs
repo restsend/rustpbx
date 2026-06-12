@@ -1,7 +1,7 @@
 use crate::app::AppStateInner;
 use crate::config::{
-    CallRecordConfig, Config, HttpRouterConfig, LocatorWebhookConfig, ProxyConfig,
-    UserBackendConfig,
+    CallRecordConfig, CallRecordStorageConfig, Config, HttpRouterConfig, LocatorWebhookConfig,
+    ProxyConfig, UserBackendConfig,
 };
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
@@ -704,8 +704,8 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
 
     let recorder_path = config.recorder_path();
 
-    let (mode, callrecord_profile) = match config.callrecord.as_ref() {
-        Some(CallRecordConfig::Local { root }) => {
+    let (mode, callrecord_profile) = match config.callrecord.as_ref().map(|cfg| &cfg.storage) {
+        Some(CallRecordStorageConfig::Local { root }) => {
             let mut profile = Profile::new(
                 "callrecord-local",
                 "Call recordings",
@@ -715,7 +715,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             profile.insert("root", json!(root));
             ("local".to_string(), profile)
         }
-        Some(CallRecordConfig::S3 {
+        Some(CallRecordStorageConfig::S3 {
             vendor,
             bucket,
             region,
@@ -751,7 +751,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             }
             ("s3".to_string(), profile)
         }
-        Some(CallRecordConfig::Http {
+        Some(CallRecordStorageConfig::Http {
             url,
             headers,
             with_media,
@@ -775,7 +775,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             }
             ("http".to_string(), profile)
         }
-        Some(CallRecordConfig::Database {
+        Some(CallRecordStorageConfig::Database {
             database_url,
             table_name,
         }) => {
@@ -1491,12 +1491,12 @@ fn mask_basic(value: &str) -> String {
 }
 
 fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> {
-    match config? {
-        CallRecordConfig::Local { root } => Some(json!({
+    match &config?.storage {
+        CallRecordStorageConfig::Local { root } => Some(json!({
             "label": "Call record storage",
             "value": format!("Local ({})", root),
         })),
-        CallRecordConfig::S3 {
+        CallRecordStorageConfig::S3 {
             bucket,
             region,
             endpoint,
@@ -1506,11 +1506,11 @@ fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> 
             "value": format!("S3 bucket {} ({})", bucket, region),
             "hint": endpoint,
         })),
-        CallRecordConfig::Http { url, .. } => Some(json!({
+        CallRecordStorageConfig::Http { url, .. } => Some(json!({
             "label": "Call record storage",
             "value": format!("HTTP {}", url),
         })),
-        CallRecordConfig::Database {
+        CallRecordStorageConfig::Database {
             database_url,
             table_name,
         } => Some(json!({

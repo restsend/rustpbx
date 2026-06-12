@@ -461,10 +461,25 @@ pub enum LocatorConfig {
 
 pub use crate::storage::S3Vendor;
 
+pub const DEFAULT_CALL_RECORD_MAX_CONCURRENT: usize = 64;
+
+fn default_call_record_max_concurrent() -> usize {
+    DEFAULT_CALL_RECORD_MAX_CONCURRENT
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct CallRecordConfig {
+    /// Maximum concurrent call record save/hook tasks (minimum: 1).
+    #[serde(default = "default_call_record_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(flatten)]
+    pub storage: CallRecordStorageConfig,
+}
+
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum CallRecordConfig {
+pub enum CallRecordStorageConfig {
     Local {
         root: String,
     },
@@ -1172,11 +1187,14 @@ impl Default for UserBackendConfig {
 
 impl Default for CallRecordConfig {
     fn default() -> Self {
-        Self::Local {
-            #[cfg(target_os = "windows")]
-            root: "./config/cdr".to_string(),
-            #[cfg(not(target_os = "windows"))]
-            root: "./config/cdr".to_string(),
+        Self {
+            max_concurrent: default_call_record_max_concurrent(),
+            storage: CallRecordStorageConfig::Local {
+                #[cfg(target_os = "windows")]
+                root: "./config/cdr".to_string(),
+                #[cfg(not(target_os = "windows"))]
+                root: "./config/cdr".to_string(),
+            },
         }
     }
 }
@@ -1304,6 +1322,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_callrecord_max_concurrent_is_shared_config() {
+        let callrecord: CallRecordConfig = toml::from_str(
+            r#"
+            type = "http"
+            url = "https://example.com/cdr"
+            max_concurrent = 7
+            "#,
+        )
+        .unwrap();
+        assert_eq!(callrecord.max_concurrent, 7);
+        assert!(matches!(
+            callrecord.storage,
+            CallRecordStorageConfig::Http { .. }
+        ));
+
+        let defaulted: CallRecordConfig = toml::from_str(
+            r#"
+            type = "local"
+            root = "./cdr"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(defaulted.max_concurrent, DEFAULT_CALL_RECORD_MAX_CONCURRENT);
+    }
 
     #[test]
     fn test_select_realm() {

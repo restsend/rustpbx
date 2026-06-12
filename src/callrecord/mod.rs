@@ -1,5 +1,5 @@
 use crate::{
-    config::CallRecordConfig,
+    config::{CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_MAX_CONCURRENT},
     utils::sanitize_id,
 };
 use anyhow::Result;
@@ -12,10 +12,18 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    future::{Future, pending},
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -436,14 +444,13 @@ pub struct CallRecordManager {
     cancel_token: CancellationToken,
     receiver: CallRecordReceiver,
     saver: Box<dyn CallRecordSaver>,
-    hooks: Arc<Vec<Box<dyn CallRecordHook>>>,
+    hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
 pub struct CallRecordManagerBuilder {
     pub cancel_token: Option<CancellationToken>,
     pub config: Option<CallRecordConfig>,
     pub max_concurrent: Option<usize>,
-    saver: Option<Box<dyn CallRecordSaver>>,
     hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
@@ -459,7 +466,6 @@ impl CallRecordManagerBuilder {
             cancel_token: None,
             config: None,
             max_concurrent: None,
-            saver: None,
             hooks: Vec::new(),
         }
     }
@@ -474,17 +480,12 @@ impl CallRecordManagerBuilder {
         self
     }
 
-    pub fn with_saver(mut self, saver: Box<dyn CallRecordSaver>) -> Self {
-        self.saver = Some(saver);
-        self
-    }
-
     pub fn with_hook(mut self, hook: Box<dyn CallRecordHook>) -> Self {
         self.hooks.push(hook);
         self
     }
     pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
-        self.max_concurrent = Some(max_concurrent);
+        self.max_concurrent = Some(max_concurrent.max(1));
         self
     }
 
@@ -493,123 +494,121 @@ impl CallRecordManagerBuilder {
             cancel_token,
             config,
             max_concurrent,
-            saver,
             hooks,
         } = self;
         let cancel_token = cancel_token.unwrap_or_default();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let saver: Box<dyn CallRecordSaver> = match saver {
-            Some(saver) => saver,
-            None => match config {
-                None => Box::new(NoopCallRecordSaver),
-                Some(CallRecordConfig::Local { root }) => {
-                    if !Path::new(&root).exists() {
-                        match std::fs::create_dir_all(&root) {
-                            Ok(_) => {
-                                info!("CallRecordManager created directory: {}", root);
-                            }
-                            Err(e) => {
-                                warn!("CallRecordManager failed to create directory: {}", e);
-                            }
+        let saver: Box<dyn CallRecordSaver> = match config.map(|config| config.storage) {
+            None => Box::new(NoopCallRecordSaver),
+            Some(CallRecordStorageConfig::Local { root }) => {
+                if !Path::new(&root).exists() {
+                    match std::fs::create_dir_all(&root) {
+                        Ok(_) => {
+                            info!("CallRecordManager created directory: {}", root);
+                        }
+                        Err(e) => {
+                            warn!("CallRecordManager failed to create directory: {}", e);
                         }
                     }
-                    Box::new(LocalCallRecordSaver { root })
                 }
-                Some(CallRecordConfig::S3 {
-                    root,
+                Box::new(LocalCallRecordSaver { root })
+            }
+            Some(CallRecordStorageConfig::S3 {
+                root,
+                vendor,
+                bucket,
+                region,
+                access_key,
+                secret_key,
+                endpoint,
+                ..
+            }) => {
+                let storage = crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
                     vendor,
-                    bucket,
+                    bucket: bucket.clone(),
                     region,
                     access_key,
                     secret_key,
-                    endpoint,
-                    ..
-                }) => {
-                    let storage =
-                        crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
-                            vendor,
-                            bucket: bucket.clone(),
-                            region,
-                            access_key,
-                            secret_key,
-                            endpoint: Some(endpoint.clone()),
-                            prefix: None,
-                        })
-                        .map_err(|e| {
-                            warn!(
-                                bucket,
-                                endpoint,
-                                "CallRecordManager failed to initialize S3 storage: {}", e
-                            );
-                            e
-                        })?;
-
-                    Box::new(S3CallRecordSaver {
-                        root,
+                    endpoint: Some(endpoint.clone()),
+                    prefix: None,
+                })
+                .map_err(|e| {
+                    warn!(
                         bucket,
                         endpoint,
-                        storage,
-                    })
-                }
-                Some(CallRecordConfig::Http { url, headers, .. }) => {
-                    Box::new(HttpCallRecordSaver {
-                        url,
-                        headers,
-                        client: reqwest::Client::new(),
-                    })
-                }
-                Some(CallRecordConfig::Database {
-                    database_url: callrecord_database_url,
-                    table_name,
-                }) => {
-                    let Some(db_url) = callrecord_database_url else {
-                        return Err(anyhow::anyhow!(
-                            "database call record saver requires database_url"
-                        ));
-                    };
-                    let db = crate::models::connect_db(&db_url).await.map_err(|e| {
-                        warn!(
-                            database_url = %db_url,
-                            "CallRecordManager failed to initialize database saver: {}", e
-                        );
-                        e
-                    })?;
-                    let create_table = Table::create()
-                        .table(Alias::new(table_name.as_str()))
-                        .if_not_exists()
-                        .col(
-                            ColumnDef::new(Alias::new("id"))
-                                .integer()
-                                .not_null()
-                                .primary_key()
-                                .auto_increment(),
-                        )
-                        .col(ColumnDef::new(Alias::new("call_id")).text().not_null())
-                        .col(ColumnDef::new(Alias::new("caller")).text().not_null())
-                        .col(ColumnDef::new(Alias::new("callee")).text().not_null())
-                        .col(ColumnDef::new(Alias::new("start_time")).text().not_null())
-                        .col(ColumnDef::new(Alias::new("end_time")).text().not_null())
-                        .col(ColumnDef::new(Alias::new("status_code")).integer())
-                        .col(ColumnDef::new(Alias::new("hangup_reason")).text())
-                        .col(ColumnDef::new(Alias::new("details")).text())
-                        .col(
-                            ColumnDef::new(Alias::new("created_at"))
-                                .timestamp()
-                                .default(Expr::current_timestamp()),
-                        )
-                        .to_owned();
-                    db.execute(db.get_database_backend().build(&create_table))
-                        .await?;
+                        "CallRecordManager failed to initialize S3 storage: {}", e
+                    );
+                    e
+                })?;
 
-                    Box::new(DatabaseCallRecordSaver {
-                        db,
-                        db_url,
-                        table_name,
-                    })
-                }
-            },
+                Box::new(S3CallRecordSaver {
+                    root,
+                    bucket,
+                    endpoint,
+                    storage,
+                })
+            }
+            Some(CallRecordStorageConfig::Http { url, headers, .. }) => {
+                Box::new(HttpCallRecordSaver {
+                    url,
+                    headers,
+                    client: reqwest::Client::new(),
+                })
+            }
+            Some(CallRecordStorageConfig::Database {
+                database_url: callrecord_database_url,
+                table_name,
+                ..
+            }) => {
+                let Some(db_url) = callrecord_database_url else {
+                    return Err(anyhow::anyhow!(
+                        "database call record saver requires database_url"
+                    ));
+                };
+                let db = crate::models::connect_db(&db_url).await.map_err(|e| {
+                    warn!(
+                        database_url = %db_url,
+                        "CallRecordManager failed to initialize database saver: {}", e
+                    );
+                    e
+                })?;
+                let create_table = Table::create()
+                    .table(Alias::new(table_name.as_str()))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .integer()
+                            .not_null()
+                            .primary_key()
+                            .auto_increment(),
+                    )
+                    .col(ColumnDef::new(Alias::new("call_id")).text().not_null())
+                    .col(ColumnDef::new(Alias::new("caller")).text().not_null())
+                    .col(ColumnDef::new(Alias::new("callee")).text().not_null())
+                    .col(ColumnDef::new(Alias::new("start_time")).text().not_null())
+                    .col(ColumnDef::new(Alias::new("end_time")).text().not_null())
+                    .col(ColumnDef::new(Alias::new("status_code")).integer())
+                    .col(ColumnDef::new(Alias::new("hangup_reason")).text())
+                    .col(ColumnDef::new(Alias::new("details")).text())
+                    .col(
+                        ColumnDef::new(Alias::new("created_at"))
+                            .timestamp()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned();
+                db.execute(db.get_database_backend().build(&create_table))
+                    .await?;
+
+                Box::new(DatabaseCallRecordSaver {
+                    db,
+                    db_url,
+                    table_name,
+                })
+            }
         };
-        let max_concurrent = max_concurrent.unwrap_or(64);
+        let max_concurrent = max_concurrent
+            .unwrap_or(DEFAULT_CALL_RECORD_MAX_CONCURRENT)
+            .max(1);
 
         Ok(CallRecordManager {
             max_concurrent,
@@ -618,7 +617,7 @@ impl CallRecordManagerBuilder {
             sender,
             receiver,
             saver,
-            hooks: Arc::new(hooks),
+            hooks,
         })
     }
 }
@@ -769,57 +768,72 @@ impl CallRecordManager {
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
         info!("CallRecordManager serving");
-        tokio::select! {
-            _ = token.cancelled() => {}
-            _ = self.recv_loop() => {}
-        }
-        info!("CallRecordManager served");
-    }
-
-    async fn recv_loop(&mut self) -> Result<()> {
+        let max_concurrent = self.max_concurrent.max(1);
+        let receiver = &mut self.receiver;
+        let saver = self.saver.as_ref();
+        let hooks = &self.hooks;
         let mut futures = FuturesUnordered::new();
+        let mut receiver_closed = false;
+        let mut shutting_down = false;
+        let mut shutdown_timeout: Pin<Box<dyn Future<Output = ()> + Send>> =
+            Box::pin(pending());
+
         loop {
-            let limit = self.max_concurrent - futures.len();
-            if limit == 0 {
-                let _ = futures.next().await;
-                continue;
-            }
-            let mut buffer = Vec::with_capacity(limit);
-            if self.receiver.recv_many(&mut buffer, limit).await == 0 {
+            if (receiver_closed || shutting_down) && futures.is_empty() {
                 break;
             }
 
-            for record in buffer {
-                let saver_ref = self.saver.as_ref();
-                let hooks_ref = self.hooks.clone();
+            let can_receive =
+                !receiver_closed && !shutting_down && futures.len() < max_concurrent;
 
-                futures.push(async move {
-                    let mut record = record;
-                    let start_time = Instant::now();
-                    match saver_ref.save(&record).await {
-                        Ok(file_name) => {
-                            let elapsed = start_time.elapsed();
-                            info!(
-                                ?elapsed,
-                                call_id = record.call_id,
-                                file_name,
-                                "CallRecordManager saved"
-                            );
-                        }
-                        Err(err) => {
-                            warn!("Failed to save call record: {}", err);
-                        }
-                    }
+            tokio::select! {
+                record = receiver.recv(), if can_receive => {
+                    let Some(record) = record else {
+                        receiver_closed = true;
+                        continue;
+                    };
 
-                    for hook in hooks_ref.iter() {
-                        if let Err(e) = hook.on_record_completed(&mut record).await {
-                            warn!("CallRecordHook failed: {}", e);
+                    futures.push(async move {
+                        let mut record = record;
+                        let start_time = Instant::now();
+                        match saver.save(&record).await {
+                            Ok(file_name) => {
+                                let elapsed = start_time.elapsed();
+                                info!(
+                                    ?elapsed,
+                                    call_id = record.call_id,
+                                    file_name,
+                                    "CallRecordManager saved"
+                                );
+                            }
+                            Err(err) => {
+                                warn!("Failed to save call record: {}", err);
+                            }
                         }
-                    }
-                });
+
+                        for hook in hooks.iter() {
+                            if let Err(e) = hook.on_record_completed(&mut record).await {
+                                warn!("CallRecordHook failed: {}", e);
+                            }
+                        }
+                    });
+                }
+                Some(()) = futures.next(), if !futures.is_empty() => {}
+                _ = token.cancelled(), if !shutting_down => {
+                    shutting_down = true;
+                    let pending = futures.len();
+                    info!(pending, "CallRecordManager received shutdown");
+                    shutdown_timeout = Box::pin(sleep(Duration::from_secs(5)));
+                }
+                _ = &mut shutdown_timeout, if shutting_down => {
+                    warn!(
+                        pending = futures.len(),
+                        "CallRecordManager shutdown timed out before all tasks finished"
+                    );
+                    break;
+                }
             }
-            while futures.next().await.is_some() {}
         }
-        Ok(())
+        info!(pending = futures.len(), "CallRecordManager exiting");
     }
 }

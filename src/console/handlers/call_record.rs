@@ -1439,8 +1439,8 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
 fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
     if let Some(app) = state.app_state() {
         if let Some(config) = &app.config().callrecord {
-            match config {
-                crate::config::CallRecordConfig::Local { root } => {
+            match &config.storage {
+                crate::config::CallRecordStorageConfig::Local { root } => {
                     let root_path = Path::new(root);
                     let candidate_path = Path::new(path);
                     if let Ok(stripped) = candidate_path.strip_prefix(root_path) {
@@ -1454,7 +1454,7 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
                         }
                     }
                 }
-                crate::config::CallRecordConfig::S3 { root, .. } => {
+                crate::config::CallRecordStorageConfig::S3 { root, .. } => {
                     let root_str = root.trim_end_matches('/');
                     if let Some(stripped) = path.strip_prefix(root_str) {
                         stripped.trim_start_matches('/').to_string()
@@ -1474,9 +1474,9 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
 
 pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
     let app = state.app_state()?;
-    let root = match app.config().callrecord.as_ref() {
-        Some(crate::config::CallRecordConfig::Local { root })
-        | Some(crate::config::CallRecordConfig::S3 { root, .. }) => root.as_str(),
+    let root = match app.config().callrecord.as_ref().map(|config| &config.storage) {
+        Some(crate::config::CallRecordStorageConfig::Local { root })
+        | Some(crate::config::CallRecordStorageConfig::S3 { root, .. }) => root.as_str(),
         _ => "",
     };
     let storage = resolve_cdr_storage(state);

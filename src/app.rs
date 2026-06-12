@@ -317,6 +317,7 @@ impl AppStateBuilder {
                 CallRecordManagerBuilder::new().with_cancel_token(token.child_token());
 
             if let Some(ref callrecord) = config.callrecord {
+                builder = builder.with_max_concurrent(callrecord.max_concurrent);
                 builder = builder.with_config(callrecord.clone());
             }
 
