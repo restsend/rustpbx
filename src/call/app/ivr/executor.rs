@@ -176,7 +176,7 @@ impl StepIvrApp {
         }
         if let Some(ref gw) = self.rwi_gateway {
             let call_id = entry.session_id.clone();
-            let event = crate::rwi::proto::RwiEvent::IvrStepTrace {
+            let ev = crate::rwi::IvrStepTrace {
                 call_id: call_id.clone(),
                 session_id: entry.session_id.clone(),
                 caller: entry.caller.clone(),
@@ -199,7 +199,7 @@ impl StepIvrApp {
             let gw = gw.clone();
             crate::utils::spawn(async move {
                 let guard = gw.read();
-                guard.fan_out_event_to_context(&call_id, &event, &call_id);
+                guard.fan_out(&call_id, &ev);
             });
         }
     }
@@ -1635,6 +1635,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires running PBX infrastructure"]
     #[cfg(feature = "addon-cc")]
     async fn test_full_e2e_via_sipbot() {
         use crate::addons::cc::tests::helpers::test_server::{TestPbx, TestPbxInject};

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod event;
 pub mod gateway;
 pub mod handler;
 pub mod processor;
@@ -10,6 +11,7 @@ pub mod webhook;
 
 pub use app::*;
 pub use auth::*;
+pub use event::*;
 pub use gateway::{RwiGatewayRef, *};
 pub use handler::*;
 pub use processor::*;

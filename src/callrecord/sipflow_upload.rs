@@ -181,16 +181,13 @@ async fn do_upload(
     // Emit RecordEnd after successful sipflow upload.
     if let Some(url) = first_uploaded_url {
         if let Some(gw) = rwi_gateway {
-            use crate::rwi::proto::RwiEvent;
-            let event_call_id = call_id.to_string();
-            let event = RwiEvent::RecordEnd {
-                call_id: event_call_id.clone(),
+            let gw_ref = gw.read();
+            gw_ref.send_to_owner(&crate::rwi::RecordEnd {
+                call_id: call_id.to_string(),
                 url: Some(url),
                 duration_secs: duration_secs as u64,
                 file_size: uploaded_file_size,
-            };
-            let gw_ref = gw.read();
-            gw_ref.send_event_to_call_owner(&event_call_id, &event);
+            });
             info!(call_id, "SipFlowUploadHook: RecordEnd event emitted");
         }
     }

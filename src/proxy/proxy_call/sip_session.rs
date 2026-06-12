@@ -771,29 +771,27 @@ impl SipSession {
             hdrs
         };
         if let Some(ref gw) = server.rwi_gateway {
-            let event =
-                crate::rwi::proto::RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
-                    call_id: session_id.clone(),
-                    context: "default".into(),
-                    caller: context.original_caller.clone(),
-                    callee: context.original_callee.clone(),
-                    dial_direction: "inbound".into(),
-                    trunk: None,
-                    sip_headers: incoming_sip_headers,
-                    root_call_id: None,
-                    caller_name: None,
-                    callee_name: None,
-                    called_phone: None,
-                    app_id: None,
-                    routing_target: None,
-                    uuid: None,
-                    routing_path: None,
-                });
+            let ev = crate::rwi::CallIncoming {
+                call_id: session_id.clone(),
+                context: "default".into(),
+                caller: context.original_caller.clone(),
+                callee: context.original_callee.clone(),
+                dial_direction: "inbound".into(),
+                trunk: None,
+                sip_headers: incoming_sip_headers,
+                root_call_id: None,
+                caller_name: None,
+                callee_name: None,
+                called_phone: None,
+                app_id: None,
+                routing_target: None,
+                uuid: None,
+                routing_path: None,
+            };
             let gw = gw.clone();
-            let call_id = session_id.clone();
             crate::utils::spawn(async move {
                 let g = gw.read();
-                g.send_event_to_call_owner(&call_id, &event);
+                g.send_to_owner(&ev);
             });
         }
 
@@ -3973,9 +3971,9 @@ impl SipSession {
                                 Some(&self.context.original_callee),
                                 Some("callee"),
                             );
-                            self.emit_rwi_event(crate::rwi::proto::RwiEvent::ringing(
-                                self.context.session_id.clone(),
-                            ));
+                            self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                                call_id: self.context.session_id.clone(),
+                            });
 
                             // Fire on_call_ringing hooks
                             if !self.server.session_hooks.is_empty() {
@@ -5975,9 +5973,9 @@ impl SipSession {
         );
 
         if !self.app_runtime.is_running() {
-            self.emit_rwi_event(crate::rwi::proto::RwiEvent::answered(
-                self.context.session_id.clone(),
-            ));
+            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                call_id: self.context.session_id.clone(),
+            });
         }
 
         let mut timer_headers = vec![];
@@ -6847,11 +6845,11 @@ impl SipSession {
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
-        self.emit_rwi_event(crate::rwi::proto::RwiEvent::hangup(
-            self.context.session_id.clone(),
-            hangup_reason_str,
+        self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+            call_id: self.context.session_id.clone(),
+            reason: hangup_reason_str,
             sip_status,
-        ));
+        });
 
         info!(session_id = %self.context.session_id, "Session cleanup complete");
 
@@ -7331,6 +7329,35 @@ impl SipSession {
     }
 
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
+        // Extract CC agent_id from connected_callee SIP URI
+        let cc_agent_id = self.meta.connected_callee.as_ref().map(|callee| {
+            let trimmed = callee
+                .strip_prefix("sips:")
+                .or_else(|| callee.strip_prefix("sip:"))
+                .unwrap_or(callee);
+            match trimmed.find('@') {
+                Some(at) => &trimmed[..at],
+                None => trimmed,
+            }
+            .to_string()
+        });
+
+        // Inject CC data into extensions so the reporter picks it up
+        let mut extensions = self.context.dialplan.extensions.clone();
+        {
+            let mut meta: std::collections::HashMap<String, String> = extensions
+                .get::<std::collections::HashMap<String, String>>()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(aid) = &cc_agent_id {
+                meta.insert("agent_id".to_string(), aid.clone());
+            }
+            if let Some(ref qn) = self.meta.queue_name {
+                meta.insert("queue_name".to_string(), qn.clone());
+            }
+            extensions.insert(meta);
+        }
+
         CallSessionRecordSnapshot {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
@@ -7344,10 +7371,10 @@ impl SipSession {
             connected_callee: self.meta.connected_callee.clone(),
             routed_contact: self.meta.routed_contact.clone(),
             routed_destination: self.meta.routed_destination.clone(),
-            last_queue_name: None,
+            last_queue_name: self.meta.queue_name.clone(),
             callee_call_ids: self.meta.callee_call_ids.iter().cloned().collect(),
             server_dialog_id: self.server_dialog.id(),
-            extensions: self.context.dialplan.extensions.clone(),
+            extensions,
         }
     }
 
@@ -7943,7 +7970,16 @@ impl SipSession {
         true
     }
 
-    /// Emit a `DnStateChanged` event via the RWI gateway, if configured.
+    /// Emit a typed call lifecycle event via the new generic gateway API.
+    fn emit_typed_rwi_event<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
+        if let Some(ref gw) = self.server.rwi_gateway {
+            let g = gw.read();
+            g.send_to_owner(event);
+        }
+    }
+
+    /// Deprecated: DnStateChanged removed. Legacy call sites retained for source compat.
+    #[allow(unused_variables, dead_code)]
     fn emit_dn_event(
         &self,
         event_name: &str,
@@ -7953,55 +7989,7 @@ impl SipSession {
         callee_name: Option<&str>,
         party: Option<&str>,
     ) {
-        if let Some(ref gw) = self.server.rwi_gateway {
-            use crate::rwi::proto::RwiEvent;
-            let caller = caller.unwrap_or("unknown").to_string();
-            let dn_call_id = call_id.clone().unwrap_or_default();
-            let (agent_id, _agent_name, routing_target) = gw
-                .read()
-                .meta_store
-                .get_sync(&dn_call_id)
-                .map(|m| {
-                    (
-                        m.agent_id.clone(),
-                        m.agent_name.clone(),
-                        m.routing_target.clone(),
-                    )
-                })
-                .unwrap_or((None, None, None));
-            let event = RwiEvent::DnStateChanged {
-                caller,
-                event_name: event_name.to_string(),
-                system_time: chrono::Utc::now().to_rfc3339(),
-                call_id,
-                agent_id,
-                caller_name: caller_name.map(|s| s.to_string()),
-                callee_name: callee_name.map(|s| s.to_string()),
-                reason_code: None,
-                agent_work_mode: None,
-                releasing_party: None,
-                vq_name: None,
-                routing_target,
-                skill_group: None,
-                party: party.map(|s| s.to_string()),
-                extra: None,
-            };
-            let gw = gw.clone();
-            let g = gw.read();
-            g.send_event_to_call_owner(&dn_call_id, &event);
-        }
-    }
-
-    /// Emit a call lifecycle RWI event via the gateway, if configured.
-    /// Uses `send_event_to_call_owner` which assigns a unique sequence number
-    /// and forwards to the webhook, avoiding the dedup issue of `broadcast_event`.
-    fn emit_rwi_event(&self, event: crate::rwi::proto::RwiEvent) {
-        if let Some(ref gw) = self.server.rwi_gateway {
-            let gw = gw.clone();
-            let call_id = self.context.session_id.clone();
-            let g = gw.read();
-            g.send_event_to_call_owner(&call_id, &event);
-        }
+        // DnStateChanged removed. Use agent_state_changed instead.
     }
 
     /// Add a new leg to the session dynamically.

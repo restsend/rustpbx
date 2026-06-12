@@ -137,6 +137,8 @@ impl DashboardPayload {
                 active: 0,
                 capacity: 0,
                 active_util: 0,
+                transaction_running: 0,
+                transaction_capacity: 0,
             },
             call_direction: default_direction_map(),
             active_calls: Vec::new(),
@@ -160,6 +162,8 @@ pub struct DashboardMetrics {
     active: u32,
     capacity: u32,
     active_util: u32,
+    transaction_running: u32,
+    transaction_capacity: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -370,6 +374,12 @@ async fn build_dashboard_payload(
         .and_then(|server| server.proxy_config.max_concurrency)
         .unwrap_or(0) as u32;
 
+    let transaction_running = state
+        .sip_server()
+        .map(|server| server.runnings_tx.load(std::sync::atomic::Ordering::Relaxed) as u32)
+        .unwrap_or(0);
+    let transaction_capacity = capacity;
+
     let total_recent = recent_stats.total as u32;
     let answered_recent = recent_stats.answered.unwrap_or(0) as u32;
     let avg_recent_duration = if answered_recent > 0 {
@@ -416,6 +426,8 @@ async fn build_dashboard_payload(
         active: active_total as u32,
         capacity,
         active_util: calc_util(active_total as u32, capacity),
+        transaction_running,
+        transaction_capacity,
     };
 
     let mut direction_counts: BTreeMap<String, i64> = BTreeMap::new();

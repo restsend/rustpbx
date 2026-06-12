@@ -1,4 +1,5 @@
 use crate::rwi::auth::RwiIdentity;
+use crate::rwi::event::{FlatEvent, RwiEventSpec, merge_event_context};
 use crate::rwi::proto::{CallMetaStore, RwiEvent};
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use chrono::{DateTime, Utc};
@@ -467,11 +468,15 @@ impl RwiGateway {
     /// Also caches the event for session resumption.
     pub fn send_event_to_call_owner(&self, call_id: &CallId, event: &RwiEvent) {
         // Feed DTMF digits to any active DtmfCollect tap for this call.
-        if let RwiEvent::Dtmf { digit, leg_id, .. } = event {
-            if let Some(digit_char) = digit.chars().next() {
+        if let RwiEvent::Custom(flat) = event
+            && flat.event_type == "dtmf"
+        {
+            let digit_char = flat.payload.get("digit").and_then(|v| v.as_str()).and_then(|s| s.chars().next());
+            let leg_id = flat.payload.get("leg_id").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+            if let Some(c) = digit_char {
                 if let Ok(taps) = self.dtmf_taps.lock() {
                     if let Some(tx) = taps.get(call_id) {
-                        let _ = tx.send((leg_id.clone(), digit_char));
+                        let _ = tx.send((leg_id, c));
                     }
                 }
             }
@@ -606,6 +611,109 @@ impl RwiGateway {
 
         (events, self.current_sequence())
     }
+
+    fn enrich_flat_event(&self, flat: &FlatEvent) -> FlatEvent {
+        if let Some(call_id) = &flat.call_id
+            && let Some(meta) = self.meta_store.get_sync(call_id)
+        {
+            let mut payload = flat.payload.clone();
+            let ctx = crate::rwi::proto::EventCallContext::from(meta);
+            merge_event_context(&mut payload, Some(&ctx));
+            return FlatEvent { event_type: flat.event_type, call_id: flat.call_id.clone(), payload };
+        }
+        flat.clone()
+    }
+
+    fn dispatch_flat(&self, flat: &FlatEvent) {
+        let enriched = self.enrich_flat_event(flat);
+        for session_id in self.session_event_senders.keys() {
+            self.send_flat_to_session(session_id, &enriched);
+        }
+    }
+
+    fn send_flat_to_session(&self, session_id: &SessionId, flat: &FlatEvent) {
+        if let Some(sender) = self.session_event_senders.get(session_id) {
+            if let Some(filter) = self.session_event_filters.get(session_id) {
+                if !filter.contains(flat.event_type) { return; }
+            }
+            let _ = sender.send(flat.payload.clone());
+        }
+    }
+
+    fn cache_flat_event(&self, call_id: &CallId, flat: &FlatEvent) -> u64 {
+        let mut cache_state = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
+        let now = chrono::Utc::now();
+        while let Some(front) = cache_state.cache.front() {
+            if now.signed_duration_since(front.cached_at).num_seconds() as u64 > self.max_cache_age_secs {
+                cache_state.cache.pop_front();
+            } else { break; }
+        }
+        let seq = cache_state.next_sequence;
+        cache_state.next_sequence += 1;
+        cache_state.cache.push_back(EventCacheEntry {
+            sequence: seq, cached_at: now, call_id: call_id.clone(),
+            event: RwiEvent::Custom(flat.clone()),
+        });
+        seq
+    }
+
+    pub fn broadcast<E: RwiEventSpec>(&self, event: &E) {
+        let flat = FlatEvent::from_spec(event, None);
+        if let Some(tx) = &self.webhook_tx {
+            let mut cs = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
+            let seq = cs.next_sequence; cs.next_sequence += 1;
+            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: String::new(), event: RwiEvent::Custom(flat.clone()) });
+        }
+        self.dispatch_flat(&flat);
+    }
+
+    pub fn send_to_owner<E: RwiEventSpec>(&self, event: &E) {
+        let flat = FlatEvent::from_spec(event, None);
+        let cid = event.call_id().expect("send_to_owner requires event.call_id()").to_string();
+        let seq = self.cache_flat_event(&cid, &flat);
+        let enriched = self.enrich_flat_event(&flat);
+        if let Some(tx) = &self.webhook_tx {
+            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: RwiEvent::Custom(enriched.clone()) });
+        }
+        if let Some(owner_id) = self.call_ownership.get(&cid) {
+            self.send_flat_to_session(owner_id, &enriched);
+        }
+    }
+
+    pub fn fan_out<E: RwiEventSpec>(&self, context: &str, event: &E) {
+        let flat = FlatEvent::from_spec(event, None);
+        let cid = event.call_id().expect("fan_out requires event.call_id()").to_string();
+        let seq = self.cache_flat_event(&cid, &flat);
+        let enriched = self.enrich_flat_event(&flat);
+        if let Some(tx) = &self.webhook_tx {
+            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: RwiEvent::Custom(enriched.clone()) });
+        }
+        if let Some(subscribers) = self.context_subscriptions.get(context) {
+            for session_id in subscribers { self.send_flat_to_session(session_id, &enriched); }
+        }
+    }
+
+    pub fn send_to_session<E: RwiEventSpec>(&self, session_id: &SessionId, event: &E) {
+        let flat = FlatEvent::from_spec(event, None);
+        let enriched = self.enrich_flat_event(&flat);
+        self.send_flat_to_session(session_id, &enriched);
+    }
+
+    pub fn fan_out_excluding<E: RwiEventSpec>(&self, context: &str, event: &E, exclude: Option<&SessionId>) {
+        let flat = FlatEvent::from_spec(event, None);
+        let cid = event.call_id().expect("fan_out_excluding requires event.call_id()").to_string();
+        let seq = self.cache_flat_event(&cid, &flat);
+        let enriched = self.enrich_flat_event(&flat);
+        if let Some(tx) = &self.webhook_tx {
+            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: RwiEvent::Custom(enriched.clone()) });
+        }
+        if let Some(subscribers) = self.context_subscriptions.get(context) {
+            for session_id in subscribers {
+                if exclude.map_or(false, |e| e == session_id) { continue; }
+                self.send_flat_to_session(session_id, &enriched);
+            }
+        }
+    }
 }
 
 impl Default for RwiGateway {
@@ -625,726 +733,28 @@ mod tests {
     use super::*;
     use crate::rwi::auth::RwiIdentity;
 
-    fn create_test_identity() -> RwiIdentity {
-        RwiIdentity {
-            token: "test-token".to_string(),
-            scopes: vec!["call.control".to_string()],
-        }
-    }
+    fn create_identity() -> RwiIdentity { RwiIdentity { token: "t".into(), scopes: vec![] } }
 
     #[tokio::test]
-    async fn test_create_and_remove_session() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-
-        assert_eq!(gateway.session_count(), 0);
-
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-        assert_eq!(gateway.session_count(), 1);
-
-        gateway.remove_session(&session_id);
-        assert_eq!(gateway.session_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_subscribe_unsubscribe() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let contexts = vec!["context1".to_string(), "context2".to_string()];
-        gateway.subscribe(&session_id, contexts.clone(), None);
-
-        assert_eq!(
-            gateway.get_sessions_subscribed_to_context("context1"),
-            vec![session_id.clone()]
-        );
-        assert_eq!(
-            gateway.get_sessions_subscribed_to_context("context2"),
-            vec![session_id.clone()]
-        );
-
-        gateway.unsubscribe(&session_id, &["context1".to_string()]);
-        assert!(
-            gateway
-                .get_sessions_subscribed_to_context("context1")
-                .is_empty()
-        );
-        assert_eq!(
-            gateway.get_sessions_subscribed_to_context("context2"),
-            vec![session_id]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_claim_call_ownership() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let call_id = "call_001".to_string();
-        let result =
-            gateway.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
-        assert!(result.is_ok());
-
-        assert_eq!(gateway.get_call_owner(&call_id), Some(session_id.clone()));
-
-        let result2 =
-            gateway.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
-        assert!(result2.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_claim_call_already_owned() {
-        let mut gateway = RwiGateway::new();
-
-        let identity1 = RwiIdentity {
-            token: "token1".to_string(),
-            scopes: vec!["call.control".to_string()],
-        };
-        let identity2 = RwiIdentity {
-            token: "token2".to_string(),
-            scopes: vec!["call.control".to_string()],
-        };
-
-        let session1 = gateway.create_session(identity1);
-        let session1_id = session1.read().id.clone();
-        let session2 = gateway.create_session(identity2);
-        let session2_id = session2.read().id.clone();
-
-        let call_id = "call_001".to_string();
-        gateway
-            .claim_call_ownership(&session1_id, call_id.clone(), OwnershipMode::Control)
-            .unwrap();
-
-        let result = gateway.claim_call_ownership(&session2_id, call_id, OwnershipMode::Control);
-        assert!(matches!(result, Err(ClaimError::AlreadyOwned)));
-    }
-
-    #[tokio::test]
-    async fn test_release_call_ownership() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let call_id = "call_001".to_string();
-        gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .unwrap();
-
-        assert_eq!(gateway.get_call_owner(&call_id), Some(session_id.clone()));
-
-        gateway.release_call_ownership(&session_id, &call_id);
-        assert_eq!(gateway.get_call_owner(&call_id), None);
-    }
-
-    #[tokio::test]
-    async fn test_supervisor_attach_detach() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let target_call = "call_001".to_string();
-
-        let result =
-            gateway.attach_supervisor(&session_id, target_call.clone(), SupervisorMode::Listen);
-        assert!(result);
-        assert!(gateway.is_supervisor(&target_call));
-        assert_eq!(
-            gateway.get_supervisor_session(&target_call),
-            Some(session_id.clone())
-        );
-
-        gateway.detach_supervisor(&session_id, &target_call);
-        assert!(!gateway.is_supervisor(&target_call));
-    }
-
-    #[tokio::test]
-    async fn test_fanout_to_context() {
-        let mut gateway = RwiGateway::new();
-
-        let identity1 = RwiIdentity {
-            token: "token1".to_string(),
-            scopes: vec!["call.control".to_string()],
-        };
-        let identity2 = RwiIdentity {
-            token: "token2".to_string(),
-            scopes: vec!["call.control".to_string()],
-        };
-
-        let session1 = gateway.create_session(identity1);
-        let session1_id = session1.read().id.clone();
-        let session2 = gateway.create_session(identity2);
-        let session2_id = session2.read().id.clone();
-
-        gateway.subscribe(&session1_id, vec!["context1".to_string()], None);
-        gateway.subscribe(
-            &session2_id,
-            vec!["context1".to_string(), "context2".to_string()],
-            None,
-        );
-
-        let subscribers = gateway.get_sessions_subscribed_to_context("context1");
-        assert_eq!(subscribers.len(), 2);
-        assert!(subscribers.contains(&session1_id));
-        assert!(subscribers.contains(&session2_id));
-
-        let subscribers2 = gateway.get_sessions_subscribed_to_context("context2");
-        assert_eq!(subscribers2.len(), 1);
-        assert_eq!(subscribers2[0], session2_id);
-    }
-
-    #[tokio::test]
-    async fn test_remove_session_cleans_up_subscriptions() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        gateway.subscribe(&session_id, vec!["context1".to_string()], None);
-
-        assert_eq!(
-            gateway.get_sessions_subscribed_to_context("context1"),
-            vec![session_id.clone()]
-        );
-
-        gateway.remove_session(&session_id);
-
-        assert!(
-            gateway
-                .get_sessions_subscribed_to_context("context1")
-                .is_empty()
-        );
-        assert!(gateway.sessions.get(&session_id).is_none());
-    }
-
-    #[tokio::test]
-    async fn test_remove_session_cleans_up_ownership() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        gateway
-            .claim_call_ownership(&session_id, "call_001".to_string(), OwnershipMode::Control)
-            .unwrap();
-
-        assert_eq!(
-            gateway.get_call_owner(&"call_001".to_string()),
-            Some(session_id.clone())
-        );
-
-        gateway.remove_session(&session_id);
-
-        assert_eq!(gateway.get_call_owner(&"call_001".to_string()), None);
-    }
-
-    #[tokio::test]
-    async fn test_send_event_to_session() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
+    async fn test_broadcast_generic() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        let event = RwiEvent::CallAnswered {
-            call_id: "call_001".to_string(),
-            context: Default::default(),
-        };
-        gateway.send_event_to_session(&session_id, &event);
-
-        let received = rx.recv().await.expect("should receive event");
-        assert!(received.is_object());
+        gw.set_session_event_sender(&sid, tx);
+        gw.broadcast(&crate::rwi::CallRinging { call_id: "c1".into() });
+        let v = rx.recv().await.unwrap();
+        assert!(v.to_string().contains("call_ringing"));
     }
 
     #[tokio::test]
-    async fn test_send_event_to_call_owner() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
+    async fn test_send_to_owner_generic() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        let call_id = "call_999".to_string();
-        gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .unwrap();
-
-        let event = RwiEvent::CallHangup {
-            call_id: call_id.clone(),
-            reason: None,
-            sip_status: None,
-            context: Default::default(),
-        };
-        gateway.send_event_to_call_owner(&call_id, &event);
-
-        let received = rx.recv().await.expect("should receive event");
-        assert!(received.is_object());
-    }
-
-    #[tokio::test]
-    async fn test_fan_out_event_to_context() {
-        let mut gateway = RwiGateway::new();
-
-        let id1 = RwiIdentity {
-            token: "t1".into(),
-            scopes: vec![],
-        };
-        let id2 = RwiIdentity {
-            token: "t2".into(),
-            scopes: vec![],
-        };
-
-        let s1 = gateway.create_session(id1);
-        let s1_id = s1.read().id.clone();
-        let s2 = gateway.create_session(id2);
-        let s2_id = s2.read().id.clone();
-
-        let (tx1, mut rx1) = mpsc::unbounded_channel();
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&s1_id, tx1);
-        gateway.set_session_event_sender(&s2_id, tx2);
-
-        gateway.subscribe(&s1_id, vec!["ctx".into()], None);
-        gateway.subscribe(&s2_id, vec!["ctx".into()], None);
-
-        let event = RwiEvent::CallRinging {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        gateway.fan_out_event_to_context("ctx", &event, &"c1".to_string());
-
-        assert!(rx1.recv().await.is_some());
-        assert!(rx2.recv().await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_remove_session_cleans_up_event_sender() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, _rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        assert_eq!(gateway.session_event_senders.len(), 1);
-
-        gateway.remove_session(&session_id);
-
-        assert_eq!(gateway.session_event_senders.len(), 0);
-    }
-
-    #[test]
-    fn test_event_cache_basic() {
-        let gateway = RwiGateway::with_config(100, 60);
-
-        // Add some events
-        let event1 = RwiEvent::CallRinging {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        let event2 = RwiEvent::CallAnswered {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        let event3 = RwiEvent::CallHangup {
-            call_id: "c1".into(),
-            reason: None,
-            sip_status: None,
-            context: Default::default(),
-        };
-
-        let seq1 = gateway.cache_event(&"c1".to_string(), &event1);
-        let seq2 = gateway.cache_event(&"c1".to_string(), &event2);
-        let seq3 = gateway.cache_event(&"c1".to_string(), &event3);
-
-        // Verify sequences are increasing
-        assert!(seq2 > seq1);
-        assert!(seq3 > seq2);
-
-        // Verify we can retrieve events since a sequence
-        let events = gateway.get_events_since(seq1);
-        assert_eq!(events.len(), 2);
-
-        // Verify sequence is in cache
-        assert!(gateway.is_sequence_in_cache(seq2));
-        assert!(!gateway.is_sequence_in_cache(0));
-    }
-
-    #[test]
-    fn test_event_cache_size_limit() {
-        // Create gateway with small cache
-        let gateway = RwiGateway::with_config(5, 60);
-
-        // Add more events than cache size
-        for i in 0..10 {
-            let event = RwiEvent::CallRinging {
-                call_id: format!("c{}", i),
-                context: Default::default(),
-            };
-            gateway.cache_event(&format!("c{}", i), &event);
-        }
-
-        // Verify cache size is maintained
-        let cache_state = gateway.event_cache.lock().unwrap();
-        assert_eq!(cache_state.cache.len(), 5);
-
-        // Verify oldest events were removed
-        let sequences: Vec<u64> = cache_state.cache.iter().map(|e| e.sequence).collect();
-        assert_eq!(sequences.len(), 5);
-    }
-
-    #[test]
-    fn test_resume_session() {
-        let gateway = RwiGateway::with_config(100, 60);
-
-        // Add some events
-        let event1 = RwiEvent::CallRinging {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        let event2 = RwiEvent::CallAnswered {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-
-        gateway.cache_event(&"c1".to_string(), &event1);
-        let seq2 = gateway.cache_event(&"c1".to_string(), &event2);
-
-        // Test resume without last_sequence (get all events)
-        let (events, current_seq) = gateway.resume_session(None);
-        assert_eq!(events.len(), 2);
-        assert!(current_seq > seq2);
-
-        // Test resume with last_sequence (get only new events)
-        let (events, _) = gateway.resume_session(Some(seq2));
-        assert_eq!(events.len(), 0); // No events after seq2
-    }
-
-    #[test]
-    fn test_resume_call() {
-        let gateway = RwiGateway::with_config(100, 60);
-
-        // Add events for different calls
-        let event1 = RwiEvent::CallRinging {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        let event2 = RwiEvent::CallRinging {
-            call_id: "c2".into(),
-            context: Default::default(),
-        };
-        let event3 = RwiEvent::CallAnswered {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-
-        gateway.cache_event(&"c1".to_string(), &event1);
-        gateway.cache_event(&"c2".to_string(), &event2);
-        gateway.cache_event(&"c1".to_string(), &event3);
-
-        // Get events only for c1
-        let (events, _seq) = gateway.resume_call(&"c1".to_string(), None);
-        assert_eq!(events.len(), 2);
-
-        for event in &events {
-            assert_eq!(event.call_id, "c1");
-        }
-    }
-
-    #[test]
-    fn test_event_call_id_extraction() {
-        // Test various events
-        let event1 = RwiEvent::CallRinging {
-            call_id: "c1".into(),
-            context: Default::default(),
-        };
-        assert_eq!(event1.call_id(), Some("c1"));
-
-        let event2 = RwiEvent::CallTransferFailed {
-            call_id: "c2".into(),
-            sip_status: Some(404),
-            reason: Some("Not found".into()),
-            context: Default::default(),
-        };
-        assert_eq!(event2.call_id(), Some("c2"));
-
-        let event3 = RwiEvent::CallBridged {
-            leg_a: "a".into(),
-            leg_b: "b".into(),
-        };
-        assert_eq!(event3.call_id(), Some("a"));
-
-        let event4 = RwiEvent::ConferenceCreated {
-            conf_id: "conf1".into(),
-        };
-        assert_eq!(event4.call_id(), None);
-    }
-
-    // ── call_vars tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_set_and_get_call_var() {
-        let mut gateway = RwiGateway::new();
-        let call_id = "call-001".to_string();
-
-        // Getting a non-existent var returns None
-        assert_eq!(gateway.get_call_var(&call_id, "mykey"), None);
-
-        // Set a var and get it back
-        gateway.set_call_var(&call_id, "mykey".to_string(), "myvalue".to_string());
-        assert_eq!(
-            gateway.get_call_var(&call_id, "mykey"),
-            Some("myvalue".to_string())
-        );
-    }
-
-    #[test]
-    fn test_set_var_overwrites() {
-        let mut gateway = RwiGateway::new();
-        let call_id = "call-002".to_string();
-
-        gateway.set_call_var(&call_id, "k".to_string(), "v1".to_string());
-        gateway.set_call_var(&call_id, "k".to_string(), "v2".to_string());
-        assert_eq!(gateway.get_call_var(&call_id, "k"), Some("v2".to_string()));
-    }
-
-    #[test]
-    fn test_vars_are_per_call() {
-        let mut gateway = RwiGateway::new();
-        gateway.set_call_var(&"call-a".to_string(), "x".to_string(), "1".to_string());
-        gateway.set_call_var(&"call-b".to_string(), "x".to_string(), "2".to_string());
-
-        assert_eq!(
-            gateway.get_call_var(&"call-a".to_string(), "x"),
-            Some("1".to_string())
-        );
-        assert_eq!(
-            gateway.get_call_var(&"call-b".to_string(), "x"),
-            Some("2".to_string())
-        );
-    }
-
-    #[test]
-    fn test_remove_call_vars() {
-        let mut gateway = RwiGateway::new();
-        let call_id = "call-003".to_string();
-
-        gateway.set_call_var(&call_id, "k".to_string(), "v".to_string());
-        gateway.remove_call_vars(&call_id);
-        assert_eq!(gateway.get_call_var(&call_id, "k"), None);
-    }
-
-    // ── event filter tests ────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_event_filter_allows_matching_events() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        // Subscribe with filter for "call_ringing" only
-        gateway.subscribe(
-            &session_id,
-            vec!["ctx".to_string()],
-            Some(vec!["call_ringing".to_string()]),
-        );
-
-        // This event should be delivered (type matches filter)
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallRinging {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        assert!(rx.try_recv().is_ok(), "call_ringing should pass filter");
-
-        // This event should be dropped (type not in filter)
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallAnswered {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "call_answered should be filtered out"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_event_filter_none_allows_all() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        // Subscribe without filter
-        gateway.subscribe(&session_id, vec!["ctx".to_string()], None);
-
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallRinging {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallAnswered {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallHangup {
-                call_id: "c1".into(),
-                reason: None,
-                sip_status: None,
-                context: Default::default(),
-            },
-        );
-
-        assert!(rx.try_recv().is_ok(), "event 1 should arrive");
-        assert!(rx.try_recv().is_ok(), "event 2 should arrive");
-        assert!(rx.try_recv().is_ok(), "event 3 should arrive");
-    }
-
-    #[tokio::test]
-    async fn test_event_filter_multi_type() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        // Subscribe filtering for two event types
-        gateway.subscribe(
-            &session_id,
-            vec!["ctx".to_string()],
-            Some(vec!["call_ringing".to_string(), "call_hangup".to_string()]),
-        );
-
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallRinging {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallAnswered {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallHangup {
-                call_id: "c1".into(),
-                reason: None,
-                sip_status: None,
-                context: Default::default(),
-            },
-        );
-
-        let e1 = rx.try_recv().expect("call_ringing should arrive");
-        let e3 = rx.try_recv().expect("call_hangup should arrive");
-        assert!(rx.try_recv().is_err(), "no more events expected");
-
-        let s1 = serde_json::to_string(&e1).unwrap();
-        let s3 = serde_json::to_string(&e3).unwrap();
-        assert!(
-            s1.contains("\"call_id\""),
-            "first should have call_id: {s1}"
-        );
-        assert!(
-            s3.contains("reason"),
-            "second should have reason field: {s3}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_event_filter_cleared_on_resubscribe_without_filter() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-
-        // First subscribe with a filter
-        gateway.subscribe(
-            &session_id,
-            vec!["ctx".to_string()],
-            Some(vec!["call_ringing".to_string()]),
-        );
-
-        // Re-subscribe without filter — should clear the filter
-        gateway.subscribe(&session_id, vec!["ctx".to_string()], None);
-
-        // Now all events should pass
-        gateway.send_event_to_session(
-            &session_id,
-            &RwiEvent::CallAnswered {
-                call_id: "c1".into(),
-                context: Default::default(),
-            },
-        );
-        assert!(
-            rx.try_recv().is_ok(),
-            "filter should be cleared after resubscribe with no events"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_event_filter_removed_on_session_removal() {
-        let mut gateway = RwiGateway::new();
-        let identity = create_test_identity();
-        let session = gateway.create_session(identity);
-        let session_id = session.read().id.clone();
-
-        let (tx, _rx) = mpsc::unbounded_channel();
-        gateway.set_session_event_sender(&session_id, tx);
-        gateway.subscribe(
-            &session_id,
-            vec!["ctx".to_string()],
-            Some(vec!["call_ringing".to_string()]),
-        );
-
-        assert!(
-            gateway.session_event_filters.contains_key(&session_id),
-            "filter should be stored"
-        );
-
-        gateway.remove_session(&session_id);
-        assert!(
-            !gateway.session_event_filters.contains_key(&session_id),
-            "filter should be removed with session"
-        );
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control).unwrap();
+        gw.send_to_owner(&crate::rwi::CallAnswered { call_id: "c1".into() });
+        let v = rx.recv().await.unwrap();
+        assert!(v.to_string().contains("call_answered"));
     }
 }

@@ -33,7 +33,7 @@ exclude = [
 opus = ["audio-codec/opus"]
 console = ["dep:minijinja"]
 addon-acme = ["instant-acme"]
-addon-wholesale = ["dep:async-stream", "dep:async-compression"]
+addon-wholesale = ["dep:async-stream", "dep:async-compression", "dep:country-emoji"]
 addon-archive = ["flate2"]
 addon-endpoint-manager = []
 addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
@@ -192,7 +192,6 @@ opentelemetry_sdk = { version = "0.31.0", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 phonenumber = "0.3.9"
-country-emoji = "0.3.5"
 tower-http = { version = "0.6.10", features = [
     "fs",
     "cors",
@@ -209,6 +208,7 @@ totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
+country-emoji = { version = "0.3.5", optional = true }
 
 
 [dev-dependencies]
@@ -219,6 +219,11 @@ serde_urlencoded = "0.7"
 
 [build-dependencies]
 chrono = "0.4"
+
+[profile.dev]
+split-debuginfo = "packed"
+debug = 1
+codegen-units = 256
 
 [[bin]]
 name = "rustpbx"

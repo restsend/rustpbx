@@ -531,12 +531,14 @@ impl ProxyModule for RegistrarModule {
         let max_expires = self.config.max_registrar_expires.unwrap_or(50);
 
         let mut response_headers = Vec::new();
+        let mut max_contact_expires = 0u32;
         for entry in contact_entries {
             let expires = entry
                 .expires()
                 .or(global_expires)
                 .unwrap_or(default_expires)
                 .min(max_expires);
+            max_contact_expires = max_contact_expires.max(expires);
 
             let destination = match user
                 .destination
@@ -625,27 +627,7 @@ impl ProxyModule for RegistrarModule {
                     if let Some(locator_events) = &self.server.locator_events {
                         locator_events.send(LocatorEvent::Registered(location)).ok();
                     }
-                    if let Some(ref gw) = self.server.rwi_gateway {
-                        use crate::rwi::proto::RwiEvent;
-                        let event = RwiEvent::DnStateChanged {
-                            caller: user.username.clone(),
-                            event_name: "REGISTERED".to_string(),
-                            system_time: chrono::Utc::now().to_rfc3339(),
-                            call_id: None,
-                            agent_id: None,
-                            caller_name: None,
-                            callee_name: None,
-                            reason_code: None,
-                            agent_work_mode: None,
-                            releasing_party: None,
-                            vq_name: None,
-                            routing_target: None,
-                            skill_group: None,
-                            party: None,
-                            extra: None,
-                        };
-                        gw.read().broadcast_event(&event);
-                    }
+                    // DnStateChanged removed. Use agent_state_changed instead.
                 }
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
@@ -672,9 +654,7 @@ impl ProxyModule for RegistrarModule {
                     .into(),
             ));
         }
-        response_headers.push(Header::Expires(
-            global_expires.unwrap_or(default_expires).into(),
-        ));
+        response_headers.push(Header::Expires(max_contact_expires.into()));
 
         tx.reply_with(rsipstack::sip::StatusCode::OK, response_headers, None)
             .await

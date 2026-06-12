@@ -987,7 +987,17 @@ impl SipServer {
     }
 
     async fn handle_incoming(&self, mut incoming: TransactionReceiver) -> Result<()> {
+        let mut tx_count: u64 = 0;
         while let Some(mut tx) = incoming.recv().await {
+            crate::metrics::transaction::received();
+            tx_count += 1;
+            if tx_count % 100 == 0 {
+                let stats = self.inner.endpoint.inner.get_stats();
+                crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
+                crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);
+                crate::metrics::transaction::set_endpoint_waiting_ack(stats.waiting_ack);
+                crate::metrics::transaction::set_running(self.inner.runnings_tx.load(Ordering::Relaxed));
+            }
             let modules = self.modules.clone();
 
             let token = tx
@@ -1007,6 +1017,7 @@ impl SipServer {
                     runnings = runnings_tx.load(Ordering::Relaxed),
                     "max concurrency reached, not process this transaction"
                 );
+                crate::metrics::transaction::rejected("max_concurrency");
                 tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable)
                     .await
                     .ok();
@@ -1070,6 +1081,7 @@ impl SipServer {
                         info!(key = %tx.key, "transaction cancelled");
                     }
                 };
+                crate::metrics::transaction::latency_seconds(start_time.elapsed().as_secs_f64());
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 let is_mid_dialog = tx
                     .original

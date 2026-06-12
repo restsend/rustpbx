@@ -92,6 +92,58 @@
             </div>
         </section>
 
+        <!-- Transaction Pressure -->
+        <section class="mt-4 rounded-xl bg-white p-5 ring-1 ring-black/5">
+            <div class="flex items-center justify-between">
+                <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Transaction Pressure</h2>
+                <span class="text-xs text-slate-400" id="tx-pressure-updated"></span>
+            </div>
+            <div class="mt-3 grid gap-3 sm:grid-cols-3">
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Running Transactions</div>
+                    <div class="mt-1 flex items-baseline gap-1">
+                        <span id="tx-running" class="text-2xl font-semibold text-slate-700">{{ metrics.transaction_running | default(0) }}</span>
+                        {% if metrics.transaction_capacity > 0 %}
+                        <span id="tx-capacity" class="text-xs text-slate-400">/ {{ metrics.transaction_capacity }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="mt-2 h-1.5 w-full overflow-hidden rounded bg-slate-200">
+                        <div id="tx-running-bar" class="h-full bg-purple-500"
+                            style="width: {% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}{% else %}0{% endif %}%"></div>
+                    </div>
+                </div>
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Active Calls</div>
+                    <div class="mt-1 flex items-baseline gap-1">
+                        <span id="tx-active-calls" class="text-2xl font-semibold text-slate-700">{{ metrics.active | default(0) }}</span>
+                        {% if metrics.capacity > 0 %}
+                        <span id="tx-call-capacity" class="text-xs text-slate-400">/ {{ metrics.capacity }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="mt-2 h-1.5 w-full overflow-hidden rounded bg-slate-200">
+                        <div id="tx-active-calls-bar" class="h-full bg-amber-500"
+                            style="width: {% if metrics.capacity > 0 %}{{ (metrics.active / metrics.capacity * 100) | round(min=0) }}{% else %}0{% endif %}%"></div>
+                    </div>
+                </div>
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Concurrency Utilization</div>
+                    <div class="mt-1">
+                        <span id="tx-utilization" class="text-2xl font-semibold text-slate-700">
+                            {% if metrics.transaction_running > 0 and metrics.transaction_capacity > 0 %}
+                            {{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}%
+                            {% elif metrics.active_util > 0 %}{{ metrics.active_util }}%
+                            {% else %}0%
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
+                        <span>Trans: <span id="tx-util-pct">{% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}{% else %}0{% endif %}%</span></span>
+                        <span>Call: {{ metrics.active_util | default(0) }}%</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- Lower grid: left charts, right summaries -->
         <section class="mt-6 grid gap-6 lg:grid-cols-3">
             <div class="lg:col-span-2 rounded-2xl bg-white p-6 ring-1 ring-black/5">
@@ -206,7 +258,15 @@
             activeUtilBar: document.getElementById('metric-active-util-bar'),
             timelineTitle: document.getElementById('timeline-title'),
             activeBody: document.getElementById('active-calls-body'),
-            activeUpdated: document.getElementById('active-updated')
+            activeUpdated: document.getElementById('active-updated'),
+            txRunning: document.getElementById('tx-running'),
+            txCapacity: document.getElementById('tx-capacity'),
+            txRunningBar: document.getElementById('tx-running-bar'),
+            txActiveCalls: document.getElementById('tx-active-calls'),
+            txCallCapacity: document.getElementById('tx-call-capacity'),
+            txActiveCallsBar: document.getElementById('tx-active-calls-bar'),
+            txUtilization: document.getElementById('tx-utilization'),
+            txUtilPct: document.getElementById('tx-util-pct'),
         };
         const rangeLabels = document.querySelectorAll('[data-range-label]');
 
@@ -416,6 +476,30 @@
             if (elements.activeUtilBar) {
                 elements.activeUtilBar.style.setProperty('--v', active.active_util ?? 0);
             }
+            // Transaction pressure
+            const txRunning = active.transaction_running ?? 0;
+            const txCapacity = active.transaction_capacity ?? 0;
+            if (elements.txRunning) elements.txRunning.textContent = txRunning;
+            if (elements.txActiveCalls) elements.txActiveCalls.textContent = active.active ?? 0;
+            if (elements.txCapacity && txCapacity > 0) {
+                elements.txCapacity.textContent = '/ ' + txCapacity;
+                elements.txCapacity.style.display = '';
+            } else if (elements.txCapacity) {
+                elements.txCapacity.style.display = 'none';
+            }
+            if (elements.txCallCapacity && active.capacity > 0) {
+                elements.txCallCapacity.textContent = '/ ' + (active.capacity ?? 0);
+                elements.txCallCapacity.style.display = '';
+            } else if (elements.txCallCapacity) {
+                elements.txCallCapacity.style.display = 'none';
+            }
+            const txUtilPct = txCapacity > 0 ? Math.round(txRunning / txCapacity * 100) : 0;
+            if (elements.txRunningBar) elements.txRunningBar.style.width = txUtilPct + '%';
+            if (elements.txActiveCallsBar) elements.txActiveCallsBar.style.width = (active.active_util ?? 0) + '%';
+            if (elements.txUtilization) {
+                elements.txUtilization.textContent = (txRunning > 0 && txCapacity > 0) ? txUtilPct + '%' : ((active.active_util ?? 0) + '%');
+            }
+            if (elements.txUtilPct) elements.txUtilPct.textContent = txUtilPct + '%';
             if (elements.timelineTitle) {
                 elements.timelineTitle.textContent = localizedTimelineTitle(data.range);
             }

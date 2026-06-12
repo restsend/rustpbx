@@ -77,6 +77,8 @@ pub struct RuntimeMetrics {
     pub sip: SipMetrics,
     /// Call metrics
     pub calls: CallMetrics,
+    /// Transaction pressure metrics
+    pub transaction: TransactionMetrics,
     /// Media metrics
     pub media: MediaMetrics,
     /// Voicemail metrics
@@ -130,10 +132,25 @@ pub struct VoicemailMetrics {
     pub active_mailboxes: u32,
 }
 
+#[derive(Clone, serde::Serialize, Default)]
+pub struct TransactionMetrics {
+    /// Currently running transactions (user-space counter)
+    pub running: u32,
+    /// Max concurrency limit (0 = unlimited)
+    pub max_concurrency: u32,
+    /// RSIP endpoint internal running transactions
+    pub endpoint_running: usize,
+    /// RSIP endpoint cumulative finished transactions
+    pub endpoint_finished: usize,
+    /// RSIP endpoint transactions waiting for ACK
+    pub endpoint_waiting_ack: usize,
+}
+
 fn collect_runtime_metrics(state: &ConsoleState) -> RuntimeMetrics {
     let system = collect_system_metrics(state);
     let sip = collect_sip_metrics(state);
     let calls = collect_call_metrics(state);
+    let transaction = collect_transaction_metrics(state);
     let media = MediaMetrics::default();
     let voicemail = VoicemailMetrics::default();
 
@@ -141,6 +158,7 @@ fn collect_runtime_metrics(state: &ConsoleState) -> RuntimeMetrics {
         system,
         sip,
         calls,
+        transaction,
         media,
         voicemail,
         collected_at: chrono::Utc::now().to_rfc3339(),
@@ -191,6 +209,21 @@ fn collect_call_metrics(state: &ConsoleState) -> CallMetrics {
     } else {
         0
     };
+
+    metrics
+}
+
+fn collect_transaction_metrics(state: &ConsoleState) -> TransactionMetrics {
+    let mut metrics = TransactionMetrics::default();
+
+    if let Some(server) = state.sip_server() {
+        metrics.running = server.runnings_tx.load(std::sync::atomic::Ordering::Relaxed) as u32;
+        metrics.max_concurrency = server.proxy_config.max_concurrency.unwrap_or(0) as u32;
+        let stats = server.endpoint.inner.get_stats();
+        metrics.endpoint_running = stats.running_transactions;
+        metrics.endpoint_finished = stats.finished_transactions;
+        metrics.endpoint_waiting_ack = stats.waiting_ack;
+    }
 
     metrics
 }
