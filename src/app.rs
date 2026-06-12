@@ -1,8 +1,7 @@
 use crate::{
     callrecord::{
-        CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender,
-        DefaultCallRecordFormatter, noop_saver, recording_upload::RecordingUploadHook,
-        sipflow_upload::SipFlowUploadHook,
+        CallRecordManagerBuilder, CallRecordSender, noop_saver,
+        recording_upload::RecordingUploadHook, sipflow_upload::SipFlowUploadHook,
     },
     config::{ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
@@ -85,7 +84,6 @@ pub type AppState = Arc<AppStateInner>;
 pub struct AppStateBuilder {
     pub config: Option<Config>,
     pub callrecord_sender: Option<CallRecordSender>,
-    pub callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
     pub cancel_token: Option<CancellationToken>,
     pub proxy_builder: Option<SipServerBuilder>,
     pub config_loaded_at: Option<DateTime<Utc>>,
@@ -194,7 +192,6 @@ impl AppStateBuilder {
         Self {
             config: None,
             callrecord_sender: None,
-            callrecord_formatter: None,
             cancel_token: None,
             proxy_builder: None,
             config_loaded_at: None,
@@ -225,11 +222,6 @@ impl AppStateBuilder {
 
     pub fn with_callrecord_sender(mut self, sender: CallRecordSender) -> Self {
         self.callrecord_sender = Some(sender);
-        self
-    }
-
-    pub fn with_callrecord_formatter(mut self, formatter: Arc<dyn CallRecordFormatter>) -> Self {
-        self.callrecord_formatter = Some(formatter);
         self
     }
 
@@ -308,17 +300,6 @@ impl AppStateBuilder {
                 None
             };
 
-        let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
-            formatter
-        } else {
-            let formatter = if let Some(ref callrecord) = config.callrecord {
-                DefaultCallRecordFormatter::new_with_config(callrecord)
-            } else {
-                DefaultCallRecordFormatter::default()
-            };
-            Arc::new(formatter)
-        };
-
         let mut callrecord_stats = None;
         let mut callrecord_manager = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
@@ -333,8 +314,7 @@ impl AppStateBuilder {
             //  - [recording].type exports live recorder WAV after call completion.
             // DatabaseHook is always included so call records reach the DB.
             let mut builder = CallRecordManagerBuilder::new()
-                .with_cancel_token(token.child_token())
-                .with_formatter(callrecord_formatter.clone());
+                .with_cancel_token(token.child_token());
 
             if let Some(ref callrecord) = config.callrecord {
                 builder = builder.with_config(callrecord.clone());
@@ -354,7 +334,6 @@ impl AppStateBuilder {
                     backend: backend.clone(),
                     upload_config: upload_cfg.clone(),
                     db: Some(db_conn.clone()),
-                    formatter: callrecord_formatter.clone(),
                     rwi_gateway: rwi_gateway.clone(),
                 }));
             }
@@ -387,11 +366,7 @@ impl AppStateBuilder {
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
-                crate::console::ConsoleState::initialize(
-                    callrecord_formatter.clone(),
-                    db_conn.clone(),
-                    console_config,
-                )
+                crate::console::ConsoleState::initialize(db_conn.clone(), console_config)
                 .await?,
             ),
             None => None,
@@ -449,7 +424,6 @@ impl AppStateBuilder {
                     .with_storage(core.storage.clone())
                     .with_sipflow_config(config.sipflow.clone())
                     .with_sipflow_backend(sipflow_backend_arc.clone())
-                    .with_callrecord_formatter(Some(callrecord_formatter.clone()))
                     .with_no_bind(self.skip_sip_bind)
                     .with_skip_migrate(self.skip_migrate)
                     .with_addon_registry(Some(addon_registry.clone()))

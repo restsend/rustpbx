@@ -8,7 +8,10 @@ use sea_orm::DatabaseConnection;
 use tracing::{info, warn};
 
 use crate::{
-    callrecord::{CallRecord, CallRecordFormatter, CallRecordHook},
+    callrecord::{
+        CallRecord, CallRecordHook, format_sipflow_media_file_name, format_sipflow_media_key,
+        format_sipflow_signaling_file_name, format_sipflow_signaling_key,
+    },
     config::SipFlowUploadConfig,
     rwi::RwiGatewayRef,
     sipflow::SipFlowBackend,
@@ -18,7 +21,6 @@ pub struct SipFlowUploadHook {
     pub backend: Arc<dyn SipFlowBackend>,
     pub upload_config: SipFlowUploadConfig,
     pub db: Option<DatabaseConnection>,
-    pub formatter: Arc<dyn CallRecordFormatter>,
     pub rwi_gateway: Option<RwiGatewayRef>,
 }
 
@@ -32,23 +34,21 @@ impl CallRecordHook for SipFlowUploadHook {
         let backend = self.backend.clone();
         let upload_config = self.upload_config.clone();
         let db = self.db.clone();
-        let formatter = self.formatter.clone();
         let call_id = record.call_id.clone();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
         let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
         let rwi_gateway = self.rwi_gateway.clone();
 
-        let media_key = formatter.format_sipflow_media_key(record);
-        let signaling_key = formatter.format_sipflow_signaling_key(record);
-        let media_file_name = formatter.format_sipflow_media_file_name(record);
-        let signaling_file_name = formatter.format_sipflow_signaling_file_name(record);
+        let media_key = format_sipflow_media_key(record);
+        let signaling_key = format_sipflow_signaling_key(record);
+        let media_file_name = format_sipflow_media_file_name(record);
+        let signaling_file_name = format_sipflow_signaling_file_name(record);
 
         crate::utils::spawn(async move {
             crate::callrecord::sipflow_upload::do_upload(
                 backend,
                 upload_config,
-                formatter,
                 db,
                 &call_id,
                 start,
@@ -71,7 +71,6 @@ impl CallRecordHook for SipFlowUploadHook {
 async fn do_upload(
     backend: Arc<dyn SipFlowBackend>,
     upload_config: SipFlowUploadConfig,
-    _formatter: Arc<dyn CallRecordFormatter>,
     db: Option<DatabaseConnection>,
     call_id: &str,
     start: DateTime<Local>,
@@ -424,7 +423,6 @@ async fn upload_http_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::callrecord::DefaultCallRecordFormatter;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
     use chrono::{DateTime, Local};
 
@@ -502,7 +500,6 @@ mod tests {
                 media: None,
             },
             db: None,
-            formatter: Arc::new(DefaultCallRecordFormatter::default()),
             rwi_gateway: None,
         };
         let mut record = make_record();
