@@ -547,17 +547,17 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Push a DTMF event via the gateway directly
-    let event = rustpbx::rwi::RwiEvent::Dtmf {
+    let event = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::Dtmf  { 
         call_id: "pushed-call".to_string(),
         digit: "7".to_string(),
         leg_id: None,
-        context: Default::default(),
-    };
+    }, None);
     {
         let gw = gateway.read();
         let call_id = "pushed-call".to_string();
         gw.fan_out_event_to_context("push-ctx", &event, &call_id);
-    }
+    }, None);
+
 
     // The client must receive it within 2 seconds
     let msg = timeout(Duration::from_secs(2), ws.next())
@@ -857,17 +857,16 @@ async fn test_session_resume_returns_events_and_sequence() {
     // Cache some events in the gateway
     {
         let gw = gateway.read();
-        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+        let event1 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
             call_id: "test-call-1".to_string(),
-            context: Default::default(),
-        };
-        let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
+        }, None);
+        let event2 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallAnswered  { 
             call_id: "test-call-1".to_string(),
-            context: Default::default(),
-        };
+        }, None);
         gw.cache_event(&"test-call-1".to_string(), &event1);
         gw.cache_event(&"test-call-1".to_string(), &event2);
-    }
+    }, None);
+
 
     // Request session resume without last_sequence (should return all events)
     let (_, json) = req("session.resume", serde_json::json!({}));
@@ -876,7 +875,8 @@ async fn test_session_resume_returns_events_and_sequence() {
     // Debug: print response if error
     if v["status"] == "error" {
         eprintln!("Session resume error: {:?}", v);
-    }
+    }, None);
+
 
     assert_eq!(v["status"], "success");
     assert!(v["data"]["events"].is_array(), "events should be an array");
@@ -904,22 +904,21 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
     // Cache events
     {
         let gw = gateway.read();
-        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+        let event1 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
             call_id: "seq-call".to_string(),
-            context: Default::default(),
-        };
-        let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
+        }, None);
+        let event2 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallAnswered  { 
             call_id: "seq-call".to_string(),
-            context: Default::default(),
-        };
-        let event3 = rustpbx::rwi::RwiEvent::CallBridged {
+        }, None);
+        let event3 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallBridged  { 
             leg_a: "seq-call".to_string(),
             leg_b: "other".to_string(),
-        };
+        }, None);
         gw.cache_event(&"seq-call".to_string(), &event1);
         gw.cache_event(&"seq-call".to_string(), &event2);
         gw.cache_event(&"seq-call".to_string(), &event3);
-    }
+    }, None);
+
 
     // Get initial sequence
     let (_, json) = req("session.resume", serde_json::json!({}));
@@ -938,7 +937,8 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
     );
 
     ws.close(None).await.unwrap();
-}
+}, None);
+
 
 #[tokio::test]
 async fn test_call_resume_returns_call_specific_events() {
@@ -948,17 +948,16 @@ async fn test_call_resume_returns_call_specific_events() {
     // Cache events for different calls
     {
         let gw = gateway.read();
-        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+        let event1 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
             call_id: "call-a".to_string(),
-            context: Default::default(),
-        };
-        let event2 = rustpbx::rwi::RwiEvent::CallRinging {
+        }, None);
+        let event2 = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
             call_id: "call-b".to_string(),
-            context: Default::default(),
-        };
+        }, None);
         gw.cache_event(&"call-a".to_string(), &event1);
         gw.cache_event(&"call-b".to_string(), &event2);
-    }
+    }, None);
+
 
     // Request call resume for specific call
     let (_, json) = req("call.resume", serde_json::json!({"call_id": "call-a"}));
@@ -975,10 +974,12 @@ async fn test_call_resume_returns_call_specific_events() {
             event["call_id"], "call-a",
             "should only have events for call-a"
         );
-    }
+    }, None);
+
 
     ws.close(None).await.unwrap();
-}
+}, None);
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Binary PCM WebSocket

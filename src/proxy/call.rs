@@ -1455,13 +1455,12 @@ impl CallModule {
                                     .await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
-                                    let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
+                                    let g = gw.read();
+                                    g.broadcast(&crate::rwi::ConferenceSeatReplaceSucceeded {
                                         conf_id: conf_id.map(|c| c.0).unwrap_or_default(),
                                         old_call_id: old_session_id.clone(),
                                         new_call_id: sid.clone(),
-                                    };
-                                    let g = gw.read();
-                                    g.broadcast_event(&event);
+                                    });
                                 }
                             }
                         });
@@ -1547,12 +1546,10 @@ impl CallModule {
                                     .await;
 
                                 if let Some(ref gw) = server.rwi_gateway {
-                                    let event = crate::rwi::proto::RwiEvent::CallTransferred {
-                                        call_id: old_session_id.clone(),
-                                        context: Default::default(),
-                                    };
                                     let g = gw.read();
-                                    g.broadcast_event(&event);
+                                    g.broadcast(&crate::rwi::CallTransferred {
+                                        call_id: old_session_id.clone(),
+                                    });
                                 }
                             }
                         });
@@ -1756,12 +1753,10 @@ impl CallModule {
             if let Some(_user) = user
                 && let Some(ref gw) = server.rwi_gateway
             {
-                let event = crate::rwi::proto::RwiEvent::CallTransferred {
-                    call_id: original_session_id.clone(),
-                    context: Default::default(),
-                };
                 let g = gw.read();
-                g.send_event_to_call_owner(&original_session_id, &event);
+                g.send_to_owner(&crate::rwi::CallTransferred {
+                    call_id: original_session_id.clone(),
+                });
             }
         });
 

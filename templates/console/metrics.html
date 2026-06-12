@@ -153,6 +153,38 @@ path = "/metrics"
             </div>
         </section>
 
+        <!-- Transaction Pressure Metrics -->
+        <section class="mb-6 grid gap-4 md:grid-cols-3">
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Running Transactions</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div id="tx-running" class="text-3xl font-semibold">{{ metrics.transaction.running | default(0) }}</div>
+                    {% if metrics.transaction.max_concurrency > 0 %}
+                    <span class="text-xs text-slate-400">/ {{ metrics.transaction.max_concurrency }}</span>
+                    {% endif %}
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div id="tx-running-bar" class="h-full bg-emerald-500"
+                        data-utilization="{% if metrics.transaction.max_concurrency > 0 %}{{ (metrics.transaction.running / metrics.transaction.max_concurrency * 100) | round }}{% else %}0{% endif %}"></div>
+                </div>
+                <div class="mt-2 text-xs text-slate-500">Concurrency Limit: {{ metrics.transaction.max_concurrency | default(0) }}</div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Endpoint Running</div>
+                <div class="mt-2">
+                    <div id="tx-endpoint-running" class="text-3xl font-semibold">{{ metrics.transaction.endpoint_running | default(0) }}</div>
+                </div>
+                <div class="mt-2 text-xs text-slate-500">Waiting ACK: <span id="tx-waiting-ack">{{ metrics.transaction.endpoint_waiting_ack | default(0) }}</span></div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Endpoint Finished</div>
+                <div class="mt-2">
+                    <div id="tx-endpoint-finished" class="text-3xl font-semibold">{{ metrics.transaction.endpoint_finished | default(0) }}</div>
+                </div>
+                <div class="mt-2 text-xs text-slate-500">Cumulative completed transactions</div>
+            </div>
+        </section>
+
         <!-- SIP Metrics -->
         <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.sip_layer" | t }}</h2>
@@ -193,6 +225,34 @@ path = "/metrics"
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_failed | default(0) }}
                             </td>
                             <td class="px-4 py-3 text-slate-500">{{ "metrics.registrations_failed_desc" | t }}</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50 bg-slate-50/50">
+                            <td class="px-4 py-3 font-medium text-slate-700" colspan="3">Transaction Pressure</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">Running (App)</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.transaction.running | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Currently in-flight transactions (user-space)</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">Max Concurrency</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.transaction.max_concurrency | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Hard limit (0 = unlimited), 503 when exceeded</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">Endpoint Running</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.transaction.endpoint_running | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">RSIP stack internal in-flight transactions</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">Endpoint Finished</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.transaction.endpoint_finished | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Cumulative completed by RSIP stack</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">Waiting ACK</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.transaction.endpoint_waiting_ack | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Transactions awaiting final ACK</td>
                         </tr>
                     </tbody>
                 </table>
@@ -326,6 +386,23 @@ path = "/metrics"
             var sipDialogs = document.getElementById('sip-dialogs');
             if (sipDialogs && data.sip) {
                 sipDialogs.textContent = data.sip.dialogs_active || 0;
+            }
+
+            // Transaction pressure metrics
+            var txRunning = document.getElementById('tx-running');
+            var txRunningBar = document.getElementById('tx-running-bar');
+            var txEndpointRunning = document.getElementById('tx-endpoint-running');
+            var txWaitingAck = document.getElementById('tx-waiting-ack');
+            var txEndpointFinished = document.getElementById('tx-endpoint-finished');
+
+            if (data.transaction) {
+                if (txRunning) txRunning.textContent = data.transaction.running || 0;
+                if (txEndpointRunning) txEndpointRunning.textContent = data.transaction.endpoint_running || 0;
+                if (txWaitingAck) txWaitingAck.textContent = data.transaction.endpoint_waiting_ack || 0;
+                if (txEndpointFinished) txEndpointFinished.textContent = data.transaction.endpoint_finished || 0;
+                if (txRunningBar && data.transaction.max_concurrency > 0) {
+                    txRunningBar.style.width = ((data.transaction.running / data.transaction.max_concurrency) * 100).toFixed(0) + '%';
+                }
             }
 
             var collectedAt = document.getElementById('collected-at');

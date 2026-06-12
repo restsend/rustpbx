@@ -77,6 +77,40 @@ pub mod sip {
     }
 }
 
+pub mod transaction {
+    pub fn received() {
+        metrics::counter!("rustpbx_sip_transactions_received_total").increment(1);
+    }
+
+    pub fn rejected(reason: &str) {
+        metrics::counter!(
+            "rustpbx_sip_transactions_rejected_total",
+            "reason" => reason.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn set_running(count: usize) {
+        metrics::gauge!("rustpbx_sip_transactions_running").set(count as f64);
+    }
+
+    pub fn latency_seconds(duration_secs: f64) {
+        metrics::histogram!("rustpbx_sip_transaction_latency_seconds").record(duration_secs);
+    }
+
+    pub fn set_endpoint_running(count: usize) {
+        metrics::gauge!("rustpbx_sip_endpoint_running_transactions").set(count as f64);
+    }
+
+    pub fn set_endpoint_finished(count: usize) {
+        metrics::gauge!("rustpbx_sip_endpoint_finished_transactions").set(count as f64);
+    }
+
+    pub fn set_endpoint_waiting_ack(count: usize) {
+        metrics::gauge!("rustpbx_sip_endpoint_waiting_ack").set(count as f64);
+    }
+}
+
 pub mod trunk {
     pub fn call_routed(trunk_id: &str, direction: &str) {
         metrics::counter!(

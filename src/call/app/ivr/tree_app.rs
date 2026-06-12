@@ -140,12 +140,10 @@ impl IvrApp {
     }
 
     /// Emit an RWI event via the gateway in the application context, if configured.
-    fn emit_rwi_event(&self, ctx: &ApplicationContext, event: crate::rwi::proto::RwiEvent) {
+    fn emit_rwi_event_typed(&self, ctx: &ApplicationContext, event: &impl crate::rwi::RwiEventSpec) {
         if let Some(ref gw) = ctx.rwi_gateway {
-            let gw = gw.clone();
-            let call_id = ctx.call_info.session_id.clone();
-            let guard = gw.read();
-            guard.fan_out_event_to_context(&call_id, &event, &call_id);
+            let gw = gw.read();
+            gw.fan_out(&ctx.call_info.session_id, event);
         }
     }
 
@@ -160,19 +158,15 @@ impl IvrApp {
             .flow_started_at
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
-        self.emit_rwi_event(
-            ctx,
-            crate::rwi::proto::RwiEvent::IvrFlowCompleted {
-                call_id: ctx.call_info.session_id.clone(),
-                app_id: self.definition.name.clone(),
-                total_nodes_traversed: self.nodes_traversed,
-                total_duration_ms: total_duration_ms as u32,
-                final_result: final_result.to_string(),
-                completion_time: chrono::Utc::now().to_rfc3339(),
-                final_routing_target: target.map(|s| s.to_string()),
-                context: Default::default(),
-            },
-        );
+        self.emit_rwi_event_typed(ctx, &crate::rwi::IvrFlowCompleted {
+            call_id: ctx.call_info.session_id.clone(),
+            app_id: self.definition.name.clone(),
+            total_nodes_traversed: self.nodes_traversed,
+            total_duration_ms: total_duration_ms as u32,
+            final_result: final_result.to_string(),
+            completion_time: chrono::Utc::now().to_rfc3339(),
+            final_routing_target: target.map(|s| s.to_string()),
+        });
     }
 
     /// Check if the current time falls within business hours.
@@ -372,22 +366,18 @@ impl IvrApp {
 
         // Emit IvrNodeEntered event
         let previous_node = self.menu_stack.iter().rev().nth(1).cloned();
-        self.emit_rwi_event(
-            ctx,
-            crate::rwi::proto::RwiEvent::IvrNodeEntered {
-                call_id: ctx.call_info.session_id.clone(),
-                node_id: menu_key.to_string(),
-                node_name: menu_key.to_string(),
-                node_type: "menu".to_string(),
-                app_id: self.definition.name.clone(),
-                entry_time: chrono::Utc::now().to_rfc3339(),
-                caller_name: Some(ctx.call_info.caller.clone()),
-                callee_name: Some(ctx.call_info.callee.clone()),
-                routing_target: Some(menu_key.to_string()),
-                previous_node_id: previous_node,
-                context: Default::default(),
-            },
-        );
+        self.emit_rwi_event_typed(ctx, &crate::rwi::IvrNodeEntered {
+            call_id: ctx.call_info.session_id.clone(),
+            node_id: menu_key.to_string(),
+            node_name: menu_key.to_string(),
+            node_type: "menu".to_string(),
+            app_id: self.definition.name.clone(),
+            entry_time: chrono::Utc::now().to_rfc3339(),
+            caller_name: Some(ctx.call_info.caller.clone()),
+            callee_name: Some(ctx.call_info.callee.clone()),
+            routing_target: Some(menu_key.to_string()),
+            previous_node_id: previous_node,
+        });
         let menu = self
             .definition
             .get_menu(menu_key)
@@ -460,21 +450,17 @@ impl IvrApp {
                 EntryAction::RouteToAgent { .. } => "route_to_agent",
                 _ => "other",
             };
-            self.emit_rwi_event(
-                ctx,
-                crate::rwi::proto::RwiEvent::IvrNodeExited {
-                    call_id: ctx.call_info.session_id.clone(),
-                    node_id: menu_key.clone(),
-                    node_name,
-                    result_value: Some(action_type.to_string()),
-                    duration_ms: duration_ms as u32,
-                    exit_time: chrono::Utc::now().to_rfc3339(),
-                    next_node_id: None,
-                    hangup_reason: None,
-                    call_result: None,
-                    context: Default::default(),
-                },
-            );
+            self.emit_rwi_event_typed(ctx, &crate::rwi::IvrNodeExited {
+                call_id: ctx.call_info.session_id.clone(),
+                node_id: menu_key.clone(),
+                node_name,
+                result_value: Some(action_type.to_string()),
+                duration_ms: duration_ms as u32,
+                exit_time: chrono::Utc::now().to_rfc3339(),
+                next_node_id: None,
+                hangup_reason: None,
+                call_result: None,
+            });
         }
         match action {
             EntryAction::Transfer { target } => {

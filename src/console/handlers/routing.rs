@@ -378,8 +378,7 @@ impl RouteDocument {
     }
 
     fn apply_trunk_context(&mut self, model: &RoutingModel, trunks: &HashMap<i64, SipTrunkModel>) {
-        if self.source_trunk.is_none()
-            && let Some(source_id) = model.source_trunk_id
+        if let Some(source_id) = model.source_trunk_id
             && let Some(trunk) = trunks.get(&source_id)
         {
             self.source_trunk = Some(trunk.name.clone());
@@ -1756,5 +1755,85 @@ mod tests {
         assert_eq!(catalog.queues.len(), 1);
         assert_eq!(catalog.queues[0].reference, "db-42");
         assert_eq!(catalog.queues[0].name, "Customer calls back");
+    }
+
+    #[test]
+    fn route_document_serialization_preserves_source_trunk_and_trunks() {
+        let doc = RouteDocument {
+            id: Some(1),
+            name: "test-route".into(),
+            description: Some("desc".into()),
+            owner: Some("admin".into()),
+            direction: RoutingDirection::Outbound,
+            priority: 10,
+            disabled: false,
+            matchers: JsonMap::new(),
+            rewrite: JsonMap::new(),
+            action: RouteActionDocument {
+                select: RoutingSelectionStrategy::RoundRobin,
+                hash_key: None,
+                trunks: vec![
+                    RouteTrunkDocument { name: "trunk-b".into(), weight: 100 },
+                    RouteTrunkDocument { name: "trunk-c".into(), weight: 50 },
+                ],
+                target_type: RouteTargetKind::SipTrunk,
+                queue_file: None,
+                voicemail_extension: None,
+                ivr_file: None,
+            },
+            source_trunk: Some("trunk-a".into()),
+            notes: vec![],
+        };
+
+        let value = serde_json::to_value(&doc).unwrap();
+        let obj = value.as_object().expect("value should be object");
+
+        let source_trunk_val = obj.get("source_trunk").expect("source_trunk key should exist");
+        assert_eq!(source_trunk_val, &Value::String("trunk-a".into()));
+
+        let action = obj.get("action").expect("action key should exist").as_object().expect("action should be object");
+        let trunks = action.get("trunks").expect("action.trunks key should exist").as_array().expect("trunks should be array");
+        assert_eq!(trunks.len(), 2);
+        assert_eq!(trunks[0].get("name").unwrap().as_str().unwrap(), "trunk-b");
+        assert_eq!(trunks[0].get("weight").unwrap().as_i64().unwrap(), 100);
+        assert_eq!(trunks[1].get("name").unwrap().as_str().unwrap(), "trunk-c");
+        assert_eq!(trunks[1].get("weight").unwrap().as_i64().unwrap(), 50);
+        assert_eq!(action.get("target_type").unwrap().as_str().unwrap(), "sip_trunk");
+    }
+
+    #[test]
+    fn route_document_roundtrip_through_metadata() {
+        let doc = RouteDocument {
+            id: Some(1),
+            name: "test-route".into(),
+            description: Some("desc".into()),
+            owner: Some("admin".into()),
+            direction: RoutingDirection::Outbound,
+            priority: 10,
+            disabled: false,
+            matchers: JsonMap::new(),
+            rewrite: JsonMap::new(),
+            action: RouteActionDocument {
+                select: RoutingSelectionStrategy::RoundRobin,
+                hash_key: None,
+                trunks: vec![
+                    RouteTrunkDocument { name: "trunk-b".into(), weight: 100 },
+                ],
+                target_type: RouteTargetKind::SipTrunk,
+                queue_file: None,
+                voicemail_extension: None,
+                ivr_file: None,
+            },
+            source_trunk: Some("trunk-a".into()),
+            notes: vec![],
+        };
+
+        let metadata = doc.metadata_value();
+        let doc2: RouteDocument = serde_json::from_value(metadata).unwrap();
+        assert_eq!(doc2.source_trunk, Some("trunk-a".into()));
+        assert_eq!(doc2.action.trunks.len(), 1);
+        assert_eq!(doc2.action.trunks[0].name, "trunk-b");
+        assert_eq!(doc2.action.trunks[0].weight, 100);
+        assert_eq!(doc2.action.target_type, RouteTargetKind::SipTrunk);
     }
 }

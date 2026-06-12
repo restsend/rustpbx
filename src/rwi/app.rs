@@ -2,8 +2,8 @@ use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
 use crate::rwi::RwiGatewayRef;
+use crate::rwi::RwiEventSpec;
 use crate::rwi::gateway::SessionId;
-use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::OwnershipMode;
 use async_trait::async_trait;
 
@@ -83,22 +83,14 @@ impl RwiApp {
         }
     }
 
-    async fn send_event(&self, event: RwiEvent) {
+    async fn send_typed_event<E: RwiEventSpec>(&self, event: &E) {
         let gw = self.gateway.read();
         if let Some(session_id) = &self.session_id {
-            gw.send_event_to_session(session_id, &event);
+            gw.send_to_session(session_id, event);
         }
-        let call_id = event
-            .call_id()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.context_name.clone());
-        gw.fan_out_event_to_context_excluding(
-            &self.context_name,
-            &event,
-            &call_id,
-            self.session_id.as_ref(),
-        );
+        gw.fan_out_excluding(&self.context_name, event, self.session_id.as_ref());
     }
+
 }
 
 #[async_trait]
@@ -138,25 +130,23 @@ impl CallApp for RwiApp {
             )
             .await;
 
-        self.send_event(RwiEvent::CallIncoming(
-            crate::rwi::proto::CallIncomingData {
-                call_id: call_id.clone(),
-                context: self.context_name.clone(),
-                caller: context.call_info.caller.clone(),
-                callee: context.call_info.callee.clone(),
-                dial_direction: context.call_info.direction.clone(),
-                trunk: None,
-                sip_headers: context.call_info.sip_headers.clone(),
-                root_call_id: None,
-                caller_name: None,
-                callee_name: None,
-                called_phone: None,
-                app_id: None,
-                routing_target: None,
-                uuid: None,
-                routing_path: None,
-            },
-        ))
+        self.send_typed_event(&crate::rwi::CallIncoming {
+            call_id: call_id.clone(),
+            context: self.context_name.clone(),
+            caller: context.call_info.caller.clone(),
+            callee: context.call_info.callee.clone(),
+            dial_direction: context.call_info.direction.clone(),
+            trunk: None,
+            sip_headers: context.call_info.sip_headers.clone(),
+            root_call_id: None,
+            caller_name: None,
+            callee_name: None,
+            called_phone: None,
+            app_id: None,
+            routing_target: None,
+            uuid: None,
+            routing_path: None,
+        })
         .await;
 
         if let Some(session_id) = &self.session_id {
@@ -170,9 +160,8 @@ impl CallApp for RwiApp {
             if claim_ok {
                 self.owned = true;
                 self.owned_call_id = Some(call_id.clone());
-                self.send_event(RwiEvent::CallAnswered {
+                self.send_typed_event(&crate::rwi::CallAnswered {
                     call_id: call_id.clone(),
-                    context: Default::default(),
                 })
                 .await;
             }
@@ -214,25 +203,23 @@ mod tests {
         }
 
         let app = RwiApp::new("ctx-anon".to_string(), None, gateway.clone());
-        app.send_event(crate::rwi::proto::RwiEvent::CallIncoming(
-            crate::rwi::proto::CallIncomingData {
-                call_id: "c-anon".to_string(),
-                context: "ctx-anon".to_string(),
-                caller: "1002".to_string(),
-                callee: "2001".to_string(),
-                dial_direction: "inbound".to_string(),
-                trunk: None,
-                sip_headers: std::collections::HashMap::new(),
-                root_call_id: None,
-                caller_name: None,
-                callee_name: None,
-                called_phone: None,
-                app_id: None,
-                routing_target: None,
-                uuid: None,
-                routing_path: None,
-            },
-        ))
+        app.send_typed_event(&crate::rwi::CallIncoming {
+            call_id: "c-anon".to_string(),
+            context: "ctx-anon".to_string(),
+            caller: "1002".to_string(),
+            callee: "2001".to_string(),
+            dial_direction: "inbound".to_string(),
+            trunk: None,
+            sip_headers: std::collections::HashMap::new(),
+            root_call_id: None,
+            caller_name: None,
+            callee_name: None,
+            called_phone: None,
+            app_id: None,
+            routing_target: None,
+            uuid: None,
+            routing_path: None,
+        })
         .await;
 
         let ev = event_rx.try_recv().expect("CallIncoming should arrive");

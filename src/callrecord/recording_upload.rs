@@ -12,7 +12,7 @@ use crate::{
         CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
     },
     config::{RecordingPolicy, RecordingType},
-    rwi::{proto::RwiEvent, RwiGatewayRef},
+    rwi::RwiGatewayRef,
     storage::{Storage, StorageConfig},
 };
 
@@ -285,12 +285,11 @@ impl CallRecordHook for RecordingUploadHook {
                     process_flag: None,
                     root_call_id: None,
                 };
-                let event = RwiEvent::RecordingMetadataAvailable {
+                let gw_ref = gw.read();
+                gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
                     call_id: record.call_id.clone(),
                     metadata,
-                };
-                let gw_ref = gw.read();
-                gw_ref.send_event_to_call_owner(&record.call_id, &event);
+                });
                 info!(
                     call_id = %record.call_id,
                     url = %url,
@@ -301,14 +300,13 @@ impl CallRecordHook for RecordingUploadHook {
 
         // Emit RecordEnd with url (upload URL or local path), duration and file size.
         if let Some(ref gw) = self.rwi_gateway {
-            let event = RwiEvent::RecordEnd {
+            let gw_ref = gw.read();
+            gw_ref.send_to_owner(&crate::rwi::RecordEnd {
                 call_id: record.call_id.clone(),
                 url: recording_url,
                 duration_secs: (record.end_time - record.start_time).num_seconds().max(0) as u64,
                 file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
-            };
-            let gw_ref = gw.read();
-            gw_ref.send_event_to_call_owner(&record.call_id, &event);
+            });
             info!(
                 call_id = %record.call_id,
                 "RecordEnd event emitted"

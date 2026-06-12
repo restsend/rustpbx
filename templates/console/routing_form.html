@@ -150,7 +150,7 @@
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
                                 "routing_form.source_label" | t }}</label>
-                            <select name="source_trunk" x-model="route.source_trunk"
+                            <select name="source_trunk" x-model="route.source_trunk" x-ref="sourceTrunkSelect"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="">{{ "routing_form.source_any" | t }}</option>
                                 <template x-for="option in trunkOptions" :key="'source-' + option.name">
@@ -582,7 +582,7 @@
                     <template x-if="!route.action.trunks.length">
                         <p class="text-xs text-slate-400">{{ "routing_form.no_trunks_hint" | t }}</p>
                     </template>
-                    <div class="space-y-3">
+                <div class="space-y-3" x-ref="trunkPoolContainer">
                         <template x-for="(trunk, index) in route.action.trunks" :key="index">
                             <div
                                 class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
@@ -939,6 +939,21 @@
                     this.$nextTick(() => this.reconcileSelectValues());
                 },
                 reconcileSelectValues() {
+                    const reconcileTrunkSelects = (container) => {
+                        if (!container) return;
+                        const selects = container.querySelectorAll('select');
+                        this.route.action.trunks.forEach((trunk, i) => {
+                            if (selects[i] && trunk.name) {
+                                selects[i].value = trunk.name;
+                            }
+                        });
+                    };
+                    if (this.$refs.trunkPoolContainer) {
+                        reconcileTrunkSelects(this.$refs.trunkPoolContainer);
+                    }
+                    if (this.$refs.sourceTrunkSelect && this.route.source_trunk) {
+                        this.$refs.sourceTrunkSelect.value = this.route.source_trunk;
+                    }
                     if (this.route?.action?.ivr_file && this.ivrOptions.length) {
                         const stored = this.route.action.ivr_file;
                         const match = this.ivrOptions.find(o => o.name === stored)
