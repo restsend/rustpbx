@@ -9,19 +9,64 @@ use tracing::{info, warn};
 
 use crate::{
     callrecord::{
-        CallRecord, CallRecordHook, format_sipflow_media_file_name, format_sipflow_media_key,
-        format_sipflow_signaling_file_name, format_sipflow_signaling_key,
+        CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
+        format_sipflow_media_key, format_sipflow_signaling_file_name, format_sipflow_signaling_key,
     },
     config::SipFlowUploadConfig,
     rwi::RwiGatewayRef,
     sipflow::SipFlowBackend,
+    storage::{Storage, StorageConfig},
 };
 
 pub struct SipFlowUploadHook {
-    pub backend: Arc<dyn SipFlowBackend>,
-    pub upload_config: SipFlowUploadConfig,
-    pub db: Option<DatabaseConnection>,
-    pub rwi_gateway: Option<RwiGatewayRef>,
+    backend: Arc<dyn SipFlowBackend>,
+    upload_config: SipFlowUploadConfig,
+    db: Option<DatabaseConnection>,
+    rwi_gateway: Option<RwiGatewayRef>,
+    client: reqwest::Client,
+    s3_storage: Option<Storage>,
+}
+
+impl SipFlowUploadHook {
+    pub fn new(
+        backend: Arc<dyn SipFlowBackend>,
+        upload_config: SipFlowUploadConfig,
+        db: Option<DatabaseConnection>,
+        rwi_gateway: Option<RwiGatewayRef>,
+    ) -> Result<Self> {
+        let s3_storage = match &upload_config {
+            SipFlowUploadConfig::S3 {
+                vendor,
+                bucket,
+                region,
+                access_key,
+                secret_key,
+                endpoint,
+                ..
+            } => Some(Storage::new(&StorageConfig::S3 {
+                vendor: vendor.clone(),
+                bucket: bucket.clone(),
+                region: region.clone(),
+                access_key: access_key.clone(),
+                secret_key: secret_key.clone(),
+                endpoint: Some(endpoint.clone()),
+                prefix: None,
+            })?),
+            SipFlowUploadConfig::Http { .. } => None,
+        };
+
+        Ok(Self {
+            backend,
+            upload_config,
+            db,
+            rwi_gateway,
+            client: reqwest::Client::builder()
+                .timeout(CALL_RECORD_HTTP_TIMEOUT)
+                .connect_timeout(CALL_RECORD_HTTP_CONNECT_TIMEOUT)
+                .build()?,
+            s3_storage,
+        })
+    }
 }
 
 #[async_trait]
@@ -31,37 +76,31 @@ impl CallRecordHook for SipFlowUploadHook {
             return Ok(());
         }
 
-        let backend = self.backend.clone();
-        let upload_config = self.upload_config.clone();
-        let db = self.db.clone();
-        let call_id = record.call_id.clone();
+        let call_id = record.call_id.as_str();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
         let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
-        let rwi_gateway = self.rwi_gateway.clone();
 
         let media_key = format_sipflow_media_key(record);
         let signaling_key = format_sipflow_signaling_key(record);
-        let media_file_name = format_sipflow_media_file_name(record);
         let signaling_file_name = format_sipflow_signaling_file_name(record);
 
-        crate::utils::spawn(async move {
-            crate::callrecord::sipflow_upload::do_upload(
-                backend,
-                upload_config,
-                db,
-                &call_id,
-                start,
-                end,
-                duration_secs,
-                &media_key,
-                &signaling_key,
-                &media_file_name,
-                &signaling_file_name,
-                rwi_gateway,
-            )
-            .await;
-        });
+        crate::callrecord::sipflow_upload::do_upload(
+            self.backend.as_ref(),
+            &self.upload_config,
+            self.db.as_ref(),
+            &self.client,
+            self.s3_storage.as_ref(),
+            call_id,
+            start,
+            end,
+            duration_secs,
+            &media_key,
+            &signaling_key,
+            &signaling_file_name,
+            self.rwi_gateway.as_ref(),
+        )
+        .await;
 
         Ok(())
     }
@@ -69,24 +108,25 @@ impl CallRecordHook for SipFlowUploadHook {
 
 #[allow(clippy::too_many_arguments)]
 async fn do_upload(
-    backend: Arc<dyn SipFlowBackend>,
-    upload_config: SipFlowUploadConfig,
-    db: Option<DatabaseConnection>,
+    backend: &dyn SipFlowBackend,
+    upload_config: &SipFlowUploadConfig,
+    db: Option<&DatabaseConnection>,
+    client: &reqwest::Client,
+    s3_storage: Option<&Storage>,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
     duration_secs: i32,
     media_key: &str,
     signaling_key: &str,
-    _media_file_name: &str,
     signaling_file_name: &str,
-    rwi_gateway: Option<RwiGatewayRef>,
+    rwi_gateway: Option<&RwiGatewayRef>,
 ) {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
 
-    let media_enabled = match &upload_config {
+    let media_enabled = match upload_config {
         SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
         SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
     };
@@ -100,14 +140,16 @@ async fn do_upload(
         );
     } else {
         if let Some((url, size)) = upload_media(
-            backend.as_ref(),
-            &upload_config,
+            backend,
+            upload_config,
             call_id,
             start,
             end,
             media_key,
-            db.as_ref(),
+            db,
             duration_secs,
+            client,
+            s3_storage,
         )
         .await
         {
@@ -116,36 +158,39 @@ async fn do_upload(
         }
     }
 
-    let signaling = match &upload_config {
+    let signaling = match upload_config {
         SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
         SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
     };
 
     if signaling {
         upload_signaling_flow(
-            &upload_config,
-            backend.as_ref(),
+            upload_config,
+            backend,
             call_id,
             start,
             end,
             signaling_key,
             signaling_file_name,
+            client,
+            s3_storage,
         )
         .await;
     }
 
     // Emit RecordEnd after successful sipflow upload.
     if let Some(url) = first_uploaded_url {
-        if let Some(ref gw) = rwi_gateway {
+        if let Some(gw) = rwi_gateway {
             use crate::rwi::proto::RwiEvent;
+            let event_call_id = call_id.to_string();
             let event = RwiEvent::RecordEnd {
-                call_id: call_id.to_string(),
+                call_id: event_call_id.clone(),
                 url: Some(url),
                 duration_secs: duration_secs as u64,
                 file_size: uploaded_file_size,
             };
             let gw_ref = gw.read();
-            gw_ref.send_event_to_call_owner(&call_id.to_string(), &event);
+            gw_ref.send_event_to_call_owner(&event_call_id, &event);
             info!(call_id, "SipFlowUploadHook: RecordEnd event emitted");
         }
     }
@@ -162,6 +207,8 @@ async fn upload_media(
     media_key: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
+    client: &reqwest::Client,
+    s3_storage: Option<&Storage>,
 ) -> Option<(String, u64)> {
     let temp_file: tempfile::NamedTempFile =
         match backend.generate_wav_file(call_id, start, end, None).await {
@@ -187,11 +234,7 @@ async fn upload_media(
 
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
-            vendor,
             bucket,
-            region,
-            access_key,
-            secret_key,
             endpoint,
             root,
             ..
@@ -208,14 +251,15 @@ async fn upload_media(
                     return None;
                 }
             };
-            upload_s3(
-                vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
-            )
-            .await
-            .map(|_| sipflow_s3_url(endpoint, bucket, &full_key))
+            let Some(storage) = s3_storage else {
+                return None;
+            };
+            upload_s3(storage, &full_key, wav_bytes)
+                .await
+                .map(|_| sipflow_s3_url(endpoint, bucket, &full_key))
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http_file(url, headers.as_ref(), call_id, &temp_path).await
+            upload_http_file(client, url, headers.as_ref(), call_id, &temp_path).await
         }
     };
 
@@ -260,6 +304,8 @@ async fn upload_signaling_flow(
     end: DateTime<Local>,
     signaling_key: &str,
     signaling_file_name: &str,
+    client: &reqwest::Client,
+    s3_storage: Option<&Storage>,
 ) {
     let flow_items = match backend.query_flow(call_id, start, end).await {
         Ok(items) => items,
@@ -278,12 +324,6 @@ async fn upload_signaling_flow(
 
     let result = match upload_config {
         SipFlowUploadConfig::S3 {
-            vendor,
-            bucket,
-            region,
-            access_key,
-            secret_key,
-            endpoint,
             root,
             ..
         } => {
@@ -292,13 +332,14 @@ async fn upload_signaling_flow(
             } else {
                 format!("{}/{}", root.trim_end_matches('/'), signaling_key)
             };
-            upload_s3(
-                vendor, bucket, region, access_key, secret_key, endpoint, &full_key, data,
-            )
-            .await
+            let Some(storage) = s3_storage else {
+                warn!(call_id, "SipFlowUploadHook: S3 storage is not initialized");
+                return;
+            };
+            upload_s3(storage, &full_key, data).await
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http_jsonl(url, headers.as_ref(), signaling_file_name, data).await
+            upload_http_jsonl(client, url, headers.as_ref(), signaling_file_name, data).await
         }
     };
 
@@ -323,38 +364,22 @@ pub(crate) fn sipflow_s3_url(endpoint: &str, bucket: &str, key: &str) -> String 
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn upload_s3(
-    vendor: &crate::config::S3Vendor,
-    bucket: &str,
-    region: &str,
-    access_key: &str,
-    secret_key: &str,
-    endpoint: &str,
+    storage: &Storage,
     key: &str,
     data: Vec<u8>,
 ) -> Result<()> {
-    use crate::storage::{Storage, StorageConfig};
-    let storage = Storage::new(&StorageConfig::S3 {
-        vendor: vendor.clone(),
-        bucket: bucket.to_string(),
-        region: region.to_string(),
-        access_key: access_key.to_string(),
-        secret_key: secret_key.to_string(),
-        endpoint: Some(endpoint.to_string()),
-        prefix: None,
-    })?;
     storage.write(key, Bytes::from(data)).await?;
     Ok(())
 }
 
 async fn upload_http_file(
+    client: &reqwest::Client,
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
     call_id: &str,
     file_path: &std::path::Path,
 ) -> Result<String> {
-    let client = reqwest::Client::new();
     let file_name = format!("{}.wav", call_id);
     let file = tokio::fs::File::open(file_path).await?;
     let part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
@@ -389,12 +414,12 @@ async fn upload_http_file(
 }
 
 async fn upload_http_jsonl(
+    client: &reqwest::Client,
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
     file_name: &str,
     data: Vec<u8>,
 ) -> Result<()> {
-    let client = reqwest::Client::new();
     let part = reqwest::multipart::Part::bytes(data)
         .file_name(file_name.to_string())
         .mime_str("application/jsonl")?;
@@ -486,29 +511,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hook_returns_immediately() {
+    async fn test_hook_runs_inline() {
         let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let hook = SipFlowUploadHook {
-            backend: Arc::new(MockBackend {
+        let hook = SipFlowUploadHook::new(
+            Arc::new(MockBackend {
                 media: vec![],
                 flush_count: flush_count.clone(),
             }),
-            upload_config: SipFlowUploadConfig::Http {
+            SipFlowUploadConfig::Http {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,
                 signaling: None,
                 media: None,
             },
-            db: None,
-            rwi_gateway: None,
-        };
+            None,
+            None,
+        )
+        .unwrap();
         let mut record = make_record();
-        let start = std::time::Instant::now();
         hook.on_record_completed(&mut record).await.unwrap();
-        let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 100, "hook blocked for {elapsed:?}");
         assert!(record.details.recording_url.is_none());
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 

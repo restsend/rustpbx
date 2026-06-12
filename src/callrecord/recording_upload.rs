@@ -8,7 +8,9 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
-    callrecord::{CallRecord, CallRecordHook},
+    callrecord::{
+        CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
+    },
     config::{RecordingPolicy, RecordingType},
     rwi::{proto::RwiEvent, RwiGatewayRef},
     storage::{Storage, StorageConfig},
@@ -17,14 +19,47 @@ use crate::{
 pub struct RecordingUploadHook {
     policy: RecordingPolicy,
     rwi_gateway: Option<RwiGatewayRef>,
+    client: reqwest::Client,
+    s3_storage: Option<Storage>,
 }
 
 impl RecordingUploadHook {
-    pub fn new(policy: RecordingPolicy) -> Self {
-        Self {
+    pub fn new(policy: RecordingPolicy) -> Result<Self> {
+        let s3_storage = if policy.recording_type == RecordingType::S3 {
+            let bucket = Self::required(&policy.bucket, "bucket")?;
+            let region = Self::required(&policy.region, "region")?;
+            let access_key = Self::required(&policy.access_key, "access_key")?;
+            let secret_key = Self::required(&policy.secret_key, "secret_key")?;
+            let endpoint = policy
+                .endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(str::to_string);
+            let vendor = policy.vendor.clone().unwrap_or_default();
+            let storage = Storage::new(&StorageConfig::S3 {
+                vendor,
+                bucket: bucket.clone(),
+                region,
+                access_key,
+                secret_key,
+                endpoint: endpoint.clone(),
+                prefix: None,
+            })?;
+            Some(storage)
+        } else {
+            None
+        };
+
+        Ok(Self {
             policy,
             rwi_gateway: None,
-        }
+            client: reqwest::Client::builder()
+                .timeout(CALL_RECORD_HTTP_TIMEOUT)
+                .connect_timeout(CALL_RECORD_HTTP_CONNECT_TIMEOUT)
+                .build()?,
+            s3_storage,
+        })
     }
 
     pub fn with_rwi_gateway(mut self, gw: RwiGatewayRef) -> Self {
@@ -81,29 +116,13 @@ impl RecordingUploadHook {
     }
 
     async fn upload_s3(&self, key: &str, data: Vec<u8>) -> Result<String> {
+        let storage = self
+            .s3_storage
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording S3 storage is not initialized"))?;
         let bucket = Self::required(&self.policy.bucket, "bucket")?;
-        let region = Self::required(&self.policy.region, "region")?;
-        let access_key = Self::required(&self.policy.access_key, "access_key")?;
-        let secret_key = Self::required(&self.policy.secret_key, "secret_key")?;
-        let endpoint = self
-            .policy
-            .endpoint
-            .as_deref()
-            .map(str::trim)
-            .filter(|endpoint| !endpoint.is_empty())
-            .map(str::to_string);
-        let vendor = self.policy.vendor.clone().unwrap_or_default();
-        let storage = Storage::new(&StorageConfig::S3 {
-            vendor,
-            bucket: bucket.clone(),
-            region,
-            access_key,
-            secret_key,
-            endpoint: endpoint.clone(),
-            prefix: None,
-        })?;
         storage.write(key, Bytes::from(data)).await?;
-        Ok(Self::s3_url(endpoint.as_deref(), &bucket, key))
+        Ok(Self::s3_url(self.policy.endpoint.as_deref(), &bucket, key))
     }
 
     async fn upload_http(
@@ -126,8 +145,7 @@ impl RecordingUploadHook {
             .text("call_id", record.call_id.clone())
             .text("track_id", track_id.to_string())
             .part("recording", part);
-        let client = reqwest::Client::new();
-        let mut request = client.post(&url).multipart(form);
+        let mut request = self.client.post(&url).multipart(form);
         if let Some(headers) = self.policy.headers.as_ref() {
             for (key, value) in headers {
                 request = request.header(key.as_str(), value.as_str());

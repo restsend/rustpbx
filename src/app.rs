@@ -321,21 +321,8 @@ impl AppStateBuilder {
                 builder = builder.with_config(callrecord.clone());
             }
 
-            // Attach the SipFlow upload hook if configured.
-            // Upload runs in a background task so it never blocks the call flow.
-            if let (Some(backend), Some(upload_cfg)) =
-                (sipflow_backend_arc.as_ref(), sipflow_upload_config.as_ref())
-            {
-                builder = builder.with_hook(Box::new(SipFlowUploadHook {
-                    backend: backend.clone(),
-                    upload_config: upload_cfg.clone(),
-                    db: Some(db_conn.clone()),
-                    rwi_gateway: rwi_gateway.clone(),
-                }));
-            }
-
             if let Some(policy) = recording_upload_policy.as_ref() {
-                let mut hook = RecordingUploadHook::new(policy.clone());
+                let mut hook = RecordingUploadHook::new(policy.clone())?;
                 if let Some(ref gw) = rwi_gateway {
                     hook = hook.with_rwi_gateway(gw.clone());
                 }
@@ -345,6 +332,19 @@ impl AppStateBuilder {
             builder = builder.with_hook(Box::new(DatabaseHook {
                 db: db_conn.clone(),
             }));
+
+            // Attach SipFlow upload after DatabaseHook so recording URL updates
+            // target a row that has already been inserted.
+            if let (Some(backend), Some(upload_cfg)) =
+                (sipflow_backend_arc.as_ref(), sipflow_upload_config.as_ref())
+            {
+                builder = builder.with_hook(Box::new(SipFlowUploadHook::new(
+                    backend.clone(),
+                    upload_cfg.clone(),
+                    Some(db_conn.clone()),
+                    rwi_gateway.clone(),
+                )?));
+            }
 
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
                 builder = builder.with_hook(hook);
