@@ -184,9 +184,7 @@ mod tests {
                 .await
                 .expect("run wholesale migrations");
         }
-        ConsoleState::initialize(
-            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
-            db,
+        ConsoleState::initialize(db,
             ConsoleConfig::default(),
         )
         .await

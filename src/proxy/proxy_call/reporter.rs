@@ -3,6 +3,7 @@ use crate::{
     callrecord::{
         CallDetails, CallRecord, CallRecordHangupMessage, CallRecordHangupReason,
         CallRecordLastError, CallRecordMedia, CallRecordRewrite, CallRecordSender,
+        format_sipflow_media_key,
     },
     models::call_record::extract_sip_username,
     proxy::{
@@ -213,15 +214,10 @@ impl CallReporter {
             }) = self.server.sipflow_config.as_ref()
             && media.unwrap_or(true)
         {
-            let key = if let Some(ref formatter) = self.server.callrecord_formatter {
-                let mut tmp = CallRecord::default();
-                tmp.call_id = self.context.session_id.clone();
-                tmp.start_time = start_time;
-                formatter.format_sipflow_media_key(&tmp)
-            } else {
-                let date_prefix = start_time.format("%Y%m%d").to_string();
-                format!("{}/{}.wav", date_prefix, self.context.session_id)
-            };
+            let mut tmp = CallRecord::default();
+            tmp.call_id = self.context.session_id.clone();
+            tmp.start_time = start_time;
+            let key = format_sipflow_media_key(&tmp);
             let full_key = if root.is_empty() {
                 key
             } else {

@@ -3,7 +3,7 @@ use crate::console::i18n::{I18n, LocaleConfig, LocaleInfo, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::models::rbac::{role_permission, user_role};
 use crate::proxy::server::SipServerRef;
-use crate::{app::AppStateInner, callrecord::CallRecordFormatter};
+use crate::app::AppStateInner;
 use anyhow::Result;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -31,7 +31,6 @@ pub struct ConsoleState {
     session_key: Vec<u8>,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
-    callrecord_formatter: Arc<dyn CallRecordFormatter>,
     i18n: Arc<I18n>,
     perm_cache: Arc<Mutex<PermCache>>,
     pub pending_reload: Arc<AtomicBool>,
@@ -45,11 +44,7 @@ pub trait AddonState: std::any::Any + Send + Sync + Clone + 'static {}
 impl<T: std::any::Any + Send + Sync + Clone + 'static> AddonState for T {}
 
 impl ConsoleState {
-    pub async fn initialize(
-        callrecord_formatter: Arc<dyn CallRecordFormatter>,
-        db: DatabaseConnection,
-        config: ConsoleConfig,
-    ) -> Result<Arc<Self>> {
+    pub async fn initialize(db: DatabaseConnection, config: ConsoleConfig) -> Result<Arc<Self>> {
         let key_material: [u8; 32] = Sha256::digest(config.session_secret.as_bytes()).into();
         let session_key = key_material.to_vec();
         let mut config = config;
@@ -77,7 +72,6 @@ impl ConsoleState {
             session_key,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
-            callrecord_formatter,
             i18n,
             perm_cache: Arc::new(Mutex::new(HashMap::new())),
             pending_reload: Arc::new(AtomicBool::new(false)),
@@ -664,9 +658,7 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(
-            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
-            db,
+        ConsoleState::initialize(db,
             ConsoleConfig::default(),
         )
         .await
@@ -764,9 +756,7 @@ mod tests {
         config.base_path = "/admin".to_string();
         config.api_prefix = "/v1/api".to_string();
 
-        let state = ConsoleState::initialize(
-            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
-            db,
+        let state = ConsoleState::initialize(db,
             config,
         )
         .await

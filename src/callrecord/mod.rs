@@ -317,7 +317,6 @@ pub type FnSaveCallRecord = Arc<
     Box<
         dyn Fn(
                 CancellationToken,
-                Arc<dyn CallRecordFormatter>,
                 Arc<CallRecordConfig>,
                 CallRecord,
             ) -> Pin<Box<dyn Future<Output = CallRecordSaveResult> + Send>>
@@ -333,7 +332,6 @@ type CallRecordSaveResult = std::result::Result<(CallRecord, String), (CallRecor
 /// but do not want CDR JSON files on disk.
 pub fn noop_saver(
     _cancel_token: CancellationToken,
-    _formatter: Arc<dyn CallRecordFormatter>,
     _config: Arc<CallRecordConfig>,
     record: CallRecord,
 ) -> Pin<Box<dyn Future<Output = CallRecordSaveResult> + Send>> {
@@ -367,109 +365,84 @@ pub fn default_transcript_file_name(record: &CallRecord) -> String {
     format!("{}.transcript.json", sanitize_id(&record.call_id))
 }
 
-pub trait CallRecordFormatter: Send + Sync {
-    fn format(&self, record: &CallRecord) -> Result<String> {
-        Ok(serde_json::to_string(record)?)
-    }
-    fn format_file_name(&self, record: &CallRecord) -> String;
-    fn format_transcript_path(&self, record: &CallRecord) -> String;
-    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String;
+pub fn format_call_record(record: &CallRecord) -> Result<String> {
+    Ok(serde_json::to_string(record)?)
+}
 
-    fn format_sipflow_media_key(&self, record: &CallRecord) -> String {
+pub fn format_file_name(root: &str, record: &CallRecord) -> String {
+    let trimmed_root = root.trim_end_matches('/');
+    let file_name = default_cdr_file_name(record);
+    if trimmed_root.is_empty() {
+        file_name
+    } else {
         format!(
-            "{}/{}.wav",
+            "{}/{}/{}",
+            trimmed_root,
             record.start_time.format("%Y%m%d"),
-            record.call_id
-        )
-    }
-
-    fn format_sipflow_signaling_key(&self, record: &CallRecord) -> String {
-        format!(
-            "{}/{}.jsonl",
-            record.start_time.format("%Y%m%d"),
-            record.call_id
-        )
-    }
-
-    fn format_sipflow_media_file_name(&self, record: &CallRecord) -> String {
-        format!("{}.wav", record.call_id)
-    }
-
-    fn format_sipflow_signaling_file_name(&self, record: &CallRecord) -> String {
-        format!("{}.jsonl", record.call_id)
-    }
-}
-
-pub struct DefaultCallRecordFormatter {
-    pub root: String,
-}
-
-impl Default for DefaultCallRecordFormatter {
-    fn default() -> Self {
-        Self {
-            root: "./config/cdr".to_string(),
-        }
-    }
-}
-
-impl DefaultCallRecordFormatter {
-    pub fn new_with_config(config: &CallRecordConfig) -> Self {
-        let root = match config {
-            CallRecordConfig::Local { root } => root.clone(),
-            CallRecordConfig::S3 { root, .. } => root.clone(),
-            CallRecordConfig::Database { .. } => "./config/cdr".to_string(),
-            _ => "./config/cdr".to_string(),
-        };
-        Self { root }
-    }
-}
-
-impl CallRecordFormatter for DefaultCallRecordFormatter {
-    fn format_file_name(&self, record: &CallRecord) -> String {
-        let trimmed_root = self.root.trim_end_matches('/');
-        let file_name = default_cdr_file_name(record);
-        if trimmed_root.is_empty() {
-            file_name
-        } else {
-            format!(
-                "{}/{}/{}",
-                trimmed_root,
-                record.start_time.format("%Y%m%d"),
-                file_name
-            )
-        }
-    }
-
-    fn format_transcript_path(&self, record: &CallRecord) -> String {
-        let trimmed_root = self.root.trim_end_matches('/');
-        let file_name = default_transcript_file_name(record);
-        if trimmed_root.is_empty() {
-            file_name
-        } else {
-            format!(
-                "{}/{}/{}",
-                trimmed_root,
-                record.start_time.format("%Y%m%d"),
-                file_name
-            )
-        }
-    }
-    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String {
-        let file_name = Path::new(&media.path)
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
-            .to_string_lossy()
-            .to_string();
-
-        format!(
-            "{}/{}/{}_{}_{}",
-            self.root.trim_end_matches('/'),
-            record.start_time.format("%Y%m%d"),
-            record.call_id,
-            media.track_id,
             file_name
         )
     }
+}
+
+pub fn format_transcript_path(root: &str, record: &CallRecord) -> String {
+    let trimmed_root = root.trim_end_matches('/');
+    let file_name = default_transcript_file_name(record);
+    if trimmed_root.is_empty() {
+        file_name
+    } else {
+        format!(
+            "{}/{}/{}",
+            trimmed_root,
+            record.start_time.format("%Y%m%d"),
+            file_name
+        )
+    }
+}
+
+pub fn format_media_path(root: &str, record: &CallRecord, media: &CallRecordMedia) -> String {
+    let trimmed_root = root.trim_end_matches('/');
+    let file_name = Path::new(&media.path)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+        .to_string_lossy()
+        .to_string();
+
+    let key = format!(
+        "{}/{}_{}_{}",
+        record.start_time.format("%Y%m%d"),
+        record.call_id,
+        media.track_id,
+        file_name
+    );
+    if trimmed_root.is_empty() {
+        key
+    } else {
+        format!("{}/{}", trimmed_root, key)
+    }
+}
+
+pub fn format_sipflow_media_key(record: &CallRecord) -> String {
+    format!(
+        "{}/{}.wav",
+        record.start_time.format("%Y%m%d"),
+        record.call_id
+    )
+}
+
+pub fn format_sipflow_signaling_key(record: &CallRecord) -> String {
+    format!(
+        "{}/{}.jsonl",
+        record.start_time.format("%Y%m%d"),
+        record.call_id
+    )
+}
+
+pub fn format_sipflow_media_file_name(record: &CallRecord) -> String {
+    format!("{}.wav", record.call_id)
+}
+
+pub fn format_sipflow_signaling_file_name(record: &CallRecord) -> String {
+    format!("{}.jsonl", record.call_id)
 }
 
 pub struct CallRecordManager {
@@ -480,7 +453,6 @@ pub struct CallRecordManager {
     cancel_token: CancellationToken,
     receiver: CallRecordReceiver,
     saver_fn: FnSaveCallRecord,
-    formatter: Arc<dyn CallRecordFormatter>,
     hooks: Arc<Vec<Box<dyn CallRecordHook>>>,
 }
 
@@ -489,7 +461,6 @@ pub struct CallRecordManagerBuilder {
     pub config: Option<CallRecordConfig>,
     pub max_concurrent: Option<usize>,
     saver_fn: Option<FnSaveCallRecord>,
-    formatter: Option<Arc<dyn CallRecordFormatter>>,
     hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
@@ -506,7 +477,6 @@ impl CallRecordManagerBuilder {
             config: None,
             max_concurrent: None,
             saver_fn: None,
-            formatter: None,
             hooks: Vec::new(),
         }
     }
@@ -526,11 +496,6 @@ impl CallRecordManagerBuilder {
         self
     }
 
-    pub fn with_formatter(mut self, formatter: Arc<dyn CallRecordFormatter>) -> Self {
-        self.formatter = Some(formatter);
-        self
-    }
-
     pub fn with_hook(mut self, hook: Box<dyn CallRecordHook>) -> Self {
         self.hooks.push(hook);
         self
@@ -547,9 +512,6 @@ impl CallRecordManagerBuilder {
         let saver_fn = self
             .saver_fn
             .unwrap_or_else(|| Arc::new(Box::new(CallRecordManager::default_saver)));
-        let formatter = self
-            .formatter
-            .unwrap_or_else(|| Arc::new(DefaultCallRecordFormatter::default()));
         let max_concurrent = self.max_concurrent.unwrap_or(64);
 
         match config.as_ref() {
@@ -579,7 +541,6 @@ impl CallRecordManagerBuilder {
             receiver,
             config,
             saver_fn,
-            formatter,
             hooks: Arc::new(self.hooks),
         }
     }
@@ -588,7 +549,6 @@ impl CallRecordManagerBuilder {
 impl CallRecordManager {
     fn default_saver(
         _cancel_token: CancellationToken,
-        formatter: Arc<dyn CallRecordFormatter>,
         config: Arc<CallRecordConfig>,
         record: CallRecord,
     ) -> Pin<Box<dyn Future<Output = CallRecordSaveResult> + Send>> {
@@ -596,10 +556,9 @@ impl CallRecordManager {
             let mut record = record;
             let start_time = Instant::now();
             let result = match config.as_ref() {
-                CallRecordConfig::Local { .. } => {
-                    Self::save_local_record(formatter.clone(), &mut record).await
-                }
+                CallRecordConfig::Local { root } => Self::save_local_record(root, &mut record).await,
                 CallRecordConfig::S3 {
+                    root,
                     vendor,
                     bucket,
                     region,
@@ -609,7 +568,7 @@ impl CallRecordManager {
                     ..
                 } => {
                     Self::save_with_s3_like(
-                        formatter.clone(),
+                        root,
                         vendor,
                         bucket,
                         region,
@@ -621,7 +580,7 @@ impl CallRecordManager {
                     .await
                 }
                 CallRecordConfig::Http { url, headers, .. } => {
-                    Self::save_with_http(formatter.clone(), url, headers, &record).await
+                    Self::save_with_http(url, headers, &record).await
                 }
                 CallRecordConfig::Database {
                     database_url,
@@ -645,12 +604,9 @@ impl CallRecordManager {
         })
     }
 
-    async fn save_local_record(
-        formatter: Arc<dyn CallRecordFormatter>,
-        record: &mut CallRecord,
-    ) -> Result<String> {
-        let file_content = formatter.format(record)?;
-        let file_name = formatter.format_file_name(record);
+    async fn save_local_record(root: &str, record: &mut CallRecord) -> Result<String> {
+        let file_content = format_call_record(record)?;
+        let file_name = format_file_name(root, record);
 
         // Ensure parent directory exists
         if let Some(parent) = Path::new(&file_name).parent() {
@@ -666,13 +622,12 @@ impl CallRecordManager {
     }
 
     async fn save_with_http(
-        formatter: Arc<dyn CallRecordFormatter>,
         url: &String,
         headers: &Option<HashMap<String, String>>,
         record: &CallRecord,
     ) -> Result<String> {
         let client = reqwest::Client::new();
-        let call_log_json = formatter.format(record)?;
+        let call_log_json = format_call_record(record)?;
         let form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
 
         let mut request = client.post(url).multipart(form);
@@ -696,7 +651,7 @@ impl CallRecordManager {
 
     #[allow(clippy::too_many_arguments)]
     async fn save_with_s3_like(
-        formatter: Arc<dyn CallRecordFormatter>,
+        root: &str,
         vendor: &S3Vendor,
         bucket: &str,
         region: &str,
@@ -717,8 +672,8 @@ impl CallRecordManager {
         };
         let storage = crate::storage::Storage::new(&storage_config)?;
 
-        let call_log_json = formatter.format(record)?;
-        let filename = formatter.format_file_name(record);
+        let call_log_json = format_call_record(record)?;
+        let filename = format_file_name(root, record);
         let buf_size = call_log_json.len();
         match storage.write(&filename, call_log_json.into()).await {
             Ok(_) => {
@@ -837,12 +792,10 @@ impl CallRecordManager {
                 let cancel_token_ref = self.cancel_token.clone();
                 let save_fn_ref = self.saver_fn.clone();
                 let config_ref = self.config.clone();
-                let formatter_ref = self.formatter.clone();
                 let hooks_ref = self.hooks.clone();
 
                 futures.push(async move {
-                    let save_outcome =
-                        save_fn_ref(cancel_token_ref, formatter_ref, config_ref, record).await;
+                    let save_outcome = save_fn_ref(cancel_token_ref, config_ref, record).await;
                     let mut record = match save_outcome {
                         Ok((record, _file_name)) => record,
                         Err((record, err)) => {

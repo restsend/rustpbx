@@ -25,9 +25,7 @@ async fn test_save_with_http_without_media() {
 
     // This test will only pass if httpbin.org is available
     // In production, you might want to use a mock server
-    let result = CallRecordManager::save_with_http(
-        Arc::new(DefaultCallRecordFormatter::default()),
-        &url,
+    let result = CallRecordManager::save_with_http(&url,
         &headers,
         &record,
     )
@@ -75,9 +73,7 @@ async fn test_save_with_http_with_media() {
     let url = "http://httpbin.org/post".to_string();
     let headers = None;
 
-    let result = CallRecordManager::save_with_http(
-        Arc::new(DefaultCallRecordFormatter::default()),
-        &url,
+    let result = CallRecordManager::save_with_http(&url,
         &headers,
         &record,
     )
@@ -112,9 +108,7 @@ async fn test_save_with_http_with_custom_headers() {
 
     let url = "http://httpbin.org/post".to_string();
 
-    let result = CallRecordManager::save_with_http(
-        Arc::new(DefaultCallRecordFormatter::default()),
-        &url,
+    let result = CallRecordManager::save_with_http(&url,
         &Some(headers),
         &record,
     )
@@ -149,9 +143,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
 
     let url = "http://httpbin.org/post".to_string();
 
-    let result = CallRecordManager::save_with_http(
-        Arc::new(DefaultCallRecordFormatter::default()),
-        &url,
+    let result = CallRecordManager::save_with_http(&url,
         &Some(headers),
         &record,
     )
@@ -190,9 +182,7 @@ async fn test_save_with_s3_like_memory_store() {
 
     // This test will only succeed if there's a local minio instance running
     // In real scenarios, this would use actual cloud storage credentials
-    let result = CallRecordManager::save_with_s3_like(
-        Arc::new(DefaultCallRecordFormatter::default()),
-        &vendor,
+    let result = CallRecordManager::save_with_s3_like("./config/cdr",&vendor,
         &bucket,
         &region,
         &access_key,
@@ -257,9 +247,7 @@ async fn test_save_with_s3_like_with_media() {
         let secret_key = "test_secret_key".to_string();
         let endpoint = endpoint.to_string();
 
-        let result = CallRecordManager::save_with_s3_like(
-            Arc::new(DefaultCallRecordFormatter::default()),
-            &vendor,
+        let result = CallRecordManager::save_with_s3_like("./config/cdr",&vendor,
             &bucket,
             &region,
             &access_key,

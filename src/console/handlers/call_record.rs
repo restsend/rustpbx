@@ -1473,9 +1473,15 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
 }
 
 pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
+    let app = state.app_state()?;
+    let root = match app.config().callrecord.as_ref() {
+        Some(crate::config::CallRecordConfig::Local { root })
+        | Some(crate::config::CallRecordConfig::S3 { root, .. }) => root.as_str(),
+        _ => "",
+    };
     let storage = resolve_cdr_storage(state);
     let callrecord: CallRecord = record.clone().into();
-    let candidate = state.callrecord_formatter.format_file_name(&callrecord);
+    let candidate = crate::callrecord::format_file_name(root, &callrecord);
     let mut content: Option<String> = None;
 
     if let Some(ref storage_ref) = storage {
@@ -1873,9 +1879,7 @@ mod tests {
     }
 
     async fn create_console_state(db: DatabaseConnection) -> Arc<ConsoleState> {
-        ConsoleState::initialize(
-            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
-            db,
+        ConsoleState::initialize(db,
             ConsoleConfig {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),
