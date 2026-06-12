@@ -6,6 +6,41 @@ use std::io::Write;
 use tempfile::NamedTempFile;
 
 #[tokio::test]
+async fn test_builder_without_callrecord_config_uses_noop_saver() {
+    let manager = CallRecordManagerBuilder::new().build().await.unwrap();
+    let record = CallRecord {
+        call_id: "noop_without_config".to_string(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
+        caller: "+1234567890".to_string(),
+        callee: "+0987654321".to_string(),
+        status_code: 200,
+        ..Default::default()
+    };
+
+    let result = manager.saver.save(&record).await.unwrap();
+    assert_eq!(result, "");
+}
+
+#[tokio::test]
+async fn test_database_saver_requires_database_url() {
+    let err = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig::Database {
+            database_url: None,
+            table_name: "call_records".to_string(),
+        })
+        .build()
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(
+        err.to_string(),
+        "database call record saver requires database_url"
+    );
+}
+
+#[tokio::test]
 async fn test_save_with_http_without_media() {
     // Create a test CallRecord
     let record = CallRecord {
@@ -25,10 +60,12 @@ async fn test_save_with_http_without_media() {
 
     // This test will only pass if httpbin.org is available
     // In production, you might want to use a mock server
-    let result = CallRecordManager::save_with_http(&url,
-        &headers,
-        &record,
-    )
+    let result = HttpCallRecordSaver {
+        url,
+        headers,
+        client: reqwest::Client::new(),
+    }
+    .save(&record)
     .await;
 
     // We expect this to succeed for the JSON upload
@@ -73,10 +110,12 @@ async fn test_save_with_http_with_media() {
     let url = "http://httpbin.org/post".to_string();
     let headers = None;
 
-    let result = CallRecordManager::save_with_http(&url,
-        &headers,
-        &record,
-    )
+    let result = HttpCallRecordSaver {
+        url,
+        headers,
+        client: reqwest::Client::new(),
+    }
+    .save(&record)
     .await;
 
     if result.is_ok() {
@@ -108,10 +147,12 @@ async fn test_save_with_http_with_custom_headers() {
 
     let url = "http://httpbin.org/post".to_string();
 
-    let result = CallRecordManager::save_with_http(&url,
-        &Some(headers),
-        &record,
-    )
+    let result = HttpCallRecordSaver {
+        url,
+        headers: Some(headers),
+        client: reqwest::Client::new(),
+    }
+    .save(&record)
     .await;
 
     if result.is_ok() {
@@ -143,10 +184,12 @@ async fn test_save_with_s3_like_with_custom_headers() {
 
     let url = "http://httpbin.org/post".to_string();
 
-    let result = CallRecordManager::save_with_http(&url,
-        &Some(headers),
-        &record,
-    )
+    let result = HttpCallRecordSaver {
+        url,
+        headers: Some(headers),
+        client: reqwest::Client::new(),
+    }
+    .save(&record)
     .await;
 
     if result.is_ok() {
@@ -169,7 +212,7 @@ async fn test_save_with_s3_like_memory_store() {
     let secret_key = "minioadmin".to_string();
     let endpoint = "http://localhost:9000".to_string(); // Local minio endpoint
 
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -182,15 +225,27 @@ async fn test_save_with_s3_like_memory_store() {
 
     // This test will only succeed if there's a local minio instance running
     // In real scenarios, this would use actual cloud storage credentials
-    let result = CallRecordManager::save_with_s3_like("./config/cdr",&vendor,
-        &bucket,
-        &region,
-        &access_key,
-        &secret_key,
-        &endpoint,
-        &mut record,
-    )
-    .await;
+    let result = match crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
+        vendor,
+        bucket: bucket.clone(),
+        region,
+        access_key,
+        secret_key,
+        endpoint: Some(endpoint.clone()),
+        prefix: None,
+    }) {
+        Ok(storage) => {
+            S3CallRecordSaver {
+                root: "./config/cdr".to_string(),
+                bucket,
+                endpoint,
+                storage,
+            }
+            .save(&record)
+            .await
+        }
+        Err(e) => Err(e),
+    };
 
     // We expect this might fail in test environment without real S3 storage
     match result {
@@ -240,22 +295,34 @@ async fn test_save_with_s3_like_with_media() {
     ];
 
     for (vendor, endpoint) in test_cases {
-        let mut record = record.clone();
+        let record = record.clone();
         let bucket = "test-bucket".to_string();
         let region = "us-east-1".to_string();
         let access_key = "test_access_key".to_string();
         let secret_key = "test_secret_key".to_string();
         let endpoint = endpoint.to_string();
 
-        let result = CallRecordManager::save_with_s3_like("./config/cdr",&vendor,
-            &bucket,
-            &region,
-            &access_key,
-            &secret_key,
-            &endpoint,
-            &mut record,
-        )
-        .await;
+        let result = match crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
+            vendor: vendor.clone(),
+            bucket: bucket.clone(),
+            region,
+            access_key,
+            secret_key,
+            endpoint: Some(endpoint.clone()),
+            prefix: None,
+        }) {
+            Ok(storage) => {
+                S3CallRecordSaver {
+                    root: "./config/cdr".to_string(),
+                    bucket,
+                    endpoint,
+                    storage,
+                }
+                .save(&record)
+                .await
+            }
+            Err(e) => Err(e),
+        };
 
         match result {
             Ok(message) => println!("S3 {:?} upload with media test passed: {}", vendor, message),
