@@ -226,6 +226,9 @@ split-debuginfo = "packed"
 debug = 1
 codegen-units = 256
 
+[profile.release]
+strip = "symbols"
+
 [[bin]]
 name = "rustpbx"
 path = "src/bin/rustpbx.rs"
