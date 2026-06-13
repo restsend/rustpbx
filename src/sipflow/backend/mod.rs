@@ -5,7 +5,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 
-use crate::config::{SipFlowClusterNode, SipFlowConfig};
+use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowEngine};
+use crate::sipflow::flowdb_backend::FlowDbBackend;
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats};
 
 #[async_trait]
@@ -87,15 +88,31 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             flush_count,
             flush_interval_secs,
             id_cache_size,
+            engine,
+            ttl_secs,
+            memtable_size_mb,
+            block_cache_capacity_mb,
             ..
-        } => local::LocalBackend::new(
-            root.clone(),
-            subdirs.clone(),
-            *flush_count,
-            *flush_interval_secs,
-            *id_cache_size,
-        )
-        .map(|b| Box::new(b) as Box<dyn SipFlowBackend>),
+        } => {
+            if *engine == SipFlowEngine::FlowDb {
+                FlowDbBackend::new(
+                    root.clone(),
+                    *ttl_secs,
+                    *memtable_size_mb,
+                    *block_cache_capacity_mb,
+                )
+                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+            } else {
+                local::LocalBackend::new(
+                    root.clone(),
+                    subdirs.clone(),
+                    *flush_count,
+                    *flush_interval_secs,
+                    *id_cache_size,
+                )
+                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+            }
+        }
         SipFlowConfig::Remote {
             nodes,
             udp_addr,

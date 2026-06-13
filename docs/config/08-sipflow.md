@@ -18,12 +18,52 @@ See [docs/sipflow.md](../sipflow.md) for the full deployment guide (architecture
 
 SipFlow runs as a background task inside the RustPBX process — no separate service needed.
 
+#### Storage Engine
+
+The local backend supports two storage engines, selectable via the `engine` field:
+
+| Engine | Description | Write Model | Best For |
+|---|---|---|---|
+| **`flowdb`** (default) | LSM-tree embedded key-value store (`flowdb` crate) | Synchronous `write_batch_sync()` per packet | High-throughput capture, compact storage |
+| **`sqlite`** (legacy) | SQLite index + zstd-compressed raw payload file | Async channel → background batch INSERT | Backward compatibility, existing data |
+
 ```toml
 [sipflow]
 type = "local"
-
-# Directory where SQLite index and .raw payload files are written.
 root = "./config/sipflow"
+engine = "flowdb"   # "flowdb" (default) or "sqlite"
+```
+
+##### FlowDB engine options
+
+When `engine = "flowdb"`, the following tuning parameters are available:
+
+```toml
+[sipflow]
+type = "local"
+engine = "flowdb"
+
+# Auto-expire records after N seconds (optional, disabled by default).
+# When set, FlowDB automatically garbage-collects expired SST entries.
+# ttl_secs = 86400
+
+# Memtable size threshold before flush to SSTable (default: 64 MB).
+# Smaller values reduce memory usage at the cost of more SST files.
+# memtable_size_mb = 64
+
+# LRU block cache capacity for reads (default: 128 MB).
+# Larger cache improves query performance on large datasets.
+# block_cache_capacity_mb = 128
+```
+
+##### SQLite engine options
+
+When `engine = "sqlite"`, the legacy options apply:
+
+```toml
+[sipflow]
+type = "local"
+engine = "sqlite"
 
 # Subdirectory layout: "none" | "daily" | "hourly"
 # - "none"   — all files directly in root (low traffic / testing)
@@ -40,6 +80,9 @@ flush_interval_secs = 5
 # Size of the Call-ID LRU cache used to map Call-IDs to SQLite row IDs (default: 8192).
 id_cache_size = 8192
 ```
+
+> **Note:** `subdirs`, `flush_count`, `flush_interval_secs`, and `id_cache_size`
+> are ignored when `engine = "flowdb"`.
 
 ### Remote (standalone `sipflow` binary)
 
@@ -71,6 +114,42 @@ Start the standalone server:
   --flush-interval 5 \
   --buffer-size 100000
 ```
+
+---
+
+## Performance Comparison: FlowDB vs SQLite
+
+A built-in benchmark (`examples/sipflow_bench.rs`) compares the two engines using a realistic mixed workload (SIP INVITE messages ~500 bytes + RTP PCMA packets ~172 bytes per leg).
+
+```sh
+cargo run --release --example sipflow_bench -- --calls 200 --rtp-per-call 2000 --sip-per-call 30
+```
+
+### Results
+
+#### Scale 1 — 51 000 records (50 calls × 20 SIP + 1000 RTP)
+
+| Metric | FlowDB | SQLite | Ratio |
+|---|---:|---:|---:|
+| Write throughput | **457 549 rec/s** | 22 958 rec/s | **19.9× faster** |
+| Write time | 0.11 s | 2.22 s | — |
+| Disk usage | **1 021 KB** | 5 810 KB | **5.7× smaller** |
+| Flow query latency | 0.4 ms | 0.6 ms | comparable |
+
+#### Scale 2 — 406 000 records (200 calls × 30 SIP + 2000 RTP)
+
+| Metric | FlowDB | SQLite | Ratio |
+|---|---:|---:|---:|
+| Write throughput | **586 125 rec/s** | 17 703 rec/s | **33.1× faster** |
+| Write time | 0.69 s | 22.93 s | — |
+| Disk usage | **8 120 KB** | 46 796 KB | **5.8× smaller** |
+| Flow query latency | 0.9 ms | 0.6 ms | comparable |
+
+### Key Takeaways
+
+- **Write throughput**: FlowDB achieves **20–33× higher write throughput** than the SQLite backend. This is because FlowDB writes are sequential append-only WAL + memtable operations, while SQLite must parse each packet, compress payloads with zstd, and execute SQL INSERT transactions.
+- **Disk efficiency**: FlowDB uses **5–6× less disk space** thanks to compact binary key/value encoding and LSM-tree compression, compared to SQLite's per-row overhead plus the separate `.raw` payload file.
+- **Query performance**: Both engines deliver sub-millisecond flow query latency. FlowDB uses prefix scans over sorted SSTables; SQLite uses indexed lookups. The difference is negligible at these scales.
 
 ---
 
@@ -185,10 +264,11 @@ SipFlow capture is enabled by configuring the `[sipflow]` backend. It is indepen
 # Default configuration (recommended):
 # - SipFlow captures SIP signalling AND RTP audio
 # - No [recording] section needed
+# - FlowDB engine (default): high throughput, compact storage
 [sipflow]
 type = "local"
 root = "./config/sipflow"
-subdirs = "daily"
+engine = "flowdb"
 ```
 
 When SipFlow is active and **no `[recording]` section exists**, each CDR entry in the console shows both the **SIP Flow** tab (signalling ladder) and the **audio player** (recorded RTP). If a `[recording]` section is present, the audio player relies on the legacy recorder's WAV output instead.
@@ -196,6 +276,29 @@ When SipFlow is active and **no `[recording]` section exists**, each CDR entry i
 ---
 
 ## Storage Layout
+
+### FlowDB engine (`engine = "flowdb"`)
+
+FlowDB stores all data in a single directory as LSM-tree files (WAL, SSTables, and indexes):
+
+```
+./config/sipflow/
+├── WAL/                 # write-ahead log segments
+├── SST/                 # sorted string tables (compacted data)
+└── INDEX/               # sparse key indexes
+```
+
+Key encoding:
+- SIP messages: `sip:{call_id}:{counter:020}`
+- RTP packets: `rtp:{call_id}:{leg}:{counter:020}`
+
+Value encoding (binary, no JSON overhead):
+- SIP: `[src_len:u16][src_addr][dst_len:u16][dst_addr][payload_bytes]`
+- RTP: `[leg:i32][src_len:u16][src_addr][payload_bytes]`
+
+When `ttl_secs` is configured, records carry an `expire_at` timestamp and FlowDB automatically garbage-collects expired entries during compaction.
+
+### SQLite engine (`engine = "sqlite"`)
 
 With `subdirs = "daily"`, files are organised as:
 
@@ -206,12 +309,17 @@ With `subdirs = "daily"`, files are organised as:
     └── 20260417.raw      # payload: SIP messages + RTP frames (zstd compressed)
 ```
 
-Older directories can be deleted freely without affecting running calls:
+### Cleanup
+
+Older directories (SQLite) or the entire data directory (FlowDB with TTL) can be cleaned up without affecting running calls:
 
 ```sh
-# Remove data older than 7 days
+# SQLite: remove old date directories
 find /data/sipflow -maxdepth 1 -type d -name '[0-9]*' \
   -mtime +7 -exec rm -rf {} +
+
+# FlowDB: set ttl_secs in config for automatic expiry,
+# or periodically delete the entire data directory and restart.
 ```
 
 ---

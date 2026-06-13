@@ -518,9 +518,8 @@ fn default_call_record_table() -> String {
 }
 
 /// Directory structure for sipflow storage
-#[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum SipFlowSubdirs {
     /// No subdirectory structure - all files in root
     None,
@@ -529,6 +528,18 @@ pub enum SipFlowSubdirs {
     Daily,
     /// Hourly subdirectories (YYYYMMDD/HH)
     Hourly,
+}
+
+/// Storage engine selection for the Local sipflow backend.
+#[derive(Debug, Deserialize, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+pub enum SipFlowEngine {
+    /// Use FlowDB LSM-tree engine (default).
+    #[default]
+    #[serde(rename = "flowdb")]
+    FlowDb,
+    /// Use the legacy SQLite + raw-file engine.
+    #[serde(rename = "sqlite")]
+    Sqlite,
 }
 
 /// Upload configuration for SipFlow recordings
@@ -583,6 +594,19 @@ pub enum SipFlowConfig {
         flush_interval_secs: u64,
         #[serde(default = "default_sipflow_id_cache_size")]
         id_cache_size: usize,
+        /// Storage engine: "flowdb" (default) or "sqlite".
+        #[serde(default)]
+        engine: SipFlowEngine,
+        /// TTL in seconds for FlowDB records (optional). When set,
+        /// expired records are automatically garbage-collected.
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+        /// FlowDB memtable size in MB (default 64).
+        #[serde(default = "default_flowdb_memtable_mb")]
+        memtable_size_mb: usize,
+        /// FlowDB block cache capacity in MB (default 128).
+        #[serde(default = "default_flowdb_block_cache_mb")]
+        block_cache_capacity_mb: usize,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },
@@ -614,6 +638,14 @@ fn default_sipflow_timeout() -> u64 {
 
 fn default_sipflow_id_cache_size() -> usize {
     8192
+}
+
+fn default_flowdb_memtable_mb() -> usize {
+    64
+}
+
+fn default_flowdb_block_cache_mb() -> usize {
+    128
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]

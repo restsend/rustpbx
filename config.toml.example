@@ -138,9 +138,17 @@ max_concurrent = 64
 [sipflow]
 type = "local"
 root = "./config/sipflow"
-subdirs = "daily"  # "none" | "daily" | "hourly"
+subdirs = "daily"  # "none" | "daily" | "hourly"  (sqlite engine only)
 
-# Advanced local backend settings (defaults shown):
+# Storage engine: "flowdb" (default, LSM-tree) or "sqlite" (legacy)
+engine = "flowdb"
+
+# FlowDB engine options (ignored when engine = "sqlite"):
+# ttl_secs = 86400          # auto-expire records after N seconds (optional)
+# memtable_size_mb = 64     # memtable size threshold before flush
+# block_cache_capacity_mb = 128  # LRU block cache for reads
+
+# Advanced local backend settings (sqlite engine only, defaults shown):
 # flush_count = 1000
 # flush_interval_secs = 5
 # id_cache_size = 8192
