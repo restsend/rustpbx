@@ -125,31 +125,32 @@ A built-in benchmark (`examples/sipflow_bench.rs`) compares the two engines usin
 cargo run --release --example sipflow_bench -- --calls 200 --rtp-per-call 2000 --sip-per-call 30
 ```
 
-### Results
+### Results (FlowDB 0.1.6)
 
 #### Scale 1 — 51 000 records (50 calls × 20 SIP + 1000 RTP)
 
 | Metric | FlowDB | SQLite | Ratio |
 |---|---:|---:|---:|
-| Write throughput | **457 549 rec/s** | 22 958 rec/s | **19.9× faster** |
-| Write time | 0.11 s | 2.22 s | — |
-| Disk usage | **1 021 KB** | 5 810 KB | **5.7× smaller** |
-| Flow query latency | 0.4 ms | 0.6 ms | comparable |
+| Write throughput | **153 265 rec/s** | 13 078 rec/s | **11.7× faster** |
+| Write time | 0.33 s | 3.90 s | — |
+| Flow query latency | **0.2 ms** | 16.2 ms | **88× faster** |
+| Disk usage | 14.7 MB | 5.8 MB | comparable |
 
 #### Scale 2 — 406 000 records (200 calls × 30 SIP + 2000 RTP)
 
 | Metric | FlowDB | SQLite | Ratio |
 |---|---:|---:|---:|
-| Write throughput | **586 125 rec/s** | 17 703 rec/s | **33.1× faster** |
-| Write time | 0.69 s | 22.93 s | — |
-| Disk usage | **8 120 KB** | 46 796 KB | **5.8× smaller** |
-| Flow query latency | 0.9 ms | 0.6 ms | comparable |
+| Write throughput | **189 469 rec/s** | 11 224 rec/s | **16.9× faster** |
+| Write time | 2.14 s | 36.17 s | — |
+| Flow query latency | **1.6 ms** | 24.1 ms | **14.7× faster** |
+| Disk usage | 51.2 MB | 46.8 MB | comparable |
 
 ### Key Takeaways
 
-- **Write throughput**: FlowDB achieves **20–33× higher write throughput** than the SQLite backend. This is because FlowDB writes are sequential append-only WAL + memtable operations, while SQLite must parse each packet, compress payloads with zstd, and execute SQL INSERT transactions.
-- **Disk efficiency**: FlowDB uses **5–6× less disk space** thanks to compact binary key/value encoding and LSM-tree compression, compared to SQLite's per-row overhead plus the separate `.raw` payload file.
-- **Query performance**: Both engines deliver sub-millisecond flow query latency. FlowDB uses prefix scans over sorted SSTables; SQLite uses indexed lookups. The difference is negligible at these scales.
+- **Write throughput**: FlowDB achieves **12–17× higher write throughput** than the SQLite backend. FlowDB writes are sequential append-only WAL + memtable operations, while SQLite must parse each packet, compress payloads with zstd, and execute SQL INSERT transactions.
+- **Query performance**: FlowDB is **15–88× faster** for flow queries thanks to prefix scans over sorted SSTables with bloom filters, compared to SQLite's indexed lookups which must join the index with the compressed raw payload file.
+- **Disk usage**: Comparable at scale. FlowDB stores data as binary key/value records in WAL + SST files; SQLite uses a compact index + zstd-compressed raw payload file. The earlier versions showed FlowDB at 5–6× smaller, but that was due to a WAL truncation bug in FlowDB ≤ 0.1.5 that deleted all WAL segments on every flush (fixed in 0.1.6).
+- **Durability**: FlowDB 0.1.6 ensures crash-safe WAL persistence. The background maintenance task automatically flushes the memtable, runs compaction, and garbage-collects expired SST files — no manual intervention needed.
 
 ---
 
@@ -283,7 +284,7 @@ FlowDB stores all data in a single directory as LSM-tree files (WAL, SSTables, a
 
 ```
 ./config/sipflow/
-├── WAL/                 # write-ahead log segments
+├── WAL/                 # write-ahead log segments (crash-safe, fsync'd on flush)
 ├── SST/                 # sorted string tables (compacted data)
 └── INDEX/               # sparse key indexes
 ```
@@ -297,6 +298,13 @@ Value encoding (binary, no JSON overhead):
 - RTP: `[leg:i32][src_len:u16][src_addr][payload_bytes]`
 
 When `ttl_secs` is configured, records carry an `expire_at` timestamp and FlowDB automatically garbage-collects expired entries during compaction.
+
+The background maintenance task (started automatically by the FlowDB backend) periodically:
+- Flushes the active memtable to SSTable (every `flush_interval_ms`, default 1s)
+- Merges SST files via compaction when count exceeds threshold
+- Garbage-collects fully-expired SST files (every `gc_interval_secs`, default 1h)
+
+WAL segments are truncated only after the corresponding memtable has been safely persisted to an SST file, ensuring no data loss on crash.
 
 ### SQLite engine (`engine = "sqlite"`)
 
