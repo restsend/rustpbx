@@ -15,7 +15,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
-use rustpbx::sipflow::SipFlowMsgType;
+use rustpbx::sipflow::{SipFlowItem, SipFlowMsgType};
 use std::path::PathBuf;
 use std::time::Instant;
 

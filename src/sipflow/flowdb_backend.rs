@@ -7,6 +7,8 @@ use futures::FutureExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::sipflow::flowdb_codec::{
     SIP_PREFIX, decode_rtp_value, decode_sip_value, encode_rtp_value, encode_sip_value,
@@ -19,10 +21,21 @@ use crate::sipflow::wav_utils::{
 };
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
+const FLUSH_INTERVAL_SECS: u64 = 30;
+const COMPACTION_INTERVAL_SECS: u64 = 300;
+const GC_INTERVAL_SECS: u64 = 600;
+
 pub struct FlowDbBackend {
-    engine: Engine,
+    engine: Arc<Engine>,
     counter: AtomicU64,
     ttl_micros: Option<i64>,
+    cancel: CancellationToken,
+}
+
+impl Drop for FlowDbBackend {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl FlowDbBackend {
@@ -44,13 +57,43 @@ impl FlowDbBackend {
             .now_or_never()
             .ok_or_else(|| anyhow::anyhow!("Engine::open did not complete synchronously"))??;
 
+        let engine = Arc::new(engine);
         let ttl_micros = ttl_secs.map(|s| s as i64 * 1_000_000);
+        let cancel = CancellationToken::new();
+
+        Self::spawn_maintenance(engine.clone(), cancel.clone());
 
         Ok(Self {
             engine,
             counter: AtomicU64::new(0),
             ttl_micros,
+            cancel,
         })
+    }
+
+    fn spawn_maintenance(engine: Arc<Engine>, cancel: CancellationToken) {
+        crate::utils::spawn(async move {
+            let mut flush_t = tokio::time::interval(std::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
+            let mut compact_t = tokio::time::interval(std::time::Duration::from_secs(COMPACTION_INTERVAL_SECS));
+            let mut gc_t = tokio::time::interval(std::time::Duration::from_secs(GC_INTERVAL_SECS));
+            compact_t.tick().await;
+            gc_t.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = flush_t.tick() => {
+                        let _ = engine.flush().await;
+                    }
+                    _ = compact_t.tick() => {
+                        let _ = engine.trigger_compaction().await;
+                    }
+                    _ = gc_t.tick() => {
+                        let _ = engine.trigger_gc().await;
+                    }
+                }
+            }
+        });
     }
 
     fn next_counter(&self) -> u64 {
