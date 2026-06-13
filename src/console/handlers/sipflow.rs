@@ -73,6 +73,10 @@ async fn get_settings(
                     flush_count,
                     flush_interval_secs,
                     id_cache_size,
+                    engine,
+                    ttl_secs,
+                    memtable_size_mb,
+                    block_cache_capacity_mb,
                     ..
                 } => (
                     "local",
@@ -81,7 +85,11 @@ async fn get_settings(
                         "subdirs": subdirs,
                         "flush_count": flush_count,
                         "flush_interval_secs": flush_interval_secs,
-                        "id_cache_size": id_cache_size
+                        "id_cache_size": id_cache_size,
+                        "engine": engine,
+                        "ttl_secs": ttl_secs,
+                        "memtable_size_mb": memtable_size_mb,
+                        "block_cache_capacity_mb": block_cache_capacity_mb
                     }),
                 ),
                 SipFlowConfig::Remote {
