@@ -178,6 +178,12 @@ pub struct RecordingPolicy {
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    /// When true, always use the legacy WAV file recorder for media capture
+    /// even if SipFlow backend is available. SipFlow will capture SIP
+    /// signalling only (no RTP). Media upload is handled by the
+    /// `[recording]` upload path, not `[sipflow.upload]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_file: Option<bool>,
 }
 
 impl RecordingPolicy {
@@ -185,6 +191,7 @@ impl RecordingPolicy {
         crate::call::CallRecordingConfig {
             enabled: self.enabled,
             auto_start: self.auto_start.unwrap_or(true),
+            force_file: self.force_file.unwrap_or(false),
             option: None,
         }
     }

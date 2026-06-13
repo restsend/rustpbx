@@ -258,7 +258,42 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 4. Billing system calculates duration * rate and deducts balance.
 
 ### Scenario D: Compliance Recording
-1. Configure `[recording] enabled = true`.
-2. Configure `[recording] type = "s3"` for recording WAV archival.
-3. Configure `[callrecord] type = "s3"` if CDR JSON should also be archived to object storage.
-4. All calls are recorded locally first, then the recording is asynchronously uploaded to AWS S3 / MinIO for long-term archival.
+
+Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). When both are configured, sipflow takes precedence for media capture and upload, avoiding duplicate local WAV files.
+
+#### Option 1: SipFlow recording (recommended)
+
+SipFlow captures raw RTP packets and SIP messages, then generates WAV / JSONL on export. No local WAV file is written.
+
+```toml
+[recording]
+enabled = true
+auto_start = true
+
+[sipflow]
+type = "local"
+root = "./config/sipflow"
+
+[sipflow.upload]
+type = "s3"
+vendor = "aliyun"
+bucket = "my-bucket"
+region = "oss-cn-hangzhou"
+endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+root = "recordings"
+media = true
+signaling = true
+```
+
+When sipflow backend is present, `[recording]` enables media anchoring only; media capture and upload are handled by sipflow. The WAV is generated on-demand from stored RTP packets via `GET /sipflow/media/{call_id}` and uploaded to the sipflow S3/HTTP target. Signaling is uploaded as JSONL to the same target.
+
+#### Option 2: Local file recorder (legacy)
+
+```toml
+[recording]
+enabled = true
+auto_start = true
+# No [sipflow] section — falls back to local .wav file
+```
+
+All calls are recorded locally to `./config/recorders/`, then asynchronously uploaded via `[callrecord]` S3 config.

@@ -926,37 +926,58 @@ impl CallModule {
         let caller_identity = Self::caller_identity(caller);
         let callee_identity = Self::callee_identity(&dialplan).unwrap_or_default();
 
-        let recorder_option =
-            match self.build_recorder_option(&dialplan, policy, &caller_identity, &callee_identity)
-            {
+        // When sipflow backend is available, skip local recorder file and use
+        // sipflow for media capture and upload instead — unless force_file is
+        // set, in which case the legacy WAV file recorder is used and sipflow
+        // captures SIP signalling only.
+        let use_sipflow = self
+            .inner
+            .server
+            .sip_flow
+            .as_ref()
+            .and_then(|sf| sf.backend())
+            .is_some();
+
+        let force_file = policy.force_file.unwrap_or(false);
+
+        if !use_sipflow || force_file {
+            let recorder_option = match self.build_recorder_option(
+                &dialplan,
+                policy,
+                &caller_identity,
+                &callee_identity,
+            ) {
                 Some(option) => option,
                 None => return dialplan,
             };
+
+            if let Some(existing) = dialplan.recording.option.as_mut() {
+                if existing.recorder_file.is_empty() {
+                    existing.recorder_file = recorder_option.recorder_file.clone();
+                }
+                if let Some(rate) = policy.samplerate {
+                    existing.samplerate = rate;
+                }
+                if let Some(ptime) = policy.ptime {
+                    existing.ptime = ptime;
+                }
+            } else {
+                dialplan.recording.option = Some(recorder_option);
+            }
+        }
 
         debug!(
             session_id = dialplan.session_id.as_deref(),
             caller = %caller_identity,
             callee = %callee_identity,
+            use_sipflow,
+            force_file,
             "recording policy enabled for dialplan"
         );
 
         dialplan.recording.enabled = true;
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
-
-        if let Some(existing) = dialplan.recording.option.as_mut() {
-            if existing.recorder_file.is_empty() {
-                existing.recorder_file = recorder_option.recorder_file.clone();
-            }
-            if let Some(rate) = policy.samplerate {
-                existing.samplerate = rate;
-            }
-            if let Some(ptime) = policy.ptime {
-                existing.ptime = ptime;
-            }
-        } else {
-            dialplan.recording.option = Some(recorder_option);
-        }
-
+        dialplan.recording.force_file = force_file;
         dialplan
     }
 

@@ -1639,6 +1639,8 @@ pub(crate) struct RecordingPolicyPayload {
     path: Option<Option<String>>,
     #[serde(default)]
     format: Option<Option<String>>,
+    #[serde(default)]
+    force_file: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2187,6 +2189,14 @@ pub(crate) async fn update_storage_settings(
                         None => {
                             table.remove("format");
                         }
+                    }
+                }
+
+                if let Some(force_file) = policy_payload.force_file {
+                    if force_file {
+                        table["force_file"] = value(true);
+                    } else {
+                        table.remove("force_file");
                     }
                 }
 

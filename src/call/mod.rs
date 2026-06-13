@@ -632,6 +632,9 @@ pub struct CallRecordingConfig {
     pub option: Option<RecorderOption>,
     /// Auto start recording when call is answered
     pub auto_start: bool,
+    /// When true, use the legacy WAV file recorder instead of SipFlow for
+    /// media capture. SipFlow captures SIP signalling only.
+    pub force_file: bool,
 }
 
 impl CallRecordingConfig {
@@ -640,6 +643,7 @@ impl CallRecordingConfig {
             enabled: false,
             option: None,
             auto_start: true,
+            force_file: false,
         }
     }
 

@@ -228,9 +228,9 @@ git submodule update --remote src/addons/cc
 ## Documentation
 
 | Guide | Description |
-|---|---|
+|---|---|---|
 | [Configuration Guide](docs/configuration.md) | All config options |
-| [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Call Control |
+| [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Call Control, Recording |
 | [RWI Protocol](docs/rwi.md) | WebSocket Interface |
 | [RWI Events Reference](docs/rwi_events_reference.md) | Event types, fields, JSON examples (中文) |
 | [RWI Events Reference (EN)](docs/rwi_events_reference_en.md) | Event types, fields, JSON examples (English) |

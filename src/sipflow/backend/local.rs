@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
@@ -144,16 +145,34 @@ impl LocalBackend {
 impl SipFlowBackend for LocalBackend {
     async fn flush(&self) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self.sender.send(Command::Flush { done: tx });
-        rx.await.ok();
-        Ok(())
+        if self
+            .sender
+            .send(Command::Flush { done: tx })
+            .is_err()
+        {
+            warn!("SipFlowBackend flush: worker channel closed, skipping flush");
+            return Ok(());
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => {
+                warn!("SipFlowBackend flush: oneshot cancelled");
+                Ok(())
+            }
+            Err(_) => {
+                warn!("SipFlowBackend flush: timed out after 30s");
+                Ok(())
+            }
+        }
     }
 
     fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
-        self.sender.send(Command::RecordItem {
-            call_id: call_id.to_string(),
-            item,
-        })?;
+        self.sender
+            .send(Command::RecordItem {
+                call_id: call_id.to_string(),
+                item,
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to send record command: {}", e))?;
         Ok(())
     }
 
@@ -320,7 +339,7 @@ async fn build_payload_maps(
         leg_sources.entry(source.leg).or_default().push(source.src);
     }
     let flow = storage
-        .query_flow_in_range(start_time, end_time)
+        .query_flow(call_id, start_time, end_time)
         .await
         .unwrap_or_default();
     let payload_map = build_payload_type_map(&flow);
@@ -349,7 +368,7 @@ async fn build_payload_maps_filtered(
         }
     }
     let flow = storage
-        .query_flow_in_range(start_time, end_time)
+        .query_flow(call_id, start_time, end_time)
         .await
         .unwrap_or_default();
     let payload_map = build_payload_type_map(&flow);

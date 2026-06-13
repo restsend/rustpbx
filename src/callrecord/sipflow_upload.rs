@@ -85,6 +85,12 @@ impl CallRecordHook for SipFlowUploadHook {
         let signaling_key = format_sipflow_signaling_key(record);
         let signaling_file_name = format_sipflow_signaling_file_name(record);
 
+        // When force_file is active, the legacy WAV recorder produced a local
+        // file that RecordingUploadHook handles. Skip sipflow media upload to
+        // avoid a redundant (and empty) WAV generation — but still upload
+        // signalling if configured.
+        let skip_media = !record.recorder.is_empty();
+
         crate::callrecord::sipflow_upload::do_upload(
             self.backend.as_ref(),
             &self.upload_config,
@@ -99,6 +105,7 @@ impl CallRecordHook for SipFlowUploadHook {
             &signaling_key,
             &signaling_file_name,
             self.rwi_gateway.as_ref(),
+            skip_media,
         )
         .await;
 
@@ -121,15 +128,17 @@ async fn do_upload(
     signaling_key: &str,
     signaling_file_name: &str,
     rwi_gateway: Option<&RwiGatewayRef>,
+    skip_media: bool,
 ) {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
 
-    let media_enabled = match upload_config {
-        SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
-        SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
-    };
+    let media_enabled = !skip_media
+        && match upload_config {
+            SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
+            SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
+        };
 
     let mut first_uploaded_url = None;
     let mut uploaded_file_size = 0u64;
