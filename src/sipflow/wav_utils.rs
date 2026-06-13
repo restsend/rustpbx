@@ -479,8 +479,9 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         let clock_rate = descriptor.clock_rate as u64;
 
         let base = *base_timestamps.entry(rtp.leg).or_insert(rtp_timestamp);
-        let rtp_diff = rtp_timestamp.wrapping_sub(base);
-        let target_timestamp = (rtp_diff * target_sample_rate as u64 / clock_rate) as u32;
+        let rtp_diff = rtp_timestamp.saturating_sub(base);
+        let target_timestamp =
+            (rtp_diff.saturating_mul(target_sample_rate as u64) / clock_rate) as u32;
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
@@ -555,6 +556,8 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         .max(max_dtmf_time_a)
         .max(max_dtmf_time_b);
     let max_duration = max_time + target_sample_rate / 50;
+    let max_duration_cap = target_sample_rate.saturating_mul(3600);
+    let max_duration = max_duration.min(max_duration_cap);
 
     tracing::info!(
         "Buffer stats: A_len={} B_len={} A_dtmf_len={} B_dtmf_len={} max_time={} max_duration={}",
@@ -850,6 +853,71 @@ mod tests {
             audible_windows >= 8,
             "RFC4733 payload without SDP mapping should still regenerate an audible tone, got {} windows",
             audible_windows
+        );
+    }
+
+    /// Reproduction: RTP packets from different SSRCs on the same leg have
+    /// very different timestamp offsets.  After sorting, the range can be
+    /// close to `u32::MAX`, making `max_duration` enormous and the WAV loop
+    /// allocate multi-GB — causing OOM on a single cancelled call with just
+    /// a few stray RTP packets.
+    #[test]
+    fn repro_different_ssrcs_cause_enormous_max_duration() {
+        // Simulate two RTP packets on leg 0 from different SSRCs:
+        //   SSRC-A: timestamp starts at 100 (normal call media)
+        //   SSRC-B: timestamp starts at 4_000_000_000 (stray packet, different clock)
+        //
+        // After sorting by timestamp: [100, 4_000_000_000]
+        // base = 100, rtp_diff = 3_999_999_900
+        let base: u64 = 100;
+        let later: u64 = 4_000_000_000;
+        let rtp_diff = later.saturating_sub(base);
+
+        let target_sample_rate = 16000u64;
+        let clock_rate = 8000u64;
+        let target_timestamp = rtp_diff.saturating_mul(target_sample_rate) / clock_rate;
+        let target_timestamp_u32 = target_timestamp as u32;
+
+        let step_samples = 320u32;
+        let max_duration = target_timestamp_u32 + step_samples;
+        let iterations = max_duration / step_samples;
+        let estimated_bytes = iterations as u64 * 640;
+
+        eprintln!(
+            "target_timestamp={target_timestamp_u32}, max_duration={max_duration}, \
+             iterations={iterations}, estimated_wav_bytes≈{estimated_bytes} ({:.1} GB)",
+            estimated_bytes as f64 / 1_073_741_824.0
+        );
+
+        assert!(
+            iterations > 1_000_000,
+            "expected >1M iterations (multi-GB allocation), got {iterations}"
+        );
+    }
+
+    /// After the fix (saturating arithmetic + max_duration cap), WAV generation
+    /// completes normally even with packets from different SSRCs.
+    #[test]
+    fn test_wav_generation_handles_mismatched_timestamps() {
+        let payload = vec![0xffu8; 160]; // 20ms PCMU
+
+        // Two packets on the same leg with very different timestamps
+        // (simulating different SSRCs).
+        let packets = vec![
+            (0i32, 0u64, build_rtp_packet(0, 100, &payload)),
+            (0i32, 1u64, build_rtp_packet(0, 4_000_000_000, &payload)),
+        ];
+
+        let wav = generate_wav_from_packets_ex(&packets, true)
+            .expect("wav generation should succeed despite mismatched timestamps");
+
+        // Before fix: this would attempt ~7 GB allocation → OOM kill.
+        // After fix: capped at 1 hour of audio ≈ 230 MB worst case.
+        assert!(
+            wav.len() < 300_000_000,
+            "wav should be bounded (< 300 MB with 1h cap), got {} bytes ({:.1} MB)",
+            wav.len(),
+            wav.len() as f64 / 1_048_576.0
         );
     }
 }

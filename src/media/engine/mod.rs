@@ -269,7 +269,7 @@ impl EngineCore {
                 if let Some(old) = old_bridge {
                     old.stop().await;
                 }
-                info!(session_id = %session_id, caller_is_webrtc, "Bridge attached to engine session");
+                debug!(session_id = %session_id, caller_is_webrtc, "Bridge attached to engine session");
             }
 
             MediaCommand::DetachBridge { session_id } => {

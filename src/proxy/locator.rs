@@ -18,7 +18,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone, Debug)]
 pub enum LocatorEvent {
@@ -96,7 +96,8 @@ impl DialogTargetLocator {
 #[async_trait]
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
-        if let Ok(locs) = self.locator.lookup(uri).await
+        let locs = self.locator.lookup(uri).await;
+        if let Ok(locs) = &locs
             && !locs.is_empty()
         {
             if let Some(loc) = locs.iter().find(|loc| {
@@ -125,6 +126,7 @@ impl TargetLocator for DialogTargetLocator {
                 }
             }
         }
+        debug!(%uri, "DialogTargetLocator: location lookup returned empty, using SipAddr fallback");
         SipAddr::try_from(uri).map_err(|e| {
             rsipstack::Error::Error(format!(
                 "failed to convert uri to sip addr: {}, error: {}",

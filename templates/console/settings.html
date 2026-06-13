@@ -1072,6 +1072,7 @@
                         <div>
                             <p class="font-semibold">{{ "settings_page.better_io_performance" | t }}</p>
                             <p class="mt-1">{{ "settings_page.concurrent_calls_support" | t }}</p>
+                            <p class="mt-1">When Recording policy is also enabled, SipFlow takes over media capture and upload — no local .wav file is written.</p>
                         </div>
                     </div>
                 </div>
@@ -1227,6 +1228,14 @@
                         <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.recording_policy" | t }}
                         </h2>
                         <p class="text-xs text-slate-500">{{ "settings_page.recording_policy_desc" | t }}</p>
+                        <template x-if="sipflowSettings?.backend_type !== 'none'">
+                            <div class="mt-2 rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-700">
+                                SipFlow backend is active. Enable <strong>Force file recorder</strong>
+                                below to record audio to WAV files via the legacy recorder while
+                                SipFlow captures SIP signalling only. Otherwise, SipFlow handles both
+                                media capture and signalling.
+                            </div>
+                        </template>
                     </div>
                 </div>
                 <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
@@ -1252,34 +1261,43 @@
                                     x-model="storageDraft.recording_auto_start" :disabled="storageProcessing">
                                 <span>{{ "settings_page.auto_start" | t }}</span>
                             </label>
-                            <div>
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                    "settings_page.directions" | t }}</span>
-                                <div class="mt-2 grid gap-2 sm:grid-cols-3">
-                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="storageDraft.recording_direction_inbound"
-                                            :disabled="storageProcessing">
-                                        <span>{{ "settings_page.inbound" | t }}</span>
-                                    </label>
-                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="storageDraft.recording_direction_outbound"
-                                            :disabled="storageProcessing">
-                                        <span>{{ "settings_page.outbound" | t }}</span>
-                                    </label>
-                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="storageDraft.recording_direction_internal"
-                                            :disabled="storageProcessing">
-                                        <span>{{ "settings_page.internal" | t }}</span>
-                                    </label>
-                                </div>
-                                <p class="mt-1 text-[11px] text-slate-400">{{ "settings_page.directions_desc" | t }}</p>
+                            <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                                <input type="checkbox"
+                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                    x-model="storageDraft.recording_force_file" :disabled="storageProcessing">
+                                <span>Force file recorder</span>
+                                <template x-if="sipflowSettings?.backend_type !== 'none'">
+                                    <span class="text-[11px] text-slate-400">(WAV file for media, SipFlow for signalling only)</span>
+                                </template>
+                            </label>
+                        </div>
+                        <div>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                "settings_page.directions" | t }}</span>
+                            <div class="mt-2 grid gap-2 sm:grid-cols-3">
+                                <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                    <input type="checkbox"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                        x-model="storageDraft.recording_direction_inbound"
+                                        :disabled="storageProcessing">
+                                    <span>{{ "settings_page.inbound" | t }}</span>
+                                </label>
+                                <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                    <input type="checkbox"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                        x-model="storageDraft.recording_direction_outbound"
+                                        :disabled="storageProcessing">
+                                    <span>{{ "settings_page.outbound" | t }}</span>
+                                </label>
+                                <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                    <input type="checkbox"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                        x-model="storageDraft.recording_direction_internal"
+                                        :disabled="storageProcessing">
+                                    <span>{{ "settings_page.internal" | t }}</span>
+                                </label>
                             </div>
+                            <p class="mt-1 text-[11px] text-slate-400">{{ "settings_page.directions_desc" | t }}</p>
                         </div>
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
@@ -2917,6 +2935,7 @@
                 callrecord_root: '',
                 recording_enabled: false,
                 recording_auto_start: true,
+                recording_force_file: false,
                 recording_direction_inbound: true,
                 recording_direction_outbound: true,
                 recording_direction_internal: true,
@@ -5260,6 +5279,7 @@
                     callrecord_s3_keep_media_copy: !!crConfig?.keep_media_copy,
                     recording_enabled: !!recording?.enabled,
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
+                    recording_force_file: !!recording?.force_file,
                     recording_direction_inbound: directionInbound,
                     recording_direction_outbound: directionOutbound,
                     recording_direction_internal: directionInternal,
@@ -5317,6 +5337,7 @@
                 const recordingPayload = {
                     enabled: !!this.storageDraft.recording_enabled,
                     auto_start: !!this.storageDraft.recording_auto_start,
+                    force_file: !!this.storageDraft.recording_force_file,
                     caller_allow: this.listFromTextarea(this.storageDraft.recording_caller_allow),
                     caller_deny: this.listFromTextarea(this.storageDraft.recording_caller_deny),
                     callee_allow: this.listFromTextarea(this.storageDraft.recording_callee_allow),

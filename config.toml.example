@@ -108,21 +108,32 @@ type = "extension"
 # video_codecs = ["H264"]
 
 # ── Recording ─────────────────────────────────────────────────────────────────
-# IMPORTANT: [recording] and [sipflow] are mutually exclusive for RTP capture.
+# IMPORTANT: [recording] and [sipflow] are mutually exclusive for RTP capture,
+# UNLESS force_file = true is set (see below).
 #
-#   • If [recording] (top-level) or [proxy.recording] is configured, the legacy
-#     live WAV recorder owns RTP recording. SipFlow will still capture SIP
-#     signalling messages, but RTP audio capture is DISABLED.
-#   • If you omit [recording] entirely, SipFlow captures both SIP signalling
-#     and RTP audio. This is the recommended default.
+#   • Default (recommended): Omit [recording]. SipFlow captures both SIP
+#     signalling and RTP audio.
 #
-# Uncomment below ONLY when you need the legacy WAV recorder instead of SipFlow.
+#   • Legacy: Configure [recording] WITHOUT [sipflow]. The live WAV recorder
+#     owns RTP recording. No SIP signalling capture.
+#
+#   • Hybrid (force_file): Configure BOTH [recording] and [sipflow], then set
+#     force_file = true inside [recording]. The WAV file recorder captures
+#     audio; SipFlow captures SIP signalling ONLY (no RTP). Media upload goes
+#     through [recording] (type = "http" or "s3"), signalling upload goes
+#     through [sipflow.upload] (signaling = true).
+#
+# Uncomment below when you need the legacy WAV recorder or the hybrid mode.
 # [recording]
 # enabled = true
 # auto_start = true
 # # Recording upload mode: "local" (default), "http", or "s3".
 # # type = "local"
 # # path = "./recordings"
+# # force_file = true   # Use WAV file recorder for media even when [sipflow]
+#                      # is active. SipFlow captures signalling only.
+#                      # Media upload is handled by [recording] (type = http/s3),
+#                      # not [sipflow.upload].
 
 [callrecord]
 type = "local"
@@ -135,6 +146,11 @@ max_concurrent = 64
 # When enabled WITHOUT a [recording] section, SipFlow captures both SIP
 # signalling and RTP audio. The console shows the SIP flow ladder and an
 # audio player for each call.
+#
+# When [recording] force_file = true is also set, SipFlow captures SIP
+# signalling ONLY. Audio is recorded to a WAV file by the [recording]
+# subsystem. In [sipflow.upload], media upload is automatically skipped
+# (handled by [recording]); only signalling upload (if enabled) runs.
 [sipflow]
 type = "local"
 root = "./config/sipflow"

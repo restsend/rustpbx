@@ -209,7 +209,7 @@ impl StorageManager {
             self.call_id_cache.clear();
         }
 
-        let file = self.raw_file.as_mut().unwrap();
+        let file = self.raw_file.as_mut().ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
         let offset = file.metadata()?.len();
 
         file.write_all(&0x5346u16.to_be_bytes())?; // Magic
@@ -995,5 +995,73 @@ mod tests {
         assert_eq!(sources.len(), 1, "expected one unique media source");
         assert_eq!(sources[0].leg, 0);
         assert_eq!(sources[0].src, "127.0.0.1:4000");
+    }
+
+    /// Reproduction: `query_flow_in_range` loads ALL calls' SIP data in the time
+    /// range, not just one call.  When `build_payload_maps` (called during WAV
+    /// generation) uses this function, it loads every concurrent call's SIP
+    /// messages into memory — a major contributor to OOM under load.
+    #[tokio::test]
+    async fn repro_query_flow_in_range_loads_all_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+
+        // Simulate 50 concurrent calls, each with 10 SIP messages.
+        for i in 0..50u64 {
+            let call_id = format!("call-{i}");
+            for j in 0..10u64 {
+                storage
+                    .write_processed(make_sip_processed(base + i * 100 + j, &call_id))
+                    .await
+                    .expect("write sip");
+            }
+        }
+
+        // Write 5 RTP packets for only ONE call.
+        for j in 0..5u64 {
+            storage
+                .write_processed(make_rtp_processed(
+                    base + j,
+                    "call-0",
+                    0,
+                    "127.0.0.1:4000",
+                    b"\x80\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01payload",
+                ))
+                .await
+                .expect("write rtp");
+        }
+        storage.force_flush().await.expect("flush");
+
+        let start = local_dt_from_micros(base as i64 - 1);
+        let end = local_dt_from_micros(base as i64 + 10_000);
+
+        // query_flow WITH call_id filter → only this call's SIP messages.
+        let one_call = storage
+            .query_flow("call-0", start, end)
+            .await
+            .expect("query_flow");
+        assert_eq!(one_call.len(), 10, "query_flow returns only call-0's 10 SIP msgs");
+
+        // query_flow_in_range WITHOUT call_id filter → ALL calls' SIP messages!
+        let all_calls = storage
+            .query_flow_in_range(start, end)
+            .await
+            .expect("query_flow_in_range");
+        assert_eq!(
+            all_calls.len(),
+            500,
+            "query_flow_in_range loads ALL 50 calls × 10 msgs = 500 items"
+        );
+
+        // ── The bug ──────────────────────────────────────────────
+        // build_payload_maps only needs call-0's SIP messages (10 items)
+        // to determine codecs, but query_flow_in_range loads 500 items
+        // — 50× more data than necessary into memory.
+        // With hundreds of concurrent calls this difference is enormous
+        // and directly contributes to the OOM crashes observed in
+        // production (~3 GB RSS → kernel kill).
+        // ─────────────────────────────────────────────────────────
     }
 }

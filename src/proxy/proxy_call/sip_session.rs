@@ -453,11 +453,7 @@ impl SipSession {
         session_id: &str,
         call_id: &str,
     ) -> Option<crate::media::engine::SipFlowCaptureTx> {
-        let backend = if self.server.proxy_config.recording.is_none() {
-            self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
-        } else {
-            None
-        }?;
+        let backend = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(
             crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY,
@@ -3325,10 +3321,12 @@ impl SipSession {
             bridge_builder =
                 bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
-        if let Some(sipflow_tx) =
-            self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
-        {
-            bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+        if !self.context.dialplan.recording.force_file {
+            if let Some(sipflow_tx) =
+                self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
+            {
+                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+            }
         }
 
         let rtp_timeout = self.context.dialplan.rtp_timeout.or_else(|| {
@@ -4859,7 +4857,11 @@ impl SipSession {
 
         let shared_recorder = self.recorder.clone();
 
-        let sipflow_tx = self.setup_sipflow_capture(session_id, session_id);
+        let sipflow_tx = if self.context.dialplan.recording.force_file {
+            None
+        } else {
+            self.setup_sipflow_capture(session_id, session_id)
+        };
         let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
         match Self::wire_with_forwarding_track(
@@ -5662,10 +5664,12 @@ impl SipSession {
                 bridge_builder = bridge_builder
                     .with_recorder(self.recorder.clone(), self.recording_paused.clone());
             }
-            if let Some(sipflow_tx) =
-                self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
-            {
-                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+            if !self.context.dialplan.recording.force_file {
+                if let Some(sipflow_tx) =
+                    self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
+                {
+                    bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+                }
             }
 
             let bridge = bridge_builder.build();
