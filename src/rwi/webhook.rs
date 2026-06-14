@@ -67,7 +67,8 @@ async fn run_rwi_webhook_handler(
         }
 
         // Determine the RWI event type name and flat value from the enum variant.
-        let (event_value, event_type) = entry.event.to_flat_value();
+        let event_value = &entry.event.payload;
+        let event_type = entry.event.event_type;
 
         // Apply event type filter if configured.
         if !config.events.is_empty() && !config.events.iter().any(|e| e == event_type) {

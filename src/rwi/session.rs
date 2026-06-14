@@ -529,32 +529,15 @@ pub struct ConferenceCreateRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ConferenceAddRequest {
+pub struct ConferenceMemberRequest {
     #[serde(alias = "conference_id")]
     pub conf_id: Option<String>,
     pub call_id: Option<String>,
 }
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConferenceRemoveRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConferenceMuteRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConferenceUnmuteRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub call_id: Option<String>,
-}
+pub type ConferenceAddRequest = ConferenceMemberRequest;
+pub type ConferenceRemoveRequest = ConferenceMemberRequest;
+pub type ConferenceMuteRequest = ConferenceMemberRequest;
+pub type ConferenceUnmuteRequest = ConferenceMemberRequest;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConferenceDestroyRequest {
