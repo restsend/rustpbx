@@ -1,3 +1,4 @@
+use sea_orm::sea_query::{Func, IntoCondition, SimpleExpr};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +10,14 @@ pub fn sanitize_id(id: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Database query helper: `COUNT(CASE WHEN condition THEN 1 END)`.
+pub fn count_when<C>(condition: C) -> SimpleExpr
+where
+    C: IntoCondition,
+{
+    Func::count(sea_orm::sea_query::Expr::case(condition, sea_orm::sea_query::Expr::val(1))).into()
 }
 
 pub struct TaskGuard {

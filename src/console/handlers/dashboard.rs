@@ -1,4 +1,5 @@
 use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::utils::count_when;
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use anyhow::Result;
 use axum::{
@@ -18,13 +19,6 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::warn;
-
-fn count_when<C>(condition: C) -> sea_query::SimpleExpr
-where
-    C: sea_query::IntoCondition,
-{
-    sea_query::Func::count(sea_query::Expr::case(condition, sea_query::Expr::val(1))).into()
-}
 
 fn sum_i64<E>(db: &impl ConnectionTrait, expr: E) -> sea_query::SimpleExpr
 where
