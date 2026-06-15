@@ -1,6 +1,7 @@
 use crate::callrecord::CallRecord;
 use crate::callrecord::storage;
 use crate::callrecord::storage::CdrStorage;
+use crate::console::config_helpers::{bad_request, find_or_404, internal_error};
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use crate::models::{
     call_record::{
@@ -329,36 +330,15 @@ async fn stream_call_recording(
     let stream_leg = match parse_recording_stream_selector(query.stream.as_deref()) {
         Ok(selection) => selection,
         Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "message": message,
-                    "allowed": ["A", "B", "mixed", "caller", "callee"],
-                })),
-            )
-                .into_response();
+            return bad_request(json!({
+                "message": message,
+                "allowed": ["A", "B", "mixed", "caller", "callee"],
+            }).to_string());
         }
     };
 
     let db = state.db();
-    let record = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(id = pk, "failed to load call record for playback: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
-            )
-                .into_response();
-        }
-    };
+    let record = find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let cdr_data = load_cdr_data(&state, &record).await;
     let recording_path = select_recording_path(&record, cdr_data.as_ref());
@@ -492,11 +472,7 @@ async fn stream_file_with_range(
         Ok(file) => file,
         Err(err) => {
             warn!(path = %recording_path, "failed to open recording file: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to open recording file: {}", err) })),
-            )
-                .into_response();
+            return internal_error(format!("Failed to open recording file: {}", err));
         }
     };
 
@@ -504,11 +480,7 @@ async fn stream_file_with_range(
         && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await
     {
         warn!(path = %recording_path, "failed to seek recording file: {}", err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "message": format!("Failed to read recording file: {}", err) })),
-        )
-            .into_response();
+        return internal_error(format!("Failed to read recording file: {}", err));
     }
 
     let bytes_to_send = end.saturating_sub(start) + 1;
@@ -626,24 +598,7 @@ async fn download_call_record_metadata(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(id = pk, "failed to load call record metadata: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let cdr_data = match load_cdr_data(&state, &model).await {
         Some(data) => data,
@@ -923,27 +878,7 @@ async fn update_call_record(
     }
 
     let db = state.db();
-    let mut record = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(
-                call_record_id = pk,
-                "failed to load call record for update: {}", err
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
-            )
-                .into_response();
-        }
-    };
+    let mut record = crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let mut active: CallRecordActiveModel = record.clone().into();
     let mut changed = false;
@@ -1012,12 +947,8 @@ async fn delete_call_record(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "cdr", "delete").await {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "cdr", "delete").await {
+        return resp;
     }
     match CallRecordEntity::delete_by_id(pk).exec(state.db()).await {
         Ok(result) => {

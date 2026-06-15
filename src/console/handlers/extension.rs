@@ -1,4 +1,5 @@
 use crate::call::Location;
+use crate::console::config_helpers::{bad_request, find_or_404, internal_error};
 use crate::console::handlers::forms::{self, ExtensionPayload, ListQuery};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
@@ -418,22 +419,14 @@ async fn create_extension(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "extensions", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "extensions", "write").await {
+        return resp;
     }
     let db = state.db();
     let extension = match payload.extension {
         Some(ref ext) if !ext.is_empty() => ext,
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message": "Extension is required"})),
-            )
-                .into_response();
+            return bad_request("Extension is required");
         }
     };
     let now = chrono::Utc::now();
@@ -457,11 +450,7 @@ async fn create_extension(
         Ok(model) => model,
         Err(err) => {
             warn!("failed to create extension: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
+            return internal_error(err.to_string());
         }
     };
 
@@ -472,11 +461,7 @@ async fn create_extension(
             "failed to set departments for extension {}: {}",
             model.id, err
         );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": err.to_string()})),
-        )
-            .into_response();
+        return internal_error(err.to_string());
     }
 
     Json(json!({"status": "ok", "id": model.id})).into_response()
@@ -661,32 +646,11 @@ async fn update_extension(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "extensions", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "extensions", "write").await {
+        return resp;
     }
     let db = state.db();
-    let model = match ExtensionEntity::find_by_id(id).one(db).await {
-        Ok(Some(result)) => result,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Extension not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load extension {} for update: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(ExtensionEntity, id, db, "Extension");
 
     let mut active: ExtensionActiveModel = model.into();
     if let Some(extension) = payload.extension {
@@ -750,12 +714,8 @@ async fn delete_extension(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "extensions", "delete").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "extensions", "delete").await {
+        return resp;
     }
     match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
         Ok(r) => Json(json!({"status": r.rows_affected})).into_response(),

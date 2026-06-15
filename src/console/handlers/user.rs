@@ -18,6 +18,19 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+async fn load_mfa_user_or_redirect(
+    state: &Arc<ConsoleState>,
+    user_id: i64,
+) -> Result<crate::models::user::Model, Response> {
+    match crate::models::user::Entity::find_by_id(user_id)
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(user)) => Ok(user),
+        _ => Err(Redirect::to(&state.url_for("/login")).into_response()),
+    }
+}
+
 fn is_secure_request(headers: &HeaderMap) -> bool {
     if let Some(proto) = headers.get("x-forwarded-proto")
         && let Ok(proto_str) = proto.to_str()
@@ -597,12 +610,8 @@ pub async fn login_mfa_page(
         }
     };
 
-    // Get user from database
-    match crate::models::user::Entity::find_by_id(user_id)
-        .one(&state.db)
-        .await
-    {
-        Ok(Some(_user)) => state.render_with_headers(
+    match load_mfa_user_or_redirect(&state, user_id).await {
+        Ok(_user) => state.render_with_headers(
             "console/login_mfa.html",
             json!({
                 "login_action": state.url_for("/login/mfa"),
@@ -610,7 +619,7 @@ pub async fn login_mfa_page(
             }),
             &headers,
         ),
-        _ => Redirect::to(&state.url_for("/login")).into_response(),
+        Err(resp) => resp,
     }
 }
 
@@ -632,15 +641,9 @@ pub async fn login_mfa_post(
         }
     };
 
-    // Get user from database
-    let user = match crate::models::user::Entity::find_by_id(user_id)
-        .one(&state.db)
-        .await
-    {
-        Ok(Some(user)) => user,
-        _ => {
-            return Redirect::to(&state.url_for("/login")).into_response();
-        }
+    let user = match load_mfa_user_or_redirect(&state, user_id).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
 
     // Verify MFA code

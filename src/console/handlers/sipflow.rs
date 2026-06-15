@@ -1,4 +1,7 @@
 use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::console::config_helpers::{
+    ensure_table_mut, get_config_path, load_document, persist_document,
+};
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use axum::{
     Json, Router,
@@ -11,8 +14,8 @@ use chrono::{DateTime, TimeZone};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, sync::Arc};
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
+use std::sync::Arc;
+use toml_edit::{Array, InlineTable, value};
 
 #[derive(Debug, Deserialize)]
 struct FlowQueryParams {
@@ -252,87 +255,6 @@ async fn update_settings(
         })),
     )
         .into_response()
-}
-
-// Helper functions from setting.rs
-#[allow(clippy::result_large_err)]
-fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
-    let Some(app_state) = state.app_state() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": "Application state is unavailable."
-            })),
-        )
-            .into_response());
-    };
-
-    let Some(path) = app_state.config_path.clone() else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Configuration file path is unknown. Start the service with --conf to enable editing."
-            })),
-        )
-            .into_response());
-    };
-    Ok(path)
-}
-
-#[allow(clippy::result_large_err)]
-fn load_document(path: &str) -> Result<DocumentMut, Response> {
-    let contents = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to read configuration file: {}", err)
-                })),
-            )
-                .into_response());
-        }
-    };
-
-    contents.parse::<DocumentMut>().map_err(|err| {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "error": format!("Configuration file is not valid TOML: {}", err)
-            })),
-        )
-            .into_response()
-    })
-}
-
-#[allow(clippy::result_large_err)]
-fn persist_document(path: &str, contents: String) -> Result<(), Response> {
-    fs::write(path, contents).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Failed to write configuration file: {}", err)
-            })),
-        )
-            .into_response()
-    })
-}
-
-fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    let needs_init = doc
-        .as_table()
-        .get(key)
-        .map(|item| !item.is_table())
-        .unwrap_or(true);
-
-    if needs_init {
-        doc.insert(key, Item::Table(Table::new()));
-    }
-
-    doc.as_table_mut()
-        .get_mut(key)
-        .and_then(Item::as_table_mut)
-        .expect("table")
 }
 
 async fn query_flow(

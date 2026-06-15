@@ -1,8 +1,9 @@
 use crate::console::ConsoleState;
+use crate::console::i18n::get_cookie;
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::{HeaderMap, header::COOKIE, request::Parts},
+    http::{HeaderMap, request::Parts},
     response::Response,
 };
 use minijinja::Environment;
@@ -103,23 +104,7 @@ pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
         return Some(token.trim().to_string());
     }
 
-    for cookie_header in headers.get_all(COOKIE) {
-        if let Ok(s) = cookie_header.to_str() {
-            let found = s.split(';').find_map(|pair| {
-                let mut parts = pair.trim().splitn(2, '=');
-                let key = parts.next()?.trim();
-                if key == super::auth::SESSION_COOKIE_NAME {
-                    Some(parts.next().unwrap_or("").trim().to_string())
-                } else {
-                    None
-                }
-            });
-            if found.is_some() {
-                return found;
-            }
-        }
-    }
-    None
+    get_cookie(headers, super::auth::SESSION_COOKIE_NAME)
 }
 
 pub struct RenderTemplate<'a> {
