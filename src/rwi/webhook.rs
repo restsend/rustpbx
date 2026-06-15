@@ -53,16 +53,20 @@ async fn run_rwi_webhook_handler(
         };
 
         // Dedup: skip event if same (call_id, sequence) already sent.
-        let dedup_key = (entry.call_id.clone(), entry.sequence);
-        if seen.contains(&dedup_key) {
-            debug!("RWI webhook: skipping duplicate event {}", entry.sequence);
-            continue;
-        }
-        seen.insert(dedup_key.clone());
-        dedup.push_back(dedup_key);
-        while dedup.len() > DEDUP_CACHE_SIZE {
-            if let Some(old) = dedup.pop_front() {
-                seen.remove(&old);
+        // Events with empty call_id (broadcast events like agent state changes)
+        // are not deduped since they have no call context and always use sequence=0.
+        if !entry.call_id.is_empty() {
+            let dedup_key = (entry.call_id.clone(), entry.sequence);
+            if seen.contains(&dedup_key) {
+                debug!("RWI webhook: skipping duplicate event {}", entry.sequence);
+                continue;
+            }
+            seen.insert(dedup_key.clone());
+            dedup.push_back(dedup_key);
+            while dedup.len() > DEDUP_CACHE_SIZE {
+                if let Some(old) = dedup.pop_front() {
+                    seen.remove(&old);
+                }
             }
         }
 

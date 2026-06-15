@@ -625,9 +625,12 @@ impl ProxyModule for RegistrarModule {
                 Ok(_) => {
                     metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
-                        locator_events.send(LocatorEvent::Registered(location)).ok();
+                        if location.expires == 0 {
+                            locator_events.send(LocatorEvent::Unregistered(location)).ok();
+                        } else {
+                            locator_events.send(LocatorEvent::Registered(location)).ok();
+                        }
                     }
-                    // DnStateChanged removed. Use agent_state_changed instead.
                 }
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
