@@ -11,13 +11,17 @@ use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType,
     create_backend,
+    perf::{PerfCounters, PerfDumper},
     protocol::{MsgType, Packet, parse_packet},
     storage::extract_callid,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::net::UdpSocket;
+use tracing_appender::non_blocking;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SipFlow - SIP and RTP flow recording server", long_about = None)]
@@ -38,8 +42,8 @@ struct Args {
     #[arg(short, long, default_value = "./config/sipflow")]
     root: String,
 
-    /// Storage engine: "flowdb" (default) or "sqlite"
-    #[arg(long, default_value = "flowdb")]
+    /// Storage engine: "flowdb" or "sqlite" (default)
+    #[arg(long, default_value = "sqlite")]
     engine: String,
 
     /// Channel buffer size
@@ -59,6 +63,16 @@ struct Args {
     /// Call-ID cache size (SQLite)
     #[arg(long, default_value_t = 8192)]
     id_cache_size: usize,
+
+    // ── Logging options ──
+
+    /// Log file path
+    #[arg(long, default_value = "/var/log/sipflow.log")]
+    log_file: String,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, default_value = "info")]
+    log_level: String,
 
     // ── FlowDB options ──
 
@@ -111,15 +125,41 @@ fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
+
+    // Initialize tracing: try log file, fall back to stdout on permission error
+    if let Some(parent) = std::path::Path::new(&args.log_file).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let (_guard, writer) = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&args.log_file)
+    {
+        Ok(f) => {
+            let (w, g) = non_blocking(f);
+            (g, w)
+        }
+        Err(e) => {
+            eprintln!(
+                "sipflow: cannot open '{}' ({}), falling back to stdout",
+                args.log_file, e
+            );
+            let (w, g) = non_blocking(std::io::stdout());
+            (g, w)
+        }
+    };
+    fmt()
+        .with_env_filter(EnvFilter::new(&args.log_level))
+        .with_writer(writer)
+        .init();
 
     // Ensure data directory exists
     std::fs::create_dir_all(&args.root)?;
 
     let engine = match args.engine.as_str() {
-        "sqlite" => SipFlowEngine::Sqlite,
-        "flowdb" | _ => SipFlowEngine::FlowDb,
+        "flowdb" => SipFlowEngine::FlowDb,
+        "sqlite" | _ => SipFlowEngine::Sqlite,
     };
     let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
 
@@ -137,6 +177,8 @@ async fn main() -> Result<()> {
     };
 
     let backend: Arc<dyn SipFlowBackend> = Arc::from(create_backend(&config)?);
+    let perf_counters = PerfCounters::new_arc();
+
     let app_state = AppState {
         backend: backend.clone(),
     };
@@ -148,12 +190,14 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Packet>(args.buffer_size);
 
     // UDP Receiver Task
+    let perf_rx = perf_counters.clone();
     rustpbx::utils::spawn(async move {
         let mut buf = vec![0u8; 65535];
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((size, _)) => {
                     if let Ok(packet) = parse_packet(&buf[..size]) {
+                        perf_rx.packets_received.fetch_add(1, Ordering::Relaxed);
                         let _ = tx.try_send(packet);
                     }
                 }
@@ -166,6 +210,7 @@ async fn main() -> Result<()> {
 
     // Storage Worker Task
     let storage_backend = backend.clone();
+    let perf_worker = perf_counters.clone();
     rustpbx::utils::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
@@ -174,11 +219,28 @@ async fn main() -> Result<()> {
                     let (call_id, item) = convert_packet_to_item(packet);
                     if !call_id.is_empty() {
                         let _ = storage_backend.record(&call_id, item);
+                        perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
                     }
+                    perf_worker.set_pending(rx.len() as i64);
                 }
                 _ = interval.tick() => {
                     let _ = storage_backend.flush().await;
+                    perf_worker.flushes.fetch_add(1, Ordering::Relaxed);
                 }
+            }
+        }
+    });
+
+    // Periodic perf dump (every 10 s, skipped when idle)
+    let perf_dump = perf_counters.clone();
+    rustpbx::utils::spawn(async move {
+        let mut dumper = PerfDumper::new(perf_dump);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            if let Some(msg) = dumper.try_dump() {
+                tracing::info!("{msg}");
             }
         }
     });

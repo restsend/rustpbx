@@ -237,6 +237,11 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Number of items waiting to be flushed.
+    pub fn batch_len(&self) -> usize {
+        self.batch.len()
+    }
+
     pub async fn check_flush(&mut self) -> Result<()> {
         if !self.batch.is_empty() && self.last_flush.elapsed().as_secs() >= self.flush_interval {
             self.flush_batch().await?;

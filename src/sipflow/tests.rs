@@ -277,9 +277,9 @@ engine = "sqlite"
         }
     }
 
-    /// Default engine (omitted in config) should be FlowDb.
+    /// Default engine (omitted in config) should be Sqlite.
     #[test]
-    fn test_config_default_engine_is_flowdb() {
+    fn test_config_default_engine_is_sqlite() {
         let toml_str = r#"
 type = "local"
 root = "/var/sipflow"
@@ -288,7 +288,7 @@ root = "/var/sipflow"
             toml::from_str(toml_str).expect("should parse default config");
         match cfg {
             crate::config::SipFlowConfig::Local { engine, .. } => {
-                assert_eq!(engine, SipFlowEngine::FlowDb);
+                assert_eq!(engine, SipFlowEngine::Sqlite);
             }
             _ => panic!("expected Local config"),
         }
