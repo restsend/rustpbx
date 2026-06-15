@@ -24,13 +24,13 @@ pub struct FlowDbBackend {
     engine: Arc<Engine>,
     counter: AtomicU64,
     ttl_micros: Option<i64>,
-    _maintenance: Option<tokio::task::JoinHandle<()>>,
+    _maintenance: Option<flowdb::MaintenanceHandle>,
 }
 
 impl Drop for FlowDbBackend {
     fn drop(&mut self) {
         if let Some(handle) = self._maintenance.take() {
-            handle.abort();
+            
         }
     }
 }
@@ -50,9 +50,7 @@ impl FlowDbBackend {
             ..Default::default()
         };
 
-        let engine = Engine::open(config)
-            .now_or_never()
-            .ok_or_else(|| anyhow::anyhow!("Engine::open did not complete synchronously"))??;
+        let engine = Engine::open(config)?;
 
         let engine = Arc::new(engine);
         let ttl_micros = ttl_secs.map(|s| s as i64 * 1_000_000);
@@ -217,13 +215,13 @@ impl SipFlowBackend for FlowDbBackend {
             SipFlowMsgType::Sip => {
                 let key = make_sip_key(call_id, counter);
                 let value = encode_sip_value(&item.src_addr, &item.dst_addr, &item.payload);
-                Record { key, ts, expire_at, value }
+                Record { key: key.into(), ts, expire_at, value }
             }
             SipFlowMsgType::Rtp => {
                 let leg = item.leg.unwrap_or(0);
                 let key = make_rtp_key(call_id, leg, counter);
                 let value = encode_rtp_value(leg, &item.src_addr, &item.payload);
-                Record { key, ts, expire_at, value }
+                Record { key: key.into(), ts, expire_at, value }
             }
         };
 
@@ -232,7 +230,7 @@ impl SipFlowBackend for FlowDbBackend {
     }
 
     async fn flush(&self) -> Result<()> {
-        self.engine.flush().await.map_err(|e| anyhow::anyhow!(e))
+        self.engine.flush().map_err(|e| anyhow::anyhow!(e))
     }
 
     async fn query_flow(
