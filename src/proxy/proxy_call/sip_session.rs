@@ -2366,6 +2366,12 @@ impl SipSession {
                                 digit = %digit,
                                 "✓ Successfully injected DTMF event from SIP INFO"
                             );
+                            // Emit typed RWI DTMF event
+                            self.emit_typed_rwi_event(&crate::rwi::Dtmf {
+                                call_id: self.context.session_id.clone(),
+                                digit: digit.chars().next().unwrap().to_string(),
+                                leg_id: Some("caller".to_string()),
+                            });
                         }
                     }
                 }
@@ -5179,6 +5185,7 @@ impl SipSession {
         let session_id = self.context.session_id.clone();
         let app_runtime = self.app_runtime.clone();
         let caller_leg_id = "caller".to_string();
+        let rwi_gateway = self.server.rwi_gateway.clone();
 
         if self.media.caller_answer_uses_media_bridge {
             if self.media.caller_ingress_monitor.is_some() {
@@ -5213,6 +5220,16 @@ impl SipSession {
                             digit = %digit,
                             "Injected RTP DTMF from bridge sink"
                         );
+                        // Emit RWI DTMF event
+                        if let Some(ref gw) = rwi_gateway {
+                            let ev = crate::rwi::Dtmf {
+                                call_id: session_id.clone(),
+                                digit: digit.to_string(),
+                                leg_id: Some(caller_leg.clone()),
+                            };
+                            let g = gw.read();
+                            g.send_to_owner(&ev);
+                        }
                     }
                 }),
             );
