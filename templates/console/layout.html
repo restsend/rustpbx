@@ -39,7 +39,7 @@
         src="{{tailwind_js|default('https://cdnjs.cloudflare.com/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js')|safe}}"></script>
     <script>
         window.RustPBX = window.RustPBX || {};
-        window.RustPBX.plugins = [];
+        window.RustPBX.plugins = []; 
         window.registerConsolePlugin = (plugin) => {
             window.RustPBX.plugins.push(plugin);
         };
