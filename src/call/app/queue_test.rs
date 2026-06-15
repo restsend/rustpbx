@@ -388,16 +388,8 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
 
-        // Should transfer to the connected agent
-        stack
-            .assert_cmd(
-                200,
-                "Transfer",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com"),
-            )
-            .await;
-
-        stack.join().await.expect("should exit after transfer");
+        // Should connect (app exits cleanly)
+        stack.join().await.expect("should exit after agent connected");
     }
 
     // ── 8. Queue with agent busy event - retry next agent ──
@@ -424,6 +416,8 @@ mod tests {
 
         // First agent is busy
         stack.custom("agent_busy", serde_json::json!({}));
+        // Auto-dials agent 2
+        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
 
         // Should continue with next agent (no immediate action, continues waiting)
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -434,16 +428,8 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent2@example.com"}),
         );
 
-        // Should transfer to the second agent
-        stack
-            .assert_cmd(
-                200,
-                "Transfer",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent2@example.com"),
-            )
-            .await;
-
-        stack.join().await.expect("should exit after transfer");
+        // Should connect (app exits cleanly)
+        stack.join().await.expect("should exit after agent connected");
     }
 
     // ── 9. Queue with all agents busy - fallback ──
@@ -650,9 +636,11 @@ mod tests {
 
         // Agent 1 is busy
         stack.custom("agent_busy", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
 
         // Agent 2 no answer
         stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
 
         // Agent 3 connects
         stack.custom(
@@ -660,16 +648,9 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent3@example.com"}),
         );
 
-        // Should transfer to agent 3
-        stack
-            .assert_cmd(
-                200,
-                "Transfer",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent3@example.com"),
-            )
-            .await;
-
-        stack.join().await.expect("should complete successfully");
+        // Should cancel agent2 leg then connect to agent 3
+        stack.assert_cmd(200, "LegRemove-agent2", |c| matches!(c, CallCommand::LegRemove { .. })).await;
+        stack.join().await.expect("should exit after agent connected");
     }
 
     /// Test autonomous routing with DbRegistry.
@@ -752,14 +733,8 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
         );
 
-        // Should transfer to agent
-        stack
-            .assert_cmd(
-                200,
-                "Transfer",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com"),
-            )
-            .await;
+        // Should connect (app exits cleanly)
+        stack.join().await.expect("should exit after agent connected");
 
         // Verify agent state is busy
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
@@ -768,7 +743,7 @@ mod tests {
             PresenceState::Busy { call_id: None }
         ));
 
-        stack.join().await.expect("should complete successfully");
+        // Note: no stack.join() here — agent registry checks happen after app exit
     }
 
     /// Test autonomous routing with no available agents.
@@ -1024,14 +999,10 @@ mod tests {
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
-        }).await;
-
         stack
             .join()
             .await
-            .expect("should exit after transfer with prompt");
+            .expect("should exit after transfer prompt");
     }
 
     #[tokio::test]
@@ -1058,14 +1029,10 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
 
-        stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
-        }).await;
-
         stack
             .join()
             .await
-            .expect("should exit after direct transfer");
+            .expect("should exit after agent connected");
     }
 
     #[tokio::test]
@@ -1122,7 +1089,9 @@ mod tests {
             .await;
 
         stack.custom("agent_busy", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_busy", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_busy", serde_json::json!({}));
 
         stack
@@ -1167,10 +1136,6 @@ mod tests {
             .await;
 
         stack.audio_complete("default");
-
-        stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
-        }).await;
 
         stack
             .join()
@@ -1239,7 +1204,9 @@ mod tests {
 
         // All agents no-answer
         stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should play no-answer prompt (not busy prompt)
@@ -1277,7 +1244,9 @@ mod tests {
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
         stack.custom("agent_busy", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
         stack.custom("agent_busy", serde_json::json!({}));
 
         // Last one was busy, so should play busy prompt
@@ -1421,15 +1390,11 @@ mod tests {
             other => panic!("expected LegRemove, got {other:?}"),
         }
 
-        // Should transfer to agent 1
+        // Should exit (agent connected via LegAdd, bridge handled by SipSession)
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
-            })
-            .await;
-
-        stack.cancel();
-        let _ = stack.join().await;
+            .join()
+            .await
+            .expect("should exit after agent connected (parallel)");
     }
 
     #[tokio::test]
@@ -1476,5 +1441,227 @@ mod tests {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
+    }
+
+    // ── 按键回拨（Queue Callback on Request） ──
+
+    #[tokio::test]
+    async fn test_callback_dtmf_request() {
+        let mut config = build_simple_queue_config();
+        config.callback_request_enabled = true;
+        config.callback_offer_after_secs = 0;
+        config.callback_dtmf_key = "2".to_string();
+        config.voice_prompts = Some(VoicePrompts {
+            callback_confirm_prompt: Some("callback-confirm.wav".into()),
+            ..VoicePrompts::zh()
+        });
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        // Enter queue → answer → agents in parallel → hold music loop
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+
+        // Send DTMF "2"
+        stack.dtmf("2");
+
+        // Should play callback confirmation prompt
+        stack.assert_cmd(200, "PlayCallbackConfirm", |c| {
+            matches!(c, CallCommand::Play { .. })
+        }).await;
+
+        // Confirm prompt completes → hangup
+        stack.audio_complete("default");
+        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+
+        stack.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_callback_dtmf_before_offer_time_ignored() {
+        let mut config = build_simple_queue_config();
+        config.callback_request_enabled = true;
+        config.callback_offer_after_secs = 60; // Must wait 60s
+        config.callback_dtmf_key = "2".to_string();
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+
+        // DTMF "2" pressed before offer time — should be ignored
+        stack.dtmf("2");
+
+        // Should NOT play callback confirm prompt, still in playing hold
+        // After an idle period, the hold music loop plays again
+        // We can't assert a specific Play since callback may not trigger,
+        // but we verify no Hangup happens
+        let timeout = tokio::time::sleep(Duration::from_millis(300));
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                () = &mut timeout => break,
+                cmd = stack.next_cmd(100) => {
+                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
+                        panic!("Callback should not trigger before offer time");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_callback_disabled_ignores_dtmf() {
+        let mut config = build_simple_queue_config();
+        config.callback_request_enabled = false; // disabled
+        config.callback_dtmf_key = "2".to_string();
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+
+        stack.dtmf("2");
+
+        // Should NOT trigger callback (disabled)
+        let timeout = tokio::time::sleep(Duration::from_millis(300));
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                () = &mut timeout => break,
+                cmd = stack.next_cmd(100) => {
+                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
+                        panic!("Callback disabled — Hangup should not occur");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_callback_wrong_dtmf_key_ignored() {
+        let mut config = build_simple_queue_config();
+        config.callback_request_enabled = true;
+        config.callback_dtmf_key = "2".to_string(); // key is "2"
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+
+        stack.dtmf("5"); // wrong key
+
+        // Should NOT trigger callback
+        let timeout = tokio::time::sleep(Duration::from_millis(300));
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                () = &mut timeout => break,
+                cmd = stack.next_cmd(100) => {
+                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
+                        panic!("Wrong DTMF key — Hangup should not occur");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_callback_no_confirm_prompt_hangs_up_immediately() {
+        let mut config = build_simple_queue_config();
+        config.callback_request_enabled = true;
+        config.callback_offer_after_secs = 0;
+        config.callback_dtmf_key = "2".to_string();
+        // No callback_confirm_prompt configured
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+
+        stack.dtmf("2");
+
+        // Without a confirm prompt, the hangup should come immediately
+        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+
+        stack.join().await.unwrap();
+    }
+
+    // ── 最终提示（Final Destination Prompt） ──
+
+    #[tokio::test]
+    async fn test_final_destination_prompt_no_agents_plays_prompt() {
+        let mut config = QueueConfig::default(); // no agents
+        config.voice_prompts = Some(VoicePrompts {
+            busy_prompt: None,
+            final_destination_prompt: Some("final-dest.wav".into()),
+            ..VoicePrompts::zh()
+        });
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        // No agents → busy prompt is none → final destination prompt
+        stack.assert_cmd(200, "PlayFinalPrompt", |c| {
+            matches!(c, CallCommand::Play { .. })
+        }).await;
+
+        // Final prompt audio completes → fallback (hangup)
+        stack.audio_complete("default");
+        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+
+        stack.join().await.unwrap();
+    }
+
+    // ── 升级策略（Escalation） ──
+
+    #[tokio::test]
+    async fn test_cumulative_escalation_does_not_crash() {
+        use crate::call::app::queue::EscalationMode;
+        use crate::call::app::agent_registry::db::DbRegistry;
+        use std::sync::Arc;
+
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let registry = Arc::new(DbRegistry::new(db));
+        registry
+            .register("agent1".into(), "Agent 1".into(), "sip:agent1@pbx".into(), vec!["support".into()], 1)
+            .await
+            .unwrap();
+        registry
+            .update_presence("agent1", crate::call::app::agent_registry::PresenceState::Available)
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.autonomous_routing = true;
+        config.skill_routing_enabled = true;
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.escalation_mode = EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 5,
+            add_skill_group: "support2".to_string(),
+        }];
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+
+        // Trigger escalation check — should not crash even though skill-group: support2
+        // doesn't resolve to any agents
+        stack.timeout("escalation_check");
+
+        stack.join().await.unwrap();
     }
 }

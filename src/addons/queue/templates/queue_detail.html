@@ -81,6 +81,12 @@ endblock %}
                     <button type="button" @click="activeTab = 'voice_prompts'" :class="tabButtonClasses('voice_prompts')"
                         x-text="tt('queue.tab_voice_prompts')">
                     </button>
+                    <button type="button" @click="activeTab = 'callback'" :class="tabButtonClasses('callback')"
+                        x-text="tt('queue.tab_callback')">
+                    </button>
+                    <button type="button" @click="activeTab = 'announcements'" :class="tabButtonClasses('announcements')"
+                        x-text="tt('queue.tab_announcements')">
+                    </button>
 
                 </div>
             </div>
@@ -531,6 +537,172 @@ endblock %}
                 </div>
             </section>
 
+            <!-- Callback tab -->
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'callback'"
+                x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_callback')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_callback_desc')"></p>
+                </div>
+                <div class="mt-4 flex items-center justify-between rounded-lg border border-slate-200 p-4">
+                    <div>
+                        <span class="text-sm font-medium text-slate-700" x-text="tt('queue.callback_enable')"></span>
+                        <p class="text-xs text-slate-400" x-text="tt('queue.callback_enable_desc')"></p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" x-model="form.callback.callback_request_enabled" class="sr-only peer">
+                        <div class="w-11 h-6 bg-slate-200 peer-checked:bg-sky-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                    </label>
+                </div>
+                <div x-show="form.callback.callback_request_enabled" x-cloak class="mt-4 grid gap-4 sm:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        <span x-text="tt('queue.callback_offer_after')"></span>
+                        <span class="text-xs font-normal text-slate-400" x-text="tt('queue.callback_offer_after_desc')"></span>
+                        <input type="number" min="0" x-model.number="form.callback.callback_offer_after_secs"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        <span x-text="tt('queue.callback_dtmf_key')"></span>
+                        <span class="text-xs font-normal text-slate-400" x-text="tt('queue.callback_dtmf_key_desc')"></span>
+                        <input type="text" maxlength="1" x-model="form.callback.callback_dtmf_key"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </label>
+                </div>
+                <div x-show="form.callback.callback_request_enabled" x-cloak class="mt-4 space-y-4">
+                    <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.callback_prompts')"></h3>
+                    <p class="text-xs text-slate-400" x-text="tt('queue.callback_prompts_desc')"></p>
+                    <!-- Offer prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h4 class="text-sm font-medium text-slate-700" x-text="tt('queue.callback_offer_prompt')"></h4>
+                        <p class="text-xs text-slate-400" x-text="tt('queue.callback_offer_prompt_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpCallbackOfferType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <input type="text" x-show="vpCallbackOfferType === 'custom'" x-model.trim="vpCallbackOfferCustom"
+                                class="md:col-span-2 rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                                :placeholder="tt('queue.vp_url_placeholder')">
+                        </div>
+                    </div>
+                    <!-- Confirm prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h4 class="text-sm font-medium text-slate-700" x-text="tt('queue.callback_confirm_prompt')"></h4>
+                        <p class="text-xs text-slate-400" x-text="tt('queue.callback_confirm_prompt_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpCallbackConfirmType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <input type="text" x-show="vpCallbackConfirmType === 'custom'" x-model.trim="vpCallbackConfirmCustom"
+                                class="md:col-span-2 rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                                :placeholder="tt('queue.vp_url_placeholder')">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Announcements tab -->
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'announcements'"
+                x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_announcements')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_announcements_desc')"></p>
+                </div>
+
+                <!-- EWT settings -->
+                <div class="mt-4">
+                    <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.section_ewt')"></h3>
+                    <p class="text-xs text-slate-400" x-text="tt('queue.section_ewt_desc')"></p>
+                    <div class="mt-3 grid gap-4 sm:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.ewt_interval')"></span>
+                            <input type="number" min="0" x-model.number="form.spec.announcements.ewt_announce_interval_secs"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.ewt_interval_desc')"></span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.ewt_max')"></span>
+                            <input type="number" min="10" x-model.number="form.spec.announcements.ewt_max_secs"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.ewt_max_desc')"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <hr class="my-6 border-slate-100">
+
+                <!-- Comfort prompts -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.section_comfort')"></h3>
+                        <p class="text-xs text-slate-400" x-text="tt('queue.section_comfort_desc')"></p>
+                    </div>
+                    <button type="button" @click="addComfort()"
+                        :disabled="(form.spec.announcements?.comfort_prompts?.length || 0) >= 15"
+                        class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-text="tt('queue.comfort_add')"></span>
+                    </button>
+                </div>
+                <p class="mt-1 text-xs text-slate-400" x-text="(form.spec.announcements?.comfort_prompts?.length || 0) + ' / 15'"></p>
+                <div class="mt-4 space-y-2">
+                    <template x-for="(prompt, idx) in form.spec.announcements?.comfort_prompts || []" :key="idx">
+                        <div class="flex items-center gap-3 rounded-lg border border-slate-200 p-3">
+                            <span class="text-xs font-semibold text-slate-400 w-5" x-text="(idx + 1) + '.'"></span>
+                            <input type="text" x-model.trim="prompt.audio_file"
+                                class="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm"
+                                :placeholder="tt('queue.comfort_audio_placeholder')">
+                            <input type="number" min="5" x-model.number="prompt.interval_secs"
+                                class="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm">
+                            <span class="text-xs text-slate-400" x-text="tt('queue.seconds')"></span>
+                            <!-- Up/Down buttons instead of drag -->
+                            <div class="flex flex-col gap-0.5">
+                                <button type="button" @click="moveComfort(idx, -1)" :disabled="idx === 0"
+                                    class="p-1 text-slate-400 hover:text-sky-600 disabled:opacity-30">
+                                    <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 20 20"><path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4-4 4 4"/></svg>
+                                </button>
+                                <button type="button" @click="moveComfort(idx, 1)" :disabled="idx >= (form.spec.announcements?.comfort_prompts?.length || 0) - 1"
+                                    class="p-1 text-slate-400 hover:text-sky-600 disabled:opacity-30">
+                                    <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 20 20"><path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 4-4"/></svg>
+                                </button>
+                            </div>
+                            <!-- Preview button -->
+                            <button type="button" @click="previewComfort(idx)"
+                                class="rounded-lg p-2 text-slate-400 transition hover:bg-indigo-50 hover:text-indigo-600">
+                                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            </button>
+                            <!-- Delete -->
+                            <button type="button" @click="form.spec.announcements.comfort_prompts.splice(idx,1)"
+                                class="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600">
+                                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        </div>
+                    </template>
+                    <div x-show="!form.spec.announcements?.comfort_prompts?.length"
+                        class="rounded-lg border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400"
+                        x-text="tt('queue.comfort_empty')"></div>
+                </div>
+
+                <!-- Final destination prompt -->
+                <hr class="my-6 border-slate-100">
+                <div class="rounded-lg border border-slate-200 p-4">
+                    <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.section_final_prompt')"></h3>
+                    <p class="text-xs text-slate-400" x-text="tt('queue.section_final_prompt_desc')"></p>
+                    <div class="mt-3 grid gap-3 md:grid-cols-3">
+                        <select x-model="vpFinalDestType"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="none" x-text="tt('queue.vp_none')"></option>
+                            <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                        </select>
+                        <input type="text" x-show="vpFinalDestType === 'custom'" x-model.trim="vpFinalDestCustom"
+                            class="md:col-span-2 rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                            :placeholder="tt('queue.vp_url_placeholder')">
+                    </div>
+                </div>
+            </section>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400" x-text="tt('queue.save_hint')"></p>
                 <div class="flex items-center gap-3">
@@ -599,6 +771,19 @@ endblock %}
                         skill_groups: [],
                     },
                     acd_policy: '',
+                    voice_prompts: null,
+                    // Callback
+                    callback: {
+                        callback_request_enabled: false,
+                        callback_offer_after_secs: 30,
+                        callback_dtmf_key: '2',
+                    },
+                    // Announcements / EWT / Comfort
+                    announcements: {
+                        ewt_announce_interval_secs: 0,
+                        ewt_max_secs: 1800,
+                        comfort_prompts: [],
+                    },
                 },
             },
             holdEnabled: false,
@@ -621,6 +806,13 @@ endblock %}
             downloadingBusy: false,
             downloadingOffHours: false,
             downloadingNoAnswer: false,
+            // Callback prompt types
+            vpCallbackOfferType: 'none',
+            vpCallbackConfirmType: 'none',
+            vpFinalDestType: 'none',
+            vpCallbackOfferCustom: '',
+            vpCallbackConfirmCustom: '',
+            vpFinalDestCustom: '',
             saving: false,
             success: null,
             error: null,
@@ -772,6 +964,13 @@ endblock %}
                 if (this.vpBusyType === 'custom') this.vpBusyCustom = vp.busy_prompt;
                 if (this.vpOffHoursType === 'custom') this.vpOffHoursCustom = vp.off_hours_prompt;
                 if (this.vpNoAnswerType === 'custom') this.vpNoAnswerCustom = vp.no_answer_prompt;
+                // Callback prompts
+                this.vpCallbackOfferType = vp.callback_offer_prompt ? 'custom' : 'none';
+                this.vpCallbackConfirmType = vp.callback_confirm_prompt ? 'custom' : 'none';
+                this.vpFinalDestType = vp.final_destination_prompt ? 'custom' : 'none';
+                this.vpCallbackOfferCustom = vp.callback_offer_prompt || '';
+                this.vpCallbackConfirmCustom = vp.callback_confirm_prompt || '';
+                this.vpFinalDestCustom = vp.final_destination_prompt || '';
             },
             buildVoicePrompts() {
                 const result = {};
@@ -783,6 +982,10 @@ endblock %}
                 if (busy) result.busy_prompt = busy;
                 if (offhours) result.off_hours_prompt = offhours;
                 if (noanswer) result.no_answer_prompt = noanswer;
+                // New prompts
+                if (this.vpCallbackOfferType === 'custom' && this.vpCallbackOfferCustom) result.callback_offer_prompt = this.vpCallbackOfferCustom;
+                if (this.vpCallbackConfirmType === 'custom' && this.vpCallbackConfirmCustom) result.callback_confirm_prompt = this.vpCallbackConfirmCustom;
+                if (this.vpFinalDestType === 'custom' && this.vpFinalDestCustom) result.final_destination_prompt = this.vpFinalDestCustom;
                 return Object.keys(result).length ? result : null;
             },
             resolvePrompt(type, lang, custom) {
@@ -834,6 +1037,44 @@ endblock %}
                     audio.src = url;
                     audio.classList.remove('hidden');
                     audio.play().catch(() => {});
+                }
+            },
+            addComfort() {
+                if (!this.form.spec.announcements) {
+                    this.form.spec.announcements = { ewt_announce_interval_secs: 0, ewt_max_secs: 1800, comfort_prompts: [] };
+                }
+                if (!Array.isArray(this.form.spec.announcements.comfort_prompts)) {
+                    this.form.spec.announcements.comfort_prompts = [];
+                }
+                if (this.form.spec.announcements.comfort_prompts.length >= 15) return;
+                this.form.spec.announcements.comfort_prompts.push({
+                    audio_file: '',
+                    interval_secs: 30,
+                    order: this.form.spec.announcements.comfort_prompts.length,
+                });
+            },
+            moveComfort(idx, dir) {
+                const list = this.form.spec.announcements?.comfort_prompts;
+                if (!Array.isArray(list)) return;
+                const target = idx + dir;
+                if (target < 0 || target >= list.length) return;
+                const tmp = list[idx];
+                list[idx] = list[target];
+                list[target] = tmp;
+                // Reassign order
+                list.forEach(function(p, i) { p.order = i; });
+            },
+            previewComfort(idx) {
+                const list = this.form.spec.announcements?.comfort_prompts;
+                if (!Array.isArray(list) || !list[idx]) return;
+                const path = list[idx].audio_file;
+                if (!path) return;
+                const url = this.basePath + '/queues/sound/' + path.replace(/^sounds\//, '');
+                const audio = this.$refs.audioPreview;
+                if (audio) {
+                    audio.src = url;
+                    audio.classList.remove('hidden');
+                    audio.play().catch(function() {});
                 }
             },
             tabButtonClasses(tab) {
@@ -932,6 +1173,18 @@ endblock %}
                     },
                     acd_policy: raw?.acd_policy || '',
                     voice_prompts: raw?.voice_prompts || null,
+                    // Callback
+                    callback: {
+                        callback_request_enabled: Boolean(raw?.callback?.callback_request_enabled),
+                        callback_offer_after_secs: Number.isFinite(Number(raw?.callback?.callback_offer_after_secs)) ? Number(raw.callback.callback_offer_after_secs) : 30,
+                        callback_dtmf_key: raw?.callback?.callback_dtmf_key || '2',
+                    },
+                    // Announcements
+                    announcements: {
+                        ewt_announce_interval_secs: Number.isFinite(Number(raw?.announcements?.ewt_announce_interval_secs)) ? Number(raw.announcements.ewt_announce_interval_secs) : 0,
+                        ewt_max_secs: Number.isFinite(Number(raw?.announcements?.ewt_max_secs)) ? Number(raw.announcements.ewt_max_secs) : 1800,
+                        comfort_prompts: Array.isArray(raw?.announcements?.comfort_prompts) ? raw.announcements.comfort_prompts.map(function(p, idx) { return { audio_file: p.audio_file || '', interval_secs: p.interval_secs || 30, order: p.order || idx }; }) : [],
+                    },
                 };
                 return spec;
             },
@@ -1074,6 +1327,33 @@ endblock %}
                 }
                 // Voice prompts
                 spec.voice_prompts = this.buildVoicePrompts();
+                // Callback
+                if (this.form.spec.callback?.callback_request_enabled) {
+                    spec.callback = {
+                        callback_request_enabled: true,
+                        callback_offer_after_secs: this.form.spec.callback.callback_offer_after_secs || 30,
+                        callback_dtmf_key: this.form.spec.callback.callback_dtmf_key || '2',
+                    };
+                }
+                // Announcements
+                if (this.form.spec.announcements?.ewt_announce_interval_secs > 0
+                    || this.form.spec.announcements?.ewt_max_secs !== 1800
+                    || (this.form.spec.announcements?.comfort_prompts || []).length > 0) {
+                    const comfortPrompts = (this.form.spec.announcements?.comfort_prompts || [])
+                        .filter(function(p) { return p.audio_file && p.audio_file.trim(); })
+                        .map(function(p, idx) {
+                            return {
+                                audio_file: p.audio_file.trim(),
+                                interval_secs: p.interval_secs || 30,
+                                order: p.order != null ? p.order : idx,
+                            };
+                        });
+                    spec.announcements = {
+                        ewt_announce_interval_secs: this.form.spec.announcements.ewt_announce_interval_secs || 0,
+                        ewt_max_secs: this.form.spec.announcements.ewt_max_secs || 1800,
+                        comfort_prompts: comfortPrompts,
+                    };
+                }
                 return spec;
             },
             buildPayload() {

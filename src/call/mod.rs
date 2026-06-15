@@ -101,6 +101,33 @@ pub struct VoicePrompts {
     /// Audio file to play for estimated-wait-time announcement.
     #[serde(default)]
     pub wait_time_prompt: Option<String>,
+    /// Audio file played before the final destination (voicemail/external number)
+    /// when all escalation timeouts are exhausted.
+    #[serde(default)]
+    pub final_destination_prompt: Option<String>,
+    /// Audio file played to offer the callback option (e.g. "Press 2 for a callback").
+    #[serde(default)]
+    pub callback_offer_prompt: Option<String>,
+    /// Audio file played after the caller confirms callback request.
+    #[serde(default)]
+    pub callback_confirm_prompt: Option<String>,
+    /// Multi-stage comfort/reassurance prompts played during wait.
+    #[serde(default)]
+    pub comfort_prompts: Vec<ComfortPrompt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComfortPrompt {
+    pub audio_file: String,
+    /// Interval in seconds between consecutive plays of this prompt.
+    #[serde(default = "default_comfort_interval")]
+    pub interval_secs: u32,
+    /// Sort order for drag-and-drop reordering.
+    pub order: u32,
+}
+
+fn default_comfort_interval() -> u32 {
+    30
 }
 
 impl VoicePrompts {
@@ -112,6 +139,10 @@ impl VoicePrompts {
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH.to_string()),
             position_prompt: None,
             wait_time_prompt: None,
+            final_destination_prompt: None,
+            callback_offer_prompt: None,
+            callback_confirm_prompt: None,
+            comfort_prompts: Vec::new(),
         }
     }
 
@@ -123,6 +154,10 @@ impl VoicePrompts {
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN.to_string()),
             position_prompt: None,
             wait_time_prompt: None,
+            final_destination_prompt: None,
+            callback_offer_prompt: None,
+            callback_confirm_prompt: None,
+            comfort_prompts: Vec::new(),
         }
     }
 }

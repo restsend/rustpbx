@@ -559,6 +559,7 @@
                         <button class="tab active" data-tab="debug-ws">WebSocket</button>
                         <button class="tab" data-tab="debug-state">Call State</button>
                         <button class="tab" data-tab="debug-sip">SIP Messages</button>
+                        <button class="tab" data-tab="debug-sip-commands">SIP Commands</button>
                     </div>
                     <div class="tab-content active" id="debug-ws">
                         <div class="form-group">
@@ -584,6 +585,29 @@
                     <div class="tab-content" id="debug-sip">
                         <div class="debug-panel" id="sipMessagesLog" style="height:200px;"></div>
                         <button type="button" id="clearSipLogBtn" class="secondary" style="width:auto;margin-top:8px;">Clear SIP Log</button>
+                    </div>
+                    <div class="tab-content" id="debug-sip-commands">
+                        <div class="form-group">
+                            <label>Preset:</label>
+                            <select id="sipCmdPreset" style="width:100%;" onchange="onSipCmdPresetChange()">
+                                <option value="">-- Custom --</option>
+                                <option value='{"action":"media.play","params":{"source":{"source_type":"silence"}}}'>media.play (silence)</option>
+                                <option value='{"action":"media.stop","params":{}}'>media.stop</option>
+                                <option value='{"action":"media.inject_start","params":{"source":{"source_type":"silence"}}}'>media.inject_start</option>
+                                <option value='{"action":"media.inject_stop","params":{}}'>media.inject_stop</option>
+                                <option value='{"action":"record.start","params":{"path":"/tmp/recording.wav","beep":true}}'>record.start</option>
+                                <option value='{"action":"record.stop","params":{}}'>record.stop</option>
+                                <option value='{"action":"hold","params":{"leg_id":"caller"}}'>hold</option>
+                                <option value='{"action":"unhold","params":{"leg_id":"caller"}}'>unhold</option>
+                                <option value='{"action":"media.play","params":{"source":{"source_type":"files","uris":["/tmp/announce.wav","/tmp/music.wav"]}}}'>media.play (multi-url)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>JSON Body (SIP INFO):</label>
+                            <textarea id="sipCmdBody" rows="4">{"action":"media.play","params":{"source":{"source_type":"silence"}}}</textarea>
+                        </div>
+                        <button type="button" id="sendSipInfoCmdBtn" style="width:auto;" onclick="sendSipInfoCommand()">Send INFO Command</button>
+                        <div class="debug-panel" id="sipCmdLog" style="margin-top:10px;height:150px;"></div>
                     </div>
                 </div>
             </div>
@@ -2407,6 +2431,80 @@
                 html.push(`<div class="debug-entry">  On Hold: ${isConsultOnHold}</div>`);
             }
             callStateDebug.innerHTML = html.join('');
+        }
+
+        // ========== SIP Commands (INFO) ==========
+        const sipCmdPresets = [
+            { action: 'media.play', params: { source: { source_type: 'silence' } } },
+            { action: 'media.stop', params: {} },
+            { action: 'media.inject_start', params: { source: { source_type: 'silence' } } },
+            { action: 'media.inject_stop', params: {} },
+            { action: 'record.start', params: { path: '/tmp/recording.wav', beep: true } },
+            { action: 'record.stop', params: {} },
+            { action: 'hold', params: { leg_id: 'caller' } },
+            { action: 'unhold', params: { leg_id: 'caller' } },
+            { action: 'media.play', params: { source: { source_type: 'files', uris: ['/tmp/announce.wav', '/tmp/music.wav'] } } },
+        ];
+
+        function onSipCmdPresetChange() {
+            const select = document.getElementById('sipCmdPreset');
+            const bodyArea = document.getElementById('sipCmdBody');
+            if (select && bodyArea && select.value) {
+                bodyArea.value = select.value;
+            }
+        }
+
+        function logSipCmd(message, type) {
+            const logPanel = document.getElementById('sipCmdLog');
+            if (!logPanel) return;
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const ts = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="debug-time">[${ts}]</span> <span class="${type === 'error' ? 'debug-error' : 'debug-info'}">${message}</span>`;
+            logPanel.appendChild(entry);
+            logPanel.scrollTop = logPanel.scrollHeight;
+        }
+
+        function sendSipInfoCommand() {
+            const bodyArea = document.getElementById('sipCmdBody');
+            if (!bodyArea) return;
+            const raw = bodyArea.value.trim();
+            if (!raw) { logSipCmd('Empty command body', 'error'); return; }
+
+            let parsed;
+            try { parsed = JSON.parse(raw); } catch (e) {
+                logSipCmd('Invalid JSON: ' + e.message, 'error');
+                return;
+            }
+
+            const session = currentSession;
+            if (!session) { logSipCmd('No active call session', 'error'); return; }
+
+            const contentType = 'application/vnd.rustpbx+json';
+            const bodyStr = JSON.stringify(parsed);
+
+            try {
+                // JsSIP 3.x sends custom INFO via session.sendRequest().
+                // Fallback: if that fails, try constructing the request through the UA.
+                if (typeof session.sendRequest === 'function') {
+                    session.sendRequest('INFO', {
+                        body: bodyStr,
+                        contentType: contentType,
+                    });
+                } else {
+                    // Older JsSIP API: use session.request.sendRequest directly
+                    const extraHeaders = ['Content-Type: ' + contentType];
+                    session.request.sendRequest('INFO', {
+                        extraHeaders: extraHeaders,
+                        body: bodyStr,
+                    });
+                }
+                logSipCmd(`Sent INFO (${contentType}): ${bodyStr.substring(0, 80)}${bodyStr.length > 80 ? '...' : ''}`, 'info');
+                logSipMessage('SENT', 'INFO', contentType);
+            } catch (e) {
+                logSipCmd('Failed to send INFO: ' + e.message, 'error');
+                logSipMessage('SENT', 'INFO', `(failed) ${e.message}`);
+            }
         }
 
         // ========== SIP Message Logging ==========

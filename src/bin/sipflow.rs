@@ -7,17 +7,17 @@ use axum::{
 };
 use chrono::{Local, TimeZone};
 use clap::Parser;
-use rustpbx::config::SipFlowSubdirs;
+use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{
-    protocol::{Packet, parse_packet},
-    storage::{StorageManager, process_packet},
-    wav_utils::generate_wav_to_writer_ex,
+    SipFlowBackend, SipFlowItem, SipFlowMsgType,
+    create_backend,
+    protocol::{MsgType, Packet, parse_packet},
+    storage::extract_callid,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SipFlow - SIP and RTP flow recording server", long_about = None)]
@@ -38,22 +38,75 @@ struct Args {
     #[arg(short, long, default_value = "./config/sipflow")]
     root: String,
 
-    /// Number of packets to batch before flushing
-    #[arg(long, default_value_t = 1000)]
-    flush_count: usize,
-
-    /// Flush interval in seconds
-    #[arg(long, default_value_t = 5)]
-    flush_interval: u64,
+    /// Storage engine: "flowdb" (default) or "sqlite"
+    #[arg(long, default_value = "flowdb")]
+    engine: String,
 
     /// Channel buffer size
     #[arg(long, default_value_t = 100000)]
     buffer_size: usize,
+
+    // ── SQLite options ──
+
+    /// Number of packets to batch before flushing (SQLite)
+    #[arg(long, default_value_t = 1000)]
+    flush_count: usize,
+
+    /// Flush interval in seconds (SQLite)
+    #[arg(long, default_value_t = 5)]
+    flush_interval: u64,
+
+    /// Call-ID cache size (SQLite)
+    #[arg(long, default_value_t = 8192)]
+    id_cache_size: usize,
+
+    // ── FlowDB options ──
+
+    /// TTL in seconds for FlowDB records (optional, 0 = no ttl)
+    #[arg(long)]
+    ttl_secs: Option<u64>,
+
+    /// FlowDB memtable size in MB (default 64)
+    #[arg(long, default_value_t = 64)]
+    memtable_size_mb: usize,
+
+    /// FlowDB block cache capacity in MB (default 128)
+    #[arg(long, default_value_t = 128)]
+    block_cache_capacity_mb: usize,
 }
 
 #[derive(Clone)]
 struct AppState {
-    storage: Arc<Mutex<StorageManager>>,
+    backend: Arc<dyn SipFlowBackend>,
+}
+
+fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
+    let call_id = packet.call_id.clone().or_else(|| {
+        if packet.msg_type == MsgType::Sip {
+            extract_callid(&packet.payload)
+        } else {
+            None
+        }
+    }).unwrap_or_default();
+
+    let src = format!("{}:{}", packet.src.0, packet.src.1);
+    let dst = format!("{}:{}", packet.dst.0, packet.dst.1);
+
+    let item = SipFlowItem {
+        timestamp: packet.timestamp,
+        seq: 0,
+        leg: packet.leg,
+        msg_type: if packet.msg_type == MsgType::Sip {
+            SipFlowMsgType::Sip
+        } else {
+            SipFlowMsgType::Rtp
+        },
+        src_addr: src,
+        dst_addr: dst,
+        payload: packet.payload,
+    };
+
+    (call_id, item)
 }
 
 #[tokio::main]
@@ -64,15 +117,28 @@ async fn main() -> Result<()> {
     // Ensure data directory exists
     std::fs::create_dir_all(&args.root)?;
 
-    let storage = Arc::new(Mutex::new(StorageManager::new(
-        std::path::Path::new(&args.root),
-        args.flush_count,
-        args.flush_interval,
-        1024,
-        SipFlowSubdirs::None,
-    )));
+    let engine = match args.engine.as_str() {
+        "sqlite" => SipFlowEngine::Sqlite,
+        "flowdb" | _ => SipFlowEngine::FlowDb,
+    };
+    let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
+
+    let config = SipFlowConfig::Local {
+        root: args.root.clone(),
+        subdirs: SipFlowSubdirs::None,
+        flush_count: args.flush_count,
+        flush_interval_secs: args.flush_interval,
+        id_cache_size: args.id_cache_size,
+        engine,
+        ttl_secs,
+        memtable_size_mb: args.memtable_size_mb,
+        block_cache_capacity_mb: args.block_cache_capacity_mb,
+        upload: None,
+    };
+
+    let backend: Arc<dyn SipFlowBackend> = Arc::from(create_backend(&config)?);
     let app_state = AppState {
-        storage: storage.clone(),
+        backend: backend.clone(),
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
@@ -99,19 +165,19 @@ async fn main() -> Result<()> {
     });
 
     // Storage Worker Task
-    let storage_worker = storage.clone();
+    let storage_backend = backend.clone();
     rustpbx::utils::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 Some(packet) = rx.recv() => {
-                    let processed = process_packet(packet);
-                    let mut mg = storage_worker.lock().await;
-                    let _ = mg.write_processed(processed).await;
+                    let (call_id, item) = convert_packet_to_item(packet);
+                    if !call_id.is_empty() {
+                        let _ = storage_backend.record(&call_id, item);
+                    }
                 }
                 _ = interval.tick() => {
-                    let mut mg = storage_worker.lock().await;
-                    let _ = mg.check_flush().await;
+                    let _ = storage_backend.flush().await;
                 }
             }
         }
@@ -153,8 +219,7 @@ async fn flow_handler(
     let start_dt = Local.timestamp_opt(start_ts, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts, 0).unwrap();
 
-    let mut mg = state.storage.lock().await;
-    match mg.query_flow(&callid, start_dt, end_dt).await {
+    match state.backend.query_flow(&callid, start_dt, end_dt).await {
         Ok(flow) => axum::Json(serde_json::json!({
             "status": "success",
             "callid": callid,
@@ -181,11 +246,6 @@ async fn media_handler(
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or_else(|| Local::now().timestamp() + 3600);
 
-    // Check if PCM format is requested (for ASR tools like sensevoice-cli)
-    let force_pcm = params
-        .get("format")
-        .map(|s| s.to_lowercase() == "pcm")
-        .unwrap_or(false);
     let stats_only = params
         .get("stats")
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
@@ -195,12 +255,9 @@ async fn media_handler(
     let end_dt = Local.timestamp_opt(end_ts_param, 0).unwrap();
 
     if stats_only {
-        let stats = {
-            let mut mg = state.storage.lock().await;
-            mg.query_media_stats(&callid, start_dt, end_dt)
-                .await
-                .unwrap_or_default()
-        };
+        let stats = state.backend.query_media_stats(&callid, start_dt, end_dt)
+            .await
+            .unwrap_or_default();
         let stats_json: Vec<_> = stats
             .into_iter()
             .map(|stat| {
@@ -228,70 +285,26 @@ async fn media_handler(
         .into_response();
     }
 
-    let packets = {
-        let mut mg = state.storage.lock().await;
-        mg.query_media(&callid, start_dt, end_dt)
-            .await
-            .unwrap_or_default()
-    };
+    let wav_bytes = state.backend.query_media(&callid, start_dt, end_dt)
+        .await
+        .unwrap_or_default();
 
-    if packets.is_empty() {
+    if wav_bytes.is_empty() {
         return (axum::http::StatusCode::NOT_FOUND, "No media found").into_response();
     }
 
-    let mut temp_file = match tempfile::NamedTempFile::new() {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                e.to_string(),
-            )
-                .into_response();
-        }
-    };
+    let file_len = wav_bytes.len();
+    let body = axum::body::Body::from(wav_bytes);
 
-    match generate_wav_to_writer_ex(&packets, force_pcm, &mut temp_file) {
-        Ok(_) => {
-            let file_len = match temp_file.as_file().metadata() {
-                Ok(m) => m.len(),
-                Err(_) => 0,
-            };
-            let path = temp_file.path().to_owned();
-            std::mem::forget(temp_file);
-
-            let file = match tokio::fs::File::open(&path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&path);
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        e.to_string(),
-                    )
-                        .into_response();
-                }
-            };
-            let stream = tokio_util::io::ReaderStream::new(file);
-            let body = axum::body::Body::from_stream(stream);
-
-            let response = axum::response::Response::builder()
-                .header("Content-Type", "audio/wav")
-                .header(
-                    "Content-Disposition",
-                    format!("attachment; filename=\"{}.wav\"", callid),
-                )
-                .header("Content-Length", file_len)
-                .body(body)
-                .unwrap();
-
-            let _ = std::fs::remove_file(&path);
-            response
-        }
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            e.to_string(),
+    axum::response::Response::builder()
+        .header("Content-Type", "audio/wav")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}.wav\"", callid),
         )
-            .into_response(),
-    }
+        .header("Content-Length", file_len)
+        .body(body)
+        .unwrap()
 }
 
 #[cfg(test)]
