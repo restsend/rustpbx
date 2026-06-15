@@ -50,6 +50,7 @@ class IvrSession:
             self._step = "wait_menu"
             return action_prompt(
                 tts_text=WELCOME_TEXT,
+                #file="http://127.0.0.1:28080/ivr.wav",
                 interruptible=True,
             )
 
@@ -175,7 +176,7 @@ class IvrStepHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
     def log_message(self, format, *args):
-        sys.stderr.write(f"[IVR Provider] {args[0]} {args[1]} {args[2]}\n")
+        sys.stderr.write(f"[IVR Provider] {args}\n")
 
 
 # ── Server Start ─────────────────────────────────────────────────────────────
