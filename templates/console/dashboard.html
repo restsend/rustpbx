@@ -109,7 +109,7 @@
                     </div>
                     <div class="mt-2 h-1.5 w-full overflow-hidden rounded bg-slate-200">
                         <div id="tx-running-bar" class="h-full bg-purple-500"
-                            style="width: {% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}{% else %}0{% endif %}%"></div>
+                            style="width: {% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(0) }}{% else %}0{% endif %}%"></div>
                     </div>
                 </div>
                 <div class="rounded-lg bg-slate-50 p-4">
@@ -122,7 +122,7 @@
                     </div>
                     <div class="mt-2 h-1.5 w-full overflow-hidden rounded bg-slate-200">
                         <div id="tx-active-calls-bar" class="h-full bg-amber-500"
-                            style="width: {% if metrics.capacity > 0 %}{{ (metrics.active / metrics.capacity * 100) | round(min=0) }}{% else %}0{% endif %}%"></div>
+                            style="width: {% if metrics.capacity > 0 %}{{ (metrics.active / metrics.capacity * 100) | round(0) }}{% else %}0{% endif %}%"></div>
                     </div>
                 </div>
                 <div class="rounded-lg bg-slate-50 p-4">
@@ -130,14 +130,14 @@
                     <div class="mt-1">
                         <span id="tx-utilization" class="text-2xl font-semibold text-slate-700">
                             {% if metrics.transaction_running > 0 and metrics.transaction_capacity > 0 %}
-                            {{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}%
+                            {{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(0) }}%
                             {% elif metrics.active_util > 0 %}{{ metrics.active_util }}%
                             {% else %}0%
                             {% endif %}
                         </span>
                     </div>
                     <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
-                        <span>Trans: <span id="tx-util-pct">{% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(min=0) }}{% else %}0{% endif %}%</span></span>
+                        <span>Trans: <span id="tx-util-pct">{% if metrics.transaction_capacity > 0 %}{{ (metrics.transaction_running / metrics.transaction_capacity * 100) | round(0) }}{% else %}0{% endif %}%</span></span>
                         <span>Call: {{ metrics.active_util | default(0) }}%</span>
                     </div>
                 </div>
