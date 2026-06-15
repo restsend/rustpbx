@@ -493,7 +493,7 @@ async fn test_leg_timeline_via_call_resume() {
 
         // Simulate call lifecycle events
         let events = vec![
-            rustpbx::rwi::CallIncoming { {
+            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallIncoming {
                 call_id: "timeline-call".to_string(),
                 context: "timeline-test".to_string(),
                 caller: "sip:customer@test.com".to_string(),
@@ -509,27 +509,27 @@ async fn test_leg_timeline_via_call_resume() {
                 routing_target: None,
                 uuid: None,
                 routing_path: None,
-            }),
+            }, None),
             rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallAnswered  { 
                 call_id: "timeline-call".to_string(),
-            },
+            }, None),
             rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallBridged  { 
                 leg_a: "timeline-call".to_string(),
                 leg_b: "agent-leg".to_string(),
-            },
+            }, None),
             rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallUnbridged  { 
                 call_id: "timeline-call".to_string(),
-            },
+            }, None),
             rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallTransferred  { 
                 call_id: "timeline-call".to_string(),
-            },
+            }, None),
         ];
 
         for event in events {
             gw.cache_event(&"timeline-call".to_string(), &event);
-        }, None);
+        }
 
-    }, None);
+    }
 
 
     // Resume the call and verify events
@@ -563,5 +563,4 @@ async fn test_leg_timeline_via_call_resume() {
     );
 
     ws.close(None).await.unwrap();
-}, None);
-
+}

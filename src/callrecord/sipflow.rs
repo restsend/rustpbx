@@ -99,6 +99,9 @@ enum WriteCommand {
         pool_idx: Option<usize>, // None if not from pool
     },
     Flush,
+    FlushSync {
+        done: tokio::sync::oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -186,6 +189,11 @@ impl SipFlow {
                     WriteCommand::Flush => {
                         Self::flush_batch(&backend, &mut batch, &pool);
                         last_flush = std::time::Instant::now();
+                    }
+                    WriteCommand::FlushSync { done } => {
+                        Self::flush_batch(&backend, &mut batch, &pool);
+                        last_flush = std::time::Instant::now();
+                        let _ = done.send(());
                     }
                     WriteCommand::Shutdown => {
                         Self::flush_batch(&backend, &mut batch, &pool);
@@ -333,6 +341,18 @@ impl SipFlow {
     pub async fn flush(&self) {
         if let Some(ref tx) = self.inner.writer_tx {
             let _ = tx.send(WriteCommand::Flush);
+        } else if let Some(ref backend) = self.inner.backend {
+            let _ = backend.flush().await;
+        }
+    }
+
+    /// Synchronously flush the batch writer and wait for completion.
+    /// Ensures all recorded messages are persisted before querying the backend.
+    pub async fn flush_sync(&self) {
+        if let Some(ref tx) = self.inner.writer_tx {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(WriteCommand::FlushSync { done: done_tx });
+            let _ = done_rx.await;
         } else if let Some(ref backend) = self.inner.backend {
             let _ = backend.flush().await;
         }
