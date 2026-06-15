@@ -5,7 +5,7 @@ use crate::addons::queue::models::{
 use crate::addons::queue::services::{exporter::QueueExporter, utils as queue_utils};
 use crate::config::ProxyConfig;
 use crate::console::handlers::{bad_request, forms, normalize_optional_string, require_field};
-use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::console::{ConsoleState, ReloadTarget, middleware::AuthRequired};
 use crate::proxy::routing::{ConfigOrigin, RouteQueueConfig};
 use axum::{
     Json, Router,
@@ -684,7 +684,7 @@ pub async fn reload_queues_handler(
         Ok(metrics) => {
             let total = metrics.total;
             let generated_entries = metrics.generated.as_ref().map(|g| g.entries).unwrap_or(0);
-            state.clear_pending_reload();
+            state.clear_pending_reload(ReloadTarget::Queues);
             Json(json!({
                 "status": "ok",
                 "queues_reloaded": total,

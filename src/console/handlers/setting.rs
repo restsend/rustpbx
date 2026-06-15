@@ -5,6 +5,8 @@ use crate::config::{
 };
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
+#[cfg(feature = "commerce")]
+use crate::console::ReloadTarget;
 use crate::models::department::{
     ActiveModel as DepartmentActiveModel, Column as DepartmentColumn, Entity as DepartmentEntity,
 };
@@ -2512,7 +2514,7 @@ async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_js
     {
         Ok(metrics) => {
             if let Some(ref console) = app.console {
-                console.clear_pending_reload();
+                console.clear_pending_reload(ReloadTarget::Trunks);
             }
             serde_json::json!({ "addon": "trunks", "status": "ok", "reloaded": metrics.total })
         }
@@ -2541,7 +2543,7 @@ async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> 
     {
         Ok(metrics) => {
             if let Some(ref console) = app.console {
-                console.clear_pending_reload();
+                console.clear_pending_reload(ReloadTarget::Routes);
             }
             serde_json::json!({ "addon": "routes", "status": "ok", "reloaded": metrics.total })
         }

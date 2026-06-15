@@ -1,5 +1,6 @@
 use crate::addons::{Addon, SidebarItem, export_reload::ExportReloadHandler};
 use crate::app::AppState;
+use crate::console::ReloadTarget;
 use async_trait::async_trait;
 use axum::Router;
 use serde_json::{Value as JsonValue, json};
@@ -146,7 +147,7 @@ impl ExportReloadHandler for QueueExportReloadHandler {
             .map_err(|e| format!("Reload failed: {}", e))?;
 
         if let Some(ref console) = app_state.console {
-            console.clear_pending_reload();
+            console.clear_pending_reload(ReloadTarget::Queues);
         }
 
         Ok(json!({"status": "ok"}))

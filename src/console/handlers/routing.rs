@@ -1,6 +1,6 @@
 use crate::console::config_helpers::{find_or_404, internal_error};
 use crate::console::handlers::{bad_request, forms};
-use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::console::{ConsoleState, ReloadTarget, middleware::AuthRequired};
 use crate::models::{
     routing::{
         ActiveModel as RoutingActiveModel, Column as RoutingColumn, Entity as RoutingEntity,
@@ -1388,7 +1388,7 @@ pub(crate) async fn create_routing(
             .into_response();
     }
 
-    state.mark_pending_reload();
+    state.mark_pending_reload(ReloadTarget::Routes);
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
@@ -1480,7 +1480,7 @@ pub(crate) async fn update_routing(
     }
 
     // Issue #175: mark routes as pending reload.
-    state.mark_pending_reload();
+    state.mark_pending_reload(ReloadTarget::Routes);
     Json(json!({"status": "ok", "id": id})).into_response()
 }
 
@@ -1502,7 +1502,7 @@ pub async fn delete_routing(
                 )
                     .into_response()
             } else {
-                state.mark_pending_reload();
+                state.mark_pending_reload(ReloadTarget::Routes);
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
         }
