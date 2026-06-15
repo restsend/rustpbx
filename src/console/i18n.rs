@@ -13,11 +13,30 @@ pub struct LocaleInfo {
     pub native_name: String,
 }
 
+impl From<(&String, &crate::config::LocaleInfo)> for LocaleInfo {
+    fn from((code, info): (&String, &crate::config::LocaleInfo)) -> Self {
+        Self {
+            code: code.clone(),
+            name: info.name.clone(),
+            native_name: info.native_name.clone(),
+        }
+    }
+}
+
 /// i18n configuration
 #[derive(Debug, Clone)]
 pub struct LocaleConfig {
     pub default: String,
     pub available: Vec<LocaleInfo>,
+}
+
+impl From<&crate::config::ConsoleConfig> for LocaleConfig {
+    fn from(config: &crate::config::ConsoleConfig) -> Self {
+        Self {
+            default: config.locale_default.clone(),
+            available: config.locales.iter().map(LocaleInfo::from).collect(),
+        }
+    }
 }
 
 /// Central i18n manager.
@@ -72,36 +91,41 @@ impl I18n {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         for info in &self.config.available {
-            let mut flat = match Self::load_file(&self.core_locales_dir, &info.code) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!(
-                        "i18n: failed to load {}/{}.toml: {}",
-                        self.core_locales_dir,
-                        info.code,
-                        e
-                    );
-                    Translations::new()
-                }
-            };
+            let mut flat = Self::load_or_empty(&self.core_locales_dir, &info.code, false);
             // Merge enabled addon locales on top
             for dir in addon_dirs.iter() {
-                match Self::load_file(dir, &info.code) {
-                    Ok(addon_flat) => {
-                        flat.extend(addon_flat);
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            "i18n: failed to load addon locale {}/{}.toml: {}",
-                            dir,
-                            info.code,
-                            e
-                        );
-                    }
-                }
+                Self::merge_locale_dir(&mut flat, dir, &info.code);
             }
             cache.insert(info.code.clone(), flat);
         }
+    }
+
+    fn load_or_empty(base_dir: &str, locale: &str, addon: bool) -> Translations {
+        match Self::load_file(base_dir, locale) {
+            Ok(flat) => flat,
+            Err(e) => {
+                if addon {
+                    tracing::debug!(
+                        "i18n: failed to load addon locale {}/{}.toml: {}",
+                        base_dir,
+                        locale,
+                        e
+                    );
+                } else {
+                    tracing::warn!(
+                        "i18n: failed to load {}/{}.toml: {}",
+                        base_dir,
+                        locale,
+                        e
+                    );
+                }
+                Translations::new()
+            }
+        }
+    }
+
+    fn merge_locale_dir(flat: &mut Translations, dir: &str, locale: &str) {
+        flat.extend(Self::load_or_empty(dir, locale, true));
     }
 
     /// Load a single `{base_dir}/{locale}.toml` file and flatten it.
@@ -159,6 +183,25 @@ impl I18n {
                 locales_dir
             );
             dirs.push(locales_dir);
+        }
+        self.reload();
+    }
+
+    /// Register multiple addon locale directories and reload once.
+    pub fn register_addon_locales_bulk(&self, locale_dirs: Vec<(String, String)>) {
+        {
+            let mut dirs = self
+                .addon_locales_dirs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for (addon_id, locales_dir) in locale_dirs {
+                tracing::debug!(
+                    "i18n: registering addon '{}' locales at '{}'",
+                    addon_id,
+                    locales_dir
+                );
+                dirs.push(locales_dir);
+            }
         }
         self.reload();
     }
@@ -227,6 +270,11 @@ impl I18n {
         serde_json::Value::Object(root)
     }
 
+    pub fn available_locales_json(&self) -> serde_json::Value {
+        serde_json::to_value(self.available_locales())
+            .unwrap_or(serde_json::Value::Array(vec![]))
+    }
+
     /// Insert a value at a dot-separated path inside a JSON map.
     fn set_nested(
         map: &mut serde_json::Map<String, serde_json::Value>,
@@ -278,21 +326,11 @@ pub fn detect_locale(
     available: &[LocaleInfo],
     default: &str,
 ) -> String {
-    use axum::http::header::COOKIE;
-
     // 1. Cookie takes highest priority
-    for cookie_header in headers.get_all(COOKIE) {
-        if let Ok(s) = cookie_header.to_str() {
-            for pair in s.split(';') {
-                let mut kv = pair.trim().splitn(2, '=');
-                if kv.next().map(str::trim) == Some("locale") {
-                    let val = kv.next().unwrap_or("").trim().to_string();
-                    if !val.is_empty() && is_available(&val, available) {
-                        return val;
-                    }
-                }
-            }
-        }
+    if let Some(val) = get_cookie(headers, "locale")
+        && is_available(&val, available)
+    {
+        return val;
     }
 
     // 2. Accept-Language header
@@ -328,6 +366,29 @@ pub fn detect_locale(
 
     // 3. Default
     default.to_string()
+}
+
+pub(crate) fn get_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    use axum::http::header::COOKIE;
+
+    for cookie_header in headers.get_all(COOKIE) {
+        if let Ok(s) = cookie_header.to_str() {
+            let found = s.split(';').find_map(|pair| {
+                let mut kv = pair.trim().splitn(2, '=');
+                if kv.next().map(str::trim) == Some(name) {
+                    Some(kv.next().unwrap_or("").trim().to_string())
+                } else {
+                    None
+                }
+            });
+            if let Some(found) = found
+                && !found.is_empty()
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn is_available(code: &str, available: &[LocaleInfo]) -> bool {

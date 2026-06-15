@@ -1,5 +1,5 @@
 use crate::config::ConsoleConfig;
-use crate::console::i18n::{I18n, LocaleConfig, LocaleInfo, detect_locale};
+use crate::console::i18n::{I18n, LocaleConfig, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::models::rbac::{role_permission, user_role};
 use crate::proxy::server::SipServerRef;
@@ -17,6 +17,7 @@ use std::time::Instant;
 
 pub mod auth;
 pub mod catalog;
+pub mod config_helpers;
 pub mod handlers;
 pub mod i18n;
 pub mod middleware;
@@ -51,19 +52,7 @@ impl ConsoleState {
         config.base_path = normalize_base_path(&config.base_path);
         config.api_prefix = normalize_api_prefix(&config.api_prefix);
 
-        // Build LocaleConfig from ConsoleConfig
-        let locale_config = LocaleConfig {
-            default: config.locale_default.clone(),
-            available: config
-                .locales
-                .iter()
-                .map(|(code, info)| LocaleInfo {
-                    code: code.clone(),
-                    name: info.name.clone(),
-                    native_name: info.native_name.clone(),
-                })
-                .collect(),
-        };
+        let locale_config = LocaleConfig::from(&config);
         let i18n = Arc::new(I18n::new(locale_config));
 
         Ok(Arc::new(Self {
@@ -202,10 +191,8 @@ impl ConsoleState {
                 .or_insert_with(|| serde_json::Value::String(locale.to_string()));
             map.entry("t")
                 .or_insert_with(|| self.i18n.get_translations_json(locale));
-            map.entry("available_locales").or_insert_with(|| {
-                serde_json::to_value(self.i18n.available_locales())
-                    .unwrap_or(serde_json::Value::Array(vec![]))
-            });
+            map.entry("available_locales")
+                .or_insert_with(|| self.i18n.available_locales_json());
         }
 
         let mut tmpl_env = Environment::new();
@@ -386,6 +373,19 @@ impl ConsoleState {
         }
         let perms = self.user_permissions(user).await;
         perms.contains(&format!("{}:{}", resource, action))
+    }
+
+    pub async fn require_permission(
+        &self,
+        user: &crate::models::user::Model,
+        resource: &str,
+        action: &str,
+    ) -> Result<(), Response> {
+        if self.has_permission(user, resource, action).await {
+            Ok(())
+        } else {
+            Err(crate::console::config_helpers::permission_denied())
+        }
     }
 
     pub async fn build_current_user_ctx(

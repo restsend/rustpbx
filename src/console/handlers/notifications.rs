@@ -1,3 +1,4 @@
+use crate::console::config_helpers::ok_json;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::system_notification::{ActiveModel, Column, Entity, Model};
 use axum::{
@@ -77,7 +78,7 @@ pub async fn mark_read_handler(
         am.read = Set(true);
         let _ = am.update(state.db()).await;
     }
-    Json(json!({ "ok": true }))
+    ok_json(json!({ "ok": true }))
 }
 
 /// API: mark all notifications as read.
@@ -96,5 +97,5 @@ pub async fn mark_all_read_handler(
         am.read = Set(true);
         let _ = am.update(state.db()).await;
     }
-    Json(json!({ "ok": true }))
+    ok_json(json!({ "ok": true }))
 }

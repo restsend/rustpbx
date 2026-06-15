@@ -8,6 +8,7 @@ use crate::addons::wholesale::models::{
     },
 };
 use crate::{
+    console::config_helpers::{find_or_404, internal_error},
     console::handlers::forms::{self, ListQuery, SipTrunkForm},
     console::{ConsoleState, middleware::AuthRequired},
     models::routing::{Entity as RoutingEntity, Model as RoutingModel},
@@ -245,12 +246,8 @@ async fn create_sip_trunk(
     AuthRequired(user): AuthRequired,
     Form(form): Form<SipTrunkForm>,
 ) -> Response {
-    if !state.has_permission(&user, "trunks", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
+        return resp;
     }
     let db = state.db();
     let now = Utc::now();
@@ -283,11 +280,7 @@ async fn create_sip_trunk(
         }
         Err(err) => {
             warn!("failed to create sip trunk: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to create SIP trunk: {}", err)})),
-            )
-                .into_response()
+            internal_error(format!("Failed to create SIP trunk: {}", err))
         }
     }
 }
@@ -298,32 +291,11 @@ async fn update_sip_trunk(
     AuthRequired(user): AuthRequired,
     Form(form): Form<SipTrunkForm>,
 ) -> Response {
-    if !state.has_permission(&user, "trunks", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
+        return resp;
     }
     let db = state.db();
-    let model = match SipTrunkEntity::find_by_id(id).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "SIP trunk not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load sip trunk {} for update: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to update SIP trunk: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(SipTrunkEntity, id, db, "SIP trunk");
 
     let mut active: SipTrunkActiveModel = model.into();
     let now = Utc::now();
@@ -352,11 +324,7 @@ async fn update_sip_trunk(
         }
         Err(err) => {
             warn!("failed to update sip trunk {}: {}", id, err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to update SIP trunk: {}", err)})),
-            )
-                .into_response()
+            internal_error(format!("Failed to update SIP trunk: {}", err))
         }
     }
 }
@@ -376,24 +344,7 @@ async fn trunk_dependencies(
 ) -> Response {
     let db = state.db();
 
-    let trunk = match SipTrunkEntity::find_by_id(id).one(db).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "SIP trunk not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load trunk {} for dependency check: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to check dependencies: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let trunk = find_or_404!(SipTrunkEntity, id, db, "SIP trunk");
 
     let trunk_name = trunk.name.clone();
 
@@ -401,11 +352,7 @@ async fn trunk_dependencies(
         Ok(routes) => routes,
         Err(err) => {
             warn!("failed to load routes for trunk dependency check: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to check dependencies: {}", err)})),
-            )
-                .into_response();
+            return internal_error(format!("Failed to check dependencies: {}", err));
         }
     };
 
@@ -459,32 +406,11 @@ async fn delete_sip_trunk(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "trunks", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
+        return resp;
     }
     let db = state.db();
-    let model = match SipTrunkEntity::find_by_id(id).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "SIP trunk not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load sip trunk {} for delete: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to delete SIP trunk: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(SipTrunkEntity, id, db, "SIP trunk");
 
     let active: SipTrunkActiveModel = model.into();
     match active.delete(db).await {
@@ -494,11 +420,7 @@ async fn delete_sip_trunk(
         }
         Err(err) => {
             warn!("failed to delete sip trunk {}: {}", id, err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to delete SIP trunk: {}", err)})),
-            )
-                .into_response()
+            internal_error(format!("Failed to delete SIP trunk: {}", err))
         }
     }
 }

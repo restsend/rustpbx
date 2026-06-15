@@ -335,36 +335,27 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
     let mut expires: Option<u32> = None;
     let mut locator_type = "memory".to_string();
 
+    let mut load_proxy_info = |proxy_cfg: &crate::config::ProxyConfig, cfg_ref: Option<&crate::config::Config>| {
+        realm = resolve_default_realm(proxy_cfg);
+        host = resolve_preferred_host(cfg_ref, proxy_cfg, &realm);
+        expires = proxy_cfg.registrar_expires;
+        transports = build_transport_entries(&host, &realm, proxy_cfg);
+        let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
+        accounts = account_entries;
+        notes.extend(backend_notes);
+        locator_type = match proxy_cfg.locator {
+            crate::config::LocatorConfig::Memory => "memory".to_string(),
+            crate::config::LocatorConfig::Http { .. } => "http".to_string(),
+            crate::config::LocatorConfig::Database { .. } => "db".to_string(),
+        };
+    };
+
     if let Some(app) = state.app_state() {
         let config = app.config().clone();
-        let proxy_cfg = &config.proxy;
-        realm = resolve_default_realm(proxy_cfg);
-        host = resolve_preferred_host(Some(config.as_ref()), proxy_cfg, &realm);
-        expires = proxy_cfg.registrar_expires;
-        transports = build_transport_entries(&host, &realm, proxy_cfg);
-        let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
-        accounts = account_entries;
-        notes.extend(backend_notes);
-        locator_type = match proxy_cfg.locator {
-            crate::config::LocatorConfig::Memory => "memory".to_string(),
-            crate::config::LocatorConfig::Http { .. } => "http".to_string(),
-            crate::config::LocatorConfig::Database { .. } => "db".to_string(),
-        };
+        load_proxy_info(&config.proxy, Some(config.as_ref()));
     } else if let Some(server) = state.sip_server() {
-        let proxy_cfg = &server.proxy_config;
-        realm = resolve_default_realm(proxy_cfg);
-        host = resolve_preferred_host(None, proxy_cfg, &realm);
-        expires = proxy_cfg.registrar_expires;
-        transports = build_transport_entries(&host, &realm, proxy_cfg);
-        let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
-        accounts = account_entries;
-        notes.extend(backend_notes);
+        load_proxy_info(&server.proxy_config, None);
         notes.push("Rendered from live proxy configuration.".to_string());
-        locator_type = match proxy_cfg.locator {
-            crate::config::LocatorConfig::Memory => "memory".to_string(),
-            crate::config::LocatorConfig::Http { .. } => "http".to_string(),
-            crate::config::LocatorConfig::Database { .. } => "db".to_string(),
-        };
     } else {
         notes.push("SIP server is not currently running; showing defaults.".to_string());
     }

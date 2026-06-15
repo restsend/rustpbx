@@ -1,3 +1,4 @@
+use crate::console::config_helpers::{find_or_404, internal_error};
 use crate::console::handlers::{bad_request, forms};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
@@ -1062,18 +1063,7 @@ pub async fn page_routing_edit(
     AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match RoutingEntity::find_by_id(id).one(db).await {
-        Ok(Some(route)) => route,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Route not found").into_response(),
-        Err(err) => {
-            warn!("failed to load route {} for edit: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load routing rule: {}", err),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoutingEntity, id, db, "Route");
 
     let trunks = match load_trunks(db).await {
         Ok(list) => list,
@@ -1118,24 +1108,7 @@ pub async fn route_detail_data(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match RoutingEntity::find_by_id(id).one(db).await {
-        Ok(Some(route)) => route,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Routing rule not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load route {} detail data: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoutingEntity, id, db, "Route");
 
     let trunks = match load_trunks(db).await {
         Ok(list) => list,
@@ -1180,24 +1153,7 @@ pub async fn clone_routing(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match RoutingEntity::find_by_id(id).one(db).await {
-        Ok(Some(route)) => route,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Route not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load route {} for clone: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoutingEntity, id, db, "Route");
 
     let mut doc = RouteDocument::from_model(&model);
     doc.id = None;
@@ -1295,24 +1251,7 @@ pub async fn toggle_routing(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match RoutingEntity::find_by_id(id).one(db).await {
-        Ok(Some(route)) => route,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Route not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load route {} for toggle: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to toggle routing rule: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoutingEntity, id, db, "Route");
 
     let mut doc = RouteDocument::from_model(&model);
     doc.disabled = !doc.disabled;
@@ -1356,12 +1295,8 @@ pub(crate) async fn create_routing(
     AuthRequired(user): AuthRequired,
     Json(mut doc): Json<RouteDocument>,
 ) -> Response {
-    if !state.has_permission(&user, "routes", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "routes", "write").await {
+        return resp;
     }
     let db = state.db();
     doc.id = None;
@@ -1463,43 +1398,18 @@ pub(crate) async fn update_routing(
     AuthRequired(user): AuthRequired,
     Json(mut doc): Json<RouteDocument>,
 ) -> Response {
-    if !state.has_permission(&user, "routes", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "routes", "write").await {
+        return resp;
     }
     let db = state.db();
 
-    let model = match RoutingEntity::find_by_id(id).one(db).await {
-        Ok(Some(route)) => route,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Route not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load route {} for update: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(RoutingEntity, id, db, "Route");
 
     let trunks = match load_trunks(db).await {
         Ok(list) => list,
         Err(err) => {
             warn!("failed to load trunks for route update: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
-            )
-                .into_response();
+            return internal_error(format!("Failed to update routing rule: {}", err));
         }
     };
 
@@ -1526,11 +1436,7 @@ pub(crate) async fn update_routing(
                 "failed to start transaction for route update {}: {}",
                 id, err
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
-            )
-                .into_response();
+            return internal_error(format!("Failed to update routing rule: {}", err));
         }
     };
 
@@ -1565,20 +1471,12 @@ pub(crate) async fn update_routing(
     if let Err(err) = active.update(&tx).await {
         warn!("failed to update routing rule {}: {}", id, err);
         let _ = tx.rollback().await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
-        )
-            .into_response();
+        return internal_error(format!("Failed to update routing rule: {}", err));
     }
 
     if let Err(err) = tx.commit().await {
         warn!("failed to commit routing rule update {}: {}", id, err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
-        )
-            .into_response();
+        return internal_error(format!("Failed to update routing rule: {}", err));
     }
 
     // Issue #175: mark routes as pending reload.
@@ -1591,12 +1489,8 @@ pub async fn delete_routing(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "routes", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "routes", "write").await {
+        return resp;
     }
     let db = state.db();
     match RoutingEntity::delete_by_id(id).exec(db).await {
@@ -1614,11 +1508,7 @@ pub async fn delete_routing(
         }
         Err(err) => {
             warn!("failed to delete routing rule {}: {}", id, err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to delete routing rule: {}", err)})),
-            )
-                .into_response()
+            internal_error(format!("Failed to delete routing rule: {}", err))
         }
     }
 }

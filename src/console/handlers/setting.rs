@@ -16,6 +16,10 @@ use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
 use crate::rwi::auth::RwiConfig;
+use crate::console::config_helpers::{
+    ensure_table_mut, find_or_404, get_config_path, json_error, load_document,
+    parse_config_from_str, persist_document,
+};
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
@@ -39,7 +43,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::time::Duration as StdDuration;
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 use tokio::time;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
@@ -844,12 +848,8 @@ async fn query_departments(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<forms::ListQuery<QueryDepartmentFilters>>,
 ) -> Response {
-    if !state.has_permission(&user, "departments", "read").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "departments", "read").await {
+        return resp;
     }
     let db = state.db();
     let mut selector = DepartmentEntity::find().order_by_asc(DepartmentColumn::Name);
@@ -909,12 +909,8 @@ async fn get_department(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "departments", "read").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "departments", "read").await {
+        return resp;
     }
     match DepartmentEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => Json(model).into_response(),
@@ -939,12 +935,8 @@ async fn create_department(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "departments", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+        return resp;
     }
     let name = payload.name.trim();
     if name.is_empty() {
@@ -992,31 +984,10 @@ async fn update_department(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "departments", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+        return resp;
     }
-    let model = match DepartmentEntity::find_by_id(id).one(state.db()).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Department not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load department {} for update: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(DepartmentEntity, id, state.db(), "Department");
 
     let mut active: DepartmentActiveModel = model.into();
     let name = payload.name.trim();
@@ -1054,31 +1025,10 @@ async fn delete_department(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "departments", "write").await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"message": "Permission denied"})),
-        )
-            .into_response();
+    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+        return resp;
     }
-    let model = match DepartmentEntity::find_by_id(id).one(state.db()).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Department not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load department {} for delete: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
+    let model = find_or_404!(DepartmentEntity, id, state.db(), "Department");
 
     let active: DepartmentActiveModel = model.into();
     match active.delete(state.db()).await {
@@ -1099,8 +1049,8 @@ async fn query_users(
     AuthRequired(user): AuthRequired,
     Json(query): Json<forms::ListQuery<QueryUserFilters>>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
     let mut selector = UserEntity::find().order_by_asc(UserColumn::Username);
@@ -1167,8 +1117,8 @@ async fn get_user(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => Json(UserView::from(model)).into_response(),
@@ -1193,8 +1143,8 @@ async fn create_user(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let email = payload.email.trim();
     let username = payload.username.trim();
@@ -1284,27 +1234,10 @@ async fn update_user(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
-    let model = match UserEntity::find_by_id(id).one(state.db()).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "User not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load user {} for update: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(UserEntity, id, state.db(), "User");
 
     let email = payload.email.trim();
     let username = payload.username.trim();
@@ -1376,27 +1309,10 @@ async fn delete_user(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
-    let model = match UserEntity::find_by_id(id).one(state.db()).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "User not found"})),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!("failed to load user {} for delete: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
+    let model = crate::console::config_helpers::find_or_404!(UserEntity, id, state.db(), "User");
 
     let active: UserActiveModel = model.into();
     match active.delete(state.db()).await {
@@ -1588,7 +1504,7 @@ pub(crate) struct StorageSettingsPayload {
     recording_policy: Option<Option<RecordingPolicyPayload>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum CallRecordStoragePayload {
     Disabled,
@@ -1613,7 +1529,7 @@ enum CallRecordStoragePayload {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct RecordingPolicyPayload {
     #[serde(default)]
     enabled: Option<bool>,
@@ -1677,8 +1593,8 @@ pub(crate) async fn update_platform_settings(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<PlatformSettingsPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -1797,13 +1713,29 @@ pub(crate) async fn update_platform_settings(
     .into_response()
 }
 
+fn serialize_to_item<T: Serialize>(val: &T, field: &str) -> Result<Item, Response> {
+    let toml_s = toml::to_string(val).map_err(|err| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Failed to serialize {}: {}", field, err),
+        )
+    })?;
+    let new_doc = toml_s.parse::<DocumentMut>().map_err(|err| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid {} payload: {}", field, err),
+        )
+    })?;
+    Ok(new_doc.as_item().clone())
+}
+
 pub(crate) async fn update_proxy_settings(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
     Json(payload): Json<ProxySettingsPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -1842,25 +1774,10 @@ pub(crate) async fn update_proxy_settings(
                 modified = true;
             }
         } else {
-            let toml_s = match toml::to_string(&webhook) {
-                Ok(s) => s,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to serialize locator_webhook: {err}"),
-                    );
-                }
-            };
-            let new_doc = match toml_s.parse::<DocumentMut>() {
-                Ok(doc) => doc,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid locator_webhook payload: {err}"),
-                    );
-                }
-            };
-            table["locator_webhook"] = new_doc.as_item().clone();
+            match serialize_to_item(&webhook, "locator_webhook") {
+                Ok(item) => table["locator_webhook"] = item,
+                Err(resp) => return resp,
+            }
             modified = true;
         }
     }
@@ -1869,25 +1786,10 @@ pub(crate) async fn update_proxy_settings(
         if webhook.url.is_empty() {
             remove_rwi_webhook = true;
         } else {
-            let toml_s = match toml::to_string(&webhook) {
-                Ok(s) => s,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to serialize rwi_webhook: {err}"),
-                    );
-                }
-            };
-            let new_doc = match toml_s.parse::<DocumentMut>() {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid rwi_webhook payload: {err}"),
-                    );
-                }
-            };
-            rwi_webhook_value = Some(new_doc.as_item().clone());
+            match serialize_to_item(&webhook, "rwi_webhook") {
+                Ok(item) => rwi_webhook_value = Some(item),
+                Err(resp) => return resp,
+            }
         }
     }
 
@@ -1896,26 +1798,12 @@ pub(crate) async fn update_proxy_settings(
         struct UserBackendsToml {
             b: Vec<UserBackendConfig>,
         }
-
-        let toml_s = match toml::to_string(&UserBackendsToml { b: backends }) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize user_backends: {err}"),
-                );
-            }
+        let wrapper = UserBackendsToml { b: backends };
+        let item = match serialize_to_item(&wrapper, "user_backends") {
+            Ok(item) => item,
+            Err(resp) => return resp,
         };
-        let new_doc = match toml_s.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid user_backends payload: {err}"),
-                );
-            }
-        };
-        let Some(backends_item) = new_doc.get("b").cloned() else {
+        let Some(backends_item) = item.as_table().and_then(|t| t.get("b").cloned()) else {
             return json_error(StatusCode::BAD_REQUEST, "Invalid user_backends payload");
         };
         table["user_backends"] = backends_item;
@@ -1929,25 +1817,10 @@ pub(crate) async fn update_proxy_settings(
                 modified = true;
             }
         } else {
-            let toml_s = match toml::to_string(&router) {
-                Ok(s) => s,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to serialize http_router: {err}"),
-                    );
-                }
-            };
-            let new_doc = match toml_s.parse::<DocumentMut>() {
-                Ok(doc) => doc,
-                Err(err) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid http_router payload: {err}"),
-                    );
-                }
-            };
-            table["http_router"] = new_doc.as_item().clone();
+            match serialize_to_item(&router, "http_router") {
+                Ok(item) => table["http_router"] = item,
+                Err(resp) => return resp,
+            }
             modified = true;
         }
     }
@@ -1984,8 +1857,8 @@ pub(crate) async fn update_storage_settings(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<StorageSettingsPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -2026,53 +1899,11 @@ pub(crate) async fn update_storage_settings(
             Some(CallRecordStoragePayload::Disabled) | None => {
                 doc.remove("callrecord");
             }
-            Some(CallRecordStoragePayload::Local { root }) => {
-                let Some(root_path) = normalize_opt_string(root) else {
-                    return json_error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "callrecord.local.root is required",
-                    );
-                };
-                let mut table = Table::new();
-                table["type"] = value("local");
-                table["root"] = value(root_path);
-                doc["callrecord"] = Item::Table(table);
-            }
-            Some(CallRecordStoragePayload::S3 {
-                vendor,
-                bucket,
-                region,
-                access_key,
-                secret_key,
-                endpoint,
-                root,
-                with_media,
-                keep_media_copy,
-            }) => {
-                let mut table = Table::new();
-                table["type"] = value("s3");
-                table["vendor"] = value(vendor);
-                table["bucket"] = value(bucket);
-                table["region"] = value(region);
-                table["access_key"] = value(access_key);
-                table["secret_key"] = value(secret_key);
-                if let Some(ep) = normalize_opt_string(endpoint) {
-                    table["endpoint"] = value(ep);
-                } else {
-                    table.remove("endpoint");
+            Some(payload) => {
+                match serialize_to_item(&payload, "callrecord") {
+                    Ok(item) => doc["callrecord"] = item,
+                    Err(resp) => return resp,
                 }
-                if let Some(r) = normalize_opt_string(root) {
-                    table["root"] = value(r);
-                } else {
-                    table.remove("root");
-                }
-                if let Some(wm) = with_media {
-                    table["with_media"] = value(wm);
-                }
-                if let Some(kmc) = keep_media_copy {
-                    table["keep_media_copy"] = value(kmc);
-                }
-                doc["callrecord"] = Item::Table(table);
             }
         }
         modified = true;
@@ -2081,126 +1912,10 @@ pub(crate) async fn update_storage_settings(
     if let Some(policy_opt) = payload.recording_policy {
         match policy_opt {
             Some(policy_payload) => {
-                let mut table = Table::new();
-                table["enabled"] = value(policy_payload.enabled.unwrap_or(false));
-
-                if let Some(directions) = policy_payload.directions {
-                    if directions.is_empty() {
-                        table.remove("directions");
-                    } else {
-                        set_string_array(&mut table, "directions", directions);
-                    }
+                match serialize_to_item(&policy_payload, "recording_policy") {
+                    Ok(item) => doc["recording"] = item,
+                    Err(resp) => return resp,
                 }
-
-                if let Some(allow) = policy_payload.caller_allow {
-                    if allow.is_empty() {
-                        table.remove("caller_allow");
-                    } else {
-                        set_string_array(&mut table, "caller_allow", allow);
-                    }
-                }
-
-                if let Some(deny) = policy_payload.caller_deny {
-                    if deny.is_empty() {
-                        table.remove("caller_deny");
-                    } else {
-                        set_string_array(&mut table, "caller_deny", deny);
-                    }
-                }
-
-                if let Some(allow) = policy_payload.callee_allow {
-                    if allow.is_empty() {
-                        table.remove("callee_allow");
-                    } else {
-                        set_string_array(&mut table, "callee_allow", allow);
-                    }
-                }
-
-                if let Some(deny) = policy_payload.callee_deny {
-                    if deny.is_empty() {
-                        table.remove("callee_deny");
-                    } else {
-                        set_string_array(&mut table, "callee_deny", deny);
-                    }
-                }
-
-                if let Some(auto_start) = policy_payload.auto_start {
-                    table["auto_start"] = value(auto_start);
-                }
-
-                match policy_payload.filename_pattern {
-                    Some(Some(pattern)) => {
-                        let trimmed = pattern.trim();
-                        if trimmed.is_empty() {
-                            table.remove("filename_pattern");
-                        } else {
-                            table["filename_pattern"] = value(trimmed);
-                        }
-                    }
-                    Some(None) => {
-                        table.remove("filename_pattern");
-                    }
-                    None => {}
-                }
-
-                match policy_payload.samplerate {
-                    Some(Some(rate)) => {
-                        table["samplerate"] = value(i64::from(rate));
-                    }
-                    Some(None) => {
-                        table.remove("samplerate");
-                    }
-                    None => {}
-                }
-
-                match policy_payload.ptime {
-                    Some(Some(ptime)) => {
-                        table["ptime"] = value(i64::from(ptime));
-                    }
-                    Some(None) => {
-                        table.remove("ptime");
-                    }
-                    None => {}
-                }
-
-                if let Some(path_opt) = policy_payload.path {
-                    if let Some(path) = normalize_opt_string(path_opt) {
-                        table["path"] = value(path);
-                    } else {
-                        table.remove("path");
-                    }
-                }
-
-                if let Some(format_opt) = policy_payload.format {
-                    match format_opt {
-                        Some(format_value) => {
-                            let normalized = format_value.trim().to_ascii_lowercase();
-                            if normalized.is_empty() {
-                                table.remove("format");
-                            } else if normalized == "wav" || normalized == "ogg" {
-                                table["format"] = value(normalized);
-                            } else {
-                                return json_error(
-                                    StatusCode::UNPROCESSABLE_ENTITY,
-                                    "recording.format must be either 'wav' or 'ogg'",
-                                );
-                            }
-                        }
-                        None => {
-                            table.remove("format");
-                        }
-                    }
-                }
-
-                if let Some(force_file) = policy_payload.force_file {
-                    if force_file {
-                        table["force_file"] = value(true);
-                    } else {
-                        table.remove("force_file");
-                    }
-                }
-
-                doc["recording"] = Item::Table(table);
             }
             None => {
                 doc.remove("recording");
@@ -2262,8 +1977,8 @@ pub(crate) async fn update_security_settings(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<SecuritySettingsPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -2295,82 +2010,56 @@ pub(crate) async fn update_security_settings(
         modified = true;
     }
 
-    // DoS protection
-    if let Some(val) = payload.dos_enabled {
+    {
         let table = ensure_table_mut(&mut doc, "proxy");
-        table["dos_enabled"] = value(val);
-        modified = true;
-    }
-    if let Some(val) = payload.dos_max_cps_per_ip {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["dos_max_cps_per_ip"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.dos_max_concurrent_per_ip {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["dos_max_concurrent_per_ip"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.dos_scan_probe_threshold {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["dos_scan_probe_threshold"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.dos_scan_block_duration_secs {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["dos_scan_block_duration_secs"] = value(val as i64);
-        modified = true;
-    }
 
-    // Channel capacities
-    if let Some(val) = payload.session_cmd_channel_capacity {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["session_cmd_channel_capacity"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.session_state_channel_capacity {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["session_state_channel_capacity"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.media_cmd_channel_capacity {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["media_cmd_channel_capacity"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.media_event_channel_capacity {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["media_event_channel_capacity"] = value(val as i64);
-        modified = true;
-    }
+        macro_rules! set_opt {
+            ($field:ident, $cast:ty) => {
+                if let Some(val) = payload.$field {
+                    table[stringify!($field)] = value(val as $cast);
+                    modified = true;
+                }
+            };
+            ($field:ident) => {
+                if let Some(val) = payload.$field {
+                    table[stringify!($field)] = value(val);
+                    modified = true;
+                }
+            };
+        }
 
-    // URI normalization
-    if let Some(val) = payload.uri_max_length {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["uri_max_length"] = value(val as i64);
-        modified = true;
-    }
-    if let Some(val) = payload.uri_reject_malformed {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        table["uri_reject_malformed"] = value(val);
-        modified = true;
-    }
+        // DoS protection
+        set_opt!(dos_enabled);
+        set_opt!(dos_max_cps_per_ip, i64);
+        set_opt!(dos_max_concurrent_per_ip, i64);
+        set_opt!(dos_scan_probe_threshold, i64);
+        set_opt!(dos_scan_block_duration_secs, i64);
 
-    // Emergency routing
-    if let Some(emg_opt) = payload.emergency {
-        let table = ensure_table_mut(&mut doc, "proxy");
-        match emg_opt {
-            Some(cfg) => {
-                let toml_s = toml::to_string(&cfg).unwrap_or_default();
-                if let Ok(emg_doc) = toml_s.parse::<DocumentMut>() {
-                    table["emergency"] = emg_doc.as_item().clone();
+        // Channel capacities
+        set_opt!(session_cmd_channel_capacity, i64);
+        set_opt!(session_state_channel_capacity, i64);
+        set_opt!(media_cmd_channel_capacity, i64);
+        set_opt!(media_event_channel_capacity, i64);
+
+        // URI normalization
+        set_opt!(uri_max_length, i64);
+        set_opt!(uri_reject_malformed);
+
+        // Emergency routing
+        if let Some(emg_opt) = payload.emergency {
+            match emg_opt {
+                Some(cfg) => {
+                    let toml_s = toml::to_string(&cfg).unwrap_or_default();
+                    if let Ok(emg_doc) = toml_s.parse::<DocumentMut>() {
+                        table["emergency"] = emg_doc.as_item().clone();
+                    }
+                }
+                None => {
+                    table.remove("emergency");
                 }
             }
-            None => {
-                table.remove("emergency");
-            }
+            modified = true;
         }
-        modified = true;
     }
 
     let doc_text = doc.to_string();
@@ -2484,26 +2173,12 @@ pub(crate) async fn update_rwi_settings(
         struct RwiTokensToml {
             tokens: Vec<RwiTokenPayload>,
         }
-
-        let tokens_str = match toml::to_string(&RwiTokensToml { tokens }) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize RWI tokens: {err}"),
-                );
-            }
+        let wrapper = RwiTokensToml { tokens };
+        let item = match serialize_to_item(&wrapper, "RWI tokens") {
+            Ok(item) => item,
+            Err(resp) => return resp,
         };
-        let tokens_doc = match tokens_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid RWI tokens payload: {err}"),
-                );
-            }
-        };
-        let Some(tokens_item) = tokens_doc.get("tokens").cloned() else {
+        let Some(tokens_item) = item.as_table().and_then(|t| t.get("tokens").cloned()) else {
             return json_error(StatusCode::BAD_REQUEST, "Invalid RWI tokens payload");
         };
         rwi_table["tokens"] = tokens_item;
@@ -2516,26 +2191,12 @@ pub(crate) async fn update_rwi_settings(
         struct RwiContextsToml {
             contexts: Vec<RwiContextPayload>,
         }
-
-        let contexts_str = match toml::to_string(&RwiContextsToml { contexts }) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize RWI contexts: {err}"),
-                );
-            }
+        let wrapper = RwiContextsToml { contexts };
+        let item = match serialize_to_item(&wrapper, "RWI contexts") {
+            Ok(item) => item,
+            Err(resp) => return resp,
         };
-        let contexts_doc = match contexts_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid RWI contexts payload: {err}"),
-                );
-            }
-        };
-        let Some(contexts_item) = contexts_doc.get("contexts").cloned() else {
+        let Some(contexts_item) = item.as_table().and_then(|t| t.get("contexts").cloned()) else {
             return json_error(StatusCode::BAD_REQUEST, "Invalid RWI contexts payload");
         };
         rwi_table["contexts"] = contexts_item;
@@ -2583,8 +2244,8 @@ pub(crate) async fn update_cluster_settings(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<ClusterSettingsPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -2603,26 +2264,13 @@ pub(crate) async fn update_cluster_settings(
         struct ClusterToml {
             peers: Vec<ClusterPeerPayload>,
         }
-        let peers_str = match toml::to_string(&ClusterToml { peers }) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize cluster peers: {err}"),
-                );
-            }
-        };
-        let peers_doc = match peers_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid cluster peers payload: {err}"),
-                );
-            }
+        let wrapper = ClusterToml { peers };
+        let item = match serialize_to_item(&wrapper, "cluster peers") {
+            Ok(item) => item,
+            Err(resp) => return resp,
         };
         let cluster_table = ensure_table_mut(&mut doc, "cluster");
-        let Some(peers_item) = peers_doc.get("peers").cloned() else {
+        let Some(peers_item) = item.as_table().and_then(|t| t.get("peers").cloned()) else {
             return json_error(StatusCode::BAD_REQUEST, "Invalid cluster peers payload");
         };
         cluster_table.insert("peers", peers_item);
@@ -3204,86 +2852,6 @@ fn read_follow_log_lines(path: &str, position: u64, limit: usize) -> io::Result<
     })
 }
 
-#[allow(clippy::result_large_err)]
-fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
-    let Some(app_state) = state.app_state() else {
-        return Err(json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Application state is unavailable.",
-        ));
-    };
-
-    let Some(path) = app_state.config_path.clone() else {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "Configuration file path is unknown. Start the service with --conf to enable editing.",
-        ));
-    };
-    Ok(path)
-}
-
-#[allow(clippy::result_large_err)]
-fn load_document(path: &str) -> Result<DocumentMut, Response> {
-    let contents = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            return Err(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read configuration file: {}", err),
-            ));
-        }
-    };
-
-    contents.parse::<DocumentMut>().map_err(|err| {
-        json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Configuration file is not valid TOML: {}", err),
-        )
-    })
-}
-
-#[allow(clippy::result_large_err)]
-fn persist_document(path: &str, contents: String) -> Result<(), Response> {
-    fs::write(path, contents).map_err(|err| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to write configuration file: {}", err),
-        )
-    })
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
-    toml::from_str::<Config>(contents)
-        .map(|mut cfg| {
-            cfg.ensure_recording_defaults();
-            cfg
-        })
-        .map_err(|err| {
-            json_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Configuration validation failed: {}", err),
-            )
-        })
-}
-
-fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    let needs_init = doc
-        .as_table()
-        .get(key)
-        .map(|item| !item.is_table())
-        .unwrap_or(true);
-
-    if needs_init {
-        doc.insert(key, Item::Table(Table::new()));
-    }
-
-    doc.as_table_mut()
-        .get_mut(key)
-        .and_then(Item::as_table_mut)
-        .expect("table")
-}
-
 fn parse_lines_to_vec(raw: &str) -> Vec<String> {
     raw.lines()
         .map(|line| line.trim())
@@ -3305,8 +2873,8 @@ pub(crate) async fn test_storage_connection(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestStoragePayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     use crate::storage::{Storage, StorageConfig};
     use uuid::Uuid;
@@ -3372,8 +2940,8 @@ pub(crate) async fn test_locator_webhook(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestLocatorWebhookPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let opts = crate::http_util::HttpFetchOptions::new()
         .with_timeout(std::time::Duration::from_secs(5))
@@ -3404,8 +2972,8 @@ pub(crate) async fn test_rwi_webhook(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestRwiWebhookPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
 
     match crate::rwi::webhook::send_test_event(&payload.url, payload.headers.as_ref()).await {
@@ -3426,8 +2994,8 @@ pub(crate) async fn test_http_router(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestHttpRouterPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     let opts = crate::http_util::HttpFetchOptions::new()
         .with_timeout(std::time::Duration::from_secs(5))
@@ -3461,8 +3029,8 @@ pub(crate) async fn test_auto_external_ip(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestAutoExternalIpPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
 
     let url = payload.url.unwrap_or_default();
@@ -3484,8 +3052,8 @@ pub(crate) async fn test_user_backend(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<TestUserBackendPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "system", "write").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
     }
     match payload.backend {
         UserBackendConfig::Memory { .. } => Json(json!({
@@ -3548,23 +3116,12 @@ pub(crate) async fn test_user_backend(
     }
 }
 
-fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(json!({
-            "status": "error",
-            "message": message.into(),
-        })),
-    )
-        .into_response()
-}
-
 async fn list_roles(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     match RoleEntity::find()
         .order_by_asc(RoleColumn::Name)
@@ -3584,8 +3141,8 @@ async fn get_role(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
     let role = match RoleEntity::find_by_id(id).one(db).await {
@@ -3609,8 +3166,8 @@ async fn create_role(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<RolePayload>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let name = payload.name.trim();
     if name.is_empty() {
@@ -3659,15 +3216,11 @@ async fn update_role(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<RolePayload>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
-    let model = match RoleEntity::find_by_id(id).one(db).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Role not found"),
-        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoleEntity, id, db, "Role");
     if model.is_system {
         return json_error(StatusCode::FORBIDDEN, "Cannot modify system roles");
     }
@@ -3709,15 +3262,11 @@ async fn delete_role_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
-    let model = match RoleEntity::find_by_id(id).one(db).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Role not found"),
-        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
+    let model = crate::console::config_helpers::find_or_404!(RoleEntity, id, db, "Role");
     if model.is_system {
         return json_error(StatusCode::FORBIDDEN, "Cannot delete system roles");
     }
@@ -3732,8 +3281,8 @@ async fn get_user_roles(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
     let assignments = match user_role::Entity::find()
@@ -3762,8 +3311,8 @@ async fn assign_user_roles(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<AssignRolesPayload>,
 ) -> Response {
-    if !state.has_permission(&user, "users", "manage").await {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
     }
     let db = state.db();
     if let Err(err) = user_role::Entity::delete_many()
