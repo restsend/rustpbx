@@ -208,7 +208,7 @@ ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
-flowdb = { version = "0.1.6", default-features = false }
+flowdb = { version = "0.3.1", default-features = false }
 
 
 [dev-dependencies]
