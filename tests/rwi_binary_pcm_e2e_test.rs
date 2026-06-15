@@ -427,7 +427,7 @@ async fn test_pcm_frame_does_not_break_session_state() {
             call_id: "test".to_string(),
         }, None);
         gw.fan_out_event_to_context("pcm-test", &event, &"test".to_string());
-    }, None);
+    }
 
 
     // Should receive the event
