@@ -212,9 +212,9 @@ async fn test_full_session_resume_flow() {
 
             for event in events {
                 gw.fan_out_event_to_context("resume-test", &event, &"resume-call-1".to_string());
-            }, None);
+            }
 
-        }, None);
+        }
 
 
         // Give time for events to be cached
@@ -228,7 +228,7 @@ async fn test_full_session_resume_flow() {
 
         ws.close(None).await.unwrap();
         initial_count
-    }, None);
+    };
 
     // Wait for disconnect to complete
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -271,7 +271,7 @@ async fn test_full_session_resume_flow() {
             assert!(event["timestamp"].is_u64(), "Event should have timestamp");
             assert!(event["call_id"].is_string(), "Event should have call_id");
             assert!(event["event"].is_object(), "Event should have event data");
-        }, None);
+        }
 
 
         ws.close(None).await.unwrap();
@@ -295,7 +295,7 @@ async fn test_incremental_resume_with_sequence() {
                 call_id: format!("seq-call-{}", i),
             }, None);
             gw.cache_event(&format!("seq-call-{}", i), &event);
-        }, None);
+        }
 
     }
 
@@ -338,13 +338,13 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-a".to_string(),
             &rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
                 call_id: "call-a".to_string(),
-            },
+            }, None),
         );
         gw.cache_event(
             &"call-a".to_string(),
             &rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallAnswered  { 
                 call_id: "call-a".to_string(),
-            },
+            }, None),
         );
 
         // Call B events
@@ -352,16 +352,16 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-b".to_string(),
             &rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallRinging  { 
                 call_id: "call-b".to_string(),
-            },
+            }, None),
         );
         gw.cache_event(
             &"call-b".to_string(),
             &rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallBridged  { 
                 leg_a: "call-b".to_string(),
                 leg_b: "call-c".to_string(),
-            },
+            }, None),
         );
-    }, None);
+    }
 
 
     // Resume call-a specifically
@@ -377,7 +377,7 @@ async fn test_call_resume_filters_by_call_id() {
     // Verify all events are for call-a
     for event in events {
         assert_eq!(event["call_id"], "call-a");
-    }, None);
+    }
 
 
     // Resume call-b
@@ -391,12 +391,12 @@ async fn test_call_resume_filters_by_call_id() {
     let has_bridged = events.iter().any(|e| {
         let event_json = serde_json::to_string(&e["event"]).unwrap_or_default();
         event_json.contains("bridged") || e["event"]["leg_a"].is_string()
-    });, None);
+    });
 
     assert!(has_bridged, "Should have a bridged event: {:?}", events);
 
     ws.close(None).await.unwrap();
-}, None);
+}
 
 
 /// Test: Resume with non-existent call returns empty events
@@ -441,7 +441,7 @@ async fn test_event_sequence_monotonicity() {
                 leg_id: None,
             }, None);
             gw.cache_event(&"dtmf-call".to_string(), &event);
-        }, None);
+        }
 
     }
 

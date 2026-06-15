@@ -1,8 +1,6 @@
 use rustpbx::rwi::{CallTransferFailed, CallTransferAccepted, CallTransferred};
 use rustpbx::rwi::{ConferenceMergeRequested, ConferenceMerged, ConferenceMergeFailed};
 use rustpbx::rwi::{CallRinging, CallAnswered, CallBridged, CallHangup, CallUnbridged};
-use rustpbx::rwi::Dtmf;
-use rustpbx::rwi::{ConferenceSeatReplaceStarted, ConferenceSeatReplaceSucceeded, ConferenceSeatReplaceFailed};
 
 #[test]
 fn test_rwi_event_call_transfer_failed() {
