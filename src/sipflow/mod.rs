@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod flowdb_backend;
 pub mod flowdb_codec;
+pub mod perf;
 pub mod protocol;
 pub mod rtp_stats;
 pub mod sdp_utils;

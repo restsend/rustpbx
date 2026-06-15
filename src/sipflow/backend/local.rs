@@ -9,12 +9,14 @@ use tracing::warn;
 
 use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
+use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet};
 use crate::sipflow::wav_utils::{
     generate_wav_to_writer,
 };
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
+use std::sync::atomic::Ordering;
 
 enum Command {
     RecordItem {
@@ -50,6 +52,8 @@ impl LocalBackend {
         let root_clone = root.clone();
         let subdirs_clone = subdirs.clone();
         // Spawn background worker task
+        let perf = PerfCounters::new_arc();
+        let perf_dumper = perf.clone();
         crate::utils::spawn(async move {
             let mut storage = StorageManager::new(
                 &PathBuf::from(&root_clone),
@@ -60,6 +64,7 @@ impl LocalBackend {
             );
 
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut dumper = PerfDumper::new(perf_dumper);
 
             loop {
                 tokio::select! {
@@ -70,6 +75,7 @@ impl LocalBackend {
                     Some(cmd) = rx.recv() => {
                         match cmd {
                             Command::RecordItem { call_id, item } => {
+                                perf.items_recorded.fetch_add(1, Ordering::Relaxed);
                                 // Convert SipFlowItem to Packet for storage
                                 let default_port = if matches!(&item.msg_type, SipFlowMsgType::Sip)
                                 {
@@ -121,12 +127,18 @@ impl LocalBackend {
                             }
                             Command::Flush { done } => {
                                 let _ = storage.force_flush().await;
+                                perf.flushes.fetch_add(1, Ordering::Relaxed);
+                                perf.set_pending(storage.batch_len() as i64);
                                 let _ = done.send(());
                             }
                         }
                     }
                     _ = interval.tick() => {
                         let _ = storage.check_flush().await;
+                        perf.set_pending(storage.batch_len() as i64);
+                        if let Some(msg) = dumper.try_dump() {
+                            tracing::info!("{msg}");
+                        }
                     }
                 }
             }

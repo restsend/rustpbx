@@ -540,11 +540,11 @@ pub enum SipFlowSubdirs {
 /// Storage engine selection for the Local sipflow backend.
 #[derive(Debug, Deserialize, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 pub enum SipFlowEngine {
-    /// Use FlowDB LSM-tree engine (default).
-    #[default]
+    /// Use FlowDB LSM-tree engine.
     #[serde(rename = "flowdb")]
     FlowDb,
-    /// Use the legacy SQLite + raw-file engine.
+    /// Use SQLite + raw-file engine (default).
+    #[default]
     #[serde(rename = "sqlite")]
     Sqlite,
 }
@@ -601,7 +601,7 @@ pub enum SipFlowConfig {
         flush_interval_secs: u64,
         #[serde(default = "default_sipflow_id_cache_size")]
         id_cache_size: usize,
-        /// Storage engine: "flowdb" (default) or "sqlite".
+        /// Storage engine: "flowdb" or "sqlite" (default).
         #[serde(default)]
         engine: SipFlowEngine,
         /// TTL in seconds for FlowDB records (optional). When set,
