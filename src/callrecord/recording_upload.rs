@@ -76,18 +76,12 @@ impl RecordingUploadHook {
             .ok_or_else(|| anyhow!("recording.{name} is required"))
     }
 
-    fn storage_key(&self, record: &CallRecord, track_id: &str, media_path: &str) -> String {
+    fn storage_key(&self, record: &CallRecord, _track_id: &str, media_path: &str) -> String {
         let file_name = Path::new(media_path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
             .to_string_lossy();
-        let key = format!(
-            "{}/{}_{}_{}",
-            record.start_time.format("%Y%m%d"),
-            record.call_id,
-            track_id,
-            file_name
-        );
+        let key = format!("{}/{}", record.start_time.format("%Y%m%d"), file_name);
         match self
             .policy
             .root
