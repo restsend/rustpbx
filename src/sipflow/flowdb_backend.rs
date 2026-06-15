@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Local};
 use flowdb::{Config as FlowDbConfig, Engine, Record, ScanRange};
-use futures::FutureExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,13 +26,7 @@ pub struct FlowDbBackend {
     _maintenance: Option<flowdb::MaintenanceHandle>,
 }
 
-impl Drop for FlowDbBackend {
-    fn drop(&mut self) {
-        if let Some(handle) = self._maintenance.take() {
-            
-        }
-    }
-}
+
 
 impl FlowDbBackend {
     pub fn new(
