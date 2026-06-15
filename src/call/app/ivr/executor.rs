@@ -40,6 +40,13 @@ pub struct StepIvrApp {
     last_transfer_target: Option<String>,
     /// Current step start time (ISO UTC) — set when a step begins, used for step_start_time.
     current_step_start_time: Option<String>,
+    /// Monotonic instant when the current step really started (edge-cli response received).
+    /// Used to compute the complete step duration including async waits (playback, user input).
+    step_start_instant: Option<std::time::Instant>,
+    /// Monotonic instant when the pending WaitFor step started (for duration calculation).
+    pending_start_instant: Option<std::time::Instant>,
+    /// Pending trace entry for a WaitFor step — finalized and recorded when the next event arrives.
+    pending_trace: Option<IvrTraceEntry>,
     /// Current step provider response metadata.
     current_step_id: Option<String>,
     current_step_name: Option<String>,
@@ -82,6 +89,9 @@ impl StepIvrApp {
             transferred_from: None,
             last_transfer_target: None,
             current_step_start_time: None,
+            step_start_instant: None,
+            pending_start_instant: None,
+            pending_trace: None,
             current_step_id: None,
             current_step_name: None,
             current_trigger_event_type: None,
@@ -111,6 +121,9 @@ impl StepIvrApp {
             transferred_from: None,
             last_transfer_target: None,
             current_step_start_time: None,
+            step_start_instant: None,
+            pending_start_instant: None,
+            pending_trace: None,
             current_step_id: None,
             current_step_name: None,
             current_trigger_event_type: None,
@@ -165,6 +178,10 @@ impl StepIvrApp {
     pub fn with_transferred_from(mut self, from: Option<String>) -> Self {
         self.transferred_from = from;
         self
+    }
+
+    fn pending_take(&mut self) -> Option<IvrTraceEntry> {
+        self.pending_trace.take()
     }
 
     fn record_trace(&self, entry: IvrTraceEntry) {
@@ -329,6 +346,18 @@ impl StepIvrApp {
 
         match result {
             Ok(action_result) => {
+                // Finalize any pending trace (from a previous WaitFor step) before
+                // recording the current step's trace.
+                if let Some(pending) = self.pending_take() {
+                    let end = std::time::Instant::now();
+                    let duration = self.pending_start_instant.map(|s| end.duration_since(s).as_millis() as u64).unwrap_or(0);
+                    let step_end = chrono::Utc::now().to_rfc3339();
+                    self.record_trace(IvrTraceEntry {
+                        step_end_time: Some(step_end),
+                        duration_ms: duration,
+                        ..pending
+                    });
+                }
                 let (app_action, _result_kind) = match action_result {
                     ActionResult::Terminal(terminal) => {
                         self.step_index += 1;
@@ -370,7 +399,10 @@ impl StepIvrApp {
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::WaitFor(_) => {
-                        self.record_trace(IvrTraceEntry {
+                        // Step isn't done yet (e.g. waiting for audio to complete / DTMF).
+                        // Save as pending — will be finalized in request_next when next event arrives.
+                        self.pending_start_instant = self.step_start_instant;
+                        self.pending_trace = Some(IvrTraceEntry {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
@@ -386,7 +418,7 @@ impl StepIvrApp {
                             step_name: step_name.clone(),
                             step_start_time: self.current_step_start_time.clone(),
                             step_end_time: None,
-                            duration_ms: elapsed_ms,
+                            duration_ms: 0,
                             extra: self.extra.clone(),
                         });
                         (AppAction::Continue, "continue")
@@ -470,6 +502,18 @@ impl StepIvrApp {
             transferred_from: self.transferred_from.clone(),
         };
 
+        // Finalize and record pending trace (WaitFor step just completed).
+        if let Some(pending) = self.pending_take() {
+            let end = std::time::Instant::now();
+            let duration = self.pending_start_instant.map(|s| end.duration_since(s).as_millis() as u64).unwrap_or(0);
+            let step_end = chrono::Utc::now().to_rfc3339();
+            self.record_trace(IvrTraceEntry {
+                step_end_time: Some(step_end),
+                duration_ms: duration,
+                ..pending
+            });
+        }
+
         let start = std::time::Instant::now();
         let result = self.provider.next_action(ctx.clone()).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -494,6 +538,7 @@ impl StepIvrApp {
 
         // Mark when this step started executing.
         self.current_step_start_time = Some(chrono::Utc::now().to_rfc3339());
+        self.step_start_instant = Some(std::time::Instant::now());
 
         // Store trigger event info for __exec_node to use when recording trace after node execution
         self.current_trigger_event_type = Some(ctx
