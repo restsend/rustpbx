@@ -1559,6 +1559,7 @@
                                                 </div>
                                                 <button type="button"
                                                     class="inline-flex items-center justify-center gap-2 rounded-md border border-rose-500 bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2"
+                                                    :class="pendingReload && (action.id === 'reload-app' || action.id === 'reload-acl') ? 'reload-glow' : ''"
                                                     :disabled="operationDisabled(action)"
                                                     @click="triggerOperation(action)">
                                                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
@@ -2123,6 +2124,7 @@
                         </button>
                         <button type="button" @click="reloadClusterConfig()"
                             class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                            :class="pendingReload && !clusterReloading ? 'reload-glow reload-glow-accent' : ''"
                             :disabled="clusterReloading">
                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
@@ -2978,6 +2980,7 @@
                 media_event_channel_capacity: 1024,
             },
             securityProcessing: false,
+            pendingReload: false,
             aclReloading: false,
             aclReloadModal: {
                 open: false,
@@ -3232,6 +3235,7 @@
                 this.resetReloadModal();
                 window.addEventListener('roles:create', () => this.openRoleCreate());
                 window.addEventListener('beforeunload', () => this.stopLogFollow());
+                this.fetchPendingReload();
             },
             get visibleTabs() {
                 return this.tabs.filter((tab) => {
@@ -4265,6 +4269,15 @@
                 }
                 return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
             },
+            async fetchPendingReload() {
+                try {
+                    const r = await fetch('{{ api_prefix | safe }}/pending-reloads');
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.pendingReload = !!(d.pending?.routes || d.pending?.trunks || d.pending?.sbc_routes || d.pending?.sbc_trunks || d.pending?.queues || d.pending?.app || d.pending?.acl);
+                    }
+                } catch (_) {}
+            },
             operationDisabled(action) {
                 if (!action) {
                     return true;
@@ -4389,6 +4402,7 @@
                 if (this.aclReloading) {
                     return;
                 }
+                this.pendingReload = false;
                 this.aclReloading = true;
                 try {
                     if (this.aclReloadModal.open && this.aclReloadModal.status !== 'running') {
@@ -4591,6 +4605,7 @@
                     endpoint = `${endpoint}${separator}mode=check`;
                 }
 
+                this.pendingReload = false;
                 this.appReloading = true;
                 this.appReloadModal.mode = checkOnly ? 'check' : 'reload';
                 this.appReloadModal.status = 'running';

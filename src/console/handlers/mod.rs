@@ -1,4 +1,4 @@
-use crate::console::ConsoleState;
+use crate::console::{ConsoleState, ReloadTarget};
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::get};
 use http::StatusCode;
 use serde_json::json;
@@ -106,9 +106,18 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
 }
 
 async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
-    use std::sync::atomic::Ordering;
-    let pending = state.pending_reload.load(Ordering::Relaxed);
-    Json(json!({ "pending": pending }))
+    let targets = state.pending_reload_targets();
+    Json(json!({
+        "pending": {
+            "routes": targets.contains(&ReloadTarget::Routes),
+            "trunks": targets.contains(&ReloadTarget::Trunks),
+            "sbc_routes": targets.contains(&ReloadTarget::SbcRoutes),
+            "sbc_trunks": targets.contains(&ReloadTarget::SbcTrunks),
+            "queues": targets.contains(&ReloadTarget::Queues),
+            "app": targets.contains(&ReloadTarget::App),
+            "acl": targets.contains(&ReloadTarget::Acl),
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -138,17 +147,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["pending"], false);
+        assert_eq!(v["pending"]["routes"], false);
+        assert_eq!(v["pending"]["trunks"], false);
     }
 
     #[tokio::test]
     async fn pending_reloads_handler_true_after_mark() {
         let state = setup_state().await;
-        state.mark_pending_reload();
+        state.mark_pending_reload(ReloadTarget::Routes);
 
         let response = pending_reloads_handler(State(state)).await.into_response();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["pending"], true);
+        assert_eq!(v["pending"]["routes"], true);
+        assert_eq!(v["pending"]["trunks"], false);
     }
 }

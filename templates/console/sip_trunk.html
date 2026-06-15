@@ -19,7 +19,7 @@
             <div class="flex flex-wrap items-center gap-3">
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
-                    :class="reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
+                    :class="[reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : '', pendingReload && !reloading ? 'reload-glow reload-glow-accent' : '']"
                     :disabled="reloading" @click="confirmReload()">
                     <template x-if="!reloading">
                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -512,6 +512,7 @@
             depTrunkName: '',
             depRoutes: [],
             reloading: false,
+            pendingReload: false,
             lastReload: null,
             page: 1,
             perPage: 20,
@@ -539,6 +540,16 @@
                 this.syncActiveFilters();
                 this.fetchTrunks();
                 this.loadRegStatuses();
+                this.fetchPendingReload();
+            },
+            async fetchPendingReload() {
+                try {
+                    const r = await fetch('{{ api_prefix | safe }}/pending-reloads');
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.pendingReload = !!d.pending?.trunks;
+                    }
+                } catch (_) {}
             },
             loadFilterOptions() {
                 const statuses = Array.isArray(this.filtersRaw.statuses) ? this.filtersRaw.statuses : [];
@@ -1008,6 +1019,7 @@
                 if (this.reloading) {
                     return;
                 }
+                this.pendingReload = false;
                 this.reloading = true;
                 this.error = null;
                 const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/trunks`;

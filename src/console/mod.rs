@@ -10,8 +10,7 @@ use axum::response::{IntoResponse, Response};
 use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
@@ -25,6 +24,17 @@ pub use handlers::router;
 
 pub type PermCache = HashMap<i64, (Instant, HashSet<String>)>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReloadTarget {
+    Routes,
+    Trunks,
+    SbcRoutes,
+    SbcTrunks,
+    Queues,
+    App,
+    Acl,
+}
+
 #[derive(Clone)]
 pub struct ConsoleState {
     db: DatabaseConnection,
@@ -34,7 +44,7 @@ pub struct ConsoleState {
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     i18n: Arc<I18n>,
     perm_cache: Arc<Mutex<PermCache>>,
-    pub pending_reload: Arc<AtomicBool>,
+    pub pending_reload: Arc<RwLock<BTreeSet<ReloadTarget>>>,
     /// Addon-specific state storage using http::Extensions for type-safe access
     addon_extensions: Arc<std::sync::RwLock<http::Extensions>>,
 }
@@ -63,7 +73,7 @@ impl ConsoleState {
             app_state: Arc::new(RwLock::new(None)),
             i18n,
             perm_cache: Arc::new(Mutex::new(HashMap::new())),
-            pending_reload: Arc::new(AtomicBool::new(false)),
+            pending_reload: Arc::new(RwLock::new(BTreeSet::new())),
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
         }))
     }
@@ -423,12 +433,20 @@ impl ConsoleState {
         &self.db
     }
 
-    pub fn mark_pending_reload(&self) {
-        self.pending_reload.store(true, Ordering::Relaxed);
+    pub fn mark_pending_reload(&self, target: ReloadTarget) {
+        self.pending_reload.write().unwrap().insert(target);
     }
 
-    pub fn clear_pending_reload(&self) {
-        self.pending_reload.store(false, Ordering::Relaxed);
+    pub fn clear_pending_reload(&self, target: ReloadTarget) {
+        self.pending_reload.write().unwrap().remove(&target);
+    }
+
+    pub fn clear_all_pending_reload(&self) {
+        self.pending_reload.write().unwrap().clear();
+    }
+
+    pub fn pending_reload_targets(&self) -> BTreeSet<ReloadTarget> {
+        self.pending_reload.read().unwrap().clone()
     }
 
     pub fn set_sip_server(&self, server: Option<SipServerRef>) {
@@ -735,13 +753,21 @@ mod tests {
     #[tokio::test]
     async fn pending_reload_mark_and_clear() {
         let state = setup_state().await;
-        use std::sync::atomic::Ordering;
 
-        assert!(!state.pending_reload.load(Ordering::Relaxed));
-        state.mark_pending_reload();
-        assert!(state.pending_reload.load(Ordering::Relaxed));
-        state.clear_pending_reload();
-        assert!(!state.pending_reload.load(Ordering::Relaxed));
+        assert!(state.pending_reload_targets().is_empty());
+        state.mark_pending_reload(ReloadTarget::Routes);
+        assert!(state.pending_reload_targets().contains(&ReloadTarget::Routes));
+        state.clear_pending_reload(ReloadTarget::Routes);
+        assert!(state.pending_reload_targets().is_empty());
+
+        // Multiple targets can be pending independently
+        state.mark_pending_reload(ReloadTarget::Trunks);
+        state.mark_pending_reload(ReloadTarget::Queues);
+        assert!(state.pending_reload_targets().contains(&ReloadTarget::Trunks));
+        assert!(state.pending_reload_targets().contains(&ReloadTarget::Queues));
+        assert!(!state.pending_reload_targets().contains(&ReloadTarget::Routes));
+        state.clear_all_pending_reload();
+        assert!(state.pending_reload_targets().is_empty());
     }
 
     #[tokio::test]

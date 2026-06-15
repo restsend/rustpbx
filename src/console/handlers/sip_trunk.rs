@@ -10,7 +10,7 @@ use crate::addons::wholesale::models::{
 use crate::{
     console::config_helpers::{find_or_404, internal_error},
     console::handlers::forms::{self, ListQuery, SipTrunkForm},
-    console::{ConsoleState, middleware::AuthRequired},
+    console::{ConsoleState, ReloadTarget, middleware::AuthRequired},
     models::routing::{Entity as RoutingEntity, Model as RoutingModel},
     models::sip_trunk::{
         ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
@@ -275,7 +275,7 @@ async fn create_sip_trunk(
                 );
             }
 
-            state.mark_pending_reload();
+            state.mark_pending_reload(ReloadTarget::Trunks);
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
         Err(err) => {
@@ -319,7 +319,7 @@ async fn update_sip_trunk(
                 );
             }
 
-            state.mark_pending_reload();
+            state.mark_pending_reload(ReloadTarget::Trunks);
             Json(json!({"status": "ok"})).into_response()
         }
         Err(err) => {
@@ -415,7 +415,7 @@ async fn delete_sip_trunk(
     let active: SipTrunkActiveModel = model.into();
     match active.delete(db).await {
         Ok(_) => {
-            state.mark_pending_reload();
+            state.mark_pending_reload(ReloadTarget::Trunks);
             Json(json!({"status": "ok"})).into_response()
         }
         Err(err) => {
