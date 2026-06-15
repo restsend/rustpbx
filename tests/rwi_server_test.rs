@@ -556,7 +556,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
         let gw = gateway.read();
         let call_id = "pushed-call".to_string();
         gw.fan_out_event_to_context("push-ctx", &event, &call_id);
-    }, None);
+    }
 
 
     // The client must receive it within 2 seconds
@@ -865,7 +865,7 @@ async fn test_session_resume_returns_events_and_sequence() {
         }, None);
         gw.cache_event(&"test-call-1".to_string(), &event1);
         gw.cache_event(&"test-call-1".to_string(), &event2);
-    }, None);
+    }
 
 
     // Request session resume without last_sequence (should return all events)
@@ -875,7 +875,7 @@ async fn test_session_resume_returns_events_and_sequence() {
     // Debug: print response if error
     if v["status"] == "error" {
         eprintln!("Session resume error: {:?}", v);
-    }, None);
+    }
 
 
     assert_eq!(v["status"], "success");
@@ -917,7 +917,7 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
         gw.cache_event(&"seq-call".to_string(), &event1);
         gw.cache_event(&"seq-call".to_string(), &event2);
         gw.cache_event(&"seq-call".to_string(), &event3);
-    }, None);
+    }
 
 
     // Get initial sequence
@@ -937,7 +937,7 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
     );
 
     ws.close(None).await.unwrap();
-}, None);
+}
 
 
 #[tokio::test]
@@ -956,7 +956,7 @@ async fn test_call_resume_returns_call_specific_events() {
         }, None);
         gw.cache_event(&"call-a".to_string(), &event1);
         gw.cache_event(&"call-b".to_string(), &event2);
-    }, None);
+    }
 
 
     // Request call resume for specific call
@@ -974,11 +974,11 @@ async fn test_call_resume_returns_call_specific_events() {
             event["call_id"], "call-a",
             "should only have events for call-a"
         );
-    }, None);
+    }
 
 
     ws.close(None).await.unwrap();
-}, None);
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────────
