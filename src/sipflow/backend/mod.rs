@@ -100,6 +100,8 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
                     *ttl_secs,
                     *memtable_size_mb,
                     *block_cache_capacity_mb,
+                    *flush_count,
+                    *flush_interval_secs,
                 )
                 .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
             } else {

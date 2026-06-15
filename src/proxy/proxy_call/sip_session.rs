@@ -1,4 +1,5 @@
-use crate::call::Location;
+use crate::call::{DialStrategy, Location};
+use crate::call::app::PendingQueuePlan;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::domain::{
     CallCommand, HangupCascade, HangupCommand, LegId, LegState, MediaPathMode, MediaRuntimeProfile,
@@ -187,6 +188,10 @@ pub struct SipSessionHandle {
 }
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
+
+/// Custom SIP INFO content type for rustpbx call-control commands.
+/// The body is a JSON object with `action` and optional `params` fields.
+const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
 
 impl SipSessionHandle {
     pub fn send_command(&self, cmd: CallCommand) -> anyhow::Result<()> {
@@ -397,6 +402,42 @@ impl AppFactory for BuiltinAppFactory {
                     app = app.with_greeting_path(greeting);
                 }
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+            }
+            "queue" => {
+                let pending = context.pending_queue.lock().unwrap().take()?;
+                let plan = pending.plan;
+                let mut config = crate::call::app::queue::QueueConfig::default();
+                config.name = plan.queue_name.clone();
+                config.accept_immediately = plan.accept_immediately;
+                config.hold = plan.hold.clone();
+                config.fallback = plan.fallback.clone();
+                config.voice_prompts = plan.voice_prompts.clone();
+                config.ring_timeout = plan.ring_timeout;
+                if let Some(ref label) = plan.label {
+                    if !config.name.is_empty() {
+                        config.name = label.clone();
+                    } else {
+                        config.name = label.clone();
+                    }
+                }
+                // Build agent locations from resolved URIs
+                let agents: Vec<crate::call::Location> = pending.agent_uris.iter().map(|uri| {
+                    let aor: rsipstack::sip::Uri = uri.parse().unwrap_or_else(|_| {
+                        format!("sip:{}", uri).parse().unwrap_or_default()
+                    });
+                    crate::call::Location {
+                        aor,
+                        contact_raw: Some(uri.clone()),
+                        ..Default::default()
+                    }
+                }).collect();
+                config.agents = agents.clone();
+                config.strategy = if pending.parallel {
+                    crate::call::DialStrategy::Parallel(agents)
+                } else {
+                    crate::call::DialStrategy::Sequential(agents)
+                };
+                Some(Box::new(crate::call::app::queue::QueueApp::new(plan, config)) as Box<dyn crate::call::app::CallApp>)
             }
             _ => None,
         }
@@ -2352,10 +2393,19 @@ impl SipSession {
             }
         } else if is_picture_fast_update {
             self.handle_picture_fast_update(DialogSide::Caller).await;
+        } else if content_type
+            .as_deref()
+            .is_some_and(|ct| ct.contains(RUSTPBX_COMMAND_CT))
+        {
+            self.handle_rustpbx_info_command(&body_text, &tx_handle)
+                .await?;
+            // Do NOT forward to peer — this is a PBX-internal command
+            return Ok(());
         } else {
             debug!(
                 session_id = %self.context.session_id,
-                "Received SIP INFO without DTMF content type"
+                ct = ?content_type,
+                "Received SIP INFO without recognized content type"
             );
         }
         tx_handle
@@ -2363,6 +2413,199 @@ impl SipSession {
             .await
             .ok();
         Ok(())
+    }
+
+    /// Handle a rustpbx JSON command received via SIP INFO with
+    /// `application/vnd.rustpbx+json` content type.  The command is dispatched
+    /// asynchronously through the session command channel and the INFO request
+    /// is always acknowledged with 200 OK.
+    async fn handle_rustpbx_info_command(
+        &mut self,
+        body: &str,
+        tx_handle: &TransactionHandle,
+    ) -> Result<()> {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    body = %body,
+                    "SIP INFO rustpbx command: invalid JSON"
+                );
+                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
+                return Ok(());
+            }
+        };
+
+        // Determine action — support both `action` and legacy `cmd` fields
+        let action = parsed
+            .get("action")
+            .and_then(|v| v.as_str())
+            .or_else(|| parsed.get("cmd").and_then(|v| v.as_str()))
+            .unwrap_or_default()
+            .to_string();
+
+        let params = parsed.get("params");
+
+        let cmd: Option<CallCommand> = match action.as_str() {
+            "media.play" | "media.inject_start" => {
+                let source = params
+                    .and_then(|p| p.get("source"))
+                    .and_then(Self::parse_info_media_source)
+                    .unwrap_or(MediaSource::Silence);
+                Some(CallCommand::Play {
+                    leg_id: params
+                        .and_then(|p| p.get("leg_id"))
+                        .and_then(|v| v.as_str())
+                        .map(LegId::new),
+                    source,
+                    options: Some(crate::call::domain::PlayOptions {
+                        loop_playback: params
+                            .and_then(|p| p.get("loop"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        await_completion: false,
+                        interrupt_on_dtmf: params
+                            .and_then(|p| p.get("interrupt_on_dtmf"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        track_id: None,
+                        send_progress: false,
+                    }),
+                })
+            }
+            "media.stop" | "media.inject_stop" => Some(CallCommand::StopPlayback {
+                leg_id: params
+                    .and_then(|p| p.get("leg_id"))
+                    .and_then(|v| v.as_str())
+                    .map(LegId::new),
+            }),
+            "record.start" => Some(CallCommand::StartRecording {
+                config: crate::call::domain::RecordConfig {
+                    path: params
+                        .and_then(|p| p.get("path"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    max_duration_secs: params
+                        .and_then(|p| p.get("max_duration"))
+                        .and_then(|v| v.as_u64().map(|d| d as u32)),
+                    beep: params.and_then(|p| p.get("beep")).and_then(|v| v.as_bool()).unwrap_or(true),
+                    format: params
+                        .and_then(|p| p.get("format"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                },
+            }),
+            "record.stop" => Some(CallCommand::StopRecording),
+            "hold" => Some(CallCommand::Hold {
+                leg_id: LegId::new(
+                    params
+                        .and_then(|p| p.get("leg_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("caller"),
+                ),
+                music: None,
+            }),
+            "unhold" => Some(CallCommand::Unhold {
+                leg_id: LegId::new(
+                    params
+                        .and_then(|p| p.get("leg_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("caller"),
+                ),
+            }),
+            "consult.initiate" => Some(CallCommand::Hold {
+                leg_id: LegId::new(
+                    params
+                        .and_then(|p| p.get("leg_id"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| parsed.get("call_id").and_then(|v| v.as_str()))
+                        .unwrap_or("caller"),
+                ),
+                music: None,
+            }),
+            "consult.cancel" => Some(CallCommand::Unhold {
+                leg_id: LegId::new(
+                    params
+                        .and_then(|p| p.get("leg_id"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| parsed.get("call_id").and_then(|v| v.as_str()))
+                        .unwrap_or("caller"),
+                ),
+            }),
+            other => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    action = %other,
+                    "SIP INFO rustpbx command: unknown action"
+                );
+                None
+            }
+        };
+
+        match cmd {
+            Some(cmd) => {
+                if let Some(ref tx) = self.cmd_tx {
+                    if let Err(e) = tx.try_send(cmd) {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            action = %action,
+                            error = %e,
+                            "SIP INFO rustpbx command: failed to enqueue"
+                        );
+                    } else {
+                        info!(
+                            session_id = %self.context.session_id,
+                            action = %action,
+                            "SIP INFO rustpbx command accepted"
+                        );
+                    }
+                }
+            }
+            None => {
+                info!(
+                    session_id = %self.context.session_id,
+                    action = %action,
+                    "SIP INFO rustpbx command ignored (unknown action or no-op)"
+                );
+            }
+        }
+
+        tx_handle
+            .respond(rsipstack::sip::StatusCode::OK, None, None)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    /// Convert a JSON value to a domain [`MediaSource`] using the same
+    /// convention as the RWI `MediaSource` (source_type + uri/uris).
+    fn parse_info_media_source(src: &serde_json::Value) -> Option<MediaSource> {
+        let source_type = src.get("source_type").and_then(|v| v.as_str()).unwrap_or("file");
+        match source_type {
+            "files" => {
+                // Multi-URL: use the first URI as a single file for now.
+                // Full multi-URL playback will be added in a follow-up.
+                let uri = src
+                    .get("uris")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str());
+                uri.map(|u| MediaSource::File { path: u.to_string() })
+            }
+            "file" | "url" => {
+                let uri = src.get("uri").and_then(|v| v.as_str())?;
+                if source_type == "url" {
+                    Some(MediaSource::Url { url: uri.to_string() })
+                } else {
+                    Some(MediaSource::File { path: uri.to_string() })
+                }
+            }
+            "silence" => Some(MediaSource::Silence),
+            _ => None,
+        }
     }
 
     fn request_content_type(request: &rsipstack::sip::Request) -> Option<String> {
@@ -2716,6 +2959,14 @@ impl SipSession {
                     }
                 } else if is_picture_fast_update {
                     self.handle_picture_fast_update(DialogSide::Callee).await;
+                } else if content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.contains(RUSTPBX_COMMAND_CT))
+                {
+                    self.handle_rustpbx_info_command(&body_text, &tx_handle)
+                        .await?;
+                    // Do NOT forward to caller — PBX-internal command
+                    return Ok(());
                 }
                 tx_handle
                     .respond(rsipstack::sip::StatusCode::OK, None, None)
@@ -2748,16 +2999,86 @@ impl SipSession {
                 DialplanFlow::Targets(strategy) => {
                     self.run_targets(strategy, callee_state_rx).await
                 }
+
                 DialplanFlow::Queue { plan, next } => {
-                    match self.execute_queue(plan, callee_state_rx).await {
-                        Ok(()) => Ok(()),
-                        Err((code, text, reason)) => {
-                            warn!(
-                                ?code,
-                                ?text,
-                                ?reason,
-                                "Queue execution failed, trying next flow"
-                            );
+                    // Extract agents from plan
+                    let agents = match &plan.dial_strategy {
+                        Some(DialStrategy::Sequential(l)) => l.clone(),
+                        Some(DialStrategy::Parallel(l)) => l.clone(),
+                        None => {
+                            warn!("No dial strategy in queue plan");
+                            return self.execute_flow(next, callee_state_rx).await;
+                        }
+                    };
+
+                    if agents.is_empty() {
+                        warn!("No agents configured in queue plan");
+                        return self.execute_flow(next, callee_state_rx).await;
+                    }
+
+                    // Resolve custom targets (skill-groups → specific agents)
+                    let resolved_agents = self
+                        .resolve_custom_targets(agents, plan.acd_policy.as_deref())
+                        .await;
+
+                    // Enrich via queue_location_enricher if configured
+                    let resolved_agents = if let Some(enricher) = &self.server.queue_location_enricher {
+                        let caller_headers: Vec<rsipstack::sip::Header> = self
+                            .server_dialog
+                            .initial_request()
+                            .headers
+                            .iter()
+                            .cloned()
+                            .collect();
+                        enricher
+                            .enrich(
+                                resolved_agents,
+                                &crate::proxy::call::QueueEnrichContext {
+                                    session_id: &self.context.session_id.to_string(),
+                                    queue_name: &plan.queue_name,
+                                    caller_headers: &caller_headers,
+                                },
+                            )
+                            .await
+                    } else {
+                        resolved_agents
+                    };
+
+                    let is_parallel = matches!(plan.dial_strategy, Some(DialStrategy::Parallel(_)));
+                    let agent_uris: Vec<String> = resolved_agents
+                        .iter()
+                        .map(|l| l.contact_raw.clone().unwrap_or_else(|| l.aor.to_string()))
+                        .collect();
+
+                    // Store resolved plan in context for the queue app factory
+                    if let Some(runtime) = self.app_runtime.as_any().downcast_ref::<DefaultAppRuntime>() {
+                        *runtime.context.pending_queue.lock().unwrap() = Some(PendingQueuePlan {
+                            plan: plan.clone(),
+                            agent_uris,
+                            parallel: is_parallel,
+                        });
+                    }
+
+                    match self
+                        .app_runtime
+                        .start_app("queue", None, plan.accept_immediately)
+                        .await
+                    {
+                        Ok(()) => {
+                            self.start_caller_ingress_monitor_if_needed().await;
+                            // Inject dial_next_agent to kick off sequential agent dialing
+                            // (parallel mode auto-dials in on_enter)
+                            if !is_parallel {
+                                let _ = self.app_runtime.inject_event(serde_json::json!({
+                                    "type": "custom",
+                                    "name": "dial_next_agent",
+                                    "data": {},
+                                }));
+                            }
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Queue: failed to start queue app, trying next flow");
                             self.execute_flow(next, callee_state_rx).await
                         }
                     }
@@ -7549,6 +7870,24 @@ impl SipSession {
 
             CallCommand::LegConnected { leg_id, answer_sdp } => {
                 info!(%leg_id, "Leg connected async notification");
+                // Forward to running app before processing so the app can react
+                let agent_uri = self
+                    .legs
+                    .states
+                    .get(&leg_id)
+                    .and_then(|l| l.endpoint.clone());
+                if let Some(ref agent_uri) = agent_uri {
+                    let bridge = self.app_event_bridge.read();
+                    if let Some(ref h) = *bridge {
+                        h.send_app_event(crate::call::app::ControllerEvent::Custom(
+                            "agent_connected".to_string(),
+                            serde_json::json!({
+                                "leg_id": leg_id.0,
+                                "agent_uri": agent_uri,
+                            }),
+                        ));
+                    }
+                }
                 if let Some(sdp) = answer_sdp {
                     self.legs.set_answer(leg_id.clone(), sdp);
                 }
@@ -7559,6 +7898,30 @@ impl SipSession {
 
             CallCommand::LegFailed { leg_id, reason } => {
                 warn!(%leg_id, %reason, "Leg failed async notification");
+                // Forward to running app before removing the leg (so we can get the URI)
+                let agent_uri = self
+                    .legs
+                    .states
+                    .get(&leg_id)
+                    .and_then(|l| l.endpoint.clone());
+                let event_name = if reason.contains("486") || reason.to_lowercase().contains("busy") {
+                    "agent_busy"
+                } else {
+                    "agent_no_answer"
+                };
+                {
+                    let bridge = self.app_event_bridge.read();
+                    if let Some(ref h) = *bridge {
+                        h.send_app_event(crate::call::app::ControllerEvent::Custom(
+                            event_name.to_string(),
+                            serde_json::json!({
+                                "leg_id": leg_id.0,
+                                "agent_uri": agent_uri,
+                                "reason": reason,
+                            }),
+                        ));
+                    }
+                }
                 self.update_leg_state(&leg_id, LegState::Ended);
                 self.legs.remove(&leg_id);
                 self.update_media_path().await;
@@ -10651,5 +11014,56 @@ a=rtcp-fb:104 nack\r\n";
             return parse_allowed_codecs(&proxy);
         }
         vec![]
+    }
+
+    // ── SipSession::parse_info_media_source tests ──────────────────────────
+    use crate::call::domain::MediaSource;
+
+    #[test]
+    fn test_parse_file_source() {
+        let src = serde_json::json!({"source_type": "file", "uri": "/tmp/a.wav"});
+        assert_eq!(
+            super::SipSession::parse_info_media_source(&src),
+            Some(MediaSource::File { path: "/tmp/a.wav".into() })
+        );
+    }
+
+    #[test]
+    fn test_parse_url_source() {
+        let src = serde_json::json!({"source_type": "url", "uri": "http://x.com/a.wav"});
+        assert_eq!(
+            super::SipSession::parse_info_media_source(&src),
+            Some(MediaSource::Url { url: "http://x.com/a.wav".into() })
+        );
+    }
+
+    #[test]
+    fn test_parse_silence_source() {
+        let src = serde_json::json!({"source_type": "silence"});
+        assert_eq!(super::SipSession::parse_info_media_source(&src), Some(MediaSource::Silence));
+    }
+
+    #[test]
+    fn test_parse_files_source_uses_first_uri() {
+        let src = serde_json::json!({"source_type": "files", "uris": ["/tmp/a.wav", "/tmp/b.wav"]});
+        assert_eq!(
+            super::SipSession::parse_info_media_source(&src),
+            Some(MediaSource::File { path: "/tmp/a.wav".into() })
+        );
+    }
+
+    #[test]
+    fn test_parse_unknown_source_type() {
+        let src = serde_json::json!({"source_type": "mp3", "uri": "/tmp/x.mp3"});
+        assert_eq!(super::SipSession::parse_info_media_source(&src), None);
+    }
+
+    #[test]
+    fn test_parse_defaults_to_file() {
+        let src = serde_json::json!({"uri": "/tmp/default.wav"});
+        assert_eq!(
+            super::SipSession::parse_info_media_source(&src),
+            Some(MediaSource::File { path: "/tmp/default.wav".into() })
+        );
     }
 }

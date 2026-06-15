@@ -252,6 +252,24 @@ impl SipSession {
     ) -> Result<(), CalleeError> {
         use crate::call::{FailureAction, QueueFallbackAction, TransferEndpoint};
 
+        // 1. Play final_destination_prompt before executing fallback action
+        if let Some(final_prompt) = plan
+            .voice_prompts
+            .as_ref()
+            .and_then(|p| p.final_destination_prompt.as_deref())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            info!(file = %final_prompt, "Queue fallback: playing final destination prompt");
+            self.prepare_queue_playback_media().await;
+            if let Err(e) = self
+                .play_audio_file(final_prompt, true, "queue-final-prompt", false)
+                .await
+            {
+                warn!(error = %e, "Failed to play final destination prompt");
+            }
+        }
+
         let pre_action_audio: Option<String> =
             plan.failure_audio.clone().or_else(|| match &plan.fallback {
                 Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {

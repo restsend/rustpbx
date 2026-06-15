@@ -7,6 +7,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 /// Metadata about the current call, derived from the SIP INVITE.
@@ -131,6 +132,18 @@ pub struct ApplicationContext {
 
     /// Post-call hook (registered by callcenter addon).
     pub post_call_hook: Option<Arc<dyn PostCallHook>>,
+
+    /// Pending queue plan + resolved agent URIs, set by SipSession before
+    /// starting the queue app. The queue app factory reads (and clears) this.
+    pub pending_queue: Arc<Mutex<Option<PendingQueuePlan>>>,
+}
+
+/// A resolved queue plan ready to be handed to QueueApp.
+#[derive(Clone)]
+pub struct PendingQueuePlan {
+    pub plan: crate::call::QueuePlan,
+    pub agent_uris: Vec<String>,
+    pub parallel: bool,
 }
 
 impl ApplicationContext {
@@ -147,6 +160,7 @@ impl ApplicationContext {
             ivr_trace: None,
             app_factories: Arc::new(Vec::new()),
             post_call_hook: None,
+            pending_queue: Arc::new(Mutex::new(None)),
         }
     }
 

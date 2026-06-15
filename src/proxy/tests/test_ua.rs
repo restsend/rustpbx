@@ -528,6 +528,41 @@ impl TestUa {
         Ok(())
     }
 
+    /// Send a SIP INFO with an arbitrary content type and body.
+    /// Returns instantly (fire-and-forget on the dialog).
+    pub async fn send_info(
+        &self,
+        dialog_id: &DialogId,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            rsipstack::sip::headers::ContentType::from(content_type),
+        )];
+
+        if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
+            match dialog {
+                Dialog::ClientInvite(d) => {
+                    d.info(Some(headers), Some(body))
+                        .await
+                        .map_err(|e| e.into_anyhow())?;
+                }
+                Dialog::ServerInvite(d) => {
+                    d.info(Some(headers), Some(body))
+                        .await
+                        .map_err(|e| e.into_anyhow())?;
+                }
+                _ => return Err(anyhow!("Dialog does not support INFO request")),
+            }
+        }
+        Ok(())
+    }
+
     async fn send_mid_dialog_request(
         &self,
         dialog_id: &DialogId,

@@ -136,6 +136,10 @@ async fn test_queue_prompts_hold_music() {
                 off_hours_prompt: None,
                 position_prompt: None,
                 wait_time_prompt: None,
+                final_destination_prompt: None,
+                callback_offer_prompt: None,
+                callback_confirm_prompt: None,
+                comfort_prompts: Vec::new(),
             }),
             ..Default::default()
         },
@@ -263,6 +267,10 @@ async fn test_queue_agent_transfer_flow() {
                 off_hours_prompt: None,
                 position_prompt: None,
                 wait_time_prompt: None,
+                final_destination_prompt: None,
+                callback_offer_prompt: None,
+                callback_confirm_prompt: None,
+                comfort_prompts: Vec::new(),
             }),
             ..Default::default()
         },

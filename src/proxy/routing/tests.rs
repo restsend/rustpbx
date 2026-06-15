@@ -953,6 +953,10 @@ fn test_queue_busy_prompt_maps_to_failure_audio() {
             no_answer_prompt: None,
             position_prompt: None,
             wait_time_prompt: None,
+            final_destination_prompt: None,
+            callback_offer_prompt: None,
+            callback_confirm_prompt: None,
+            comfort_prompts: Vec::new(),
         }),
         ..RouteQueueConfig::default()
     };

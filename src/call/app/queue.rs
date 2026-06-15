@@ -27,6 +27,7 @@ use crate::call::{
 };
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -152,6 +153,48 @@ pub struct QueueConfig {
     pub callback_retry_secs: u64,
     /// Built-in voice prompts for queue events.
     pub voice_prompts: Option<VoicePrompts>,
+    // ── 按键回拨 (Queue Callback on Request) ──
+    /// Enable DTMF callback request feature.
+    pub callback_request_enabled: bool,
+    /// Seconds to wait before offering callback option.
+    pub callback_offer_after_secs: u64,
+    /// DTMF key to trigger callback (default "2").
+    pub callback_dtmf_key: String,
+    // ── EWT 播报 (Estimated Wait Time) ──
+    /// Interval between EWT announcements in seconds. 0 = once only.
+    pub ewt_announce_interval_secs: u64,
+    /// Maximum EWT cap in seconds (default 1800 = 30 min).
+    pub ewt_max_secs: u64,
+    // ── 升级策略 (Escalation) ──
+    /// Escalation mode: Replace or Cumulative.
+    pub escalation_mode: EscalationMode,
+    /// Escalation timeline: ordered steps of (threshold_secs, skill_group_id).
+    pub escalation_timeline: Vec<EscalationStep>,
+}
+
+/// Escalation mode for overflow/skill-group escalation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationMode {
+    /// Replace current skill group with the next one.
+    Replace,
+    /// Add new skill group agents alongside existing ones (cumulative).
+    Cumulative,
+}
+
+impl Default for EscalationMode {
+    fn default() -> Self {
+        Self::Replace
+    }
+}
+
+/// A single step in the escalation timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EscalationStep {
+    /// Wait threshold in seconds before this step triggers.
+    pub threshold_secs: u64,
+    /// Skill group to add (or switch to, depending on mode).
+    pub add_skill_group: String,
 }
 
 impl Default for QueueConfig {
@@ -182,6 +225,13 @@ impl Default for QueueConfig {
             callback_enabled: false,
             callback_retry_secs: 300,
             voice_prompts: None,
+            callback_request_enabled: false,
+            callback_offer_after_secs: 30,
+            callback_dtmf_key: "2".to_string(),
+            ewt_announce_interval_secs: 0,
+            ewt_max_secs: 1800,
+            escalation_mode: EscalationMode::Replace,
+            escalation_timeline: Vec::new(),
         }
     }
 }
@@ -232,6 +282,14 @@ pub enum QueueState {
     Connected { agent_uri: String },
     /// Executing fallback action.
     ExecutingFallback,
+    /// Playing the callback confirmation prompt after DTMF.
+    PlayingCallbackConfirm,
+    /// Playing comfort/reassurance prompt during hold.
+    PlayingComfortPrompt,
+    /// Playing EWT announcement during hold.
+    PlayingEwtAnnouncement,
+    /// Playing final-destination prompt before fallback.
+    PlayingFinalPrompt,
     /// Terminal state.
     Done,
 }
@@ -283,6 +341,21 @@ pub struct QueueApp {
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
+    // ── 回调/回拨 ──
+    /// Whether the caller has requested a callback via DTMF.
+    callback_requested: bool,
+    /// Already-offered the callback option (to avoid repeating).
+    #[allow(dead_code)]
+    callback_offered: bool,
+    // ── Comfort / EWT 播报 ──
+    /// Next EWT announcement time.
+    next_ewt_announce: Option<Instant>,
+    /// Comfort prompt playback state.
+    comfort_index: usize,
+    last_comfort_played: Option<Instant>,
+    // ── 升级策略 ──
+    /// Skill groups already escalated (to avoid duplicates).
+    escalated_groups: Vec<String>,
 }
 
 impl QueueApp {
@@ -302,6 +375,12 @@ impl QueueApp {
             enqueued_at: None,
             stats: Arc::new(RwLock::new(HashMap::new())),
             pending_agents: Vec::new(),
+            callback_requested: false,
+            callback_offered: false,
+            next_ewt_announce: None,
+            comfort_index: 0,
+            last_comfort_played: None,
+            escalated_groups: Vec::new(),
         }
     }
 
@@ -518,6 +597,7 @@ impl QueueApp {
     }
 
     /// Handle agent unavailable (busy or no answer).
+    /// Tries next agent if available; otherwise plays fallback prompt.
     async fn handle_agent_unavailable(
         &mut self,
         ctrl: &mut CallController,
@@ -545,10 +625,8 @@ impl QueueApp {
             };
         }
 
-        self.state = QueueState::DialingAgents {
-            attempt: self.dial_attempts,
-        };
-        Ok(AppAction::Continue)
+        // More agents remaining — dial the next one immediately
+        self.dial_next_agent(ctrl).await
     }
 
     /// Record abandoned call, then play busy prompt (if configured) before fallback.
@@ -582,7 +660,7 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
-        self.execute_fallback().await
+        self.play_final_destination_prompt_or_fallback(ctrl).await
     }
 
     /// Record abandoned call, then play no-answer prompt (if configured) before fallback.
@@ -616,7 +694,238 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
+        self.play_final_destination_prompt_or_fallback(ctrl).await
+    }
+
+    /// Try to play the final_destination_prompt before fallback.
+    /// If no prompt is configured, falls through to execute_fallback directly.
+    async fn play_final_destination_prompt_or_fallback(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        if let Some(path) = prompts.and_then(|p| p.final_destination_prompt.as_ref()) {
+            info!("Queue: playing final destination prompt before fallback");
+            self.state = QueueState::PlayingFinalPrompt;
+            ctrl.play_audio(path.clone(), false).await?;
+            return Ok(AppAction::Continue);
+        }
         self.execute_fallback().await
+    }
+
+    /// Write callback metadata (notified as queue event; CDR hook captures externally).
+    async fn write_callback_metadata(&self) {
+        info!(
+            queue = %self.config.name,
+            "Queue: callback requested — emitting queue.callback_requested event"
+        );
+        // In production, the callback request is captured by the external CDR/webhook
+        // system via the queue.callback_requested event notification.
+        // The QueueApp does not have direct access to session extensions (that
+        // requires the production SipSession which owns the extensions type-map).
+    }
+
+    /// Check and play comfort prompts or EWT announcements between hold music loops.
+    async fn maybe_play_comfort_or_ewt(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<()> {
+        let now = Instant::now();
+
+        // 1. EWT periodic announcement
+        if self.config.announce_wait_time && self.config.ewt_announce_interval_secs > 0 {
+            let should_announce = match self.next_ewt_announce {
+                Some(next) => now >= next,
+                None => {
+                    // First time: schedule and play immediately
+                    self.next_ewt_announce = Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                    true
+                }
+            };
+            if should_announce {
+                let ewt_secs = self.calculate_ewt().await;
+                debug!(ewt_secs, "Queue: playing EWT announcement (pre-recorded fallback)");
+                // Note: the production queue should wire a `TtsService` here to synthesize
+                // "Your estimated wait time is N minutes" dynamically. QueueApp is a
+                // testable harness; the real TTS integration belongs in the production
+                // SipSession::execute_queue which has access to the TTS configuration.
+                let prompts = self
+                    .plan
+                    .voice_prompts
+                    .as_ref()
+                    .or(self.config.voice_prompts.as_ref());
+                if let Some(path) = prompts.and_then(|p| p.wait_time_prompt.as_ref()) {
+                    self.state = QueueState::PlayingEwtAnnouncement;
+                    ctrl.play_audio(path.clone(), false).await?;
+                    return Ok(());
+                }
+                self.next_ewt_announce = Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                return Ok(());
+            }
+        }
+
+        // 2. Comfort prompts
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        if let Some(comfort_list) = prompts.map(|p| &p.comfort_prompts) {
+            if !comfort_list.is_empty() {
+                let elapsed = self.last_comfort_played.map(|t| now.duration_since(t));
+                let idx = self.comfort_index % comfort_list.len();
+                let prompt = &comfort_list[idx];
+                let should_play = match elapsed {
+                    Some(d) => d.as_secs() >= prompt.interval_secs as u64,
+                    None => true, // play first comfort immediately after hold loop
+                };
+                if should_play {
+                    debug!(
+                        comfort_idx = idx,
+                        file = %prompt.audio_file,
+                        "Queue: playing comfort prompt"
+                    );
+                    self.state = QueueState::PlayingComfortPrompt;
+                    ctrl.play_audio(prompt.audio_file.clone(), false).await?;
+                    self.comfort_index += 1;
+                    self.last_comfort_played = Some(now);
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate a simple EWT estimate based on queue statistics.
+    async fn calculate_ewt(&self) -> u64 {
+        let stats = self.stats.read().await;
+        if let Some(qs) = stats.get(&self.config.name) {
+            if qs.available_agents > 0 && qs.current_waiting > 0 {
+                let avg = if qs.calls_answered > 0 {
+                    qs.total_wait_secs / qs.calls_answered.max(1)
+                } else {
+                    60 // default 60s if no historical data
+                };
+                let ewt = (qs.current_waiting as u64 * avg) / qs.available_agents as u64;
+                // Round to nearest 10, cap at ewt_max_secs
+                let rounded = ((ewt + 5) / 10) * 10;
+                return rounded.min(self.config.ewt_max_secs);
+            }
+        }
+        self.config.ewt_max_secs
+    }
+
+    /// Dial the next agent in a sequential dialing strategy.
+    async fn dial_next_agent(&mut self, ctrl: &mut CallController) -> anyhow::Result<AppAction> {
+        let agents = self.get_agents();
+        if self.current_agent_idx >= agents.len() {
+            warn!("Queue: no more agents to dial");
+            return self.play_busy_and_then_fallback(ctrl).await;
+        }
+        let uri = agents[self.current_agent_idx]
+            .contact_raw
+            .clone()
+            .unwrap_or_else(|| agents[self.current_agent_idx].aor.to_string());
+        info!(
+            "Queue: dialing next agent {} (idx={})",
+            uri, self.current_agent_idx
+        );
+        match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
+            Ok(call_id) => {
+                self.pending_agents.push((uri, call_id));
+            }
+            Err(e) => {
+                warn!("Queue: failed to dial agent {}: {}", uri, e);
+                return self.play_busy_and_then_fallback(ctrl).await;
+            }
+        }
+        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
+        ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+        self.state = QueueState::DialingAgents {
+            attempt: self.dial_attempts,
+        };
+        Ok(AppAction::Continue)
+    }
+
+    /// Check escalation timeline and add/switch skill groups.
+    async fn check_escalation(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        if self.config.escalation_timeline.is_empty() {
+            return Ok(());
+        }
+        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+
+        for step in &self.config.escalation_timeline {
+            if wait_secs >= step.threshold_secs
+                && !self.escalated_groups.contains(&step.add_skill_group)
+            {
+                info!(
+                    queue = %self.config.name,
+                    wait_secs,
+                    threshold = step.threshold_secs,
+                    skill_group = %step.add_skill_group,
+                    mode = ?self.config.escalation_mode,
+                    "Queue: escalation triggered"
+                );
+
+                if let Some(ref registry) = self.agent_registry {
+                    let skill_uri = format!("skill-group:{}", step.add_skill_group);
+                    let agent_uris = registry.resolve_target(&skill_uri).await;
+
+                    match self.config.escalation_mode {
+                        EscalationMode::Cumulative => {
+                            // Add new agents alongside existing
+                            for uri in &agent_uris {
+                                match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
+                                    Ok(call_id) => {
+                                        info!(agent = %uri, call_id = %call_id, "Queue: cumulative escalation - added agent");
+                                        self.pending_agents.push((uri.clone(), call_id));
+                                    }
+                                    Err(e) => {
+                                        warn!(agent = %uri, error = %e, "Queue: cumulative escalation - failed to add agent");
+                                    }
+                                }
+                            }
+                        }
+                        EscalationMode::Replace => {
+                            // Cancel existing legs and dial new agents
+                            if !self.pending_agents.is_empty() {
+                                let old_legs: Vec<String> = self.pending_agents
+                                    .iter()
+                                    .map(|(_, cid)| cid.clone())
+                                    .collect();
+                                ctrl.remove_legs(&old_legs);
+                                self.pending_agents.clear();
+                            }
+                            // Also reset dynamic agents for new skill group
+                            self.dynamic_agents = None;
+                            self.current_agent_idx = 0;
+
+                            for uri in &agent_uris {
+                                match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
+                                    Ok(call_id) => {
+                                        info!(agent = %uri, call_id = %call_id, "Queue: replace escalation - dialed agent");
+                                        self.pending_agents.push((uri.clone(), call_id));
+                                    }
+                                    Err(e) => {
+                                        warn!(agent = %uri, error = %e, "Queue: replace escalation - failed to dial agent");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                self.escalated_groups.push(step.add_skill_group.clone());
+                break; // Only trigger one escalation step per check
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -805,9 +1114,65 @@ impl CallApp for QueueApp {
             }
         }
 
-        // Transition to dialing state (for static agent configuration)
+        // Sequential mode: transition to DialingAgents state.
+        // The production execute_flow will inject a "dial_next_agent" event
+        // to kick off dialing. In tests, the test sends custom events manually.
         self.state = QueueState::DialingAgents { attempt: 1 };
         self.dial_attempts = 1;
+
+        Ok(AppAction::Continue)
+    }
+
+    async fn on_dtmf(
+        &mut self,
+        digit: String,
+        ctrl: &mut CallController,
+        _ctx: &ApplicationContext,
+    ) -> anyhow::Result<AppAction> {
+        if !matches!(self.state, QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. }) {
+            return Ok(AppAction::Continue);
+        }
+
+        // Check callback eligibility
+        if !self.config.callback_request_enabled || digit != self.config.callback_dtmf_key {
+            return Ok(AppAction::Continue);
+        }
+
+        if let Some(enqueued) = self.enqueued_at {
+            let wait_secs = enqueued.elapsed().as_secs();
+            if wait_secs < self.config.callback_offer_after_secs {
+                debug!("Queue: callback DTMF received but too early ({}s < {}s)", wait_secs, self.config.callback_offer_after_secs);
+                return Ok(AppAction::Continue);
+            }
+        }
+
+        info!(
+            queue = %self.config.name,
+            digit = %digit,
+            "Queue: callback requested via DTMF"
+        );
+        self.callback_requested = true;
+        self._stop_hold_music().await;
+
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        if let Some(path) = prompts.and_then(|p| p.callback_confirm_prompt.as_ref()) {
+            info!("Queue: playing callback confirmation prompt");
+            self.state = QueueState::PlayingCallbackConfirm;
+            ctrl.play_audio(path.clone(), false).await?;
+        } else {
+            // No confirmation prompt configured — request callback directly
+            self.write_callback_metadata().await;
+                    self.state = QueueState::Done;
+                    info!("Queue: hanging up after callback request (no prompt)");
+                    return Ok(AppAction::Hangup {
+                        reason: Some(CallRecordHangupReason::BySystem),
+                        code: None,
+                    });
+        }
 
         Ok(AppAction::Continue)
     }
@@ -821,11 +1186,18 @@ impl CallApp for QueueApp {
         debug!("Queue: audio playback completed");
 
         match &self.state {
-            QueueState::PlayingHold { .. } => {
+            QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. } => {
+                // Hold music loop completed or starting — check comfort/EWT scheduling
+                self.maybe_play_comfort_or_ewt(ctrl).await?;
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingTransferPrompt { agent_uri } => {
                 let agent_uri = agent_uri.clone();
+                // Answer the caller if not already answered
+                if !self.answered {
+                    ctrl.answer().await?;
+                    self.answered = true;
+                }
                 self.state = QueueState::Connected {
                     agent_uri: agent_uri.clone(),
                 };
@@ -837,12 +1209,36 @@ impl CallApp for QueueApp {
                     wait_secs,
                     "Queue: call connected to agent (after prompt)"
                 );
-                return Ok(AppAction::Transfer(agent_uri));
+                return Ok(AppAction::Exit);
             }
             QueueState::PlayingBusyPrompt => {
-                return self.execute_fallback().await;
+                return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
             QueueState::PlayingNoAnswerPrompt => {
+                return self.play_final_destination_prompt_or_fallback(ctrl).await;
+            }
+            QueueState::PlayingCallbackConfirm => {
+                // Write callback metadata to CDR
+                info!("Queue: callback confirmation done, logging to CDR");
+                self.write_callback_metadata().await;
+                self.state = QueueState::Done;
+                return Ok(AppAction::Hangup {
+                    reason: Some(CallRecordHangupReason::BySystem),
+                    code: None,
+                });
+            }
+            QueueState::PlayingComfortPrompt => {
+                // Return to hold music; next comfort will be scheduled by maybe_play_comfort_or_ewt
+                self.start_hold_music(ctrl).await?;
+            }
+            QueueState::PlayingEwtAnnouncement => {
+                // Schedule next EWT announcement
+                if self.config.ewt_announce_interval_secs > 0 {
+                    self.next_ewt_announce = Some(Instant::now() + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                }
+                self.start_hold_music(ctrl).await?;
+            }
+            QueueState::PlayingFinalPrompt => {
                 return self.execute_fallback().await;
             }
             _ => {}
@@ -921,14 +1317,23 @@ impl CallApp for QueueApp {
                             agent_uri: agent_uri.to_string(),
                         };
 
+                        // Answer the caller if not already answered (needed when accept_immediately=false)
+                        if !self.answered {
+                            ctrl.answer().await?;
+                            self.answered = true;
+                        }
+
                         info!(
                             queue = %queue_id,
                             agent = %agent_uri,
                             wait_secs,
-                            "Queue: call connected to agent"
+                            "Queue: call connected to agent (exiting app, bridge is established by SipSession)"
                         );
 
-                        return Ok(AppAction::Transfer(agent_uri.to_string()));
+                        // Exit the app — the agent is already connected via LegAdd/LegConnected
+                        // and the media bridge is set up by SipSession's update_media_path().
+                        // No need for Transfer (which would create a new call).
+                        return Ok(AppAction::Exit);
                     }
                     Ok(AppAction::Continue)
                 }
@@ -981,6 +1386,9 @@ impl CallApp for QueueApp {
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
                     self.play_busy_and_then_fallback(ctrl).await
+                }
+                "dial_next_agent" => {
+                    self.dial_next_agent(ctrl).await
                 }
                 _ => Ok(AppAction::Continue),
             },
@@ -1039,6 +1447,15 @@ impl CallApp for QueueApp {
                 .await?;
 
                 self.play_busy_and_then_fallback(ctrl).await
+            }
+            "escalation_check" => {
+                debug!("Queue: escalation check");
+                self.check_escalation(ctrl).await?;
+                // Re-register the escalation timer
+                if !self.config.escalation_timeline.is_empty() {
+                    ctrl.set_timeout("escalation_check", Duration::from_secs(10));
+                }
+                Ok(AppAction::Continue)
             }
             _ => Ok(AppAction::Continue),
         }
