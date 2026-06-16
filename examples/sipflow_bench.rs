@@ -103,7 +103,6 @@ struct BenchResult {
     query_flow_ms: f64,
     query_media_ms: f64,
     flow_count: usize,
-    stats_count: usize,
     stats_packets: usize,
     isolation_ok: bool,
 }
@@ -301,7 +300,6 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         query_flow_ms,
         query_media_ms,
         flow_count,
-        stats_count,
         stats_packets,
         isolation_ok,
     }
