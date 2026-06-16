@@ -14,6 +14,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
 const RAW_RECORD_HEADER_LEN: u64 = 10;
 const RAW_READ_THROUGH_GAP: u64 = 64 * 1024;
 
@@ -105,9 +106,14 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
 
     let orig_size = payload.len();
     let (payload, comp_size, _compressed) = if orig_size >= 96 {
-        if let Ok(data) = zstd::encode_all(&payload[..], 3) {
-            let size = data.len();
-            (data.into(), size, true)
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        if encoder.write_all(&payload).is_ok() {
+            if let Ok(data) = encoder.finish() {
+                let size = data.len();
+                (data.into(), size, true)
+            } else {
+                (payload, orig_size, false)
+            }
         } else {
             (payload, orig_size, false)
         }
@@ -167,7 +173,16 @@ fn read_raw_payload(
     *current_pos = Some(payload_offset + size as u64);
 
     if buf.starts_with(&ZSTD_MAGIC) {
-        zstd::decode_all(&buf[..])
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(&buf[..])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut result = Vec::new();
+        decoder.read_to_end(&mut result)?;
+        Ok(result)
+    } else if buf.starts_with(&GZIP_MAGIC) {
+        let mut decoder = flate2::read::GzDecoder::new(&buf[..]);
+        let mut result = Vec::new();
+        decoder.read_to_end(&mut result)?;
+        Ok(result)
     } else {
         Ok(buf)
     }

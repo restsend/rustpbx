@@ -1,7 +1,7 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use bytes::Bytes;
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded};
-use rsipstack::sip::{SipMessage, prelude::HeadersExt};
+use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -333,6 +333,33 @@ impl SipFlow {
             && let Ok(dest) = rsipstack::transport::SipConnection::get_destination(msg)
         {
             dst.push_str(&dest.to_string());
+        }
+
+        // Fill the missing side from SIP headers for a complete view
+        if src.is_empty() && is_outgoing && msg.is_request() {
+            // Outgoing requests: local address from Via sent-by
+            if let Ok(via) = msg.via_header() {
+                if let Ok(typed_via) = via.typed() {
+                    src.push_str(&typed_via.uri.host_with_port.to_string());
+                }
+            }
+        }
+
+        if dst.is_empty() {
+            match msg {
+                SipMessage::Request(req) => {
+                    dst.push_str(&req.destination().host_with_port.to_string());
+                }
+                SipMessage::Response(resp) => {
+                    if let Some(addr) = resp.via_received() {
+                        dst.push_str(&addr.to_string());
+                    } else if let Ok(via) = resp.via_header() {
+                        if let Ok(typed_via) = via.typed() {
+                            dst.push_str(&typed_via.uri.host_with_port.to_string());
+                        }
+                    }
+                }
+            }
         }
 
         (src, dst)

@@ -25,3 +25,11 @@ pub mod http_util;
 pub mod tts;
 pub mod utils;
 pub mod version;
+
+#[cfg(test)]
+#[ctor::ctor]
+fn init_rustls_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider for tests");
+}

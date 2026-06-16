@@ -33,10 +33,14 @@ exclude = [
 opus = ["audio-codec/opus"]
 console = ["dep:minijinja"]
 addon-acme = ["instant-acme"]
-addon-wholesale = ["dep:async-stream", "dep:async-compression", "dep:country-emoji"]
-addon-archive = ["flate2"]
+addon-wholesale = [
+    "dep:async-stream",
+    "dep:async-compression",
+    "dep:country-emoji",
+]
+addon-archive = []
 addon-endpoint-manager = []
-addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
+addon-enterprise-auth = ["dep:ldap3", "dep:ring"]
 addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = ["dep:hex"]
@@ -77,20 +81,17 @@ default = [
     "addon-archive",
     "addon-observability",
 ]
-cross = ["aws-lc-rs/bindgen"]
-perfcli-bin = []
-text2wav-bin = []
-wav2text-bin = []
+
 
 [dependencies]
-instant-acme = { version = "0.8.5", optional = true }
+instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "ring", "rcgen", "time"], optional = true }
 anyhow = "1"
 async-trait = "0.1.88"
 async-stream = { version = "0.3.6", optional = true }
 axum = { version = "0.8.9", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
 futures = "0.3.31"
-rustls = { version = "0.23.39", features = ["ring"] }
+rustls = { version = "0.23.39", default-features = false, features = ["ring", "tls12", "logging"] }
 minijinja = { version = "2.20.0", features = [
     "loader",
     "json",
@@ -118,22 +119,24 @@ toml_edit = { version = "0.25.11", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.12"
+rsipstack = "0.5.13"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.38"
 #udio-codec = { path = "../audio-codec", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.66"
-reqwest = { version = "0.13", features = [
+rustrtc = "0.3.75"
+reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
-    "rustls",
+    "rustls-no-provider",
     "multipart",
     "form",
     "query",
     "gzip",
     "blocking",
+    "http2",
+    "charset",
 ] }
 base64 = "0.22.1"
 hmac = "0.13.0"
@@ -173,12 +176,12 @@ async-compression = { version = "0.4", default-features = false, features = [
     "tokio",
     "gzip",
 ], optional = true }
-flate2 = { version = "1", optional = true }
+flate2 = "1"
 console-subscriber = "0.5.0"
 crossbeam-channel = "0.5"
 lru = "0.18.0"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18.3", optional = true }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener", "push-gateway-no-tls-provider"], optional = true }
 # OTel stack — only pulled in for the commercial `addon-telemetry` feature.
 opentelemetry = { version = "0.31.0", optional = true }
 opentelemetry-otlp = { version = "0.31.1", features = [
@@ -196,11 +199,11 @@ tower-http = { version = "0.6.10", features = [
     "cors",
     "compression-gzip",
 ] }
-rcgen = "0.14.7"
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 csv = "1.4.0"
 quick-xml = { version = "0.39.3", features = ["serialize"] }
-zstd = "0.13"
+ruzstd = "0.8"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
@@ -208,7 +211,7 @@ ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
-flowdb = { version = "0.6", default-features = false }
+flowdb = { version = "0.6.4", default-features = false }
 
 
 [dev-dependencies]
@@ -216,6 +219,7 @@ portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 sipbot = { version = "0.2.38", default-features = false }
 serde_urlencoded = "0.7"
+ctor = "0.4"
 
 [build-dependencies]
 chrono = "0.4"
