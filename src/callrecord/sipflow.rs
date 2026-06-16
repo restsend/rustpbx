@@ -110,6 +110,7 @@ struct SipFlowInner {
     inspectors: Vec<Box<dyn MessageInspector>>,
     writer_tx: Option<Sender<WriteCommand>>,
     pool: Arc<ItemPool>,
+    local_addrs: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -153,6 +154,7 @@ impl SipFlow {
                 inspectors,
                 writer_tx,
                 pool,
+                local_addrs: Vec::new(),
             }),
         }
     }
@@ -259,7 +261,8 @@ impl SipFlow {
             let payload = Self::message_to_bytes_fast(msg);
 
             // OPTIMIZATION: Pre-sized string allocation
-            let (src_addr, dst_addr) = Self::extract_addrs_fast(is_outgoing, addr, msg);
+            let (src_addr, dst_addr) =
+                Self::extract_addrs_fast(is_outgoing, addr, msg, &self.inner.local_addrs);
 
             // OPTIMIZATION: Object pool
             let (pool_idx, mut item) = self
@@ -318,6 +321,7 @@ impl SipFlow {
         is_outgoing: bool,
         addr: Option<&SipAddr>,
         msg: &SipMessage,
+        local_addrs: &[String],
     ) -> (String, String) {
         let mut src = String::with_capacity(64);
         let mut dst = String::with_capacity(64);
@@ -335,24 +339,31 @@ impl SipFlow {
             dst.push_str(&dest.to_string());
         }
 
-        // Fill the missing side from SIP headers for a complete view
-        if src.is_empty() && is_outgoing && msg.is_request() {
-            // Outgoing requests: local address from Via sent-by
-            if let Ok(via) = msg.via_header() {
-                if let Ok(typed_via) = via.typed() {
-                    src.push_str(&typed_via.uri.host_with_port.to_string());
+        if is_outgoing {
+            // Outgoing messages: fill src (local) side
+            if src.is_empty() && msg.is_request() {
+                // Outgoing requests: local address from Via sent-by
+                if let Ok(via) = msg.via_header() {
+                    if let Ok(typed_via) = via.typed() {
+                        src.push_str(&typed_via.uri.host_with_port.to_string());
+                    }
                 }
             }
-        }
-
-        if dst.is_empty() {
-            match msg {
-                SipMessage::Request(req) => {
-                    dst.push_str(&req.destination().host_with_port.to_string());
-                }
-                SipMessage::Response(resp) => {
-                    if let Some(addr) = resp.via_received() {
-                        dst.push_str(&addr.to_string());
+            if src.is_empty() && !local_addrs.is_empty() {
+                src.push_str(&local_addrs[0]);
+            }
+        } else {
+            // Incoming messages: fill dst (local) side with the server's
+            // actual listening address, NOT the SIP Request-URI.
+            if dst.is_empty() && !local_addrs.is_empty() {
+                dst.push_str(&local_addrs[0]);
+            }
+            // Last resort fallback: for incoming responses, Via header can
+            // tell us where the response was sent (our address).
+            if dst.is_empty() {
+                if let SipMessage::Response(resp) = msg {
+                    if let Some(via_addr) = resp.via_received() {
+                        dst.push_str(&via_addr.to_string());
                     } else if let Ok(via) = resp.via_header() {
                         if let Ok(typed_via) = via.typed() {
                             dst.push_str(&typed_via.uri.host_with_port.to_string());
@@ -368,7 +379,8 @@ impl SipFlow {
     pub async fn flush(&self) {
         if let Some(ref tx) = self.inner.writer_tx {
             let _ = tx.send(WriteCommand::Flush);
-        } else if let Some(ref backend) = self.inner.backend {
+        }
+        if let Some(ref backend) = self.inner.backend {
             let _ = backend.flush().await;
         }
     }
@@ -380,7 +392,8 @@ impl SipFlow {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let _ = tx.send(WriteCommand::FlushSync { done: done_tx });
             let _ = done_rx.await;
-        } else if let Some(ref backend) = self.inner.backend {
+        }
+        if let Some(ref backend) = self.inner.backend {
             let _ = backend.flush().await;
         }
     }
@@ -419,6 +432,7 @@ pub struct SipFlowBuilder {
     inspectors: Vec<Box<dyn MessageInspector>>,
     backend: Option<Arc<dyn SipFlowBackend>>,
     enable_async_writer: bool,
+    local_addrs: Vec<String>,
 }
 
 impl SipFlowBuilder {
@@ -427,6 +441,7 @@ impl SipFlowBuilder {
             inspectors: Vec::new(),
             backend: None,
             enable_async_writer: true,
+            local_addrs: Vec::new(),
         }
     }
 
@@ -446,8 +461,19 @@ impl SipFlowBuilder {
         self
     }
 
+    /// Set the server's local listening addresses (e.g. ["0.0.0.0:5060", "0.0.0.0:15060"]).
+    /// Used as the dst_addr for received messages and src_addr for sent messages.
+    pub fn with_local_addrs(mut self, addrs: Vec<String>) -> Self {
+        self.local_addrs = addrs;
+        self
+    }
+
     pub fn build(self) -> SipFlow {
-        SipFlow::new(self.backend, self.inspectors, self.enable_async_writer)
+        let mut flow = SipFlow::new(self.backend, self.inspectors, self.enable_async_writer);
+        // SAFETY: inner is behind Arc but we just created it, no other references exist.
+        let inner = Arc::get_mut(&mut flow.inner).expect("SipFlow inner uniquely held during build");
+        inner.local_addrs = self.local_addrs;
+        flow
     }
 }
 
