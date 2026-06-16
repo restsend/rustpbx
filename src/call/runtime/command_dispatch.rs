@@ -17,9 +17,12 @@
 //! ).await;
 //! ```
 
-use crate::call::adapters::{console_to_call_command, rwi_to_call_command};
+#[cfg(feature = "console")]
+use crate::call::adapters::console_to_call_command;
+use crate::call::adapters::rwi_to_call_command;
 use crate::call::domain::CallCommand;
 use crate::call::runtime::{CommandResult, CommandSource, ExecutionContext, MediaCapabilityCheck};
+#[cfg(feature = "console")]
 use crate::console::handlers::call_control::CallCommandPayload;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::rwi::session::RwiCommandPayload;
@@ -70,6 +73,7 @@ pub fn dispatch_rwi_command(
 }
 
 /// Dispatch a Console command using the unified path
+#[cfg(feature = "console")]
 pub fn dispatch_console_command(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: &str,

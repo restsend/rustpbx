@@ -1,4 +1,5 @@
 pub mod addons;
+#[cfg(feature = "console")]
 pub mod api;
 pub mod app;
 pub mod auth;

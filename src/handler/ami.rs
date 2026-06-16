@@ -1,10 +1,11 @@
 use crate::{
     app::AppState,
     config::{Config, ProxyConfig},
-    console::ReloadTarget,
     handler::middleware::clientaddr::ClientAddr,
     preflight,
 };
+#[cfg(feature = "console")]
+use crate::console::ReloadTarget;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -204,8 +205,11 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
     {
         Ok(metrics) => {
             let total = metrics.total;
-            if let Some(ref console) = state.console {
-                console.clear_pending_reload(ReloadTarget::Trunks);
+            #[cfg(feature = "console")]
+            {
+                if let Some(ref console) = state.console {
+                    console.clear_pending_reload(ReloadTarget::Trunks);
+                }
             }
             Json(serde_json::json!({
                 "status": "ok",
@@ -258,8 +262,11 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
     {
         Ok(metrics) => {
             let total = metrics.total;
-            if let Some(ref console) = state.console {
-                console.clear_pending_reload(ReloadTarget::Routes);
+            #[cfg(feature = "console")]
+            {
+                if let Some(ref console) = state.console {
+                    console.clear_pending_reload(ReloadTarget::Routes);
+                }
             }
             Json(serde_json::json!({
                 "status": "ok",
@@ -1178,8 +1185,11 @@ async fn reload_trunks_on_node(state: &AppState, _node: &str) -> serde_json::Val
         .await
     {
         Ok(metrics) => {
-            if let Some(ref console) = state.console {
-                console.clear_pending_reload(ReloadTarget::Trunks);
+            #[cfg(feature = "console")]
+            {
+                if let Some(ref console) = state.console {
+                    console.clear_pending_reload(ReloadTarget::Trunks);
+                }
             }
             serde_json::json!({ "addon": "trunks", "status": "ok", "reloaded": metrics.total })
         }
@@ -1205,8 +1215,11 @@ async fn reload_routes_on_node(state: &AppState, _node: &str) -> serde_json::Val
         .await
     {
         Ok(metrics) => {
-            if let Some(ref console) = state.console {
-                console.clear_pending_reload(ReloadTarget::Routes);
+            #[cfg(feature = "console")]
+            {
+                if let Some(ref console) = state.console {
+                    console.clear_pending_reload(ReloadTarget::Routes);
+                }
             }
             serde_json::json!({ "addon": "routes", "status": "ok", "reloaded": metrics.total })
         }

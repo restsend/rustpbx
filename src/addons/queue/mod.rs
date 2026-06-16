@@ -1,11 +1,16 @@
-use crate::addons::{Addon, SidebarItem, export_reload::ExportReloadHandler};
+use crate::addons::{Addon, export_reload::ExportReloadHandler};
+#[cfg(feature = "console")]
+use crate::addons::SidebarItem;
 use crate::app::AppState;
+#[cfg(feature = "console")]
 use crate::console::ReloadTarget;
 use async_trait::async_trait;
 use axum::Router;
 use serde_json::{Value as JsonValue, json};
+#[cfg(feature = "console")]
 use tower_http::services::ServeDir;
 
+#[cfg(feature = "console")]
 pub mod console;
 pub mod models;
 pub mod services;
@@ -48,6 +53,7 @@ impl Addon for QueueAddon {
         Ok(())
     }
 
+    #[cfg(feature = "console")]
     fn router(&self, state: AppState) -> Option<Router> {
         let console_state = state.console.clone()?;
         let base_path = console_state.base_path().to_string();
@@ -70,6 +76,12 @@ impl Addon for QueueAddon {
         )
     }
 
+    #[cfg(not(feature = "console"))]
+    fn router(&self, _state: AppState) -> Option<Router> {
+        None
+    }
+
+    #[cfg(feature = "console")]
     fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {
         let base_path = state
             .console
@@ -85,6 +97,7 @@ impl Addon for QueueAddon {
         }]
     }
 
+    #[cfg(feature = "console")]
     fn inject_scripts(&self) -> Vec<crate::addons::ScriptInjection> {
         // Use a regex that matches any base path followed by /extensions/ or /routing/
         vec![crate::addons::ScriptInjection {
@@ -146,8 +159,11 @@ impl ExportReloadHandler for QueueExportReloadHandler {
             .await
             .map_err(|e| format!("Reload failed: {}", e))?;
 
-        if let Some(ref console) = app_state.console {
-            console.clear_pending_reload(ReloadTarget::Queues);
+        #[cfg(feature = "console")]
+        {
+            if let Some(ref console) = app_state.console {
+                console.clear_pending_reload(ReloadTarget::Queues);
+            }
         }
 
         Ok(json!({"status": "ok"}))

@@ -1338,11 +1338,19 @@ impl Config {
 
     /// Returns the configured static files HTTP path prefix.
     /// Defaults to "/static" when not configured.
+    #[cfg(feature = "console")]
     pub fn static_path(&self) -> String {
         self.console
             .as_ref()
             .and_then(|c| c.static_path.clone())
             .unwrap_or_else(|| "/static".to_string())
+    }
+
+    /// Returns the configured static files HTTP path prefix.
+    /// Defaults to "/static" when the console feature is not compiled.
+    #[cfg(not(feature = "console"))]
+    pub fn static_path(&self) -> String {
+        "/static".to_string()
     }
 
     /// Returns the wholesale bills directory.
