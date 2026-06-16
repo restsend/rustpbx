@@ -7,7 +7,7 @@
             filter_options: {{ filter_options | default({}) | tojson }},
             list_url: {{ list_url | default("/console/call-records") | tojson }},
             page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }},
-            translations: {{ t | tojson }}
+            translations: window.__i18n_t || {}
         })' x-init="init()">
         <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="space-y-1">

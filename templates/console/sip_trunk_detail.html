@@ -16,7 +16,7 @@ default('RustPBX') }}{% endblock %}
         createUrl: {{ create_url | default(null) | tojson }},
         updateUrl: {{ update_url | default(null) | tojson }},
         apiPrefix: {{ api_prefix | tojson }},
-        t: {{ t | tojson }},
+        t: window.__i18n_t || {},
         amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">

@@ -528,6 +528,7 @@ pub struct IvrNodeEntered {
     pub app_id: String, pub entry_time: String,
     pub caller_name: Option<String>, pub callee_name: Option<String>,
     pub routing_target: Option<String>, pub previous_node_id: Option<String>,
+    pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrNodeEntered, "ivr_node_entered");
 
@@ -537,6 +538,7 @@ pub struct IvrNodeExited {
     pub result_value: Option<String>, pub duration_ms: u32, pub exit_time: String,
     pub next_node_id: Option<String>, pub hangup_reason: Option<String>,
     pub call_result: Option<String>,
+    pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrNodeExited, "ivr_node_exited");
 
@@ -546,6 +548,7 @@ pub struct IvrFlowCompleted {
     pub total_nodes_traversed: u32, pub total_duration_ms: u32,
     pub final_result: String, pub completion_time: String,
     pub final_routing_target: Option<String>,
+    pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrFlowCompleted, "ivr_flow_completed");
 
@@ -564,3 +567,60 @@ pub struct IvrStepTrace {
     pub sip_headers: Option<std::collections::HashMap<String, String>>,
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ivr_events_serialize_extra_field() {
+        let entered = to_flat_payload(
+            &IvrNodeEntered {
+                call_id: "call-1".into(),
+                node_id: "root".into(),
+                node_name: "Root".into(),
+                node_type: "menu".into(),
+                app_id: "ivr-main".into(),
+                entry_time: "2026-01-01T00:00:00Z".into(),
+                caller_name: None,
+                callee_name: None,
+                routing_target: None,
+                previous_node_id: None,
+                extra: None,
+            },
+            None,
+        );
+        let exited = to_flat_payload(
+            &IvrNodeExited {
+                call_id: "call-1".into(),
+                node_id: "root".into(),
+                node_name: "Root".into(),
+                result_value: None,
+                duration_ms: 10,
+                exit_time: "2026-01-01T00:00:01Z".into(),
+                next_node_id: None,
+                hangup_reason: None,
+                call_result: None,
+                extra: None,
+            },
+            None,
+        );
+        let completed = to_flat_payload(
+            &IvrFlowCompleted {
+                call_id: "call-1".into(),
+                app_id: "ivr-main".into(),
+                total_nodes_traversed: 1,
+                total_duration_ms: 10,
+                final_result: "completed".into(),
+                completion_time: "2026-01-01T00:00:02Z".into(),
+                final_routing_target: None,
+                extra: None,
+            },
+            None,
+        );
+
+        assert!(entered.get("extra").is_some());
+        assert!(exited.get("extra").is_some());
+        assert!(completed.get("extra").is_some());
+    }
+}

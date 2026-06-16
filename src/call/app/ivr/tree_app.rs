@@ -166,6 +166,7 @@ impl IvrApp {
             final_result: final_result.to_string(),
             completion_time: chrono::Utc::now().to_rfc3339(),
             final_routing_target: target.map(|s| s.to_string()),
+            extra: None,
         });
     }
 
@@ -377,6 +378,7 @@ impl IvrApp {
             callee_name: Some(ctx.call_info.callee.clone()),
             routing_target: Some(menu_key.to_string()),
             previous_node_id: previous_node,
+            extra: None,
         });
         let menu = self
             .definition
@@ -460,6 +462,7 @@ impl IvrApp {
                 next_node_id: None,
                 hangup_reason: None,
                 call_result: None,
+                extra: None,
             });
         }
         match action {

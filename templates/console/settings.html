@@ -2855,9 +2855,8 @@
     </div>
 </div>
 
-<script type="application/json" id="__settingsTranslations">{{ t | json | safe }}</script>
 <script>
-    window._settingsTranslations = JSON.parse(document.getElementById('__settingsTranslations').textContent || '{}');
+    window._settingsTranslations = window.__i18n_t || {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('settingsConsole', (options = {}) => ({
             basePath: options?.basePath || '/console',

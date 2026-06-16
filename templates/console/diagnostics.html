@@ -6,7 +6,7 @@
 {% block content %}
 <div class="p-6">
     <div class="mx-auto max-w-7xl space-y-6"
-        x-data='testingConsole({data: {{ test_data | tojson }}, translations: {{ t | tojson }}})'>
+        x-data='testingConsole({data: {{ test_data | tojson }}, translations: window.__i18n_t || {}})'>
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{

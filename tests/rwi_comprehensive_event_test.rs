@@ -254,6 +254,7 @@ async fn test_comprehensive_core_event_structs() {
             callee_name: None,
             routing_target: None,
             previous_node_id: None,
+            extra: None,
         });
         gw.fan_out("default", &rustpbx::rwi::IvrNodeExited {
             call_id: call_id.into(),
@@ -265,6 +266,7 @@ async fn test_comprehensive_core_event_structs() {
             next_node_id: Some("node-2".into()),
             hangup_reason: None,
             call_result: None,
+            extra: None,
         });
         gw.fan_out("default", &rustpbx::rwi::IvrFlowCompleted {
             call_id: call_id.into(),
@@ -274,6 +276,7 @@ async fn test_comprehensive_core_event_structs() {
             final_result: "completed".into(),
             completion_time: now,
             final_routing_target: Some("support".into()),
+            extra: None,
         });
         gw.fan_out("default", &rustpbx::rwi::MediaHoldStarted { call_id: call_id.into() });
         gw.fan_out("default", &rustpbx::rwi::MediaHoldStopped { call_id: call_id.into() });

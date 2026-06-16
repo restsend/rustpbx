@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod extension;
 pub mod forms;
 pub mod licenses;
+pub mod locales;
 pub mod metrics;
 pub mod notifications;
 pub mod presence;
@@ -68,6 +69,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     // API routes (nested under api_prefix)
     let api_routes = Router::new()
         .route("/pending-reloads", get(pending_reloads_handler))
+        .merge(locales::api_urls())
         .merge(presence::api_urls())
         .merge(notifications::api_urls())
         .merge(metrics::api_urls())
