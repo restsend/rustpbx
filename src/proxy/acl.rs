@@ -1,10 +1,13 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{TransactionCookie, TrunkContext};
-use crate::{config::ProxyConfig, proxy::routing::TrunkConfig};
+use crate::{
+    config::ProxyConfig,
+    proxy::routing::{TrunkConfig, source_addr_ip},
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::sip::prelude::HeadersExt;
-use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
+use rsipstack::transaction::transaction::Transaction;
 use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
@@ -166,9 +169,10 @@ impl AclModule {
     // ── DoS protection helpers ─────────────────────────────────────
 
     fn extract_ip(tx: &Transaction) -> Option<IpAddr> {
-        let via = tx.original.via_header().ok()?;
-        let (_, target) = SipConnection::parse_target_from_via(via).ok()?;
-        target.host.try_into().ok()
+        tx.connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr())
+            .and_then(source_addr_ip)
     }
 
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
@@ -436,15 +440,12 @@ impl ProxyModule for AclModule {
         }
 
         // 4. IP ACL check (allow/deny with trunk bypass)
-        let via = tx.original.via_header()?;
-        let (_, target) =
-            SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        let from_addr = target.host.try_into()?;
+        let from_addr = Self::extract_ip(tx)
+            .ok_or_else(|| anyhow::anyhow!("missing transport source address"))?;
         if let Some(ctx) = self.is_from_trunk_context(&from_addr).await {
             debug!(
                 method = tx.original.method().to_string(),
-                via = via.value(),
+                source_ip = %from_addr,
                 "IP is from trunk, bypassing acl check"
             );
             cookie.insert_extension(ctx);
@@ -456,7 +457,7 @@ impl ProxyModule for AclModule {
         }
         info!(
             method = tx.original.method().to_string(),
-            via = via.value(),
+            source_ip = %from_addr,
             "IP is denied by acl module"
         );
         cookie.mark_as_spam(crate::call::cookie::SpamResult::IpBlacklist);

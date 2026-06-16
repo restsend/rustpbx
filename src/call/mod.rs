@@ -28,7 +28,8 @@ pub mod runtime;
 pub mod sip;
 pub mod user;
 pub use cookie::{
-    CalleeDisplayName, CalleeOfflineMarker, TenantId, TransactionCookie, TrunkContext,
+    CalleeDisplayName, CalleeOfflineMarker, SourceAddress, TenantId, TransactionCookie,
+    TrunkContext,
 };
 pub use user::SipUser;
 

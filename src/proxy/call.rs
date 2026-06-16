@@ -2,7 +2,8 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::runtime::SessionId;
 use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
-    Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    Location, MediaConfig, RouteInvite, RoutingState, SipUser, SourceAddress, TransactionCookie,
+    TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::{Track, recorder::RecorderOption};
@@ -11,7 +12,7 @@ use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::CallSessionBuilder;
 use crate::proxy::proxy_call::sip_session::SipSession;
 use crate::proxy::routing::{
-    RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
+    RouteRule, SourceTrunk, TrunkConfig, build_source_trunk, source_addr_ip,
     matcher::{RouteResourceLookup, match_invite},
 };
 use crate::proxy::routing::{
@@ -188,10 +189,10 @@ impl RouteInvite for DefaultRouteInvite {
         option: InviteOption,
         origin: &rsipstack::sip::Request,
         direction: &DialDirection,
-        _cookie: &TransactionCookie,
+        cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
-            self.build_context(origin, direction).await;
+            self.build_context(direction, cookie).await;
         if matches!(direction, DialDirection::Inbound)
             && let Some(source) = source_trunk.as_ref()
             && let Some(trunk_cfg) = trunks_snapshot.get(&source.name)
@@ -280,10 +281,10 @@ impl RouteInvite for DefaultRouteInvite {
         option: InviteOption,
         origin: &rsipstack::sip::Request,
         direction: &DialDirection,
-        _cookie: &TransactionCookie,
+        cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
-            self.build_context(origin, direction).await;
+            self.build_context(direction, cookie).await;
 
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing (preview mode)
@@ -324,8 +325,8 @@ impl RouteInvite for DefaultRouteInvite {
 impl DefaultRouteInvite {
     async fn build_context(
         &self,
-        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
+        cookie: &TransactionCookie,
     ) -> (
         std::collections::HashMap<String, TrunkConfig>,
         Vec<RouteRule>,
@@ -334,7 +335,7 @@ impl DefaultRouteInvite {
         let trunks_snapshot = self.data_context.trunks_snapshot();
         let routes_snapshot = self.data_context.routes_snapshot();
         let source_trunk = self
-            .resolve_source_trunk(&trunks_snapshot, origin, direction)
+            .resolve_source_trunk(&trunks_snapshot, direction, cookie)
             .await;
         (trunks_snapshot, routes_snapshot, source_trunk)
     }
@@ -342,8 +343,8 @@ impl DefaultRouteInvite {
     async fn resolve_source_trunk(
         &self,
         trunks: &HashMap<String, TrunkConfig>,
-        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
+        cookie: &TransactionCookie,
     ) -> Option<SourceTrunk> {
         if !matches!(direction, DialDirection::Inbound) {
             return None;
@@ -355,8 +356,14 @@ impl DefaultRouteInvite {
             return build_source_trunk(name.clone(), config, direction);
         }
 
-        let ip = super::routing::extract_via_ip(origin)?;
-        let name = self.data_context.find_trunk_by_ip(&ip).await?;
+        let source_addr = cookie.get_extension::<SourceAddress>()?;
+        let source_ip = source_addr_ip(&source_addr.0)?;
+        let name = self
+            .data_context
+            .find_trunks_by_ip(&source_ip)
+            .await
+            .into_iter()
+            .next()?;
         let config = trunks.get(&name)?;
         build_source_trunk(name, config, direction)
     }
@@ -1206,6 +1213,14 @@ impl CallModule {
         cookie: TransactionCookie,
         caller: &SipUser,
     ) -> Result<Dialplan, RouteError> {
+        if let Some(source_addr) = tx
+            .connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr().cloned())
+        {
+            cookie.insert_extension(SourceAddress(source_addr));
+        }
+
         let trunk_context = cookie.get_extension::<TrunkContext>();
         let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
 
@@ -2718,6 +2733,139 @@ mod tests {
             .expect("same-realm trunk-originated call should resolve");
 
         assert_eq!(dialplan.allow_codecs, vec![CodecType::PCMA]);
+    }
+
+    #[tokio::test]
+    async fn default_route_uses_real_source_ip_for_source_trunk() {
+        let mut proxy_config = ProxyConfig::default();
+        proxy_config.generated_dir =
+            format!("target/test-generated/source-route-{}", std::process::id());
+        proxy_config.trunks.insert(
+            "via_source".to_string(),
+            TrunkConfig {
+                dest: "sip:5.5.5.5:5060".to_string(),
+                direction: Some(crate::proxy::routing::TrunkDirection::Inbound),
+                inbound_hosts: vec!["5.5.5.0/24".to_string()],
+                ..Default::default()
+            },
+        );
+        proxy_config.trunks.insert(
+            "real_source".to_string(),
+            TrunkConfig {
+                dest: "sip:1.2.3.4:5060".to_string(),
+                direction: Some(crate::proxy::routing::TrunkDirection::Inbound),
+                inbound_hosts: vec!["1.2.3.0/24".to_string()],
+                ..Default::default()
+            },
+        );
+        proxy_config.trunks.insert(
+            "wrong_carrier".to_string(),
+            TrunkConfig {
+                dest: "sip:10.0.0.1:5060".to_string(),
+                direction: Some(crate::proxy::routing::TrunkDirection::Outbound),
+                ..Default::default()
+            },
+        );
+        proxy_config.trunks.insert(
+            "right_carrier".to_string(),
+            TrunkConfig {
+                dest: "sip:10.0.0.2:5060".to_string(),
+                direction: Some(crate::proxy::routing::TrunkDirection::Outbound),
+                ..Default::default()
+            },
+        );
+        proxy_config.routes = Some(vec![
+            RouteRule {
+                name: "wrong-via-source".to_string(),
+                priority: 0,
+                source_trunks: vec!["via_source".to_string()],
+                match_conditions: crate::proxy::routing::MatchConditions::default(),
+                action: crate::proxy::routing::RouteAction {
+                    dest: Some(crate::proxy::routing::DestConfig::Single(
+                        "wrong_carrier".to_string(),
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RouteRule {
+                name: "right-real-source".to_string(),
+                priority: 10,
+                source_trunks: vec!["real_source".to_string()],
+                match_conditions: crate::proxy::routing::MatchConditions::default(),
+                action: crate::proxy::routing::RouteAction {
+                    dest: Some(crate::proxy::routing::DestConfig::Single(
+                        "right_carrier".to_string(),
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ]);
+
+        let (server, _config) = create_test_server_with_config(proxy_config).await;
+        let route_invite = DefaultRouteInvite {
+            routing_state: std::sync::Arc::new(RoutingState::default()),
+            data_context: server.data_context.clone(),
+            source_trunk_hint: None,
+        };
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "caller",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:callee@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:callee@rustpbx.com").unwrap(),
+        );
+        request
+            .headers
+            .retain(|header| !matches!(header, rsipstack::sip::Header::Via(_)));
+        request.headers.push(rsipstack::sip::Header::Via(
+            rsipstack::sip::headers::Via::new("SIP/2.0/UDP 5.5.5.5:5060;branch=z9hG4bK-wrong-via"),
+        ));
+
+        let option = InviteOption {
+            caller: rsipstack::sip::Uri::try_from("sip:caller@1.2.3.4").unwrap(),
+            callee: request.uri.clone(),
+            ..Default::default()
+        };
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(SourceAddress(
+            "1.2.3.4:5060"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        ));
+
+        let result = route_invite
+            .route_invite(option, &request, &DialDirection::Inbound, &cookie)
+            .await
+            .expect("route invite should succeed");
+
+        match result {
+            RouteResult::Forward(option, _) => {
+                assert_eq!(
+                    option.destination.unwrap().addr.to_string(),
+                    "10.0.0.2:5060"
+                );
+            }
+            RouteResult::NotHandled(_, _) => {
+                panic!("expected Forward via right carrier, got NotHandled")
+            }
+            RouteResult::Abort(code, reason) => panic!(
+                "expected Forward via right carrier, got Abort {} {:?}",
+                code, reason
+            ),
+            RouteResult::Queue { .. } => panic!("expected Forward via right carrier, got Queue"),
+            RouteResult::Application { .. } => {
+                panic!("expected Forward via right carrier, got Application")
+            }
+        }
     }
 
     #[test]

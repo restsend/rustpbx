@@ -16,12 +16,13 @@ use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
+    call::DialDirection,
     config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
-        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
+        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy, candidate_matches_ip,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -207,21 +208,24 @@ impl ProxyDataContext {
     }
 
     pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {
-        let trunks = self.trunks_snapshot();
-        for (name, trunk) in trunks.iter() {
-            if trunk.matches_inbound_ip(addr).await {
-                return Some(name.clone());
-            }
-        }
-        None
+        self.find_trunks_by_ip(addr).await.into_iter().next()
     }
 
     pub async fn find_trunks_by_ip(&self, addr: &IpAddr) -> Vec<String> {
         let trunks = self.trunks_snapshot();
         let mut matches = Vec::new();
         for (name, trunk) in trunks.iter() {
-            if trunk.matches_inbound_ip(addr).await {
-                matches.push(name.clone());
+            if let Some(trunk_direction) = trunk.direction
+                && !trunk_direction.allows(&DialDirection::Inbound)
+            {
+                continue;
+            }
+
+            for host in &trunk.inbound_hosts {
+                if candidate_matches_ip(host, addr).await {
+                    matches.push(name.clone());
+                    break;
+                }
             }
         }
         matches
@@ -980,18 +984,7 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
 
     let transport = Some(model.sip_transport.as_str().to_string());
 
-    let mut inbound_hosts = extract_string_array(model.allowed_ips.clone());
-    if let Some(host) = extract_host_from_uri(&dest)
-        && host.parse::<IpAddr>().is_ok()
-    {
-        push_unique(&mut inbound_hosts, host);
-    }
-    if let Some(backup) = &backup_dest
-        && let Some(host) = extract_host_from_uri(backup)
-        && host.parse::<IpAddr>().is_ok()
-    {
-        push_unique(&mut inbound_hosts, host);
-    }
+    let inbound_hosts = extract_string_array(model.allowed_ips.clone());
 
     let recording = model
         .metadata
@@ -1473,18 +1466,6 @@ fn extract_string_array(value: Option<serde_json::value::Value>) -> Vec<String> 
             _ => Vec::new(),
         },
         None => Vec::new(),
-    }
-}
-
-fn extract_host_from_uri(uri: &str) -> Option<String> {
-    rsipstack::sip::Uri::try_from(uri)
-        .ok()
-        .map(|parsed| parsed.host_with_port.host.to_string())
-}
-
-fn push_unique(list: &mut Vec<String>, value: String) {
-    if !list.iter().any(|existing| existing == &value) {
-        list.push(value);
     }
 }
 
