@@ -633,7 +633,14 @@ impl SipServerBuilder {
         });
         if let Some(backend) = sipflow_backend {
             info!("Sipflow backend initialized");
-            let sflow = SipFlowBuilder::new().with_backend(backend).build();
+            let local_addr_strs: Vec<String> = endpoint_local_addrs
+                .iter()
+                .map(|a| a.addr.to_string())
+                .collect();
+            let sflow = SipFlowBuilder::new()
+                .with_backend(backend)
+                .with_local_addrs(local_addr_strs)
+                .build();
             sip_flow = Some(sflow.clone());
             inspectors.push(Box::new(sflow));
         }
