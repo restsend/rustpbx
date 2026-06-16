@@ -30,7 +30,7 @@ exclude = [
 ]
 
 [features]
-opus = ["audio-codec/opus"]
+cross = []
 console = ["dep:minijinja"]
 addon-acme = ["instant-acme"]
 addon-wholesale = [
@@ -74,7 +74,6 @@ contact-center = [
 ]
 
 default = [
-    "opus",
     "console",
     "addon-acme",
     "addon-transcript",
@@ -205,7 +204,6 @@ csv = "1.4.0"
 quick-xml = { version = "0.39.3", features = ["serialize"] }
 ruzstd = "0.8"
 minimp3 = "0.6.1"
-aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
@@ -239,7 +237,6 @@ path = "src/bin/rustpbx.rs"
 [[bin]]
 name = "sipflow"
 path = "src/bin/sipflow.rs"
-required-features = ["opus"]
 
 [[bin]]
 name = "verify-i18n"

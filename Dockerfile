@@ -13,9 +13,7 @@ ENV TZ=UTC
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    tzdata \
-    libopus0 \
-    && rm -rf /var/lib/apt/lists/*
+    tzdata
 
 # Create application directory structure
 WORKDIR /app

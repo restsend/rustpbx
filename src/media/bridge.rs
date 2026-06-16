@@ -4031,7 +4031,6 @@ mod tests {
 
     /// Verify Opus → PCMU transcoding via Transcoder produces correct output.
     #[tokio::test]
-    #[cfg(feature = "opus")]
     async fn test_transcoder_opus_to_pcmu() {
         use audio_codec::create_encoder;
         // Generate 20ms of 48kHz mono PCM (960 samples)
@@ -4110,7 +4109,6 @@ mod tests {
 
     /// Verify Opus → G.722 transcoding via Transcoder produces correct output.
     #[tokio::test]
-    #[cfg(feature = "opus")]
     async fn test_transcoder_opus_to_g722() {
         use audio_codec::create_encoder;
 
@@ -4147,7 +4145,6 @@ mod tests {
 
     /// Run full Opus→PCMU round-trip: encode PCM → Opus → transcode → PCMU → decode → verify PCM correlation.
     #[tokio::test]
-    #[cfg(feature = "opus")]
     async fn test_transcoder_opus_to_pcmu_roundtrip_quality() {
         use audio_codec::{create_decoder, create_encoder};
 
