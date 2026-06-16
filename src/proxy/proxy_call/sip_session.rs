@@ -3737,7 +3737,7 @@ impl SipSession {
             bridge_builder =
                 bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
-        if !self.context.dialplan.recording.force_file {
+        if self.context.dialplan.recording.enabled && !self.context.dialplan.recording.force_file {
             if let Some(sipflow_tx) =
                 self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
             {
@@ -5035,10 +5035,12 @@ impl SipSession {
 
         let shared_recorder = self.recorder.clone();
 
-        let sipflow_tx = if self.context.dialplan.recording.force_file {
-            None
-        } else {
+        let sipflow_tx = if self.context.dialplan.recording.enabled
+            && !self.context.dialplan.recording.force_file
+        {
             self.setup_sipflow_capture(session_id, session_id)
+        } else {
+            None
         };
         let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
@@ -5852,7 +5854,9 @@ impl SipSession {
                 bridge_builder = bridge_builder
                     .with_recorder(self.recorder.clone(), self.recording_paused.clone());
             }
-            if !self.context.dialplan.recording.force_file {
+            if self.context.dialplan.recording.enabled
+                && !self.context.dialplan.recording.force_file
+            {
                 if let Some(sipflow_tx) =
                     self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
                 {
