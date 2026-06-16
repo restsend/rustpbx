@@ -346,6 +346,8 @@ status_offline = "离线"
 config_sections_label = "分机配置栏目"
 
 [routing]
+filter_from_trunk = "过滤来源中继"
+
 title = "路由管理"
 new_route = "新建路由"
 route_name = "路由名称"
@@ -2039,8 +2041,6 @@ export = "导出配置"
 exporting = "导出中..."
 reload = "重载配置"
 reloading = "重载中..."
-diagnostics = "运行诊断"
-testing = "测试中..."
 confirm_delete_title = "删除策略"
 confirm_delete_desc = "确定要删除此策略吗？此操作无法撤销。"
 saved_with_backup = "已保存到 cc/acd.toml；并生成备份 cc/acd.toml.bak"
@@ -2052,3 +2052,15 @@ escalation_timeline = "升级时间线"
 escalation_after = "后升级到"
 add_escalation_step = "添加升级步骤"
 escalation_skill_group_placeholder = "技能组 ID"
+
+[sip]
+internal = "内部 SIP"
+
+[carrier]
+"provider.net" = "运营商网络"
+
+[rtp]
+"provider.net" = "运营商网络 (RTP)"
+
+[sbc]
+health_check = "SBC 健康检查"

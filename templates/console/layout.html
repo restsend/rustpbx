@@ -10,6 +10,7 @@
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     <script type="application/json" id="__currentUser">{{ current_user | json | safe }}</script>
     <script type="application/json" id="__locales">{{ available_locales | json | safe }}</script>
+    <script src="{{ api_prefix }}/locales/{{ locale }}.js"></script>
     {% block js_head %}
     <script>
         window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');

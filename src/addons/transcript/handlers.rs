@@ -933,7 +933,7 @@ pub async fn download_model(
     // Build download command
     let mut cmd = tokio::process::Command::new(command);
     cmd.arg("--models-path").arg(models_path);
-    cmd.arg("--download-model");
+    cmd.arg("--download-only");
 
     // Add HF endpoint if provided
     if let Some(endpoint) = payload.hf_endpoint

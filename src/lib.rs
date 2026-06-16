@@ -28,7 +28,7 @@ pub mod utils;
 pub mod version;
 
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init_rustls_crypto_provider() {
     rustls::crypto::ring::default_provider()
         .install_default()

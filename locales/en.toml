@@ -346,6 +346,8 @@ status_offline = "Offline"
 config_sections_label = "Extension configuration sections"
 
 [routing]
+filter_from_trunk = "Filter from trunk"
+
 title = "Routing"
 new_route = "New Route"
 route_name = "Route Name"
@@ -2067,3 +2069,16 @@ escalation_timeline = "Escalation timeline"
 escalation_after = "after"
 add_escalation_step = "Add escalation step"
 escalation_skill_group_placeholder = "Skill group ID"
+
+
+[sip]
+internal = "Internal SIP"
+
+[carrier]
+"provider.net" = "Provider network"
+
+[rtp]
+"provider.net" = "Provider network (RTP)"
+
+[sbc]
+health_check = "SBC Health Check"
