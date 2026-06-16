@@ -65,7 +65,7 @@ impl UserBackend for DbBackend {
                 "SELECT COUNT(*) FROM {} WHERE {} = ? OR {} = ?",
                 self.config.table_name, realm_col, realm_col
             );
-            let count = sqlx::query(&query)
+            let count = sqlx::query(sqlx::AssertSqlSafe(query))
                 .bind(realm)
                 .bind(host)
                 .fetch_one(&self.db)
@@ -133,7 +133,7 @@ impl UserBackend for DbBackend {
             select_clause, self.config.table_name, where_clause
         );
 
-        let mut sqlx_query = sqlx::query(&query);
+        let mut sqlx_query = sqlx::query(sqlx::AssertSqlSafe(query));
         for param in bind_params {
             sqlx_query = sqlx_query.bind(param);
         }
