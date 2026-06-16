@@ -30,7 +30,7 @@ impl AddonRegistry {
 
         // Observability: community build uses ObservabilityAddon (/metrics + /healthz);
         // commercial addon-telemetry replaces it with OTel tracing + Prometheus.
-        #[cfg(not(feature = "addon-telemetry"))]
+        #[cfg(all(feature = "addon-observability", not(feature = "addon-telemetry")))]
         {
             super::observability::ObservabilityAddon::install_recorder().ok();
             addons.push(Box::new(super::observability::ObservabilityAddon::new()));

@@ -9,10 +9,12 @@
 //! - `ConsoleAdapter`: Converts `CallCommandPayload` (HTTP API) to `CallCommand`
 //! - `SessionActionBridge`: Converts `CallCommand` to `SessionAction` (migration only)
 
+#[cfg(feature = "console")]
 mod console_adapter;
 mod rwi_adapter;
 mod session_action_bridge;
 
+#[cfg(feature = "console")]
 pub use console_adapter::*;
 pub use rwi_adapter::*;
 pub use session_action_bridge::*;
