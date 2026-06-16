@@ -837,12 +837,15 @@ impl CallModule {
             .or(self.inner.config.audio_codecs.as_deref());
 
         if let Some(mut hints) = dialplan_hints {
-            if let Some(policy) = hints.recording.take() {
+            let mut recording_policy = hints.recording.take();
+            if let Some(enabled) = hints.enable_recording {
+                recording_policy
+                    .get_or_insert_with(RecordingPolicy::default)
+                    .enabled = enabled;
+            }
+            if let Some(policy) = recording_policy {
                 dialplan.recording = policy.new_recording_config();
                 dialplan.recording_policy = Some(policy);
-            }
-            if let Some(enabled) = hints.enable_recording {
-                dialplan.recording.enabled = enabled;
             }
             if let Some(bypass) = hints.bypass_media
                 && bypass
@@ -888,12 +891,92 @@ impl CallModule {
         &self,
         mut dialplan: Dialplan,
         caller: &SipUser,
-        recording_policy_override: Option<&RecordingPolicy>,
     ) -> Dialplan {
-        let policy = match recording_policy_override.or(self.inner.config.recording.as_ref()) {
-            Some(policy) if policy.enabled => policy,
-            _ => return dialplan,
+        let policy = match dialplan.recording_policy.as_ref() {
+            Some(overrides) => {
+                let mut merged = self
+                    .inner
+                    .config
+                    .recording
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| overrides.clone());
+
+                merged.enabled = overrides.enabled;
+                if overrides.recording_type != crate::config::RecordingType::default() {
+                    merged.recording_type = overrides.recording_type;
+                }
+                if !overrides.directions.is_empty() {
+                    merged.directions = overrides.directions.clone();
+                }
+                if !overrides.caller_allow.is_empty() {
+                    merged.caller_allow = overrides.caller_allow.clone();
+                }
+                if !overrides.caller_deny.is_empty() {
+                    merged.caller_deny = overrides.caller_deny.clone();
+                }
+                if !overrides.callee_allow.is_empty() {
+                    merged.callee_allow = overrides.callee_allow.clone();
+                }
+                if !overrides.callee_deny.is_empty() {
+                    merged.callee_deny = overrides.callee_deny.clone();
+                }
+                if overrides.auto_start.is_some() {
+                    merged.auto_start = overrides.auto_start;
+                }
+                if overrides.filename_pattern.is_some() {
+                    merged.filename_pattern = overrides.filename_pattern.clone();
+                }
+                if overrides.samplerate.is_some() {
+                    merged.samplerate = overrides.samplerate;
+                }
+                if overrides.ptime.is_some() {
+                    merged.ptime = overrides.ptime;
+                }
+                if overrides.path.is_some() {
+                    merged.path = overrides.path.clone();
+                }
+                if overrides.url.is_some() {
+                    merged.url = overrides.url.clone();
+                }
+                if overrides.headers.is_some() {
+                    merged.headers = overrides.headers.clone();
+                }
+                if overrides.vendor.is_some() {
+                    merged.vendor = overrides.vendor.clone();
+                }
+                if overrides.bucket.is_some() {
+                    merged.bucket = overrides.bucket.clone();
+                }
+                if overrides.region.is_some() {
+                    merged.region = overrides.region.clone();
+                }
+                if overrides.access_key.is_some() {
+                    merged.access_key = overrides.access_key.clone();
+                }
+                if overrides.secret_key.is_some() {
+                    merged.secret_key = overrides.secret_key.clone();
+                }
+                if overrides.endpoint.is_some() {
+                    merged.endpoint = overrides.endpoint.clone();
+                }
+                if overrides.root.is_some() {
+                    merged.root = overrides.root.clone();
+                }
+                if overrides.force_file.is_some() {
+                    merged.force_file = overrides.force_file;
+                }
+
+                merged
+            }
+            None => match self.inner.config.recording.as_ref() {
+                Some(policy) => policy.clone(),
+                None => return dialplan,
+            },
         };
+        if !policy.enabled {
+            return dialplan;
+        }
 
         if dialplan.recording.enabled && dialplan.recording.option.is_some() {
             return dialplan;
@@ -950,7 +1033,7 @@ impl CallModule {
         if !use_sipflow || force_file {
             let recorder_option = match self.build_recorder_option(
                 &dialplan,
-                policy,
+                &policy,
                 &caller_identity,
                 &callee_identity,
             ) {
@@ -1350,9 +1433,7 @@ impl CallModule {
             }
         }
 
-        let recording_policy_override = dialplan.recording_policy.clone();
-        let dialplan =
-            self.apply_recording_policy(dialplan, caller, recording_policy_override.as_ref());
+        let dialplan = self.apply_recording_policy(dialplan, caller);
         Ok(dialplan)
     }
 
@@ -2389,6 +2470,27 @@ mod tests {
         }
     }
 
+    struct RecordingHintsRouteInvite {
+        recording: Option<RecordingPolicy>,
+        enable_recording: Option<bool>,
+    }
+
+    #[async_trait]
+    impl RouteInvite for RecordingHintsRouteInvite {
+        async fn route_invite(
+            &self,
+            option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            let mut hints = crate::config::DialplanHints::default();
+            hints.recording = self.recording.clone();
+            hints.enable_recording = self.enable_recording;
+            Ok(RouteResult::Forward(option, Some(hints)))
+        }
+    }
+
     fn replace_to_header(request: &mut rsipstack::sip::Request, to_uri: rsipstack::sip::Uri) {
         request
             .headers
@@ -2733,6 +2835,133 @@ mod tests {
             .expect("same-realm trunk-originated call should resolve");
 
         assert_eq!(dialplan.allow_codecs, vec![CodecType::PCMA]);
+    }
+
+    #[tokio::test]
+    async fn default_resolve_partial_recording_policy_inherits_global_policy_fields() {
+        let mut proxy_config = ProxyConfig::default();
+        proxy_config.recording = Some(RecordingPolicy {
+            enabled: true,
+            recording_type: crate::config::RecordingType::S3,
+            bucket: Some("recordings".to_string()),
+            region: Some("us-east-1".to_string()),
+            access_key: Some("access".to_string()),
+            secret_key: Some("secret".to_string()),
+            path: Some("/tmp/rustpbx-main-recordings".to_string()),
+            auto_start: Some(true),
+            force_file: Some(true),
+            ..Default::default()
+        });
+
+        let (server, config) = create_test_server_with_config(proxy_config).await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "alice".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RecordingHintsRouteInvite {
+                    recording: Some(RecordingPolicy {
+                        enabled: true,
+                        auto_start: Some(false),
+                        ..Default::default()
+                    }),
+                    enable_recording: None,
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("route should resolve");
+        assert_eq!(
+            dialplan.recording_policy.as_ref().and_then(|p| p.auto_start),
+            Some(false)
+        );
+        let dialplan = module.apply_recording_policy(dialplan, &caller);
+
+        assert!(dialplan.recording.enabled);
+        assert!(!dialplan.recording.auto_start);
+        assert!(dialplan.recording.force_file);
+        let option = dialplan
+            .recording
+            .option
+            .expect("merged policy should build recorder option");
+        assert!(
+            option
+                .recorder_file
+                .starts_with("/tmp/rustpbx-main-recordings"),
+            "partial override must inherit the global recorder path"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_recording_enable_hint_false_disables_global_policy() {
+        let mut proxy_config = ProxyConfig::default();
+        proxy_config.recording = Some(RecordingPolicy {
+            enabled: true,
+            path: Some("/tmp/rustpbx-main-recordings".to_string()),
+            auto_start: Some(true),
+            ..Default::default()
+        });
+
+        let (server, config) = create_test_server_with_config(proxy_config).await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "alice".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RecordingHintsRouteInvite {
+                    recording: None,
+                    enable_recording: Some(false),
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("route should resolve");
+        assert_eq!(
+            dialplan.recording_policy.as_ref().map(|p| p.enabled),
+            Some(false)
+        );
+        let dialplan = module.apply_recording_policy(dialplan, &caller);
+
+        assert!(!dialplan.recording.enabled);
+        assert!(dialplan.recording.option.is_none());
     }
 
     #[tokio::test]
