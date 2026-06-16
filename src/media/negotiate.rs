@@ -37,7 +37,6 @@ impl CodecInfo {
             CodecType::PCMA => ("PCMA".to_string(), None),
             CodecType::G722 => ("G722".to_string(), None),
             CodecType::G729 => ("G729".to_string(), None),
-            #[cfg(feature = "opus")]
             CodecType::Opus => (
                 "opus".to_string(),
                 Some("minptime=10;useinbandfec=1".to_string()),
@@ -174,20 +173,16 @@ impl MediaNegotiator {
         let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
             let (rate, chans) = match codec {
                 CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => (8000, 1),
-                #[cfg(feature = "opus")]
                 CodecType::Opus => (48000, 2),
                 _ => return None,
             };
             Some((codec, rate, chans))
         } else {
-            #[cfg(feature = "opus")]
             if (pt == 96 || pt == 111) && section.kind == MediaKind::Audio {
                 Some((CodecType::Opus, 48000, 2))
             } else {
                 None
             }
-            #[cfg(not(feature = "opus"))]
-            None
         };
 
         static_codec.map(|(codec, rate, chans)| CodecInfo {
@@ -339,7 +334,6 @@ impl MediaNegotiator {
     /// Build default codec list for RTP endpoints
     pub fn default_rtp_codecs() -> Vec<CodecType> {
         vec![
-            #[cfg(feature = "opus")]
             CodecType::Opus,
             CodecType::G729,
             CodecType::G722,
@@ -352,7 +346,6 @@ impl MediaNegotiator {
     /// Build default codec list for WebRTC endpoints
     pub fn default_webrtc_codecs() -> Vec<CodecType> {
         vec![
-            #[cfg(feature = "opus")]
             CodecType::Opus,
             CodecType::G722,
             CodecType::PCMU,
@@ -376,7 +369,6 @@ impl MediaNegotiator {
             CodecType::PCMA => "PCMA",
             CodecType::G722 => "G722",
             CodecType::G729 => "G729",
-            #[cfg(feature = "opus")]
             CodecType::Opus => "opus",
             CodecType::TelephoneEvent => "telephone-event",
         };
@@ -472,7 +464,6 @@ impl MediaNegotiator {
             }),
             _ => {
                 let preferred_rate = match audio.as_ref().map(|codec| codec.codec) {
-                    #[cfg(feature = "opus")]
                     Some(CodecType::Opus) => 48000,
                     _ => 8000,
                 };
@@ -1528,7 +1519,6 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(dtmf[0].clock_rate, 8000);
     }
 
-    #[cfg(feature = "opus")]
     #[test]
     fn test_callee_offer_appends_dtmf_in_final_audio_clock_order() {
         let caller_sdp = "v=0\r\n\
@@ -1555,7 +1545,6 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(dtmf[1].clock_rate, 48000);
     }
 
-    #[cfg(feature = "opus")]
     #[test]
     fn test_caller_answer_filters_dtmf_by_final_audio_clock_rate() {
         let caller_sdp = "v=0\r\n\
@@ -2244,7 +2233,6 @@ a=rtpmap:8 PCMA/8000\r\n";
         );
     }
 
-    #[cfg(feature = "opus")]
     #[test]
     fn test_rewrite_sdp_codec_list_uses_dtmf_clock_rate() {
         let caller_sdp = "v=0\r\n\

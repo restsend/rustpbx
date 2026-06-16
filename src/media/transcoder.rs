@@ -303,7 +303,6 @@ mod tests {
         assert!(!output.data.is_empty(), "G729 output must not be empty");
     }
 
-    #[cfg(feature = "opus")]
     #[test]
     fn test_transcoder_pcmu_to_opus() {
         let pcm = silence_pcm_8k();

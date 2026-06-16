@@ -487,7 +487,6 @@ impl RtpTrackBuilder {
             probation_max_packets: None,
             ice_servers: Vec::new(),
             rtp_map: vec![
-                #[cfg(feature = "opus")]
                 CodecType::Opus,
                 CodecType::G729,
                 CodecType::G722,

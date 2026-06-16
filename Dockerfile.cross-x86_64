@@ -4,8 +4,5 @@ RUN set -eux; \
     apt_opts='-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30'; \
     apt-get ${apt_opts} update; \
     apt-get ${apt_opts} install -y \
-        cmake \
-        pkg-config \
-        libopus-dev \
-        libssl-dev; \
+        pkg-config; \
     rm -rf /var/lib/apt/lists/*
