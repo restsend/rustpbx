@@ -632,11 +632,11 @@ pub enum SipFlowConfig {
 }
 
 fn default_sipflow_flush_count() -> usize {
-    1000
+    0
 }
 
 fn default_sipflow_flush_interval() -> u64 {
-    5
+    0
 }
 
 fn default_sipflow_timeout() -> u64 {
