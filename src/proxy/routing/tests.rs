@@ -7,6 +7,7 @@ use crate::proxy::routing::{
     DestConfig, MatchConditions, MediaMode, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
     RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig, TrunkDirection, VideoPolicy,
+    candidate_matches_ip,
 };
 use async_trait::async_trait;
 use rsipstack::dialog::invitation::InviteOption;
@@ -91,6 +92,17 @@ async fn test_source_trunk_codecs_apply_when_no_route_handles_call() {
         }
         _ => panic!("expected not handled with source trunk codec hints"),
     }
+}
+
+#[tokio::test]
+async fn test_source_addr_candidate_matches_ip_and_cidr() {
+    let addr: IpAddr = "1.2.3.4".parse().unwrap();
+
+    assert!(candidate_matches_ip("1.2.3.4", &addr).await);
+    assert!(candidate_matches_ip("1.2.3.4:5080", &addr).await);
+    assert!(candidate_matches_ip("1.2.3.0/24", &addr).await);
+    assert!(!candidate_matches_ip("1.2.4.0/24", &addr).await);
+    assert!(!candidate_matches_ip("1.2.3.5", &addr).await);
 }
 
 #[tokio::test]

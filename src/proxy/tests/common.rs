@@ -329,7 +329,7 @@ pub fn create_auth_request(
     create_test_request(method, username, Some(password), realm, None)
 }
 
-/// Creates a test request with specific source IP (for acl module tests)
+/// Creates a test request for ACL module tests.
 pub fn create_acl_request(
     method: rsipstack::sip::Method,
     username: &str,

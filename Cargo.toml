@@ -37,6 +37,7 @@ addon-wholesale = [
     "dep:async-stream",
     "dep:async-compression",
     "dep:country-emoji",
+    "dep:hex",
 ]
 addon-archive = []
 addon-endpoint-manager = []

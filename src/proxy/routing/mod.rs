@@ -7,6 +7,7 @@ use ipnetwork::IpNetwork;
 use regex::Regex;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::{StatusCode, Uri};
+use rsipstack::transport::SipAddr;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -954,6 +955,11 @@ async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {
 /// Public helper to validate whether a candidate host definition resolves to the provided IP.
 pub async fn candidate_matches_ip(candidate: &str, addr: &IpAddr) -> bool {
     candidate_matches(candidate, addr).await
+}
+
+pub fn source_addr_ip(source_addr: &SipAddr) -> Option<IpAddr> {
+    let ip: IpAddr = source_addr.addr.host.clone().try_into().ok()?;
+    Some(ip)
 }
 
 async fn host_matches(host: &str, addr: &IpAddr) -> bool {
