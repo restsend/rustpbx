@@ -167,7 +167,7 @@ Results from `cargo run --release --example sipflow_bench -- --calls 50 --rtp-pe
 | Flow query latency | 0.3 ms | 0.1 ms | FlowDB 4.9× faster |
 | Media query latency | 0.3 ms | 0.0 ms | FlowDB faster |
 
-> **Note:** FlowDB batches records in memory before performing a synchronous batch write, achieving **13× higher throughput** than SQLite while using 5.6× less disk space. The default `flush_count` (1000) and `flush_interval_secs` (5) control the batch behavior — identical to SQLite's configuration. FlowDB's block-level LSM compression is more effective than per-packet zstd on small frames.
+> **Note:** FlowDB batches records in memory before performing a synchronous batch write, achieving **13× higher throughput** than SQLite while using 5.6× less disk space. The default `flush_count` (0) and `flush_interval_secs` (0) disable app-level buffering — each record is written to the engine immediately and is instantly queryable via FlowDB's LSM memtable. FlowDB's block-level LSM compression is more effective than per-packet zstd on small frames.
 
 ### Correctness Verification
 
@@ -212,8 +212,8 @@ type = "local"
 root = "/var/sipflow/data"
 engine = "sqlite"
 subdirs = "daily"          # "none" / "daily" / "hourly" (SQLite only)
-flush_count = 1000
-flush_interval_secs = 5
+# flush_count = 0          # 0=immediate write, no app-level buffering
+# flush_interval_secs = 0
 id_cache_size = 8192
 ```
 
@@ -241,8 +241,8 @@ timeout_secs = 10
 | `root` | String | - | Data directory (local) |
 | `engine` | `"flowdb"` / `"sqlite"` | `"flowdb"` | Storage engine (local) |
 | `subdirs` | `"none"` / `"daily"` / `"hourly"` | `"daily"` | Directory partitioning (local SQLite) |
-| `flush_count` | usize | 1000 | Batch size before flush (local) |
-| `flush_interval_secs` | u64 | 5 | Max flush interval (local) |
+| `flush_count` | usize | 0 | Batch size before flush; 0 = immediate write (local) |
+| `flush_interval_secs` | u64 | 0 | Max flush interval; 0 = no timer (local) |
 | `id_cache_size` | usize | 8192 | CallID→ID LRU cache (local SQLite) |
 | `ttl_secs` | Option\<u64\> | None | FlowDB TTL (local FlowDB) |
 | `memtable_size_mb` | usize | 64 | FlowDB memtable size (local FlowDB) |
