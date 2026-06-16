@@ -84,14 +84,23 @@ default = [
 
 
 [dependencies]
-instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "ring", "rcgen", "time"], optional = true }
+instant-acme = { version = "0.8.5", default-features = false, features = [
+    "hyper-rustls",
+    "ring",
+    "rcgen",
+    "time",
+], optional = true }
 anyhow = "1"
 async-trait = "0.1.88"
 async-stream = { version = "0.3.6", optional = true }
 axum = { version = "0.8.9", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
 futures = "0.3.31"
-rustls = { version = "0.23.39", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23.39", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
 minijinja = { version = "2.20.0", features = [
     "loader",
     "json",
@@ -112,7 +121,7 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 url = { version = "2.5.8", optional = true }
-uuid = { version = "1.23.1", features = ["v4"] }
+uuid = { version = "1.23.3", features = ["v4"] }
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "1.1.2"
 toml_edit = { version = "0.25.11", features = ["serde"] }
@@ -122,7 +131,7 @@ chrono-tz = "0.10.4"
 rsipstack = "0.5.13"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
-audio-codec = "0.3.38"
+audio-codec = "0.3.39"
 #udio-codec = { path = "../audio-codec", default-features = false }
 #rustrtc = { path = "../rustrtc" }
 rustrtc = "0.3.75"
@@ -144,12 +153,12 @@ sha2 = "0.11.0"
 dotenvy = "0.15.7"
 md-5 = "0.11.0"
 once_cell = "1.21.4"
-regex = "1.12.3"
-http = "1.4.0"
+regex = "1.12.4"
+http = "1.4.2"
 urlencoding = "2.1.3"
 ipnetwork = "0.21.1"
-sqlx = { version = "0.8.6", features = [
-    "runtime-tokio-rustls",
+sqlx = { version = "0.9.0", features = [
+    "tls-rustls-ring",
     "postgres",
     "sqlite",
     "mysql",
@@ -181,28 +190,36 @@ console-subscriber = "0.5.0"
 crossbeam-channel = "0.5"
 lru = "0.18.0"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener", "push-gateway-no-tls-provider"], optional = true }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = [
+    "http-listener",
+    "push-gateway-no-tls-provider",
+], optional = true }
 # OTel stack — only pulled in for the commercial `addon-telemetry` feature.
-opentelemetry = { version = "0.31.0", optional = true }
-opentelemetry-otlp = { version = "0.31.1", features = [
+opentelemetry = { version = "0.32.0", optional = true }
+opentelemetry-otlp = { version = "0.32.0", features = [
     "grpc-tonic",
     "trace",
     "metrics",
 ], optional = true }
-opentelemetry_sdk = { version = "0.31.0", features = [
+opentelemetry_sdk = { version = "0.32.1", features = [
     "rt-tokio",
 ], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.33.0", optional = true }
 phonenumber = "0.3.9"
-tower-http = { version = "0.6.10", features = [
+tower-http = { version = "0.7.0", features = [
     "fs",
     "cors",
     "compression-gzip",
 ] }
-rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
-axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+rcgen = { version = "0.14.8", default-features = false, features = [
+    "pem",
+    "ring",
+] }
+axum-server = { version = "0.8.0", default-features = false, features = [
+    "tls-rustls-no-provider",
+] }
 csv = "1.4.0"
-quick-xml = { version = "0.39.3", features = ["serialize"] }
+quick-xml = { version = "0.40.1", features = ["serialize"] }
 ruzstd = "0.8"
 minimp3 = "0.6.1"
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
@@ -218,7 +235,7 @@ portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 sipbot = { version = "0.2.38", default-features = false }
 serde_urlencoded = "0.7"
-ctor = "0.4"
+ctor = "1.0.7"
 
 [build-dependencies]
 chrono = "0.4"
