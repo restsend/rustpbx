@@ -2484,16 +2484,18 @@
             const bodyStr = JSON.stringify(parsed);
 
             try {
-                // JsSIP 3.x sends custom INFO via session.sendRequest().
-                // Fallback: if that fails, try constructing the request through the UA.
+                // JsSIP 3.x: RTCSession.sendRequest() drops the `contentType`
+                // option — it only forwards `extraHeaders` and `body` to the
+                // dialog.  So the Content-Type header MUST be supplied via
+                // extraHeaders, otherwise the server receives ct=None.
+                const extraHeaders = ['Content-Type: ' + contentType];
                 if (typeof session.sendRequest === 'function') {
                     session.sendRequest('INFO', {
+                        extraHeaders: extraHeaders,
                         body: bodyStr,
-                        contentType: contentType,
                     });
                 } else {
                     // Older JsSIP API: use session.request.sendRequest directly
-                    const extraHeaders = ['Content-Type: ' + contentType];
                     session.request.sendRequest('INFO', {
                         extraHeaders: extraHeaders,
                         body: bodyStr,
