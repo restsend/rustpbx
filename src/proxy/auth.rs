@@ -375,6 +375,44 @@ impl ProxyModule for AuthModule {
             }
         }
 
+        // Path B: Check WebSocket pre-authentication via JWT
+        if let Some(ref registry) = self.server.pre_auth_registry {
+            if let Some(source_addr) = self.get_source_addr(tx) {
+                if let Some(agent_id) = registry.lookup(&source_addr).await {
+                    if tx.original.method == rsipstack::sip::Method::Register {
+                        let realm = tx.original.uri().host().to_string();
+                        match self
+                            .server
+                            .user_backend
+                            .get_user(&agent_id, Some(&realm), Some(&tx.original))
+                            .await
+                        {
+                            Ok(Some(mut user)) => {
+                                if !user.enabled {
+                                    info!(username = %agent_id, "Pre-authed user is disabled");
+                                } else {
+                                    user.username = agent_id;
+                                    cookie.set_user(user);
+                                    return Ok(ProxyAction::Continue);
+                                }
+                            }
+                            _ => {
+                                // User not found in backend — create minimal SipUser from JWT identity
+                                let user = SipUser {
+                                    username: agent_id,
+                                    enabled: true,
+                                    realm: Some(realm),
+                                    ..Default::default()
+                                };
+                                cookie.set_user(user);
+                                return Ok(ProxyAction::Continue);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         match self.authenticate_request(tx).await {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {

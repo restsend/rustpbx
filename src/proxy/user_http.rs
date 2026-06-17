@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use reqwest::{Client, Method};
 use serde::Deserialize;
-use std::{collections::HashMap, time::Instant};
-use tracing::info;
+use std::{collections::HashMap, time::{Duration, Instant}};
+use tracing::{info, warn};
 use urlencoding;
 
 #[derive(Deserialize)]
@@ -22,10 +22,14 @@ pub struct HttpUserBackend {
     request_uri_field: String,
     headers: HashMap<String, String>,
     sip_headers: Vec<String>,
+    token_header: Option<String>,
     client: Client,
+    retry_count: u32,
+    retry_delay: Duration,
 }
 
 impl HttpUserBackend {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         url: &str,
         method: &Option<String>,
@@ -34,6 +38,10 @@ impl HttpUserBackend {
         request_uri_field: &Option<String>,
         headers: &Option<HashMap<String, String>>,
         sip_headers: &Option<Vec<String>>,
+        token_header: &Option<String>,
+        http_timeout_ms: &Option<u64>,
+        http_retry_count: &Option<u32>,
+        http_retry_delay_ms: &Option<u64>,
     ) -> Self {
         let method = method
             .as_ref()
@@ -56,6 +64,15 @@ impl HttpUserBackend {
         let headers = headers.clone().unwrap_or_default();
         let sip_headers = sip_headers.clone().unwrap_or_default();
 
+        let timeout_ms = http_timeout_ms.unwrap_or(5000);
+        let client = Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        let retry_count = http_retry_count.unwrap_or(1);
+        let retry_delay = Duration::from_millis(http_retry_delay_ms.unwrap_or(500));
+
         HttpUserBackend {
             url: url.to_string(),
             method,
@@ -64,23 +81,24 @@ impl HttpUserBackend {
             request_uri_field,
             headers,
             sip_headers,
-            client: Client::new(),
+            token_header: token_header.clone(),
+            client,
+            retry_count,
+            retry_delay,
         }
     }
-}
 
-#[async_trait]
-impl UserBackend for HttpUserBackend {
-    async fn is_same_realm(&self, _realm: &str) -> bool {
-        false
+    pub fn token_header(&self) -> Option<&str> {
+        self.token_header.as_deref()
     }
-    async fn get_user(
+
+    /// Send the HTTP auth request with retry logic.
+    async fn send_with_retry(
         &self,
         username: &str,
         realm: Option<&str>,
         request: Option<&rsipstack::sip::Request>,
-    ) -> Result<Option<SipUser>, AuthError> {
-        let start_time = Instant::now();
+    ) -> Result<reqwest::Response, AuthError> {
         let request_uri = request
             .map(|req| req.uri.to_string())
             .unwrap_or_default();
@@ -103,57 +121,89 @@ impl UserBackend for HttpUserBackend {
             HashMap::new()
         };
 
-        let mut request_builder = match self.method {
-            Method::GET => {
-                let mut url = self.url.clone();
-                if !url.contains('?') {
-                    url.push('?');
-                } else if !url.ends_with('?') && !url.ends_with('&') {
-                    url.push('&');
-                }
+        let mut last_err = AuthError::Other(anyhow!("no attempts made"));
+        for attempt in 0..=self.retry_count {
+            if attempt > 0 {
+                tokio::time::sleep(self.retry_delay).await;
+                info!(attempt, "retrying HTTP auth request");
+            }
 
-                url.push_str(&format!(
-                    "{}={}&{}={}&{}={}",
-                    self.username_field,
-                    urlencoding::encode(username),
-                    self.realm_field,
-                    urlencoding::encode(realm.unwrap_or("")),
-                    self.request_uri_field,
-                    urlencoding::encode(&request_uri),
-                ));
+            let mut request_builder = match self.method {
+                Method::GET => {
+                    let mut url = self.url.clone();
+                    if !url.contains('?') {
+                        url.push('?');
+                    } else if !url.ends_with('?') && !url.ends_with('&') {
+                        url.push('&');
+                    }
 
-                for (key, value) in &sip_params {
                     url.push_str(&format!(
-                        "&{}={}",
-                        urlencoding::encode(key),
-                        urlencoding::encode(value)
+                        "{}={}&{}={}&{}={}",
+                        self.username_field,
+                        urlencoding::encode(username),
+                        self.realm_field,
+                        urlencoding::encode(realm.unwrap_or("")),
+                        self.request_uri_field,
+                        urlencoding::encode(&request_uri),
                     ));
+
+                    for (key, value) in &sip_params {
+                        url.push_str(&format!(
+                            "&{}={}",
+                            urlencoding::encode(key),
+                            urlencoding::encode(value)
+                        ));
+                    }
+
+                    self.client.get(url)
                 }
+                Method::POST => {
+                    let mut form = HashMap::new();
+                    form.insert(self.username_field.clone(), username.to_string());
+                    form.insert(self.realm_field.clone(), realm.unwrap_or("").to_string());
+                    form.insert(self.request_uri_field.clone(), request_uri.clone());
+                    for (key, value) in &sip_params {
+                        form.insert(key.clone(), value.clone());
+                    }
 
-                self.client.get(url)
-            }
-            Method::POST => {
-                let mut form = HashMap::new();
-                form.insert(self.username_field.clone(), username.to_string());
-                form.insert(self.realm_field.clone(), realm.unwrap_or("").to_string());
-                form.insert(self.request_uri_field.clone(), request_uri);
-                for (key, value) in &sip_params {
-                    form.insert(key.clone(), value.clone());
+                    self.client.post(&self.url).form(&form)
                 }
+                _ => return Err(AuthError::Other(anyhow!("Unsupported HTTP method"))),
+            };
 
-                self.client.post(&self.url).form(&form)
+            for (key, value) in &self.headers {
+                request_builder = request_builder.header(key, value);
             }
-            _ => return Err(AuthError::Other(anyhow!("Unsupported HTTP method"))),
-        };
 
-        for (key, value) in &self.headers {
-            request_builder = request_builder.header(key, value);
+            match request_builder.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_server_error() && attempt < self.retry_count {
+                        warn!(attempt, %status, "HTTP auth server error, will retry");
+                        continue;
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    warn!(attempt, error = %e, "HTTP auth request failed");
+                    last_err = AuthError::Other(anyhow!("HTTP request error: {}", e));
+                }
+            }
         }
+        Err(last_err)
+    }
 
-        let response = request_builder
-            .send()
-            .await
-            .map_err(|e| AuthError::Other(anyhow!("HTTP request error: {}", e)))?;
+    /// Core method: fetch user from HTTP service. Used by both
+    /// `UserBackend::get_user` (Digest path) and the token-auth wrapper.
+    pub async fn fetch_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        request: Option<&rsipstack::sip::Request>,
+    ) -> Result<Option<SipUser>, AuthError> {
+        let start_time = Instant::now();
+
+        let response = self.send_with_retry(username, realm, request).await?;
 
         info!(
             username,
@@ -197,6 +247,21 @@ impl UserBackend for HttpUserBackend {
     }
 }
 
+#[async_trait]
+impl UserBackend for HttpUserBackend {
+    async fn is_same_realm(&self, _realm: &str) -> bool {
+        false
+    }
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        request: Option<&rsipstack::sip::Request>,
+    ) -> Result<Option<SipUser>, AuthError> {
+        self.fetch_user(username, realm, request).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +273,10 @@ mod tests {
             "http://rustpbx.com/auth",
             &Some("POST".to_string()),
             &Some("username".to_string()),
+            &None,
+            &None,
+            &None,
+            &None,
             &None,
             &None,
             &None,
@@ -230,6 +299,10 @@ mod tests {
             &None,
             &None,
             &Some(headers.clone()),
+            &None,
+            &None,
+            &None,
+            &None,
             &None,
         );
 

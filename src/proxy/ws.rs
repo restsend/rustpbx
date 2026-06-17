@@ -6,15 +6,20 @@ use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
 };
+use std::sync::Arc;
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use super::pre_auth_registry::PreAuthRegistry;
 
 pub async fn sip_ws_handler(
     token: CancellationToken,
     client_addr: ClientAddr,
     socket: WebSocket,
     endpoint_ref: EndpointInnerRef,
+    pre_authed_agent: Option<String>,
+    pre_auth_registry: Option<Arc<PreAuthRegistry>>,
 ) {
     let (mut ws_sink, mut ws_read) = socket.split();
     let (from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
@@ -50,6 +55,12 @@ pub async fn sip_ws_handler(
         addr = %local_addr,
         "created WebSocket channel connection"
     );
+
+    // Register pre-authenticated agent if provided (path B: JWT WS pre-auth)
+    if let (Some(agent), Some(registry)) = (&pre_authed_agent, &pre_auth_registry) {
+        registry.register(local_addr.clone(), agent.clone()).await;
+        info!(addr = %local_addr, agent = %agent, "WebSocket pre-authenticated");
+    }
 
     endpoint_ref
         .transport_layer
@@ -161,5 +172,9 @@ pub async fn sip_ws_handler(
     }
     ws_token.cancel();
     endpoint_ref.transport_layer.del_connection(&local_addr);
+    // Clean up pre-auth registry entry
+    if let Some(ref registry) = pre_auth_registry {
+        registry.remove(&local_addr).await;
+    }
     info!(addr = %local_addr, "WebSocket connection handler exiting");
 }

@@ -231,27 +231,27 @@ impl ClusterEventHub {
     async fn dispatch_local_locator_event(&self, event: LocatorEvent) {
         let source = EventSource::Local;
 
-        // Notify addon handlers
-        self.notify_locator_handlers(&event, &source).await;
-
-        // Forward to peers
+        // Forward to peers and notify addon handlers.
+        //
+        // For Offline events (batch of locations), split into individual
+        // Unregistered events so that handlers and peers each process every
+        // location exactly once.  Previously the full Offline batch was sent
+        // to handlers *and* then each location again as Unregistered, causing
+        // double-processing.
         if let LocatorEvent::Offline(locs) = &event {
             if !locs.is_empty() {
                 for loc in locs.iter() {
                     let single = LocatorEvent::Unregistered(loc.clone());
-                    self.notify_locator_handlers_for_offline(loc, &single).await;
+                    self.notify_locator_handlers(&single, &source).await;
                     self.send_locator_to_peers(&single).await;
                 }
                 return;
             }
         }
-        self.send_locator_to_peers(&event).await;
-    }
 
-    /// For Offline events, also notify handlers with the Unregistered event
-    async fn notify_locator_handlers_for_offline(&self, _loc: &Location, event: &LocatorEvent) {
-        let source = EventSource::Local;
-        self.notify_locator_handlers(event, &source).await;
+        // For Registered / Unregistered (and empty Offline) events.
+        self.notify_locator_handlers(&event, &source).await;
+        self.send_locator_to_peers(&event).await;
     }
 
     /// Remote locator event (from peer MESSAGE).
@@ -1141,6 +1141,57 @@ mod tests {
         assert_eq!(
             hub.presence_manager.get_state("4001").status,
             PresenceStatus::Offline
+        );
+    }
+
+    #[tokio::test]
+    async fn test_offline_event_no_double_notification() {
+        // Regression test: Offline events with N locations must notify
+        // handlers exactly N times (once per location), NOT N+1.
+        // Previously the full Offline batch was sent to handlers AND then
+        // each location was sent individually, causing double-processing.
+        let (locator_tx, _) = tokio::sync::broadcast::channel(4);
+        let presence_manager = Arc::new(PresenceManager::new(None));
+        let transport_layer =
+            rsipstack::transport::TransportLayer::new(tokio_util::sync::CancellationToken::new());
+        let endpoint = rsipstack::EndpointBuilder::new()
+            .with_transport_layer(transport_layer)
+            .build();
+        let hub = Arc::new(ClusterEventHub::new(
+            locator_tx.clone(),
+            presence_manager,
+            endpoint.inner.clone(),
+            "127.0.0.1:5060".parse().unwrap(),
+            vec![],
+        ));
+
+        let handler = Arc::new(CountingHandler::new());
+        hub.register_handler(handler.clone());
+
+        // Start the hub's broadcast subscriber loop.
+        hub.clone().start().await;
+
+        // Send an Offline event with 2 locations.
+        let loc1 = Location {
+            aor: "sip:5001@pbx.local".parse().unwrap(),
+            ..Default::default()
+        };
+        let loc2 = Location {
+            aor: "sip:5002@pbx.local".parse().unwrap(),
+            ..Default::default()
+        };
+        let _ = locator_tx.send(LocatorEvent::Offline(vec![loc1, loc2]));
+
+        // Give the async dispatch loop time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Each location should be delivered exactly once as Unregistered.
+        // Before the fix this would be 3 (1 Offline batch + 2 individual).
+        let count = *handler.locator_count.lock().unwrap();
+        assert_eq!(
+            count, 2,
+            "Offline event with 2 locations must notify handlers exactly 2 times, got {}",
+            count
         );
     }
 

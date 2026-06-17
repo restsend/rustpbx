@@ -113,6 +113,7 @@ pub async fn create_test_server_with_config(
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
+        pre_auth_registry: None,
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
         media_engine: {

@@ -66,7 +66,7 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
 
 ## Core Capabilities
 
-**SIP & Media** — Full SIP stack (UDP/TCP/WS/TLS/WebRTC), RTP relay, NAT traversal, TLS/SRTP with auto ACME certs.
+**SIP & Media** — Full SIP stack (UDP/TCP/WS/TLS/WebRTC), RTP relay, NAT traversal, TLS/SRTP with auto ACME certs. Fast registration via JWT or HTTP token (skip 401/407).
 
 **Routing & Control** — HTTP Router (dynamic routing decisions), RWI WebSocket Interface (real-time call control), Queue/ACD (sequential or parallel agent ringing).
 
@@ -230,6 +230,7 @@ git submodule update --remote src/addons/cc
 | Guide | Description |
 |---|---|---|
 | [Configuration Guide](docs/configuration.md) | All config options |
+| [Authentication](docs/config/03-auth-users.md) | User backends, JWT & HTTP token fast registration |
 | [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Call Control, Recording |
 | [RWI Protocol](docs/rwi.md) | WebSocket Interface |
 | [RWI Events Reference](docs/rwi_events_reference.md) | Event types, fields, JSON examples (中文) |
