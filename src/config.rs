@@ -406,6 +406,21 @@ pub enum UserBackendConfig {
         request_uri_field: Option<String>,
         headers: Option<HashMap<String, String>>,
         sip_headers: Option<Vec<String>>,
+        /// If set, enables one-shot token auth: when the SIP request carries
+        /// this header, the token is forwarded to the HTTP service for
+        /// immediate validation (skipping the 401/407 Digest challenge).
+        token_header: Option<String>,
+        /// HTTP request timeout in milliseconds (applies to both token auth
+        /// and Digest password lookup). Default: 5000.
+        http_timeout_ms: Option<u64>,
+        /// Number of retries on HTTP failure. Default: 1.
+        http_retry_count: Option<u32>,
+        /// Delay between retries in milliseconds. Default: 500.
+        http_retry_delay_ms: Option<u64>,
+        /// Token cache TTL in seconds. 0 = disabled. Default: 0.
+        token_cache_ttl_secs: Option<u64>,
+        /// Maximum token cache entries (LRU eviction). Default: 10000.
+        token_cache_size: Option<usize>,
     },
     Plain {
         path: String,
@@ -701,6 +716,35 @@ pub struct LocatorWebhookConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JwtAuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub secret: String,
+    #[serde(default = "default_jwt_user_id_claim")]
+    pub user_id_claim: String,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default = "default_jwt_sip_header")]
+    pub sip_header_name: String,
+    #[serde(default)]
+    pub check_local_user: bool,
+    #[serde(default = "default_jwt_ws_token_param")]
+    pub ws_token_param: String,
+}
+
+fn default_jwt_user_id_claim() -> String {
+    "userId".to_string()
+}
+fn default_jwt_sip_header() -> String {
+    "X-Auth-Token".to_string()
+}
+fn default_jwt_ws_token_param() -> String {
+    "token".to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
@@ -821,6 +865,8 @@ pub struct ProxyConfig {
     pub contact_username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtc_cname: Option<String>,
+    #[serde(default)]
+    pub jwt_auth: Option<JwtAuthConfig>,
 }
 
 /// Emergency number routing configuration.
@@ -1195,6 +1241,7 @@ impl Default for ProxyConfig {
             emergency: None,
             contact_username: None,
             rtc_cname: None,
+            jwt_auth: None,
         }
     }
 }

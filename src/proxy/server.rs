@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     auto_external_ip,
+    auth::{jwt_auth_backend::JwtAuthBackend, jwt_validator::JwtValidator},
     call::{TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
@@ -20,6 +21,7 @@ use crate::{
         cluster_event::{ClusterEventHub, ClusterEventModule},
         locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
         presence::PresenceManager,
+        pre_auth_registry::PreAuthRegistry,
     },
     sipflow::SipFlowBackend,
     sipflow::backend::create_backend,
@@ -104,6 +106,8 @@ pub struct SipServerInner {
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks (connected, held, unheld, ended).
     pub session_hooks: Arc<Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>>,
+    /// Pre-auth registry for WebSocket connections authenticated via JWT (path B).
+    pub pre_auth_registry: Option<Arc<PreAuthRegistry>>,
     /// Resolved contact username (from config or random hex).
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
@@ -393,7 +397,93 @@ impl SipServerBuilder {
                 }
             }
         };
-        let auth_backend = self.auth_backend;
+
+        // Build JWT auth backend if configured
+        let mut auth_backend = self.auth_backend;
+        if let Some(ref jwt_cfg) = self.config.jwt_auth {
+            if jwt_cfg.enabled {
+                let validator = JwtValidator::new(jwt_cfg);
+                let local_ub = if jwt_cfg.check_local_user {
+                    match build_user_backend(self.config.as_ref()).await {
+                        Ok(ub) => Some(ub),
+                        Err(e) => {
+                            warn!("failed to create user backend for JWT auth: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let jwt_backend = JwtAuthBackend::new(
+                    validator,
+                    local_ub,
+                    jwt_cfg.sip_header_name.clone(),
+                );
+                info!(
+                    header = %jwt_cfg.sip_header_name,
+                    check_local = jwt_cfg.check_local_user,
+                    "JWT auth backend enabled"
+                );
+                auth_backend.push(Box::new(jwt_backend));
+            }
+        }
+
+        // Build HTTP token auth backend from user_backends config
+        for backend_cfg in &self.config.user_backends {
+            if let crate::config::UserBackendConfig::Http {
+                url,
+                method,
+                username_field,
+                realm_field,
+                request_uri_field,
+                headers,
+                sip_headers,
+                token_header: Some(token_hdr),
+                http_timeout_ms,
+                http_retry_count,
+                http_retry_delay_ms,
+                token_cache_ttl_secs,
+                token_cache_size,
+            } = backend_cfg
+            {
+                let http_backend = crate::proxy::user_http::HttpUserBackend::new(
+                    url,
+                    method,
+                    username_field,
+                    realm_field,
+                    request_uri_field,
+                    headers,
+                    sip_headers,
+                    &Some(token_hdr.clone()),
+                    http_timeout_ms,
+                    http_retry_count,
+                    http_retry_delay_ms,
+                );
+                let cache_ttl = Duration::from_secs(token_cache_ttl_secs.unwrap_or(0));
+                let cache_size = token_cache_size.unwrap_or(10000);
+                let token_backend =
+                    crate::auth::http_token_auth_backend::HttpTokenAuthBackend::new(
+                        http_backend,
+                        token_hdr.clone(),
+                        cache_ttl,
+                        cache_size,
+                    );
+                info!(
+                    header = %token_hdr,
+                    cache_ttl_secs = token_cache_ttl_secs.unwrap_or(0),
+                    "HTTP token auth backend enabled"
+                );
+                auth_backend.push(Box::new(token_backend));
+            }
+        }
+
+        // Create pre-auth registry for WebSocket JWT pre-authentication (path B)
+        let pre_auth_registry = if self.config.jwt_auth.as_ref().is_some_and(|c| c.enabled) {
+            Some(PreAuthRegistry::new())
+        } else {
+            None
+        };
+
         let locator = if let Some(locator) = self.locator {
             locator
         } else {
@@ -786,6 +876,7 @@ impl SipServerBuilder {
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
+            pre_auth_registry,
             contact_username: self
                 .config
                 .contact_username

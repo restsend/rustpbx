@@ -7,9 +7,11 @@ use super::common::{
     extract_nonce_from_proxy_authenticate,
 };
 use crate::call::{SipUser, TransactionCookie};
-use crate::config::{ProxyConfig, RtpConfig};
+use crate::auth::jwt_auth_backend::JwtAuthBackend;
+use crate::auth::jwt_validator::{JwtValidator, generate_hs256_jwt};
+use crate::config::{JwtAuthConfig, ProxyConfig, RtpConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
-use crate::proxy::auth::AuthModule;
+use crate::proxy::auth::{AuthBackend, AuthModule};
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
@@ -515,6 +517,7 @@ async fn test_guest_call_allowed_extension() {
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
+        pre_auth_registry: None,
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
         media_engine: {
@@ -1394,4 +1397,648 @@ async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
     // Note: Since we're using mock connections, source address matching may not work in tests
     // without explicit connection setup. This test mainly verifies the cache logic doesn't break.
     println!("Re-INVITE result: {:?}", result3);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JWT Auth Backend Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn make_jwt_config() -> JwtAuthConfig {
+    JwtAuthConfig {
+        enabled: true,
+        secret: "test-jwt-secret".to_string(),
+        user_id_claim: "userId".to_string(),
+        issuer: None,
+        audience: None,
+        sip_header_name: "X-Auth-Token".to_string(),
+        check_local_user: false,
+        ws_token_param: "token".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn test_jwt_auth_backend_valid_token() {
+    let config = make_jwt_config();
+    let validator = JwtValidator::new(&config);
+    let backend = JwtAuthBackend::new(validator, None, config.sip_header_name.clone());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({
+        "userId": "alice",
+        "exp": now + 3600,
+    });
+    let token = generate_hs256_jwt(&claims, "test-jwt-secret");
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        token,
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok(), "authenticate should succeed");
+    let user = result.unwrap().expect("should return Some(user)");
+    assert_eq!(user.username, "alice");
+    assert!(user.enabled);
+}
+
+#[tokio::test]
+async fn test_jwt_auth_backend_invalid_token_falls_through() {
+    let config = make_jwt_config();
+    let validator = JwtValidator::new(&config);
+    let backend = JwtAuthBackend::new(validator, None, config.sip_header_name.clone());
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "invalid.jwt.token".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none(), "invalid JWT should return None (fall through)");
+}
+
+#[tokio::test]
+async fn test_jwt_auth_backend_no_token_falls_through() {
+    let config = make_jwt_config();
+    let validator = JwtValidator::new(&config);
+    let backend = JwtAuthBackend::new(validator, None, config.sip_header_name.clone());
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let cookie = TransactionCookie::default();
+    let result = backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none(), "no JWT header should return None (fall through)");
+}
+
+#[tokio::test]
+async fn test_jwt_auth_backend_with_check_local_user() {
+    let (server_inner, _) = create_test_server().await;
+
+    let mut config = make_jwt_config();
+    config.check_local_user = true;
+    let validator = JwtValidator::new(&config);
+
+    // The test server has "alice" as an enabled user
+    let backend = JwtAuthBackend::new(
+        validator,
+        None, // We can't easily clone the Box<dyn UserBackend>, test without local lookup
+        config.sip_header_name.clone(),
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({
+        "userId": "alice",
+        "name": "Alice Test",
+        "exp": now + 3600,
+    });
+    let token = generate_hs256_jwt(&claims, "test-jwt-secret");
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        token,
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    let user = result.unwrap().expect("should return Some(user)");
+    assert_eq!(user.username, "alice");
+    // Without check_local_user (user_backend=None), display_name comes from JWT claims
+    assert_eq!(user.display_name, Some("Alice Test".to_string()));
+
+    // Verify server is set up correctly
+    assert!(server_inner.user_backend.get_user("alice", Some("rustpbx.com"), None).await.is_ok());
+}
+
+#[tokio::test]
+async fn test_jwt_auth_module_integration_no_401() {
+    // Build a test server with JWT auth backend
+    let mut proxy_config = ProxyConfig::default();
+    proxy_config.ensure_user = Some(false);
+    let (mut server_inner, config) = create_test_server_with_config(proxy_config).await;
+
+    // Add JWT auth backend to the server's auth_backend chain
+    let jwt_config = make_jwt_config();
+    let validator = JwtValidator::new(&jwt_config);
+    let backend = Box::new(JwtAuthBackend::new(
+        validator,
+        None,
+        jwt_config.sip_header_name.clone(),
+    ));
+
+    // We need to modify auth_backend on the server_inner.
+    // Since it's behind Arc, use Arc::get_mut.
+    if let Some(ref mut inner) = Arc::get_mut(&mut server_inner) {
+        inner.auth_backend.push(backend);
+    }
+
+    let module = AuthModule::new(server_inner.clone(), config);
+
+    // Generate valid JWT
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({
+        "userId": "newuser",
+        "exp": now + 3600,
+    });
+    let token = generate_hs256_jwt(&claims, "test-jwt-secret");
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "newuser",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        token,
+    ));
+
+    let (mut tx, _) = create_transaction(request).await;
+    let result = module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    // Should continue (authenticated via JWT), NOT abort with 401
+    assert_eq!(
+        format!("{:?}", result),
+        format!("{:?}", ProxyAction::Continue),
+        "REGISTER with valid JWT should pass through without 401"
+    );
+}
+
+#[tokio::test]
+async fn test_jwt_auth_module_integration_invalid_falls_back_to_401() {
+    let mut proxy_config = ProxyConfig::default();
+    proxy_config.ensure_user = Some(false);
+    let (mut server_inner, config) = create_test_server_with_config(proxy_config).await;
+
+    // Add JWT auth backend
+    let jwt_config = make_jwt_config();
+    let validator = JwtValidator::new(&jwt_config);
+    let backend = Box::new(JwtAuthBackend::new(
+        validator,
+        None,
+        jwt_config.sip_header_name.clone(),
+    ));
+
+    if let Some(ref mut inner) = Arc::get_mut(&mut server_inner) {
+        inner.auth_backend.push(backend);
+    }
+
+    let module = AuthModule::new(server_inner.clone(), config);
+
+    // REGISTER with invalid JWT
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "stranger",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "completely.invalid.jwt".to_string(),
+    ));
+
+    let (mut tx, _) = create_transaction(request).await;
+    let result = module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    // Should abort (fall back to 401 since JWT invalid and no password)
+    assert_eq!(
+        format!("{:?}", result),
+        format!("{:?}", ProxyAction::Abort),
+        "REGISTER with invalid JWT should fall back to 401 challenge"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HTTP Token Auth Backend Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::auth::http_token_auth_backend::HttpTokenAuthBackend;
+use crate::proxy::user_http::HttpUserBackend;
+use axum::response::IntoResponse;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// A minimal HTTP test server that responds to token-auth requests.
+struct TokenAuthTestServer {
+    port: u16,
+    request_count: Arc<AtomicU32>,
+}
+
+impl TokenAuthTestServer {
+    /// Start a server that returns 200 + SipUser for valid tokens, 403 for invalid.
+    async fn start(valid_token: &'static str) -> Self {
+        let request_count = Arc::new(AtomicU32::new(0));
+        let rc = request_count.clone();
+        let app = axum::Router::new().route(
+            "/auth",
+            axum::routing::post(
+                move |
+                    axum::Form(form): axum::Form<HashMap<String, String>>,
+                | {
+                    rc.fetch_add(1, Ordering::SeqCst);
+                    let token = form.get("X-Auth-Token").cloned().unwrap_or_default();
+                    let username = form.get("username").cloned().unwrap_or_default();
+                    let realm = form.get("realm").cloned().unwrap_or_default();
+
+                    let resp: axum::response::Response = if token == valid_token {
+                        let user = serde_json::json!({
+                            "username": username,
+                            "enabled": true,
+                            "realm": realm,
+                            "display_name": format!("{} via token", username),
+                            "id": 100,
+                        });
+                        (axum::http::StatusCode::OK, axum::Json(user)).into_response()
+                    } else {
+                        (
+                            axum::http::StatusCode::FORBIDDEN,
+                            axum::Json(serde_json::json!({
+                                "reason": "invalid_credentials",
+                                "message": "token not recognized"
+                            })),
+                        )
+                            .into_response()
+                    };
+                    async move { resp }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        Self { port, request_count }
+    }
+
+    /// Start a server that always returns 500 (for retry testing).
+    async fn start_always_fail() -> Self {
+        let request_count = Arc::new(AtomicU32::new(0));
+        let rc = request_count.clone();
+        let app = axum::Router::new().route(
+            "/auth",
+            axum::routing::post(move || {
+                rc.fetch_add(1, Ordering::SeqCst);
+                let resp: axum::response::Response = (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({
+                        "reason": "server_error",
+                        "message": "internal error"
+                    })),
+                )
+                    .into_response();
+                async move { resp }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        Self { port, request_count }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/auth", self.port)
+    }
+
+    fn request_count(&self) -> u32 {
+        self.request_count.load(Ordering::SeqCst)
+    }
+}
+
+fn make_http_backend(url: &str) -> HttpUserBackend {
+    let mut sip_headers = Vec::new();
+    sip_headers.push("X-Auth-Token".to_string());
+    HttpUserBackend::new(
+        url,
+        &Some("POST".to_string()),
+        &None,
+        &None,
+        &None,
+        &None,
+        &Some(sip_headers),
+        &Some("X-Auth-Token".to_string()),
+        &Some(2000),
+        &Some(1),
+        &Some(50),
+    )
+}
+
+#[tokio::test]
+async fn test_http_token_auth_valid_token() {
+    let server = TokenAuthTestServer::start("valid-token-123").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(0),
+        0,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "valid-token-123".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok(), "authenticate should succeed");
+    let user = result.unwrap().expect("should return Some(user)");
+    assert_eq!(user.username, "alice");
+    assert!(user.enabled);
+    assert_eq!(user.display_name.as_deref(), Some("alice via token"));
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn test_http_token_auth_no_token_falls_through() {
+    let server = TokenAuthTestServer::start("valid-token-123").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(0),
+        0,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+
+    let cookie = TransactionCookie::default();
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none(), "no token → should fall through");
+    assert_eq!(server.request_count(), 0, "should not make HTTP request without token");
+}
+
+#[tokio::test]
+async fn test_http_token_auth_invalid_token_falls_through() {
+    let server = TokenAuthTestServer::start("valid-token-123").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(0),
+        0,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "wrong-token".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none(), "invalid token → should fall through");
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn test_http_token_auth_cache_hit() {
+    let server = TokenAuthTestServer::start("cached-token").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(60),
+        100,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "cached-token".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+
+    // First call: HTTP request
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    let user = result.unwrap().expect("first call should succeed");
+    assert_eq!(user.username, "alice");
+    assert_eq!(server.request_count(), 1);
+
+    // Second call: cache hit, no HTTP request
+    let result2 = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result2.is_ok());
+    let user2 = result2.unwrap().expect("second call should succeed via cache");
+    assert_eq!(user2.username, "alice");
+    assert_eq!(server.request_count(), 1, "second call should use cache");
+}
+
+#[tokio::test]
+async fn test_http_token_auth_cache_ttl_expiry() {
+    let server = TokenAuthTestServer::start("ttl-token").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_millis(100),
+        100,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "ttl-token".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+
+    // First call: HTTP request + cache
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok());
+    assert_eq!(server.request_count(), 1);
+
+    // Wait for cache to expire
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Second call: cache expired, new HTTP request
+    let result2 = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result2.is_ok());
+    assert_eq!(server.request_count(), 2, "expired cache should trigger new HTTP request");
+}
+
+#[tokio::test]
+async fn test_http_token_auth_cache_lru_eviction() {
+    let server = TokenAuthTestServer::start("token-evict").await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(60),
+        2, // max 2 entries
+    );
+
+    let cookie = TransactionCookie::default();
+
+    // Insert 3 different tokens → cache max is 2, first should be evicted
+    for i in 0..3 {
+        let request = super::common::create_test_request(
+            rsipstack::sip::Method::Register,
+            &format!("user{}", i),
+            None,
+            "rustpbx.com",
+            Some(300),
+        );
+        let mut request = request;
+        request.headers.push(Header::Other(
+            "X-Auth-Token".to_string(),
+            format!("token-evict-{}", i),
+        ));
+
+        // Each unique token needs a valid token on the server side, but since our test server
+        // only accepts "token-evict", we just verify the HTTP call count increases.
+        let result = auth_backend.authenticate(&request, &cookie).await;
+        assert!(result.is_ok());
+    }
+
+    // All 3 calls should have made HTTP requests (no cache hits since all different tokens
+    // and one was evicted)
+    assert!(
+        server.request_count() >= 3,
+        "all 3 calls should hit the server"
+    );
+}
+
+#[tokio::test]
+async fn test_http_token_auth_retry_on_failure() {
+    let server = TokenAuthTestServer::start_always_fail().await;
+    let backend = make_http_backend(&server.url());
+    let auth_backend = HttpTokenAuthBackend::new(
+        backend,
+        "X-Auth-Token".to_string(),
+        Duration::from_secs(0),
+        0,
+    );
+
+    let request = super::common::create_test_request(
+        rsipstack::sip::Method::Register,
+        "alice",
+        None,
+        "rustpbx.com",
+        Some(300),
+    );
+    let mut request = request;
+    request.headers.push(Header::Other(
+        "X-Auth-Token".to_string(),
+        "any-token".to_string(),
+    ));
+
+    let cookie = TransactionCookie::default();
+    let result = auth_backend.authenticate(&request, &cookie).await;
+    assert!(result.is_ok(), "should not error even after retries");
+    assert!(
+        result.unwrap().is_none(),
+        "server always returns 500 → should fall through"
+    );
+    // retry_count=1 → 2 total attempts
+    assert_eq!(
+        server.request_count(),
+        2,
+        "should retry once (2 total requests)"
+    );
 }

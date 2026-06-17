@@ -183,6 +183,12 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             request_uri_field,
             headers,
             sip_headers,
+            token_header,
+            http_timeout_ms,
+            http_retry_count,
+            http_retry_delay_ms,
+            token_cache_ttl_secs: _,
+            token_cache_size: _,
         } => {
             let backend = HttpUserBackend::new(
                 url,
@@ -192,6 +198,10 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 request_uri_field,
                 headers,
                 sip_headers,
+                token_header,
+                http_timeout_ms,
+                http_retry_count,
+                http_retry_delay_ms,
             );
             Ok(Box::new(backend) as Box<dyn UserBackend>)
         }

@@ -1,3 +1,6 @@
+pub mod http_token_auth_backend;
+pub mod jwt_auth_backend;
+pub mod jwt_validator;
 pub mod phone_auth;
 
 use std::sync::Arc;

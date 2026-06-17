@@ -99,6 +99,29 @@ users = [
 [[proxy.user_backends]]
 type = "extension"
 
+# JWT Fast Registration — skip 401/407 Digest challenge for JWT-authenticated clients.
+# See docs/config/03-auth-users.md for full documentation.
+# [proxy.jwt_auth]
+# enabled = true
+# secret = "your-shared-hs256-secret"
+# user_id_claim = "userId"
+# check_local_user = false
+
+# HTTP Token Auth Backend — one-shot token auth via external HTTP service.
+# Add token_header to any HTTP user backend to enable one-shot registration.
+# See docs/config/03-auth-users.md for full documentation.
+# [[proxy.user_backends]]
+# type = "http"
+# url = "https://auth-service.example.com/sip-auth"
+# method = "POST"
+# sip_headers = ["X-Auth-Token"]     # Forward token to external service
+# token_header = "X-Auth-Token"      # Enable one-shot token auth (skip 407)
+# http_timeout_ms = 5000             # Default: 5000
+# http_retry_count = 1              # Default: 1 (retries on network error + 5xx)
+# http_retry_delay_ms = 500         # Default: 500
+# token_cache_ttl_secs = 60         # Default: 0 (disabled). Recommended: 30-300
+# token_cache_size = 10000          # Default: 10000 (LRU eviction)
+
 # Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
 # audio_codecs = ["pcma","pcmu","g722","opus"]
 

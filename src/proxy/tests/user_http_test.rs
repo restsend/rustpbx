@@ -13,11 +13,12 @@ async fn test_http_backend_creation() -> Result<()> {
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
-    // Test that the backend was created successfully
-    // We can't easily test the actual HTTP functionality without a real server
-    // but we can test that construction works correctly
     Ok(())
 }
 
@@ -35,9 +36,12 @@ async fn test_http_backend_with_custom_headers() -> Result<()> {
         &None,
         &Some(headers),
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
-    // Test that the backend was created successfully with custom headers
     Ok(())
 }
 
@@ -51,9 +55,12 @@ async fn test_http_backend_with_post_method() -> Result<()> {
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
-    // Test that the backend was created successfully with POST method
     Ok(())
 }
 
@@ -67,33 +74,35 @@ async fn test_http_backend_with_defaults() -> Result<()> {
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
-    // Test that the backend was created successfully with default values
     Ok(())
 }
 
 #[tokio::test]
 async fn test_http_backend_get_user() -> Result<()> {
     let backend = HttpUserBackend::new(
-        "http://httpbin.org/json", // Use a real endpoint for basic testing
+        "http://httpbin.org/json",
         &Some("GET".to_string()),
         &Some("username".to_string()),
         &Some("realm".to_string()),
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
-    // Note: This test will fail if httpbin.org is not available
-    // In a real test environment, you'd use a mock server
-    // For now, we just test that the method exists and can be called
     let result = backend
         .get_user("testuser", Some("rustpbx.com"), None)
         .await;
 
-    // We expect this to fail since httpbin.org/json doesn't return SipUser format
-    // But it verifies the method signature and that the HTTP client works
     assert!(result.is_err());
 
     Ok(())
