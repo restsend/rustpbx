@@ -1,4 +1,7 @@
-use super::locator::{Locator, RealmChecker, is_local_realm, sort_locations_by_recency};
+use super::locator::{
+    Locator, RealmChecker, choose_registered_aor, is_local_realm, is_location_expired,
+    is_webrtc_invalid_host, now_epoch_secs, sort_locations_by_recency, UNREGISTER_GRACE_SECS,
+};
 use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,7 +12,7 @@ use sea_orm_migration::schema::{
     big_integer, boolean, string_len, string_len_null, timestamp_with_time_zone as timestamp,
 };
 use sea_orm_migration::sea_query::ColumnDef as MigrationColumnDef;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -203,44 +206,6 @@ fn decode_sip_addr(value: &str) -> Option<SipAddr> {
         .map(SipAddr::from)
 }
 
-fn fallback_registered_aor(
-    username: &str,
-    realm: &str,
-    fallback: &rsipstack::sip::Uri,
-) -> rsipstack::sip::Uri {
-    let user = username.trim();
-    let host = realm.trim();
-    if user.is_empty() || host.is_empty() {
-        return fallback.clone();
-    }
-
-    let candidate = format!("sip:{}@{}", user, host);
-    rsipstack::sip::Uri::try_from(candidate.as_str()).unwrap_or_else(|_| fallback.clone())
-}
-
-fn choose_registered_aor(
-    username: &str,
-    realm: &str,
-    contact_aor: &rsipstack::sip::Uri,
-    decoded_registered_aor: Option<rsipstack::sip::Uri>,
-) -> rsipstack::sip::Uri {
-    let fallback = fallback_registered_aor(username, realm, contact_aor);
-    let strict_equals = |a: &rsipstack::sip::Uri, b: &rsipstack::sip::Uri| {
-        a.to_string().eq_ignore_ascii_case(&b.to_string())
-    };
-
-    match decoded_registered_aor {
-        Some(registered)
-            if strict_equals(&registered, contact_aor)
-                && !strict_equals(&fallback, contact_aor) =>
-        {
-            fallback
-        }
-        Some(registered) => registered,
-        None => fallback,
-    }
-}
-
 fn encode_location_metadata(
     user_agent: Option<&str>,
     home_proxy: Option<&SipAddr>,
@@ -367,10 +332,7 @@ impl Locator for DbLocator {
             .unwrap_or(rsipstack::sip::transport::Transport::Udp);
         let host = addr.to_string();
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = now_epoch_secs();
 
         if expires <= 0 {
             Entity::delete_many()
@@ -456,9 +418,18 @@ impl Locator for DbLocator {
             .r#type
             .map(|t| t.to_string())
             .unwrap_or_else(|| "UDP".to_string());
+
+        // Only remove rows registered more than GRACE_SECS ago. This guards
+        // against the rapid-reconnect race: a WS client reconnects and reuses
+        // the same NAT ip:port, then the stale close event for the previous
+        // connection arrives and would otherwise delete the fresh row.
+        let now_epoch = now_epoch_secs();
+        let cutoff = now_epoch - UNREGISTER_GRACE_SECS;
+
         let removed_locations = Entity::find()
             .filter(Column::Destination.eq(&host))
             .filter(Column::Transport.eq(&transport))
+            .filter(Column::LastModified.lt(cutoff))
             .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup before unregister: {}", e))?;
@@ -469,6 +440,7 @@ impl Locator for DbLocator {
         Entity::delete_many()
             .filter(Column::Destination.eq(&host))
             .filter(Column::Transport.eq(&transport))
+            .filter(Column::LastModified.lt(cutoff))
             .exec(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on unregister with address: {}", e))?;
@@ -550,10 +522,7 @@ impl Locator for DbLocator {
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
-        let now_epoch = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now_epoch = now_epoch_secs();
 
         let target_aor = uri.to_string();
         let mut models = Entity::find()
@@ -565,7 +534,7 @@ impl Locator for DbLocator {
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
 
-        if models.is_empty() && uri.host().to_string().ends_with(".invalid") {
+        if models.is_empty() && is_webrtc_invalid_host(&uri.host().to_string()) {
             if let Some(username) = uri.user() {
                 let username_key = username.trim().to_ascii_lowercase();
                 if !username_key.is_empty() {
@@ -622,13 +591,12 @@ impl Locator for DbLocator {
         }
 
         let mut locations = Vec::new();
+        let mut expired_ids = Vec::new();
         let now_instant = Instant::now();
         for model in models {
-            if model.expires > 0 {
-                let elapsed = now_epoch - model.last_modified;
-                if elapsed >= model.expires {
-                    continue;
-                }
+            if is_location_expired(model.expires, model.last_modified, now_epoch) {
+                expired_ids.push(model.id);
+                continue;
             }
             let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
@@ -682,6 +650,18 @@ impl Locator for DbLocator {
                 home_proxy,
                 ..Default::default()
             });
+        }
+
+        // Best-effort cleanup of expired bindings so they don't shadow live
+        // registrations in subsequent .invalid username lookups (which order by
+        // recency). Expired rows were previously only skipped, never deleted.
+        if !expired_ids.is_empty()
+            && let Err(e) = Entity::delete_many()
+                .filter(Column::Id.is_in(expired_ids))
+                .exec(&self.db)
+                .await
+        {
+            warn!(error = %e, "Failed to delete expired location rows during lookup");
         }
 
         Ok(sort_locations_by_recency(locations))
