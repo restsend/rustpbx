@@ -3,7 +3,7 @@ use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
     TrunkContext,
 };
-use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
+use crate::config::{HttpRouterConfig, MediaProxyMode, RecordingPolicy, RtpConfig};
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -284,6 +284,10 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(record) = result.record {
                     dialplan.recording.enabled = record;
+                    dialplan.recording_policy = Some(RecordingPolicy {
+                        enabled: Some(record),
+                        ..Default::default()
+                    });
                 }
 
                 if let Some(mode) = result.media_proxy {

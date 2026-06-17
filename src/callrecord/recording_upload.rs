@@ -25,7 +25,8 @@ pub struct RecordingUploadHook {
 
 impl RecordingUploadHook {
     pub fn new(policy: RecordingPolicy) -> Result<Self> {
-        let s3_storage = if policy.recording_type == RecordingType::S3 {
+        let recording_type = policy.recording_type.unwrap_or_default();
+        let s3_storage = if recording_type == RecordingType::S3 {
             let bucket = Self::required(&policy.bucket, "bucket")?;
             let region = Self::required(&policy.region, "region")?;
             let access_key = Self::required(&policy.access_key, "access_key")?;
@@ -201,7 +202,7 @@ impl CallRecordHook for RecordingUploadHook {
             };
             let data_len = data.len();
             let key = self.storage_key(record, &track_id, &path);
-            let upload = match self.policy.recording_type {
+            let upload = match self.policy.recording_type.unwrap_or_default() {
                 RecordingType::Local => Ok(path.clone()),
                 RecordingType::Http => self.upload_http(record, &track_id, &path, data).await,
                 RecordingType::S3 => self.upload_s3(&key, data).await,

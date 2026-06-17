@@ -441,7 +441,7 @@ async fn test_match_invite_exact_match() {
             media_mode: Some(MediaMode::Bypass),
             video_policy: Some(VideoPolicy::Strip),
             recording: Some(RecordingPolicy {
-                enabled: true,
+                enabled: Some(true),
                 auto_start: Some(false),
                 ..Default::default()
             }),
@@ -507,7 +507,7 @@ async fn test_match_invite_exact_match() {
             let recording = hints
                 .recording
                 .expect("selected trunk recording should produce recording hint");
-            assert!(recording.enabled);
+            assert_eq!(recording.enabled, Some(true));
             assert_eq!(recording.auto_start, Some(false));
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
