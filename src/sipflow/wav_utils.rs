@@ -556,8 +556,36 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         .max(max_dtmf_time_a)
         .max(max_dtmf_time_b);
     let max_duration = max_time + target_sample_rate / 50;
-    let max_duration_cap = target_sample_rate.saturating_mul(3600);
-    let max_duration = max_duration.min(max_duration_cap);
+
+    // Detect large gaps between consecutive packet timestamps, which
+    // indicate an anomalously-high timestamp (e.g. from clock-rate
+    // mismatches, cross-call contamination, or wraparound).  If any gap
+    // exceeds MAX_GAP_SAMPLES (5 minutes at the target rate), cap the
+    // output at the audio that came before the gap so we don't pad with
+    // minutes/hours of silence.  Adjust the threshold if you have long
+    // hold/resume scenarios that should be preserved.
+    let max_gap_samples = 5 * 60 * target_sample_rate;
+    let mut gap_capped = max_duration;
+    for buffer in [&buffer_a, &buffer_b, &dtmf_buffer_a, &dtmf_buffer_b] {
+        if buffer.len() < 2 {
+            continue;
+        }
+        let mut prev = None::<u32>;
+        for &ts in buffer.keys() {
+            if let Some(p) = prev {
+                if ts - p > max_gap_samples {
+                    let capped = *buffer.keys().take_while(|&&k| k < ts).last().unwrap_or(&p);
+                    let new_dur = capped + target_sample_rate / 50;
+                    if new_dur < gap_capped {
+                        gap_capped = new_dur;
+                    }
+                    break;
+                }
+            }
+            prev = Some(ts);
+        }
+    }
+    let max_duration = max_duration.min(gap_capped);
 
     tracing::info!(
         "Buffer stats: A_len={} B_len={} A_dtmf_len={} B_dtmf_len={} max_time={} max_duration={}",
