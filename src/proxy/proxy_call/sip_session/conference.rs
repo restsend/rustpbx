@@ -57,8 +57,28 @@ impl SipSession {
             info!(%leg_id, "Added participant to conference");
 
             if let Some(peer) = peer {
+                let fallback_pc = if leg_id.0 == "caller" {
+                    self.media.media_bridge.as_ref().map(|b| b.caller_pc().clone())
+                } else if leg_id.0 == "callee" {
+                    self.media.media_bridge.as_ref().map(|b| b.callee_pc().clone())
+                } else {
+                    None
+                };
+                
+                let fallback_sender = if leg_id.0 == "caller" {
+                    if let Some(b) = self.media.media_bridge.as_ref() {
+                        b.get_caller_sender().await
+                    } else { None }
+                } else if leg_id.0 == "callee" {
+                    if let Some(b) = self.media.media_bridge.as_ref() {
+                        b.get_callee_sender().await
+                    } else { None }
+                } else {
+                    None
+                };
+
                 if let Err(e) = self
-                    .start_conference_media_bridge_for_peer(&conf_id_str, &leg_id, &peer)
+                    .start_conference_media_bridge_for_peer(&conf_id_str, &leg_id, &peer, fallback_pc, fallback_sender)
                     .await
                 {
                     warn!(%leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
@@ -88,6 +108,8 @@ impl SipSession {
         conf_id: &str,
         leg_id: &LegId,
         peer: &Arc<dyn MediaPeer>,
+        fallback_pc: Option<rustrtc::PeerConnection>,
+        fallback_sender: Option<rustrtc::media::SampleStreamSource>,
     ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
         use rustrtc::media::MediaSample;
 
@@ -99,6 +121,10 @@ impl SipSession {
                 audio_sender = Some(sender);
                 break;
             }
+        }
+
+        if audio_sender.is_none() {
+            audio_sender = fallback_sender;
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
@@ -147,7 +173,7 @@ impl SipSession {
         }
 
         let audio_receiver = self
-            .create_audio_receiver_from_peer(peer)
+            .create_audio_receiver_from_peer(peer, fallback_pc)
             .await
             .map_err(|e| anyhow!("Failed to create audio receiver for dynamic leg: {}", e))?;
 
@@ -283,7 +309,7 @@ impl SipSession {
             .push(forwarder_handle);
 
         let audio_receiver = if is_callee {
-            self.create_audio_receiver_from_peer(&peer).await
+            self.create_audio_receiver_from_peer(&peer, None).await
         } else {
             self.create_audio_receiver().await
         }
@@ -325,6 +351,7 @@ impl SipSession {
     pub(super) async fn create_audio_receiver_from_peer(
         &self,
         peer: &Arc<dyn MediaPeer>,
+        fallback_pc: Option<rustrtc::PeerConnection>,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
         let mut pc = None;
         for _ in 0..150 {
@@ -342,7 +369,7 @@ impl SipSession {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let pc = pc.ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
+        let pc = pc.or(fallback_pc).ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
 
         let decoder = self
             .create_audio_decoder()
@@ -451,7 +478,7 @@ impl SipSession {
 
         let peer = self.legs.peers.get(&leg_id).cloned();
         let bridge_result = if let Some(peer) = peer {
-            self.start_conference_media_bridge_for_peer(&conf_id, &leg_id, &peer)
+            self.start_conference_media_bridge_for_peer(&conf_id, &leg_id, &peer, None, None)
                 .await
         } else {
             self.start_conference_media_bridge(&conf_id, &leg_id)
