@@ -1333,7 +1333,7 @@ async fn test_auto_start_recording_creates_file() -> Result<()> {
     let proxy_config = ProxyConfig {
         media_proxy: MediaProxyMode::All,
         recording: Some(RecordingPolicy {
-            enabled: true,
+            enabled: Some(true),
             auto_start: Some(true),
             path: Some(record_path.clone()),
             ..Default::default()

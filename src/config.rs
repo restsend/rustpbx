@@ -125,71 +125,48 @@ pub enum RecordingType {
     S3,
 }
 
-fn is_default_recording_type(recording_type: &RecordingType) -> bool {
-    *recording_type == RecordingType::Local
-}
-
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case")]
 pub struct RecordingPolicy {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(
-        default,
-        rename = "type",
-        skip_serializing_if = "is_default_recording_type"
-    )]
-    pub recording_type: RecordingType,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled: Option<bool>,
+    #[serde(rename = "type")]
+    pub recording_type: Option<RecordingType>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub directions: Vec<RecordingDirection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub caller_allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub caller_deny: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callee_allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callee_deny: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename_pattern: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samplerate: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptime: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<crate::storage::S3Vendor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// When true, always use the legacy WAV file recorder for media capture
     /// even if SipFlow backend is available. SipFlow will capture SIP
     /// signalling only (no RTP). Media upload is handled by the
     /// `[recording]` upload path, not `[sipflow.upload]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_file: Option<bool>,
 }
 
 impl RecordingPolicy {
     pub fn new_recording_config(&self) -> CallRecordingConfig {
         crate::call::CallRecordingConfig {
-            enabled: self.enabled,
+            enabled: self.enabled.unwrap_or(false),
             auto_start: self.auto_start.unwrap_or(true),
             force_file: self.force_file.unwrap_or(false),
             option: None,
@@ -205,7 +182,11 @@ impl RecordingPolicy {
     }
 
     pub fn uploads_recording(&self) -> bool {
-        self.enabled && matches!(self.recording_type, RecordingType::Http | RecordingType::S3)
+        self.enabled.unwrap_or(false)
+            && matches!(
+                self.recording_type.unwrap_or_default(),
+                RecordingType::Http | RecordingType::S3
+            )
     }
 
     pub fn ensure_defaults(&mut self) -> bool {

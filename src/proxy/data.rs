@@ -911,7 +911,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     };
     let recording = from_bool(sbc.and_then(|s| s.get("recording_enabled"))).map(|enabled| {
         let mut r = crate::config::RecordingPolicy::default();
-        r.enabled = enabled;
+        r.enabled = Some(enabled);
         r
     });
 

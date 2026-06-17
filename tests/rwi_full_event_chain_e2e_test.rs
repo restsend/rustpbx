@@ -106,7 +106,7 @@ impl TestCtx {
         let proxy_config = ProxyConfig {
             media_proxy: MediaProxyMode::All,
             recording: Some(RecordingPolicy {
-                enabled: true,
+                enabled: Some(true),
                 auto_start: Some(false),
                 ..Default::default()
             }),

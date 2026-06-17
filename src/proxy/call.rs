@@ -841,7 +841,7 @@ impl CallModule {
             if let Some(enabled) = hints.enable_recording {
                 recording_policy
                     .get_or_insert_with(RecordingPolicy::default)
-                    .enabled = enabled;
+                    .enabled = Some(enabled);
             }
             if let Some(policy) = recording_policy {
                 dialplan.recording = policy.new_recording_config();
@@ -902,8 +902,10 @@ impl CallModule {
                     .cloned()
                     .unwrap_or_else(|| overrides.clone());
 
-                merged.enabled = overrides.enabled;
-                if overrides.recording_type != crate::config::RecordingType::default() {
+                if overrides.enabled.is_some() {
+                    merged.enabled = overrides.enabled;
+                }
+                if overrides.recording_type.is_some() {
                     merged.recording_type = overrides.recording_type;
                 }
                 if !overrides.directions.is_empty() {
@@ -974,7 +976,7 @@ impl CallModule {
                 None => return dialplan,
             },
         };
-        if !policy.enabled {
+        if !policy.enabled.unwrap_or(false) {
             return dialplan;
         }
 
@@ -2841,8 +2843,8 @@ mod tests {
     async fn default_resolve_partial_recording_policy_inherits_global_policy_fields() {
         let mut proxy_config = ProxyConfig::default();
         proxy_config.recording = Some(RecordingPolicy {
-            enabled: true,
-            recording_type: crate::config::RecordingType::S3,
+            enabled: Some(true),
+            recording_type: Some(crate::config::RecordingType::S3),
             bucket: Some("recordings".to_string()),
             region: Some("us-east-1".to_string()),
             access_key: Some("access".to_string()),
@@ -2879,7 +2881,7 @@ mod tests {
                 &request,
                 Box::new(RecordingHintsRouteInvite {
                     recording: Some(RecordingPolicy {
-                        enabled: true,
+                        enabled: Some(true),
                         auto_start: Some(false),
                         ..Default::default()
                     }),
@@ -2915,7 +2917,7 @@ mod tests {
     async fn default_resolve_recording_enable_hint_false_disables_global_policy() {
         let mut proxy_config = ProxyConfig::default();
         proxy_config.recording = Some(RecordingPolicy {
-            enabled: true,
+            enabled: Some(true),
             path: Some("/tmp/rustpbx-main-recordings".to_string()),
             auto_start: Some(true),
             ..Default::default()
@@ -2955,7 +2957,7 @@ mod tests {
             .await
             .expect("route should resolve");
         assert_eq!(
-            dialplan.recording_policy.as_ref().map(|p| p.enabled),
+            dialplan.recording_policy.as_ref().and_then(|p| p.enabled),
             Some(false)
         );
         let dialplan = module.apply_recording_policy(dialplan, &caller);

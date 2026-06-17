@@ -107,7 +107,7 @@ impl TestCtx {
                 proxy_config: Some(ProxyConfig {
                     media_proxy: MediaProxyMode::All,
                     recording: Some(RecordingPolicy {
-                        enabled: true, auto_start: Some(false), ..Default::default()
+                        enabled: Some(true), auto_start: Some(false), ..Default::default()
                     }),
                     ..Default::default()
                 }),
