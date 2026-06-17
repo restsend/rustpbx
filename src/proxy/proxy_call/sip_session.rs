@@ -7553,6 +7553,7 @@ impl SipSession {
                     match self.accept_call(None, answer_sdp, None).await {
                         Ok(()) => {
                             self.update_leg_state(&leg_id, LegState::Connected);
+                            self.update_media_path().await;
                             CommandResult::success()
                         }
                         Err(e) => CommandResult::failure(e.to_string()),
@@ -8176,68 +8177,97 @@ impl SipSession {
         let invite_handle = crate::utils::spawn(async move {
             let leg_id = leg_id_for_spawn;
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
-            let invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+            let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
-            let result = match invitation.await {
-                Ok((dialog, response)) => {
-                    if let Some(ref resp) = response {
-                        let status_code = resp.status_code.code();
-                        if StatusCode::from(status_code).kind()
-                            == rsipstack::sip::StatusCodeKind::Successful
-                        {
-                            info!(%leg_id, status = %status_code, "SIP leg answered successfully");
+            let mut result: Result<rsipstack::dialog::client_dialog::ClientInviteDialog, String> = Err("not started".to_string());
+            let mut state_rx_open = true;
 
-                            // Extract SDP answer from response body
-                            let answer_sdp = if !resp.body().is_empty() {
-                                let sdp = String::from_utf8_lossy(resp.body()).to_string();
+            loop {
+                tokio::select! {
+                    biased;
+                    r = &mut invitation, if !result.is_ok() => {
+                        match r {
+                            Ok((dialog, response)) => {
+                                if let Some(ref resp) = response {
+                                    let status_code = resp.status_code.code();
+                                    if StatusCode::from(status_code).kind()
+                                        == rsipstack::sip::StatusCodeKind::Successful
+                                    {
+                                        info!(%leg_id, status = %status_code, "SIP leg answered successfully");
 
-                                // Set remote description on the peer
-                                if let Err(e) =
-                                    peer.update_remote_description(&track_id, &sdp).await
-                                {
-                                    warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
+                                        let answer_sdp = if !resp.body().is_empty() {
+                                            let sdp = String::from_utf8_lossy(resp.body()).to_string();
+                                            if let Err(e) =
+                                                peer.update_remote_description(&track_id, &sdp).await
+                                            {
+                                                warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
+                                            } else {
+                                                info!(%leg_id, "Remote description set successfully");
+                                            }
+                                            Some(sdp)
+                                        } else {
+                                            None
+                                        };
+
+                                        let _ = cmd_tx.send(CallCommand::LegConnected {
+                                            leg_id: leg_id.clone(),
+                                            answer_sdp,
+                                        }).await;
+
+                                        result = Ok(dialog);
+                                        break;
+                                    } else {
+                                        warn!(%leg_id, status = %status_code, "SIP leg rejected");
+                                        let _ = cmd_tx.send(CallCommand::LegFailed {
+                                            leg_id: leg_id.clone(),
+                                            reason: format!("Rejected with {}", status_code),
+                                        }).await;
+                                        result = Err(format!("Rejected with {}", status_code));
+                                        break;
+                                    }
                                 } else {
-                                    info!(%leg_id, "Remote description set successfully");
+                                    warn!(%leg_id, "SIP leg timeout (no response)");
+                                    let _ = cmd_tx.send(CallCommand::LegFailed {
+                                        leg_id: leg_id.clone(),
+                                        reason: "Timeout".to_string(),
+                                    }).await;
+                                    result = Err("Timeout".to_string());
+                                    break;
                                 }
-                                Some(sdp)
-                            } else {
-                                None
-                            };
-
-                            // Send LegConnected with SDP answer
-                            let _ = cmd_tx.send(CallCommand::LegConnected {
-                                leg_id: leg_id.clone(),
-                                answer_sdp,
-                            });
-
-                            // Return dialog for further processing
-                            Ok(dialog)
-                        } else {
-                            warn!(%leg_id, status = %status_code, "SIP leg rejected");
-                            let _ = cmd_tx.send(CallCommand::LegFailed {
-                                leg_id: leg_id.clone(),
-                                reason: format!("Rejected with {}", status_code),
-                            });
-                            Err(format!("Rejected with {}", status_code))
+                            }
+                            Err(e) => {
+                                warn!(%leg_id, error = %e, "SIP leg failed");
+                                let _ = cmd_tx.send(CallCommand::LegFailed {
+                                    leg_id: leg_id.clone(),
+                                    reason: e.to_string(),
+                                }).await;
+                                result = Err(e.to_string());
+                                break;
+                            }
                         }
-                    } else {
-                        warn!(%leg_id, "SIP leg timeout (no response)");
-                        let _ = cmd_tx.send(CallCommand::LegFailed {
-                            leg_id: leg_id.clone(),
-                            reason: "Timeout".to_string(),
-                        });
-                        Err("Timeout".to_string())
+                    }
+                    state = state_rx.recv(), if state_rx_open => {
+                        match state {
+                            Some(rsipstack::dialog::dialog::DialogState::Early(_, ref resp)) => {
+                                info!(%leg_id, "SIP leg early media (183)");
+                                let body = resp.body();
+                                if !body.is_empty() {
+                                    let sdp = String::from_utf8_lossy(body).to_string();
+                                    if let Err(e) =
+                                        peer.update_remote_description(&track_id, &sdp).await
+                                    {
+                                        warn!(%leg_id, error = %e, "Failed to set early media remote description");
+                                    } else {
+                                        info!(%leg_id, "Early media remote description set");
+                                    }
+                                }
+                            }
+                            Some(_) => {}
+                            None => { state_rx_open = false; }
+                        }
                     }
                 }
-                Err(e) => {
-                    warn!(%leg_id, error = %e, "SIP leg failed");
-                    let _ = cmd_tx.send(CallCommand::LegFailed {
-                        leg_id: leg_id.clone(),
-                        reason: e.to_string(),
-                    });
-                    Err(e.to_string())
-                }
-            };
+            }
 
             // Process dialog state changes (e.g., BYE from remote)
             if let Ok(dialog) = result {
@@ -8257,7 +8287,7 @@ impl SipSession {
                                         let _ = cmd_tx.send(CallCommand::LegFailed {
                                             leg_id: leg_id.clone(),
                                             reason: "Remote hung up".to_string(),
-                                        });
+                                        }).await;
                                         break;
                                     }
                                     Some(_) => {}
@@ -8266,7 +8296,6 @@ impl SipSession {
                             }
                         }
                     }
-                    // Keep dialog alive
                     let _ = dialog;
                 });
             }
@@ -8338,13 +8367,6 @@ impl SipSession {
     async fn stop_all_bridges(&mut self) {
         self.stop_conference_bridges().await;
         self.stop_direct_bridge().await;
-        // Abort all leg-specific spawned tasks
-        for (leg_id, handles) in self.legs.drain_tasks() {
-            for handle in handles {
-                handle.abort();
-            }
-            info!(%leg_id, "Aborted tasks for leg");
-        }
         info!("All bridges stopped");
     }
 
