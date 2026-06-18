@@ -22,6 +22,7 @@ struct RtpPacketView<'a> {
     payload_type: u8,
     sequence_number: u16,
     rtp_timestamp: u32,
+    ssrc: u32,
     payload: &'a [u8],
 }
 
@@ -96,6 +97,7 @@ fn parse_borrowed_rtp_packet(leg: i32, raw: &[u8]) -> Option<RtpPacketView<'_>> 
         payload_type: raw[1] & 0x7f,
         sequence_number: u16::from_be_bytes([raw[2], raw[3]]),
         rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
         payload: &raw[payload_offset..payload_end],
     })
 }
@@ -461,27 +463,61 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
 
     let mut decoders: HashMap<(i32, u8), Box<dyn Decoder>> = HashMap::new();
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
-    let mut base_timestamps: HashMap<i32, u64> = HashMap::new();
+
+    // RTP timestamps are per-SSRC, not per-leg.  When the SSRC changes within
+    // a leg (e.g. call-transfer or media-reinvite), each SSRC has its own
+    // independent timeline.  We assign each new SSRC on the same leg an offset
+    // so that its timestamps are placed sequentially in the per-leg buffer,
+    // preventing false truncation by the gap-detection logic below.
+    let mut base_timestamps: HashMap<(i32, u32), u64> = HashMap::new();
+    // Per-stream offset (in target-time units) — set once when the SSRC is
+    // first seen, so all packets from that stream land at the right place.
+    let mut ssrc_target_offset: HashMap<(i32, u32), u32> = HashMap::new();
+    // Per-leg running maximum target timestamp (updated on every packet).
+    let mut leg_max_target: HashMap<i32, u32> = HashMap::new();
 
     for rtp in &parsed_packets {
-        let rtp_timestamp = rtp.rtp_timestamp as u64;
         let pt = rtp.payload_type;
         let payload = rtp.payload;
+        let leg = rtp.leg;
+        let ssrc = rtp.ssrc;
+        let raw_ts = rtp.rtp_timestamp as u64;
 
-        let mut descriptor = payload_descriptor(pt, rtp.leg, payload_map, leg_payload_map);
+        // First time we see this (leg, ssrc)?  Set its offset so it follows
+        // the previous SSRC on this leg (if any).
+        let stream_key = (leg, ssrc);
+        let ssrc_offset = *ssrc_target_offset.entry(stream_key).or_insert_with(|| {
+            let prev_max = leg_max_target.get(&leg).copied().unwrap_or(0);
+            if prev_max > 0 {
+                prev_max + step_samples
+            } else {
+                0
+            }
+        });
+
+        // Base RTP timestamp for this stream.
+        let base = *base_timestamps.entry(stream_key).or_insert(raw_ts);
+        let rtp_diff = raw_ts.saturating_sub(base);
+
+        let mut descriptor = payload_descriptor(pt, leg, payload_map, leg_payload_map);
         if descriptor.codec != CodecType::TelephoneEvent && looks_like_dtmf_payload(payload) {
             descriptor = PayloadDescriptor {
                 codec: CodecType::TelephoneEvent,
-                clock_rate: leg_audio_clock_rates.get(&rtp.leg).copied().unwrap_or(8000),
+                clock_rate: leg_audio_clock_rates.get(&leg).copied().unwrap_or(8000),
             };
         }
         let codec = descriptor.codec;
         let clock_rate = descriptor.clock_rate as u64;
 
-        let base = *base_timestamps.entry(rtp.leg).or_insert(rtp_timestamp);
-        let rtp_diff = rtp_timestamp.saturating_sub(base);
-        let target_timestamp =
+        let raw_target =
             (rtp_diff.saturating_mul(target_sample_rate as u64) / clock_rate) as u32;
+        let target_timestamp = raw_target.saturating_add(ssrc_offset);
+
+        // Update the running max per-leg (used to offset the next new SSRC).
+        let leg_max = leg_max_target.entry(leg).or_insert(0);
+        if target_timestamp > *leg_max {
+            *leg_max = target_timestamp;
+        }
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
@@ -544,6 +580,8 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     drop(decoders);
     drop(resamplers);
     drop(base_timestamps);
+    drop(ssrc_target_offset);
+    drop(leg_max_target);
     drop(leg_audio_clock_rates);
     drop(legs_codecs);
 
@@ -690,10 +728,20 @@ mod tests {
     use bytes::Bytes;
 
     fn build_rtp_packet(payload_type: u8, timestamp: u32, payload: &[u8]) -> Vec<u8> {
+        build_rtp_packet_with_ssrc(payload_type, timestamp, 0, payload)
+    }
+
+    fn build_rtp_packet_with_ssrc(
+        payload_type: u8,
+        timestamp: u32,
+        ssrc: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let mut packet = vec![0u8; 12];
         packet[0] = 0x80;
         packet[1] = payload_type & 0x7f;
         packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
+        packet[8..12].copy_from_slice(&ssrc.to_be_bytes());
         packet.extend_from_slice(payload);
         packet
     }
@@ -920,6 +968,121 @@ mod tests {
         assert!(
             iterations > 1_000_000,
             "expected >1M iterations (multi-GB allocation), got {iterations}"
+        );
+    }
+
+    /// SSRC changes on the same leg (e.g. call-transfer) should produce the
+    /// full audio from both streams, placed sequentially in the output WAV.
+    /// The two SSRCs have non-overlapping RTP timestamp ranges so they sort
+    /// sequentially and the per-leg offset correctly chains the second stream.
+    #[test]
+    fn test_wav_generation_multiple_ssrcs_same_leg() {
+        let mut payload_map = HashMap::new();
+        payload_map.insert(
+            0,
+            PayloadDescriptor {
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+            },
+        );
+
+        let pcmu_silence = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]); // 20ms
+
+        // Leg 1, SSRC 0xAAAA: 5 packets at 20ms intervals (100ms total)
+        let mut packets: Vec<(i32, u64, Vec<u8>)> = (0..5)
+            .map(|i| {
+                (
+                    1i32,
+                    i as u64,
+                    build_rtp_packet_with_ssrc(0, i * 160, 0xAAAA, &pcmu_silence),
+                )
+            })
+            .collect();
+
+        // Leg 1, SSRC 0xBBBB: 5 packets at timestamps shifted by 10000 so
+        // they sort after AAAA's packets, triggering the SSRC-offset path.
+        packets.extend((0..5).map(|i| {
+            (
+                1i32,
+                (i + 100) as u64,
+                build_rtp_packet_with_ssrc(0, 10_000 + i * 160, 0xBBBB, &pcmu_silence),
+            )
+        }));
+
+        let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
+            .expect("wav generation should succeed with SSRC change");
+
+        let duration_secs = (wav.len() - 44) as f64 / (16000.0 * 2.0 * 2.0); // 16kHz stereo 16-bit
+
+        // Without SSRC fix: gap detection caps at first SSRC → ~100ms
+        // With SSRC fix: both SSRCs sequenced → ~200ms
+        assert!(
+            duration_secs > 0.15,
+            "expected both SSRCs in output (~200ms), got {:.3}s",
+            duration_secs
+        );
+        assert!(
+            duration_secs < 1.0,
+            "output should not be excessively long, got {:.3}s",
+            duration_secs
+        );
+    }
+
+    /// Same-leg SSRC change with a large timestamp gap between the two
+    /// streams (simulating real call-transfer where the second SSRC starts
+    /// at a completely different offset).  Only possible with SSRC-aware
+    /// offsetting — otherwise the gap-detection truncates the output.
+    #[test]
+    fn test_wav_generation_ssrc_change_large_gap() {
+        let mut payload_map = HashMap::new();
+        payload_map.insert(
+            0,
+            PayloadDescriptor {
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+            },
+        );
+
+        let pcmu_silence = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
+
+        // Leg 1, SSRC 0xAAAA: 10 packets, timestamps 0..1440 (180ms)
+        let mut packets: Vec<(i32, u64, Vec<u8>)> = (0..10)
+            .map(|i| {
+                (
+                    1i32,
+                    i as u64,
+                    build_rtp_packet_with_ssrc(0, i * 160, 0xAAAA, &pcmu_silence),
+                )
+            })
+            .collect();
+
+        // Leg 1, SSRC 0xBBBB: timestamps start at ~2 billion (realistic
+        // call-transfer where the second leg has a different clock base).
+        packets.extend((0..10).map(|i| {
+            (
+                1i32,
+                (i + 1000) as u64,
+                build_rtp_packet_with_ssrc(0, 2_000_000_000 + i * 160, 0xBBBB, &pcmu_silence),
+            )
+        }));
+
+        let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
+            .expect("wav generation should succeed");
+
+        let duration_secs = (wav.len() - 44) as f64 / (16000.0 * 2.0 * 2.0);
+
+        // Both SSRCs produce 180ms each = 360ms total.  Without SSRC-aware
+        // offsetting, the second SSRC's huge timestamp creates a gap that
+        // gets capped at ~180ms.  With the fix, output is ~360ms.
+        assert!(
+            duration_secs > 0.30,
+            "expected both SSRCs (~360ms), got {:.3}s — likely gap-truncated",
+            duration_secs
+        );
+        assert!(
+            duration_secs < 1.0,
+            "output should be bounded, got {:.3}s",
+            duration_secs
         );
     }
 
