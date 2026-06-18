@@ -79,7 +79,7 @@ async fn test_queue_direct_sip_target() {
     };
 
     // ── Start PBX ──────────────────────────────────────────────────────────
-    let pbx = TestPbx::start_with_inject(sip_port, inject).await;
+    let _pbx = TestPbx::start_with_inject(sip_port, inject).await;
     tracing::info!(
         sip_port,
         caller_port,

@@ -158,6 +158,7 @@ http = "1.4.2"
 urlencoding = "2.1.3"
 ipnetwork = "0.21.1"
 sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
     "tls-rustls-ring",
     "postgres",
     "sqlite",
