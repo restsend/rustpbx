@@ -120,7 +120,10 @@ impl Addon for TranscriptAddon {
         // Use a regex that matches any base path followed by /call-records/{id}
         vec![ScriptInjection {
             url_path_regex: r"^/.+/call-records/\d+$",
-            script_url: "/static/transcript/transcript_addon.js".to_string(),
+            script_url: format!(
+                "/static/transcript/transcript_addon.js?v={}",
+                crate::version::get_short_version()
+            ),
         }]
     }
 }
