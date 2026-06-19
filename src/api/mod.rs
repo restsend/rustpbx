@@ -1,6 +1,6 @@
 use crate::auth::DynTokenValidator;
-use crate::console::middleware::ApiTokenAuth;
 use crate::console::ConsoleState;
+use crate::console::middleware::ApiTokenAuth;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -32,10 +32,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::extension::api_urls())
         .merge(crate::console::handlers::sip_trunk::api_urls())
         .merge(crate::console::handlers::dashboard::api_urls())
-        .merge(
-            crate::addons::queue::console::handlers::api_urls()
-                .with_state(state.clone()),
-        );
+        .merge(crate::addons::queue::console::handlers::api_urls().with_state(state.clone()));
 
     let api_routes = api_routes.layer(axum::middleware::from_fn_with_state(
         ApiAuthState {
@@ -47,7 +44,9 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     ));
 
     let api_prefix = state.api_prefix().to_string();
-    Router::new().nest(&api_prefix, api_routes).with_state(state)
+    Router::new()
+        .nest(&api_prefix, api_routes)
+        .with_state(state)
 }
 
 fn build_phone_auth(console: &Arc<ConsoleState>) -> Option<DynTokenValidator> {
@@ -107,14 +106,8 @@ async fn api_auth_middleware(
             .into_response();
     }
 
-    if let Some(session_token) =
-        crate::console::middleware::extract_session_cookie(&headers)
-    {
-        if let Ok(Some(user)) = auth_state
-            .console
-            .current_user(Some(&session_token))
-            .await
-        {
+    if let Some(session_token) = crate::console::middleware::extract_session_cookie(&headers) {
+        if let Ok(Some(user)) = auth_state.console.current_user(Some(&session_token)).await {
             req.extensions_mut().insert(ApiTokenAuth(user));
             return next.run(req).await;
         }

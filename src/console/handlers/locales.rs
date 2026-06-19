@@ -1,9 +1,10 @@
 use crate::console::ConsoleState;
 use axum::{
+    Router,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    Router, routing::get,
+    routing::get,
 };
 use std::sync::Arc;
 
@@ -22,7 +23,10 @@ async fn get_locale_js(
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
             (header::CACHE_CONTROL, "public, max-age=604800, immutable"),
         ],
         js,

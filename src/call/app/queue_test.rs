@@ -389,7 +389,10 @@ mod tests {
         );
 
         // Should connect (app exits cleanly)
-        stack.join().await.expect("should exit after agent connected");
+        stack
+            .join()
+            .await
+            .expect("should exit after agent connected");
     }
 
     // ── 8. Queue with agent busy event - retry next agent ──
@@ -417,7 +420,11 @@ mod tests {
         // First agent is busy
         stack.custom("agent_busy", serde_json::json!({}));
         // Auto-dials agent 2
-        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
 
         // Should continue with next agent (no immediate action, continues waiting)
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -429,7 +436,10 @@ mod tests {
         );
 
         // Should connect (app exits cleanly)
-        stack.join().await.expect("should exit after agent connected");
+        stack
+            .join()
+            .await
+            .expect("should exit after agent connected");
     }
 
     // ── 9. Queue with all agents busy - fallback ──
@@ -636,11 +646,19 @@ mod tests {
 
         // Agent 1 is busy
         stack.custom("agent_busy", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
 
         // Agent 2 no answer
         stack.custom("agent_no_answer", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent3", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
 
         // Agent 3 connects
         stack.custom(
@@ -649,8 +667,15 @@ mod tests {
         );
 
         // Should cancel agent2 leg then connect to agent 3
-        stack.assert_cmd(200, "LegRemove-agent2", |c| matches!(c, CallCommand::LegRemove { .. })).await;
-        stack.join().await.expect("should exit after agent connected");
+        stack
+            .assert_cmd(200, "LegRemove-agent2", |c| {
+                matches!(c, CallCommand::LegRemove { .. })
+            })
+            .await;
+        stack
+            .join()
+            .await
+            .expect("should exit after agent connected");
     }
 
     /// Test autonomous routing with DbRegistry.
@@ -734,7 +759,10 @@ mod tests {
         );
 
         // Should connect (app exits cleanly)
-        stack.join().await.expect("should exit after agent connected");
+        stack
+            .join()
+            .await
+            .expect("should exit after agent connected");
 
         // Verify agent state is busy
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
@@ -1089,9 +1117,17 @@ mod tests {
             .await;
 
         stack.custom("agent_busy", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_busy", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent3", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_busy", serde_json::json!({}));
 
         stack
@@ -1204,9 +1240,17 @@ mod tests {
 
         // All agents no-answer
         stack.custom("agent_no_answer", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent3", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should play no-answer prompt (not busy prompt)
@@ -1244,9 +1288,17 @@ mod tests {
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
         stack.custom("agent_busy", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-agent3", |c| matches!(c, CallCommand::LegAdd { .. })).await;
+        stack
+            .assert_cmd(200, "LegAdd-agent3", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
         stack.custom("agent_busy", serde_json::json!({}));
 
         // Last one was busy, so should play busy prompt
@@ -1460,20 +1512,28 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         // Enter queue → answer → agents in parallel → hold music loop
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
-        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // Send DTMF "2"
         stack.dtmf("2");
 
         // Should play callback confirmation prompt
-        stack.assert_cmd(200, "PlayCallbackConfirm", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayCallbackConfirm", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         // Confirm prompt completes → hangup
         stack.audio_complete("default");
-        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
 
         stack.join().await.unwrap();
     }
@@ -1488,8 +1548,12 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
-        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // DTMF "2" pressed before offer time — should be ignored
         stack.dtmf("2");
@@ -1521,8 +1585,12 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
-        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.dtmf("2");
 
@@ -1550,8 +1618,12 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
-        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.dtmf("5"); // wrong key
 
@@ -1581,13 +1653,19 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
-        stack.assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.dtmf("2");
 
         // Without a confirm prompt, the hangup should come immediately
-        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
 
         stack.join().await.unwrap();
     }
@@ -1607,13 +1685,17 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         // No agents → busy prompt is none → final destination prompt
-        stack.assert_cmd(200, "PlayFinalPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayFinalPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         // Final prompt audio completes → fallback (hangup)
         stack.audio_complete("default");
-        stack.assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_))).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
 
         stack.join().await.unwrap();
     }
@@ -1622,18 +1704,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_cumulative_escalation_does_not_crash() {
-        use crate::call::app::queue::EscalationMode;
         use crate::call::app::agent_registry::db::DbRegistry;
+        use crate::call::app::queue::EscalationMode;
         use std::sync::Arc;
 
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         let registry = Arc::new(DbRegistry::new(db));
         registry
-            .register("agent1".into(), "Agent 1".into(), "sip:agent1@pbx".into(), vec!["support".into()], 1)
+            .register(
+                "agent1".into(),
+                "Agent 1".into(),
+                "sip:agent1@pbx".into(),
+                vec!["support".into()],
+                1,
+            )
             .await
             .unwrap();
         registry
-            .update_presence("agent1", crate::call::app::agent_registry::PresenceState::Available)
+            .update_presence(
+                "agent1",
+                crate::call::app::agent_registry::PresenceState::Available,
+            )
             .await
             .unwrap();
 
@@ -1656,7 +1747,9 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
-        stack.assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
 
         // Trigger escalation check — should not crash even though skill-group: support2
         // doesn't resolve to any agents

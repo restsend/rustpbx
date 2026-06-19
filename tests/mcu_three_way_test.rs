@@ -312,5 +312,9 @@ async fn test_transcoding_pipeline() {
     let decoded = pipeline.decode_to_pcm(&encoded);
 
     // Verify encode/decode round-trip produces same length output
-    assert_eq!(decoded.len(), pcm.len(), "Round-trip should preserve length");
+    assert_eq!(
+        decoded.len(),
+        pcm.len(),
+        "Round-trip should preserve length"
+    );
 }

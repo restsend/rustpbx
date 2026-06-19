@@ -5,8 +5,8 @@ use super::{
     user::{UserBackend, build_user_backend},
 };
 use crate::{
-    auto_external_ip,
     auth::{jwt_auth_backend::JwtAuthBackend, jwt_validator::JwtValidator},
+    auto_external_ip,
     call::{TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
@@ -20,8 +20,8 @@ use crate::{
         call::{CallRouter, DialplanInspector},
         cluster_event::{ClusterEventHub, ClusterEventModule},
         locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
-        presence::PresenceManager,
         pre_auth_registry::PreAuthRegistry,
+        presence::PresenceManager,
     },
     sipflow::SipFlowBackend,
     sipflow::backend::create_backend,
@@ -414,11 +414,8 @@ impl SipServerBuilder {
                 } else {
                     None
                 };
-                let jwt_backend = JwtAuthBackend::new(
-                    validator,
-                    local_ub,
-                    jwt_cfg.sip_header_name.clone(),
-                );
+                let jwt_backend =
+                    JwtAuthBackend::new(validator, local_ub, jwt_cfg.sip_header_name.clone());
                 info!(
                     header = %jwt_cfg.sip_header_name,
                     check_local = jwt_cfg.check_local_user,
@@ -461,13 +458,12 @@ impl SipServerBuilder {
                 );
                 let cache_ttl = Duration::from_secs(token_cache_ttl_secs.unwrap_or(0));
                 let cache_size = token_cache_size.unwrap_or(10000);
-                let token_backend =
-                    crate::auth::http_token_auth_backend::HttpTokenAuthBackend::new(
-                        http_backend,
-                        token_hdr.clone(),
-                        cache_ttl,
-                        cache_size,
-                    );
+                let token_backend = crate::auth::http_token_auth_backend::HttpTokenAuthBackend::new(
+                    http_backend,
+                    token_hdr.clone(),
+                    cache_ttl,
+                    cache_size,
+                );
                 info!(
                     header = %token_hdr,
                     cache_ttl_secs = token_cache_ttl_secs.unwrap_or(0),
@@ -1094,7 +1090,9 @@ impl SipServer {
                 crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
                 crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);
                 crate::metrics::transaction::set_endpoint_waiting_ack(stats.waiting_ack);
-                crate::metrics::transaction::set_running(self.inner.runnings_tx.load(Ordering::Relaxed));
+                crate::metrics::transaction::set_running(
+                    self.inner.runnings_tx.load(Ordering::Relaxed),
+                );
             }
             let modules = self.modules.clone();
 
@@ -1315,7 +1313,11 @@ impl SipServerInner {
                         }
                     }
                 }
-                let realms_empty = self.proxy_config.realms.as_ref().map_or(true, |v| v.is_empty());
+                let realms_empty = self
+                    .proxy_config
+                    .realms
+                    .as_ref()
+                    .map_or(true, |v| v.is_empty());
                 if self.endpoint.get_addrs().iter().any(|addr| {
                     let addr_host = addr.addr.host.to_string();
                     if addr_host == host {

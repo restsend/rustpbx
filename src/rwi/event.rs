@@ -17,7 +17,11 @@ impl RwiEvent {
         let mut payload = serde_json::to_value(event).expect("RwiEventSpec must be Serialize");
         payload["event_type"] = serde_json::Value::String(E::TYPE.into());
         merge_event_context(&mut payload, ctx);
-        RwiEvent { event_type: E::TYPE, call_id: event.call_id().map(|s| s.to_owned()), payload }
+        RwiEvent {
+            event_type: E::TYPE,
+            call_id: event.call_id().map(|s| s.to_owned()),
+            payload,
+        }
     }
 }
 
@@ -42,7 +46,10 @@ pub trait RwiEventSpec: Serialize {
 }
 
 /// Build a flat payload from a spec, optionally enriched with context.
-pub fn to_flat_payload<E: RwiEventSpec>(event: &E, ctx: Option<&EventCallContext>) -> serde_json::Value {
+pub fn to_flat_payload<E: RwiEventSpec>(
+    event: &E,
+    ctx: Option<&EventCallContext>,
+) -> serde_json::Value {
     RwiEvent::from_spec(event, ctx).payload
 }
 
@@ -57,7 +64,9 @@ macro_rules! rwi_event {
     ($ty:ident, $type:literal) => {
         impl RwiEventSpec for $ty {
             const TYPE: &'static str = $type;
-            fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
+            fn call_id(&self) -> Option<&str> {
+                Some(&self.call_id)
+            }
         }
     };
 }
@@ -229,7 +238,9 @@ pub struct MediaRingbackPassthroughStarted {
 }
 impl RwiEventSpec for MediaRingbackPassthroughStarted {
     const TYPE: &'static str = "media_ringback_passthrough_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.source) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.source)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,7 +275,9 @@ pub struct CallBridged {
 }
 impl RwiEventSpec for CallBridged {
     const TYPE: &'static str = "call_bridged";
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,7 +286,9 @@ pub struct ConferenceCreated {
 }
 impl RwiEventSpec for ConferenceCreated {
     const TYPE: &'static str = "conference_created";
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,192 +366,340 @@ pub struct QueueFallbackExecuted {
 rwi_event!(QueueFallbackExecuted, "queue_fallback_executed");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CallUnbridged { pub call_id: String }
+pub struct CallUnbridged {
+    pub call_id: String,
+}
 rwi_event!(CallUnbridged, "call_unbridged");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DtmfCollected { pub call_id: String, pub leg_id: String, pub digits: String }
+pub struct DtmfCollected {
+    pub call_id: String,
+    pub leg_id: String,
+    pub digits: String,
+}
 rwi_event!(DtmfCollected, "dtmf_collected");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DtmfCollectionTimeout { pub call_id: String, pub leg_id: String }
+pub struct DtmfCollectionTimeout {
+    pub call_id: String,
+    pub leg_id: String,
+}
 rwi_event!(DtmfCollectionTimeout, "dtmf_collection_timeout");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SipMessageReceived { pub call_id: String, pub content_type: String, pub body: String }
+pub struct SipMessageReceived {
+    pub call_id: String,
+    pub content_type: String,
+    pub body: String,
+}
 rwi_event!(SipMessageReceived, "sip_message_received");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SipNotifyReceived { pub call_id: String, pub event: String, pub content_type: String, pub body: String }
+pub struct SipNotifyReceived {
+    pub call_id: String,
+    pub event: String,
+    pub content_type: String,
+    pub body: String,
+}
 rwi_event!(SipNotifyReceived, "sip_notify_received");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct MediaStreamStarted { pub call_id: String }
+pub struct MediaStreamStarted {
+    pub call_id: String,
+}
 rwi_event!(MediaStreamStarted, "media_stream_started");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct MediaStreamStopped { pub call_id: String }
+pub struct MediaStreamStopped {
+    pub call_id: String,
+}
 rwi_event!(MediaStreamStopped, "media_stream_stopped");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SupervisorListenStarted { pub supervisor_call_id: String, pub target_call_id: String }
+pub struct SupervisorListenStarted {
+    pub supervisor_call_id: String,
+    pub target_call_id: String,
+}
 impl RwiEventSpec for SupervisorListenStarted {
     const TYPE: &'static str = "supervisor_listen_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.target_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.target_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SupervisorWhisperStarted { pub supervisor_call_id: String, pub target_call_id: String }
+pub struct SupervisorWhisperStarted {
+    pub supervisor_call_id: String,
+    pub target_call_id: String,
+}
 impl RwiEventSpec for SupervisorWhisperStarted {
     const TYPE: &'static str = "supervisor_whisper_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.target_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.target_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SupervisorBargeStarted { pub supervisor_call_id: String, pub target_call_id: String }
+pub struct SupervisorBargeStarted {
+    pub supervisor_call_id: String,
+    pub target_call_id: String,
+}
 impl RwiEventSpec for SupervisorBargeStarted {
     const TYPE: &'static str = "supervisor_barge_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.target_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.target_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SupervisorTakeoverStarted { pub supervisor_call_id: String, pub target_call_id: String }
+pub struct SupervisorTakeoverStarted {
+    pub supervisor_call_id: String,
+    pub target_call_id: String,
+}
 impl RwiEventSpec for SupervisorTakeoverStarted {
     const TYPE: &'static str = "supervisor_takeover_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.target_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.target_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SupervisorModeStopped { pub supervisor_call_id: String, pub target_call_id: String }
+pub struct SupervisorModeStopped {
+    pub supervisor_call_id: String,
+    pub target_call_id: String,
+}
 impl RwiEventSpec for SupervisorModeStopped {
     const TYPE: &'static str = "supervisor_mode_stopped";
-    fn call_id(&self) -> Option<&str> { Some(&self.target_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.target_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateStarted { pub operation_id: String, pub leg_count: u32 }
+pub struct ParallelOriginateStarted {
+    pub operation_id: String,
+    pub leg_count: u32,
+}
 impl RwiEventSpec for ParallelOriginateStarted {
     const TYPE: &'static str = "parallel_originate_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.operation_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateLegRinging { pub operation_id: String, pub call_id: String, pub destination: String }
-rwi_event!(ParallelOriginateLegRinging, "parallel_originate_leg_ringing");
+pub struct ParallelOriginateLegRinging {
+    pub operation_id: String,
+    pub call_id: String,
+    pub destination: String,
+}
+rwi_event!(
+    ParallelOriginateLegRinging,
+    "parallel_originate_leg_ringing"
+);
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateWinner { pub operation_id: String, pub call_id: String, pub destination: String }
+pub struct ParallelOriginateWinner {
+    pub operation_id: String,
+    pub call_id: String,
+    pub destination: String,
+}
 impl RwiEventSpec for ParallelOriginateWinner {
     const TYPE: &'static str = "parallel_originate_winner";
-    fn call_id(&self) -> Option<&str> { Some(&self.operation_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateLegCancelled { pub operation_id: String, pub call_id: String, pub reason: String }
+pub struct ParallelOriginateLegCancelled {
+    pub operation_id: String,
+    pub call_id: String,
+    pub reason: String,
+}
 impl RwiEventSpec for ParallelOriginateLegCancelled {
     const TYPE: &'static str = "parallel_originate_leg_cancelled";
-    fn call_id(&self) -> Option<&str> { Some(&self.operation_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateCompleted { pub operation_id: String, pub winning_call_id: String }
+pub struct ParallelOriginateCompleted {
+    pub operation_id: String,
+    pub winning_call_id: String,
+}
 impl RwiEventSpec for ParallelOriginateCompleted {
     const TYPE: &'static str = "parallel_originate_completed";
-    fn call_id(&self) -> Option<&str> { Some(&self.operation_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateFailed { pub operation_id: String, pub reason: String }
+pub struct ParallelOriginateFailed {
+    pub operation_id: String,
+    pub reason: String,
+}
 impl RwiEventSpec for ParallelOriginateFailed {
     const TYPE: &'static str = "parallel_originate_failed";
-    fn call_id(&self) -> Option<&str> { Some(&self.operation_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceError { pub conf_id: String, pub error: String }
+pub struct ConferenceError {
+    pub conf_id: String,
+    pub error: String,
+}
 impl RwiEventSpec for ConferenceError {
     const TYPE: &'static str = "conference_error";
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMemberJoined { pub conf_id: String, pub call_id: String }
+pub struct ConferenceMemberJoined {
+    pub conf_id: String,
+    pub call_id: String,
+}
 rwi_event!(ConferenceMemberJoined, "conference_member_joined");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMemberLeft { pub conf_id: String, pub call_id: String }
+pub struct ConferenceMemberLeft {
+    pub conf_id: String,
+    pub call_id: String,
+}
 rwi_event!(ConferenceMemberLeft, "conference_member_left");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMemberMuted { pub conf_id: String, pub call_id: String }
+pub struct ConferenceMemberMuted {
+    pub conf_id: String,
+    pub call_id: String,
+}
 rwi_event!(ConferenceMemberMuted, "conference_member_muted");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMemberUnmuted { pub conf_id: String, pub call_id: String }
+pub struct ConferenceMemberUnmuted {
+    pub conf_id: String,
+    pub call_id: String,
+}
 rwi_event!(ConferenceMemberUnmuted, "conference_member_unmuted");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceDestroyed { pub conf_id: String }
+pub struct ConferenceDestroyed {
+    pub conf_id: String,
+}
 impl RwiEventSpec for ConferenceDestroyed {
     const TYPE: &'static str = "conference_destroyed";
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceEndedByHost { pub conf_id: String, pub host_call_id: String, pub removed_call_ids: Vec<String> }
+pub struct ConferenceEndedByHost {
+    pub conf_id: String,
+    pub host_call_id: String,
+    pub removed_call_ids: Vec<String>,
+}
 impl RwiEventSpec for ConferenceEndedByHost {
     const TYPE: &'static str = "conference_ended_by_host";
-    fn call_id(&self) -> Option<&str> { Some(&self.host_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.host_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMergeRequested { pub call_id: String, pub consultation_call_id: String }
+pub struct ConferenceMergeRequested {
+    pub call_id: String,
+    pub consultation_call_id: String,
+}
 rwi_event!(ConferenceMergeRequested, "conference_merge_requested");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMerged { pub conf_id: String, pub call_id: String }
+pub struct ConferenceMerged {
+    pub conf_id: String,
+    pub call_id: String,
+}
 rwi_event!(ConferenceMerged, "conference_merged");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceMergeFailed { pub conf_id: String, pub call_id: String, pub reason: String }
+pub struct ConferenceMergeFailed {
+    pub conf_id: String,
+    pub call_id: String,
+    pub reason: String,
+}
 rwi_event!(ConferenceMergeFailed, "conference_merge_failed");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceSeatReplaceStarted { pub conf_id: String, pub old_call_id: String, pub new_call_id: String }
+pub struct ConferenceSeatReplaceStarted {
+    pub conf_id: String,
+    pub old_call_id: String,
+    pub new_call_id: String,
+}
 impl RwiEventSpec for ConferenceSeatReplaceStarted {
     const TYPE: &'static str = "conference_seat_replace_started";
-    fn call_id(&self) -> Option<&str> { Some(&self.new_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.new_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceSeatReplaceSucceeded { pub conf_id: String, pub old_call_id: String, pub new_call_id: String }
+pub struct ConferenceSeatReplaceSucceeded {
+    pub conf_id: String,
+    pub old_call_id: String,
+    pub new_call_id: String,
+}
 impl RwiEventSpec for ConferenceSeatReplaceSucceeded {
     const TYPE: &'static str = "conference_seat_replace_succeeded";
-    fn call_id(&self) -> Option<&str> { Some(&self.new_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.new_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConferenceSeatReplaceFailed { pub conf_id: String, pub old_call_id: String, pub new_call_id: String, pub reason: String }
+pub struct ConferenceSeatReplaceFailed {
+    pub conf_id: String,
+    pub old_call_id: String,
+    pub new_call_id: String,
+    pub reason: String,
+}
 impl RwiEventSpec for ConferenceSeatReplaceFailed {
     const TYPE: &'static str = "conference_seat_replace_failed";
-    fn call_id(&self) -> Option<&str> { Some(&self.new_call_id) }
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.new_call_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrNodeEntered {
-    pub call_id: String, pub node_id: String, pub node_name: String, pub node_type: String,
-    pub app_id: String, pub entry_time: String,
-    pub caller_name: Option<String>, pub callee_name: Option<String>,
-    pub routing_target: Option<String>, pub previous_node_id: Option<String>,
+    pub call_id: String,
+    pub node_id: String,
+    pub node_name: String,
+    pub node_type: String,
+    pub app_id: String,
+    pub entry_time: String,
+    pub caller_name: Option<String>,
+    pub callee_name: Option<String>,
+    pub routing_target: Option<String>,
+    pub previous_node_id: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrNodeEntered, "ivr_node_entered");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrNodeExited {
-    pub call_id: String, pub node_id: String, pub node_name: String,
-    pub result_value: Option<String>, pub duration_ms: u32, pub exit_time: String,
-    pub next_node_id: Option<String>, pub hangup_reason: Option<String>,
+    pub call_id: String,
+    pub node_id: String,
+    pub node_name: String,
+    pub result_value: Option<String>,
+    pub duration_ms: u32,
+    pub exit_time: String,
+    pub next_node_id: Option<String>,
+    pub hangup_reason: Option<String>,
     pub call_result: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
@@ -544,9 +707,12 @@ rwi_event!(IvrNodeExited, "ivr_node_exited");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrFlowCompleted {
-    pub call_id: String, pub app_id: String,
-    pub total_nodes_traversed: u32, pub total_duration_ms: u32,
-    pub final_result: String, pub completion_time: String,
+    pub call_id: String,
+    pub app_id: String,
+    pub total_nodes_traversed: u32,
+    pub total_duration_ms: u32,
+    pub final_result: String,
+    pub completion_time: String,
     pub final_routing_target: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
@@ -554,15 +720,22 @@ rwi_event!(IvrFlowCompleted, "ivr_flow_completed");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrStepTrace {
-    pub call_id: String, pub session_id: String,
-    pub caller: String, pub callee: String,
-    pub step_index: u32, pub event_type: String,
+    pub call_id: String,
+    pub session_id: String,
+    pub caller: String,
+    pub callee: String,
+    pub step_index: u32,
+    pub event_type: String,
     pub event_detail: Option<String>,
-    pub action_type: String, pub action_json: Option<String>,
-    pub result_kind: String, pub duration_ms: u64,
+    pub action_type: String,
+    pub action_json: Option<String>,
+    pub result_kind: String,
+    pub duration_ms: u64,
     pub error: Option<String>,
-    pub step_id: Option<String>, pub step_name: Option<String>,
-    pub step_start_time: Option<String>, pub step_end_time: Option<String>,
+    pub step_id: Option<String>,
+    pub step_name: Option<String>,
+    pub step_start_time: Option<String>,
+    pub step_end_time: Option<String>,
     pub extra: Option<serde_json::Value>,
     pub sip_headers: Option<std::collections::HashMap<String, String>>,
 }

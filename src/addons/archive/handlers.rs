@@ -174,7 +174,10 @@ pub async fn update_config(
 
         let config_content = toml::to_string_pretty(&new_config)?;
         std::fs::write(&archive_config_path, config_content)?;
-        info!("Updated archive config in {}", archive_config_path.display());
+        info!(
+            "Updated archive config in {}",
+            archive_config_path.display()
+        );
         Ok(())
     })();
 

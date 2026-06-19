@@ -9,8 +9,7 @@ use chrono::{Local, TimeZone};
 use clap::Parser;
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{
-    SipFlowBackend, SipFlowItem, SipFlowMsgType,
-    create_backend,
+    SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
     perf::{PerfCounters, PerfDumper},
     protocol::{MsgType, Packet, parse_packet},
     storage::extract_callid,
@@ -21,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::net::UdpSocket;
 use tracing_appender::non_blocking;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SipFlow - SIP and RTP flow recording server", long_about = None)]
@@ -51,7 +50,6 @@ struct Args {
     buffer_size: usize,
 
     // ── SQLite options ──
-
     /// Number of packets to batch before flushing (SQLite)
     #[arg(long, default_value_t = 1000)]
     flush_count: usize,
@@ -65,7 +63,6 @@ struct Args {
     id_cache_size: usize,
 
     // ── Logging options ──
-
     /// Log file path
     #[arg(long, default_value = "/var/log/sipflow.log")]
     log_file: String,
@@ -75,7 +72,6 @@ struct Args {
     log_level: String,
 
     // ── FlowDB options ──
-
     /// TTL in seconds for FlowDB records (optional, 0 = no ttl)
     #[arg(long)]
     ttl_secs: Option<u64>,
@@ -95,13 +91,17 @@ struct AppState {
 }
 
 fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
-    let call_id = packet.call_id.clone().or_else(|| {
-        if packet.msg_type == MsgType::Sip {
-            extract_callid(&packet.payload)
-        } else {
-            None
-        }
-    }).unwrap_or_default();
+    let call_id = packet
+        .call_id
+        .clone()
+        .or_else(|| {
+            if packet.msg_type == MsgType::Sip {
+                extract_callid(&packet.payload)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     let src = format!("{}:{}", packet.src.0, packet.src.1);
     let dst = format!("{}:{}", packet.dst.0, packet.dst.1);
@@ -317,7 +317,9 @@ async fn media_handler(
     let end_dt = Local.timestamp_opt(end_ts_param, 0).unwrap();
 
     if stats_only {
-        let stats = state.backend.query_media_stats(&callid, start_dt, end_dt)
+        let stats = state
+            .backend
+            .query_media_stats(&callid, start_dt, end_dt)
             .await
             .unwrap_or_default();
         let stats_json: Vec<_> = stats
@@ -347,7 +349,9 @@ async fn media_handler(
         .into_response();
     }
 
-    let wav_bytes = state.backend.query_media(&callid, start_dt, end_dt)
+    let wav_bytes = state
+        .backend
+        .query_media(&callid, start_dt, end_dt)
         .await
         .unwrap_or_default();
 

@@ -249,7 +249,6 @@ struct Cli {
 enum Commands {
     /// Validate configuration and exit without starting the server
     CheckConfig,
-
 }
 
 #[tokio::main]

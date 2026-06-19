@@ -2017,7 +2017,10 @@ async fn test_match_invite_application_with_rewrite_headers() {
         rewrite: Some(RewriteRules {
             headers: vec![
                 ("header.X-Custom".to_string(), "custom-value".to_string()),
-                ("header.P-Asserted-Identity".to_string(), "<sip:routing@pbx.com>".to_string()),
+                (
+                    "header.P-Asserted-Identity".to_string(),
+                    "<sip:routing@pbx.com>".to_string(),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -2058,15 +2061,15 @@ async fn test_match_invite_application_with_rewrite_headers() {
 
     match result {
         RouteResult::Application {
-            option,
-            app_name,
-            ..
+            option, app_name, ..
         } => {
             assert_eq!(app_name, "ivr");
             let headers = option.headers.expect("routing should carry headers");
-            assert!(headers.iter().any(|h| {
-                h.name() == "X-Custom" && h.value() == "custom-value"
-            }));
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| { h.name() == "X-Custom" && h.value() == "custom-value" })
+            );
             assert!(headers.iter().any(|h| {
                 h.name() == "P-Asserted-Identity" && h.value() == "<sip:routing@pbx.com>"
             }));

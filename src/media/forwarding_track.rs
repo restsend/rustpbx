@@ -263,7 +263,8 @@ impl MediaStreamTrack for ForwardingTrack {
 
             // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
             if let Some(tx) = &self.sipflow_tx {
-                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros)) {
+                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros))
+                {
                     trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
                 }
             }

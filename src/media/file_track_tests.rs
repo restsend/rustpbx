@@ -19,8 +19,8 @@ async fn create_test_wav_file_with_samples(path: &str, num_samples: usize) -> Re
         bits_per_sample: 16,
         sample_format: crate::media::wav_reader::SampleFormat::Int,
     };
-    let mut writer =
-        crate::media::wav_reader::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
+    let mut writer = crate::media::wav_reader::WavWriter::create(path, spec)
+        .map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
     for i in 0..num_samples {
         let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
         writer

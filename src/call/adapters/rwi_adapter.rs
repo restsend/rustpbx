@@ -402,12 +402,10 @@ pub fn rwi_to_call_command(
             Ok(CallCommand::ConferenceDestroy { conf_id })
         }
 
-        RwiCommandPayload::ConferenceKick { conf_id, call_id } => {
-            Ok(CallCommand::ConferenceKick {
-                conf_id,
-                leg_id: LegId::new(call_id),
-            })
-        }
+        RwiCommandPayload::ConferenceKick { conf_id, call_id } => Ok(CallCommand::ConferenceKick {
+            conf_id,
+            leg_id: LegId::new(call_id),
+        }),
 
         RwiCommandPayload::ConferenceMuteAll { conf_id } => {
             Ok(CallCommand::ConferenceMuteAll { conf_id })

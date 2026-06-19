@@ -565,10 +565,15 @@ async fn test_db_locator_lookup_with_invalid_host() {
         .unwrap();
 
     // Lookup with a random .invalid hostname (like JsSIP's Contact)
-    let lookup_uri: rsipstack::sip::Uri =
-        "sip:jssip_user@abcdef123456.invalid;transport=ws".try_into().unwrap();
+    let lookup_uri: rsipstack::sip::Uri = "sip:jssip_user@abcdef123456.invalid;transport=ws"
+        .try_into()
+        .unwrap();
     let locations = locator.lookup(&lookup_uri).await.unwrap();
-    assert_eq!(locations.len(), 1, "should find registration via .invalid lookup");
+    assert_eq!(
+        locations.len(),
+        1,
+        "should find registration via .invalid lookup"
+    );
     assert_eq!(
         locations[0].destination,
         Some(destination),
@@ -594,9 +599,7 @@ async fn test_db_locator_unregister_with_address_protects_fresh_registration() {
             "webphone",
             Some("rustpbx.com"),
             Location {
-                aor: "sip:webphone@abc.invalid;transport=ws"
-                    .try_into()
-                    .unwrap(),
+                aor: "sip:webphone@abc.invalid;transport=ws".try_into().unwrap(),
                 expires: 3600,
                 destination: Some(destination.clone()),
                 transport: Some(rsipstack::sip::transport::Transport::Wss),
@@ -609,10 +612,7 @@ async fn test_db_locator_unregister_with_address_protects_fresh_registration() {
 
     // Simulate the stale close event for the *previous* connection that used
     // the same NAT address. This must NOT delete the just-registered row.
-    let removed = locator
-        .unregister_with_address(&destination)
-        .await
-        .unwrap();
+    let removed = locator.unregister_with_address(&destination).await.unwrap();
     assert!(
         removed.is_none(),
         "fresh registration (< grace window) must not be removed by unregister_with_address"
@@ -639,11 +639,7 @@ async fn test_db_locator_unregister_with_address_protects_fresh_registration() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Helper: build a WebRTC (.invalid) registration on a given node.
-fn make_webrtc_location(
-    contact: &str,
-    home_proxy: SipAddr,
-    ws_destination: SipAddr,
-) -> Location {
+fn make_webrtc_location(contact: &str, home_proxy: SipAddr, ws_destination: SipAddr) -> Location {
     Location {
         aor: contact.try_into().unwrap(),
         expires: 3600,
@@ -674,9 +670,11 @@ async fn test_cross_cluster_invalid_bye_routes_to_remote_home_proxy() {
     ));
 
     let node_a = sip_addr("10.0.0.5:5060", rsipstack::sip::transport::Transport::Udp);
-    let ws_a = sip_addr("198.51.100.10:51234", rsipstack::sip::transport::Transport::Wss);
-    let contact_a: rsipstack::sip::Uri =
-        "sip:bob@7s8f2k.invalid;transport=ws".try_into().unwrap();
+    let ws_a = sip_addr(
+        "198.51.100.10:51234",
+        rsipstack::sip::transport::Transport::Wss,
+    );
+    let contact_a: rsipstack::sip::Uri = "sip:bob@7s8f2k.invalid;transport=ws".try_into().unwrap();
 
     // Client registers on Node A
     locator
@@ -713,9 +711,11 @@ async fn test_cross_cluster_invalid_bye_delivers_to_local_ws() {
     ));
 
     let node_a = sip_addr("10.0.0.5:5060", rsipstack::sip::transport::Transport::Udp);
-    let ws_a = sip_addr("198.51.100.10:51234", rsipstack::sip::transport::Transport::Wss);
-    let contact_a: rsipstack::sip::Uri =
-        "sip:bob@7s8f2k.invalid;transport=ws".try_into().unwrap();
+    let ws_a = sip_addr(
+        "198.51.100.10:51234",
+        rsipstack::sip::transport::Transport::Wss,
+    );
+    let contact_a: rsipstack::sip::Uri = "sip:bob@7s8f2k.invalid;transport=ws".try_into().unwrap();
 
     locator
         .register(
@@ -754,13 +754,17 @@ async fn test_cross_cluster_multi_node_same_user_routes_correctly() {
 
     let node_a = sip_addr("10.0.0.5:5060", rsipstack::sip::transport::Transport::Udp);
     let node_b = sip_addr("10.0.0.6:5060", rsipstack::sip::transport::Transport::Udp);
-    let ws_a = sip_addr("198.51.100.10:51234", rsipstack::sip::transport::Transport::Wss);
-    let ws_b = sip_addr("198.51.100.20:57890", rsipstack::sip::transport::Transport::Wss);
+    let ws_a = sip_addr(
+        "198.51.100.10:51234",
+        rsipstack::sip::transport::Transport::Wss,
+    );
+    let ws_b = sip_addr(
+        "198.51.100.20:57890",
+        rsipstack::sip::transport::Transport::Wss,
+    );
 
-    let contact_a: rsipstack::sip::Uri =
-        "sip:bob@aaa123.invalid;transport=ws".try_into().unwrap();
-    let contact_b: rsipstack::sip::Uri =
-        "sip:bob@bbb456.invalid;transport=ws".try_into().unwrap();
+    let contact_a: rsipstack::sip::Uri = "sip:bob@aaa123.invalid;transport=ws".try_into().unwrap();
+    let contact_b: rsipstack::sip::Uri = "sip:bob@bbb456.invalid;transport=ws".try_into().unwrap();
 
     // Register bob on Node A
     locator

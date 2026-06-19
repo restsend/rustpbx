@@ -181,11 +181,12 @@ pub fn build_per_ip_targets(dest: &str, inbound_hosts: &[String]) -> Vec<String>
     let mut seen = std::collections::HashSet::new();
     let mut targets = Vec::new();
 
-    let add_target = |t: &str, targets: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
-        if seen.insert(t.to_string()) {
-            targets.push(t.to_string());
-        }
-    };
+    let add_target =
+        |t: &str, targets: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+            if seen.insert(t.to_string()) {
+                targets.push(t.to_string());
+            }
+        };
 
     add_target(&dest_clean, &mut targets, &mut seen);
 
@@ -451,7 +452,9 @@ fn spawn_health_loop_with_timeout(
             {
                 let mut map = states.write().await;
                 map.retain(|name, _| {
-                    trunks.get(name).map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
+                    trunks
+                        .get(name)
+                        .map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
                 });
             }
 
@@ -471,7 +474,9 @@ pub async fn cleanup_stale_health_states(
     if let Some(health_map) = health {
         let mut map = health_map.write().await;
         map.retain(|name, _| {
-            trunks.get(name).map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
+            trunks
+                .get(name)
+                .map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
         });
     }
 }

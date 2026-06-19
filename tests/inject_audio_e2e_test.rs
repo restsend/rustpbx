@@ -15,17 +15,17 @@ mod helpers;
 use audio_codec::CodecType;
 use futures::{SinkExt, StreamExt};
 use helpers::audio_verifier::{
-    compute_rms, extract_audio_region, find_signal_start,
-    generate_sine_wav, has_audio_content, read_wav_stereo,
+    compute_rms, extract_audio_region, find_signal_start, generate_sine_wav, has_audio_content,
+    read_wav_stereo,
 };
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TEST_TOKEN, TestPbx};
 use rustpbx::call::domain::{CallCommand, MediaSource as DomainMediaSource, PlayOptions};
+use rustpbx::media::FileTrack;
 use rustpbx::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
 use rustpbx::media::engine::command::{InjectTarget, PlaySource};
 use rustpbx::media::engine::{MediaCommand, MediaEngine, MediaEngineConfig};
 use rustpbx::media::negotiate::CodecInfo;
-use rustpbx::media::FileTrack;
 use rustrtc::media::{MediaSample, MediaStreamTrack};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -130,7 +130,10 @@ fn codec_info() -> CodecInfo {
     }
 }
 
-fn setup_engine() -> (MediaEngine, tokio::sync::broadcast::Receiver<rustpbx::media::engine::MediaEvent>) {
+fn setup_engine() -> (
+    MediaEngine,
+    tokio::sync::broadcast::Receiver<rustpbx::media::engine::MediaEvent>,
+) {
     let (engine, handle) = MediaEngine::new(MediaEngineConfig {
         command_channel_capacity: 64,
         event_channel_capacity: 64,
@@ -241,8 +244,7 @@ async fn test_inject_audio_both_endpoints_produce_rtp() {
 /// Test: InjectAudio with InjectTarget::Leg only produces RTP on that endpoint.
 #[tokio::test]
 async fn test_inject_audio_single_leg_produces_rtp() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_single_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_single_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -322,8 +324,7 @@ async fn test_inject_audio_single_leg_produces_rtp() {
 /// Test: InjectAudio with mute_peer suppresses the opposite endpoint's output.
 #[tokio::test]
 async fn test_inject_audio_mute_peer_suppresses_output() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_mute_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_mute_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -402,8 +403,7 @@ async fn test_inject_audio_mute_peer_suppresses_output() {
 /// Test: InjectAudio followed by StopPlayback restores normal peer output mode.
 #[tokio::test]
 async fn test_inject_audio_stop_restores_peer_output() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_stop_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_stop_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -456,7 +456,10 @@ async fn test_inject_audio_stop_restores_peer_output() {
         .await
         .expect("timeout")
         .expect("channel closed");
-    assert!(matches!(&ev, rustpbx::media::engine::MediaEvent::PlayStarted { .. }));
+    assert!(matches!(
+        &ev,
+        rustpbx::media::engine::MediaEvent::PlayStarted { .. }
+    ));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -502,8 +505,7 @@ async fn test_inject_audio_stop_restores_peer_output() {
 /// increment correctly during file output.
 #[tokio::test]
 async fn test_inject_audio_rtp_sequence_continuity() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_seq_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_seq_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -603,7 +605,10 @@ async fn test_inject_audio_rtp_sequence_continuity() {
 
     bridge.stop().await;
     let _ = std::fs::remove_dir_all(&temp_dir);
-    tracing::info!("test_inject_audio_rtp_sequence_continuity PASSED ({} frames)", frame_count);
+    tracing::info!(
+        "test_inject_audio_rtp_sequence_continuity PASSED ({} frames)",
+        frame_count
+    );
 }
 
 /// Test: InjectAudio on nonexistent session returns an error from the engine.
@@ -638,8 +643,7 @@ async fn test_inject_audio_nonexistent_session() {
 /// Test: InjectAudio on a session without a bridge returns an error.
 #[tokio::test]
 async fn test_inject_audio_no_bridge() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_nobridge_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_nobridge_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -879,8 +883,7 @@ async fn test_inject_audio_rtp_continuity_after_replacement() {
 /// 4. Data is valid PCMU (decode round-trip matches original PCM)
 #[tokio::test]
 async fn test_inject_audio_pcmu_encoding_correctness() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_pcmu_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_pcmu_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_pcmu.wav");
@@ -978,10 +981,7 @@ async fn test_inject_audio_pcmu_encoding_correctness() {
         frame_count
     );
     assert!(all_pt_ok, "all frames should have PT=0 (PCMU)");
-    assert!(
-        all_clock_rate_ok,
-        "all frames should have clock_rate=8000"
-    );
+    assert!(all_clock_rate_ok, "all frames should have clock_rate=8000");
     assert!(
         all_data_len_ok,
         "all frames should have 160 bytes data (20ms PCMU)"
@@ -993,16 +993,17 @@ async fn test_inject_audio_pcmu_encoding_correctness() {
         match timeout(Duration::from_millis(100), callee_track.recv()).await {
             Ok(Ok(MediaSample::Audio(f))) => {
                 let pcm = decoder.decode(&f.data);
-                assert!(
-                    !pcm.is_empty(),
-                    "decoded PCM should not be empty"
-                );
+                assert!(!pcm.is_empty(), "decoded PCM should not be empty");
                 assert_eq!(
                     pcm.len(),
                     160,
                     "decoded PCM should have 160 samples for 20ms@8kHz"
                 );
-                let max_amp = pcm.iter().map(|s: &i16| s.unsigned_abs()).max().unwrap_or(0);
+                let max_amp = pcm
+                    .iter()
+                    .map(|s: &i16| s.unsigned_abs())
+                    .max()
+                    .unwrap_or(0);
                 assert!(
                     max_amp > 100,
                     "decoded PCM should have non-trivial amplitude (max={}), not silence",
@@ -1015,8 +1016,7 @@ async fn test_inject_audio_pcmu_encoding_correctness() {
     }
 
     if decoded_pcm.len() >= 320 {
-        let has_variation = decoded_pcm.windows(2)
-            .any(|w| w[0] != w[1]);
+        let has_variation = decoded_pcm.windows(2).any(|w| w[0] != w[1]);
         assert!(
             has_variation,
             "decoded PCM should have sample variation (not flat/silence)"
@@ -1038,8 +1038,7 @@ async fn test_inject_audio_pcmu_encoding_correctness() {
 /// so injected announcements are captured in the recording WAV file.
 #[tokio::test]
 async fn test_inject_audio_recording_captures_injected_audio() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("rustpbx_inject_rec_{}", Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_inject_rec_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let wav_path = temp_dir.join("test_inject.wav");
@@ -1119,7 +1118,11 @@ async fn test_inject_audio_recording_captures_injected_audio() {
         rec_data.len()
     );
 
-    assert!(rec_data.len() >= 80, "WAV file too small: {} bytes", rec_data.len());
+    assert!(
+        rec_data.len() >= 80,
+        "WAV file too small: {} bytes",
+        rec_data.len()
+    );
     assert_eq!(&rec_data[0..4], b"RIFF", "should be a valid WAV file");
     assert_eq!(&rec_data[8..12], b"WAVE", "should be a valid WAV file");
 
@@ -1226,7 +1229,8 @@ async fn test_inject_audio_via_rwi_media_play() {
         v["type"], "command_completed",
         "media.play should succeed: {v}"
     );
-    let track_id = v.get("track_id")
+    let track_id = v
+        .get("track_id")
         .or_else(|| v.get("result").and_then(|r| r.get("track_id")))
         .and_then(|t| t.as_str())
         .unwrap_or("unknown");

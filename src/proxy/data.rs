@@ -183,7 +183,6 @@ impl ProxyDataContext {
         resolve_ivr_name_to_path(ivr_name, &ivr_dir)
     }
 
-
     fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
         let candidate = Path::new(reference);
         if candidate.is_absolute() {
@@ -636,7 +635,8 @@ impl ProxyDataContext {
                 .collect::<HashMap<i64, String>>()
         };
 
-        let routes = load_routes_from_db(db, &trunk_lookup, Some(&config.generated_ivr_dir())).await?;
+        let routes =
+            load_routes_from_db(db, &trunk_lookup, Some(&config.generated_ivr_dir())).await?;
         let entries = routes.len();
         let backup = backup_existing_file(&target_path)?;
         write_routes_file(&target_path, &routes)?;

@@ -730,10 +730,7 @@ impl QueueApp {
     }
 
     /// Check and play comfort prompts or EWT announcements between hold music loops.
-    async fn maybe_play_comfort_or_ewt(
-        &mut self,
-        ctrl: &mut CallController,
-    ) -> anyhow::Result<()> {
+    async fn maybe_play_comfort_or_ewt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
         let now = Instant::now();
 
         // 1. EWT periodic announcement
@@ -742,13 +739,17 @@ impl QueueApp {
                 Some(next) => now >= next,
                 None => {
                     // First time: schedule and play immediately
-                    self.next_ewt_announce = Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                    self.next_ewt_announce =
+                        Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
                     true
                 }
             };
             if should_announce {
                 let ewt_secs = self.calculate_ewt().await;
-                debug!(ewt_secs, "Queue: playing EWT announcement (pre-recorded fallback)");
+                debug!(
+                    ewt_secs,
+                    "Queue: playing EWT announcement (pre-recorded fallback)"
+                );
                 // Note: the production queue should wire a `TtsService` here to synthesize
                 // "Your estimated wait time is N minutes" dynamically. QueueApp is a
                 // testable harness; the real TTS integration belongs in the production
@@ -763,7 +764,8 @@ impl QueueApp {
                     ctrl.play_audio(path.clone(), false).await?;
                     return Ok(());
                 }
-                self.next_ewt_announce = Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                self.next_ewt_announce =
+                    Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
                 return Ok(());
             }
         }
@@ -894,7 +896,8 @@ impl QueueApp {
                         EscalationMode::Replace => {
                             // Cancel existing legs and dial new agents
                             if !self.pending_agents.is_empty() {
-                                let old_legs: Vec<String> = self.pending_agents
+                                let old_legs: Vec<String> = self
+                                    .pending_agents
                                     .iter()
                                     .map(|(_, cid)| cid.clone())
                                     .collect();
@@ -1129,7 +1132,10 @@ impl CallApp for QueueApp {
         ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        if !matches!(self.state, QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. }) {
+        if !matches!(
+            self.state,
+            QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. }
+        ) {
             return Ok(AppAction::Continue);
         }
 
@@ -1141,7 +1147,10 @@ impl CallApp for QueueApp {
         if let Some(enqueued) = self.enqueued_at {
             let wait_secs = enqueued.elapsed().as_secs();
             if wait_secs < self.config.callback_offer_after_secs {
-                debug!("Queue: callback DTMF received but too early ({}s < {}s)", wait_secs, self.config.callback_offer_after_secs);
+                debug!(
+                    "Queue: callback DTMF received but too early ({}s < {}s)",
+                    wait_secs, self.config.callback_offer_after_secs
+                );
                 return Ok(AppAction::Continue);
             }
         }
@@ -1166,12 +1175,12 @@ impl CallApp for QueueApp {
         } else {
             // No confirmation prompt configured — request callback directly
             self.write_callback_metadata().await;
-                    self.state = QueueState::Done;
-                    info!("Queue: hanging up after callback request (no prompt)");
-                    return Ok(AppAction::Hangup {
-                        reason: Some(CallRecordHangupReason::BySystem),
-                        code: None,
-                    });
+            self.state = QueueState::Done;
+            info!("Queue: hanging up after callback request (no prompt)");
+            return Ok(AppAction::Hangup {
+                reason: Some(CallRecordHangupReason::BySystem),
+                code: None,
+            });
         }
 
         Ok(AppAction::Continue)
@@ -1234,7 +1243,10 @@ impl CallApp for QueueApp {
             QueueState::PlayingEwtAnnouncement => {
                 // Schedule next EWT announcement
                 if self.config.ewt_announce_interval_secs > 0 {
-                    self.next_ewt_announce = Some(Instant::now() + Duration::from_secs(self.config.ewt_announce_interval_secs));
+                    self.next_ewt_announce = Some(
+                        Instant::now()
+                            + Duration::from_secs(self.config.ewt_announce_interval_secs),
+                    );
                 }
                 self.start_hold_music(ctrl).await?;
             }
@@ -1387,9 +1399,7 @@ impl CallApp for QueueApp {
                     warn!("Queue: all agents busy");
                     self.play_busy_and_then_fallback(ctrl).await
                 }
-                "dial_next_agent" => {
-                    self.dial_next_agent(ctrl).await
-                }
+                "dial_next_agent" => self.dial_next_agent(ctrl).await,
                 _ => Ok(AppAction::Continue),
             },
             _ => Ok(AppAction::Continue),

@@ -4,7 +4,10 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use reqwest::{Client, Method};
 use serde::Deserialize;
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tracing::{info, warn};
 use urlencoding;
 
@@ -99,9 +102,7 @@ impl HttpUserBackend {
         realm: Option<&str>,
         request: Option<&rsipstack::sip::Request>,
     ) -> Result<reqwest::Response, AuthError> {
-        let request_uri = request
-            .map(|req| req.uri.to_string())
-            .unwrap_or_default();
+        let request_uri = request.map(|req| req.uri.to_string()).unwrap_or_default();
         let sip_params = if let Some(req) = request {
             let mut params: HashMap<String, String> = HashMap::new();
             for header_name in &self.sip_headers {

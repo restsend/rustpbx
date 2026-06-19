@@ -1149,12 +1149,13 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequestPayload::ConferenceDestroy(r) => RwiCommandPayload::ConferenceDestroy {
                 conf_id: r.conf_id.unwrap_or_default(),
             },
-            RwiRequestPayload::ConferenceEnd { conf_id, host_call_id } => {
-                RwiCommandPayload::ConferenceEnd {
-                    conf_id: conf_id.unwrap_or_default(),
-                    host_call_id: host_call_id.unwrap_or_default(),
-                }
-            }
+            RwiRequestPayload::ConferenceEnd {
+                conf_id,
+                host_call_id,
+            } => RwiCommandPayload::ConferenceEnd {
+                conf_id: conf_id.unwrap_or_default(),
+                host_call_id: host_call_id.unwrap_or_default(),
+            },
             RwiRequestPayload::ConferenceMerge(r) => RwiCommandPayload::ConferenceMerge {
                 conf_id: r.conf_id.unwrap_or_default(),
                 call_id: r.call_id.unwrap_or_default(),

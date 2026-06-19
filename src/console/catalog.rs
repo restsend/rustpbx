@@ -100,8 +100,7 @@ pub fn scan_ivr_catalog(ivr_dir: &Path, extra_patterns: &[String]) -> Vec<IvrCat
                     let old = seen.remove(&lookup_key).unwrap();
                     warn!(
                         "IVR '{}' has both hand-written and generated files; preferring hand-written ({})",
-                        ivr_name,
-                        old.file_path
+                        ivr_name, old.file_path
                     );
                 }
                 if seen.contains_key(&lookup_key) {
@@ -163,11 +162,7 @@ pub fn scan_ivr_catalog(ivr_dir: &Path, extra_patterns: &[String]) -> Vec<IvrCat
             let file_config: IvrFileConfig = match toml::from_str(&content) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(
-                        "failed to parse IVR include file {}: {}",
-                        path.display(),
-                        e
-                    );
+                    warn!("failed to parse IVR include file {}: {}", path.display(), e);
                     continue;
                 }
             };
@@ -207,14 +202,15 @@ pub fn scan_ivr_catalog(ivr_dir: &Path, extra_patterns: &[String]) -> Vec<IvrCat
     }
 
     let mut result: Vec<IvrCatalogEntry> = seen.into_values().collect();
-    result.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    result.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
     result
 }
 
-pub fn scan_queue_catalog(
-    queue_dir: &Path,
-    extra_patterns: &[String],
-) -> Vec<QueueCatalogEntry> {
+pub fn scan_queue_catalog(queue_dir: &Path, extra_patterns: &[String]) -> Vec<QueueCatalogEntry> {
     let mut seen: HashMap<String, QueueCatalogEntry> = HashMap::new();
 
     if queue_dir.exists() {
@@ -337,7 +333,11 @@ pub fn scan_queue_catalog(
             let content = match fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!("failed to read queue include file {}: {}", path.display(), e);
+                    warn!(
+                        "failed to read queue include file {}: {}",
+                        path.display(),
+                        e
+                    );
                     continue;
                 }
             };
@@ -377,7 +377,11 @@ pub fn scan_queue_catalog(
     }
 
     let mut result: Vec<QueueCatalogEntry> = seen.into_values().collect();
-    result.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    result.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
     result
 }
 
@@ -426,18 +430,16 @@ pub fn build_forwarding_catalog(proxy_config: &ProxyConfig) -> ForwardingCatalog
     })
     .collect();
 
-    catalog.ivr_projects = scan_ivr_catalog(
-        &proxy_config.generated_ivr_dir(),
-        &proxy_config.ivr_files,
-    )
-    .into_iter()
-    .map(|i| ForwardingIvr {
-        name: i.name,
-        description: i.description,
-        ivr_mode: i.ivr_mode,
-        file_path: i.file_path,
-    })
-    .collect();
+    catalog.ivr_projects =
+        scan_ivr_catalog(&proxy_config.generated_ivr_dir(), &proxy_config.ivr_files)
+            .into_iter()
+            .map(|i| ForwardingIvr {
+                name: i.name,
+                description: i.description,
+                ivr_mode: i.ivr_mode,
+                file_path: i.file_path,
+            })
+            .collect();
 
     catalog
 }
@@ -482,8 +484,16 @@ mode = "sequential"
         assert_eq!(result.len(), 2, "should have 2 queues, got: {:?}", result);
 
         let names: Vec<&str> = result.iter().map(|q| q.name.as_str()).collect();
-        assert!(names.contains(&"nouser"), "should contain nouser: {:?}", names);
-        assert!(names.contains(&"toagent"), "should contain toagent: {:?}", names);
+        assert!(
+            names.contains(&"nouser"),
+            "should contain nouser: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"toagent"),
+            "should contain toagent: {:?}",
+            names
+        );
 
         let keys: Vec<&str> = result.iter().map(|q| q.key.as_str()).collect();
         assert!(keys.contains(&"db-1"), "should contain db-1: {:?}", keys);

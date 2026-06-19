@@ -229,10 +229,9 @@ mod tests {
     fn test_media_stats_unfilled_gap_counts_as_loss() {
         let mut stats = MediaStatsAccumulator::new(0, "127.0.0.1:4000".to_string(), Some(1));
 
-        for (sequence_number, rtp_timestamp, arrival_micros) in [
-            (10, 1_600, 10_000),
-            (12, 1_920, 30_000),
-        ] {
+        for (sequence_number, rtp_timestamp, arrival_micros) in
+            [(10, 1_600, 10_000), (12, 1_920, 30_000)]
+        {
             stats.observe(
                 arrival_micros,
                 Some(RtpStatsHeader {

@@ -147,8 +147,13 @@ impl<R: Read> fmt::Debug for WavReader<R> {
 
 impl WavReader<BufReader<File>> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| anyhow!("Failed to open WAV file '{}': {}", path.as_ref().display(), e))?;
+        let file = File::open(path.as_ref()).map_err(|e| {
+            anyhow!(
+                "Failed to open WAV file '{}': {}",
+                path.as_ref().display(),
+                e
+            )
+        })?;
         let reader = BufReader::new(file);
         Self::new(reader)
     }
@@ -337,9 +342,8 @@ impl<R: Read + Seek> WavReader<R> {
                 match self.reader.read_exact(&mut buf) {
                     Ok(()) => {
                         self.bytes_read += 3;
-                        let val = (buf[0] as i32)
-                            | ((buf[1] as i32) << 8)
-                            | ((buf[2] as i32) << 16);
+                        let val =
+                            (buf[0] as i32) | ((buf[1] as i32) << 8) | ((buf[2] as i32) << 16);
                         let val = if val & 0x800000 != 0 {
                             val | 0xFF00_0000u32 as i32
                         } else {
@@ -670,8 +674,7 @@ mod tests {
         }
 
         fn extra_chunk(mut self, id: &[u8], payload: &[u8]) -> Self {
-            self.extra_chunks
-                .push((id.to_vec(), payload.to_vec()));
+            self.extra_chunks.push((id.to_vec(), payload.to_vec()));
             self
         }
 
@@ -696,7 +699,8 @@ mod tests {
         }
 
         fn build(self) -> Vec<u8> {
-            let byte_rate = self.sample_rate * self.channels as u32 * (self.bits_per_sample as u32 / 8);
+            let byte_rate =
+                self.sample_rate * self.channels as u32 * (self.bits_per_sample as u32 / 8);
             let block_align = self.channels * (self.bits_per_sample / 8);
 
             let fmt_chunk_len = 16u32 + self.fmt_extra.len() as u32;
@@ -731,9 +735,8 @@ mod tests {
                 extra_buf.extend_from_slice(payload);
             }
 
-            let file_size = 36 + self.data.len() as u32
-                + self.fmt_extra.len() as u32
-                + extra_buf.len() as u32;
+            let file_size =
+                36 + self.data.len() as u32 + self.fmt_extra.len() as u32 + extra_buf.len() as u32;
 
             let mut wav = Vec::new();
             wav.extend_from_slice(b"RIFF");
@@ -768,7 +771,12 @@ mod tests {
         tmp
     }
 
-    fn write_read_roundtrip(samples: &[i16], sample_rate: u32, channels: u16, bits: u16) -> Vec<i16> {
+    fn write_read_roundtrip(
+        samples: &[i16],
+        sample_rate: u32,
+        channels: u16,
+        bits: u16,
+    ) -> Vec<i16> {
         let spec = WavSpec {
             channels,
             sample_rate,
@@ -854,7 +862,9 @@ mod tests {
     fn test_pcm_16bit_stereo() {
         let samples: Vec<i16> = (0..320).collect();
         let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let wav = WavBuilder::new(FORMAT_PCM, 44100, 2, 16).data(&data).build();
+        let wav = WavBuilder::new(FORMAT_PCM, 44100, 2, 16)
+            .data(&data)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         assert_eq!(reader.spec().channels, 2);
@@ -891,7 +901,13 @@ mod tests {
         // 8-bit has limited precision, check each sample is within ±512
         for (orig, decoded) in samples.iter().zip(read.iter()) {
             let diff = (orig - decoded).unsigned_abs();
-            assert!(diff <= 512, "8-bit roundtrip: orig={}, got={}, diff={}", orig, decoded, diff);
+            assert!(
+                diff <= 512,
+                "8-bit roundtrip: orig={}, got={}, diff={}",
+                orig,
+                decoded,
+                diff
+            );
         }
     }
 
@@ -1001,14 +1017,22 @@ mod tests {
         let pcm: Vec<i16> = vec![0, 1000, -1000, 32767, -32768, 5000];
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
         assert_eq!(read.len(), pcm.len());
         for (orig, decoded) in pcm.iter().zip(read.iter()) {
             let diff = (orig - decoded).unsigned_abs();
-            assert!(diff <= 1000, "PCMU: expected ~{}, got {}, diff={}", orig, decoded, diff);
+            assert!(
+                diff <= 1000,
+                "PCMU: expected ~{}, got {}, diff={}",
+                orig,
+                decoded,
+                diff
+            );
         }
     }
 
@@ -1020,7 +1044,9 @@ mod tests {
         let mut encoder = audio_codec::create_encoder(CodecType::PCMU);
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1035,14 +1061,22 @@ mod tests {
         let pcm: Vec<i16> = vec![0, 1000, -1000, 32767, -32768, 5000];
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
         assert_eq!(read.len(), pcm.len());
         for (orig, decoded) in pcm.iter().zip(read.iter()) {
             let diff = (orig - decoded).unsigned_abs();
-            assert!(diff <= 1000, "PCMA: expected ~{}, got {}, diff={}", orig, decoded, diff);
+            assert!(
+                diff <= 1000,
+                "PCMA: expected ~{}, got {}, diff={}",
+                orig,
+                decoded,
+                diff
+            );
         }
     }
 
@@ -1054,7 +1088,9 @@ mod tests {
         let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1066,12 +1102,20 @@ mod tests {
     #[test]
     fn test_g722_single_frame() {
         let mut encoder = audio_codec::create_encoder(CodecType::G722);
-        let pcm: Vec<i16> = (0..160).map(|i| ((i as f32 * 0.1).sin() * 8000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..160)
+            .map(|i| ((i as f32 * 0.1).sin() * 8000.0) as i16)
+            .collect();
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        eprintln!("G722 encoded {} bytes from {} samples", encoded.len(), pcm.len());
+        eprintln!(
+            "G722 encoded {} bytes from {} samples",
+            encoded.len(),
+            pcm.len()
+        );
 
-        let wav = WavBuilder::new(FORMAT_G722, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_G722, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1084,10 +1128,14 @@ mod tests {
     #[test]
     fn test_g722_multiple_frames() {
         let mut encoder = audio_codec::create_encoder(CodecType::G722);
-        let pcm: Vec<i16> = (0..480).map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..480)
+            .map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16)
+            .collect();
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        let wav = WavBuilder::new(FORMAT_G722, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_G722, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1099,12 +1147,16 @@ mod tests {
     #[test]
     fn test_g729_single_frame() {
         let mut encoder = audio_codec::create_encoder(CodecType::G729);
-        let pcm: Vec<i16> = (0..80).map(|i| ((i as f32 * 0.1).sin() * 4000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..80)
+            .map(|i| ((i as f32 * 0.1).sin() * 4000.0) as i16)
+            .collect();
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
         assert_eq!(encoded.len(), 10);
 
-        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1114,12 +1166,16 @@ mod tests {
     #[test]
     fn test_g729_multiple_frames() {
         let mut encoder = audio_codec::create_encoder(CodecType::G729);
-        let pcm: Vec<i16> = (0..240).map(|i| ((i as f32 * 0.05).sin() * 4000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..240)
+            .map(|i| ((i as f32 * 0.05).sin() * 4000.0) as i16)
+            .collect();
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
         assert_eq!(encoded.len(), 30);
 
-        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1129,7 +1185,9 @@ mod tests {
     #[test]
     fn test_g729_partial_frame_padded() {
         let partial = vec![0xABu8, 0xCD, 0xEF, 0x01, 0x23];
-        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0).data(&partial).build();
+        let wav = WavBuilder::new(FORMAT_G729, 8000, 1, 0)
+            .data(&partial)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
@@ -1146,14 +1204,23 @@ mod tests {
         let mut encoder = audio_codec::create_encoder(CodecType::PCMU);
         let encoded: Vec<u8> = encoder.encode(&original);
 
-        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMU, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
         let decoded: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
 
         assert_eq!(decoded.len(), original.len());
         for (i, (o, d)) in original.iter().zip(decoded.iter()).enumerate() {
             let diff = (o - d).unsigned_abs();
-            assert!(diff <= 500, "roundtrip PCMU[{}]: expected ~{}, got {}, diff={}", i, o, d, diff);
+            assert!(
+                diff <= 500,
+                "roundtrip PCMU[{}]: expected ~{}, got {}, diff={}",
+                i,
+                o,
+                d,
+                diff
+            );
         }
     }
 
@@ -1165,14 +1232,23 @@ mod tests {
         let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
         let encoded: Vec<u8> = encoder.encode(&original);
 
-        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8).data(&encoded).build();
+        let wav = WavBuilder::new(FORMAT_PCMA, 8000, 1, 8)
+            .data(&encoded)
+            .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
         let decoded: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
 
         assert_eq!(decoded.len(), original.len());
         for (i, (o, d)) in original.iter().zip(decoded.iter()).enumerate() {
             let diff = (o - d).unsigned_abs();
-            assert!(diff <= 500, "roundtrip PCMA[{}]: expected ~{}, got {}, diff={}", i, o, d, diff);
+            assert!(
+                diff <= 500,
+                "roundtrip PCMA[{}]: expected ~{}, got {}, diff={}",
+                i,
+                o,
+                d,
+                diff
+            );
         }
     }
 
@@ -1241,9 +1317,7 @@ mod tests {
 
     #[test]
     fn test_no_fmt_chunk() {
-        let wav = WavBuilder::new(FORMAT_PCM, 8000, 1, 16)
-            .no_fmt()
-            .build();
+        let wav = WavBuilder::new(FORMAT_PCM, 8000, 1, 16).no_fmt().build();
         let result = WavReader::new(Cursor::new(wav));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("fmt"));
@@ -1251,9 +1325,7 @@ mod tests {
 
     #[test]
     fn test_no_data_chunk() {
-        let wav = WavBuilder::new(FORMAT_PCM, 8000, 1, 16)
-            .no_data()
-            .build();
+        let wav = WavBuilder::new(FORMAT_PCM, 8000, 1, 16).no_data().build();
         let result = WavReader::new(Cursor::new(wav));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("data"));
@@ -1354,7 +1426,9 @@ mod tests {
 
     #[test]
     fn test_wav_format_roundtrip_tag() {
-        for tag in [0x0001u16, 0x0003, 0x0006, 0x0007, 0x0065, 0x0083, 0xFFFE, 0x1234] {
+        for tag in [
+            0x0001u16, 0x0003, 0x0006, 0x0007, 0x0065, 0x0083, 0xFFFE, 0x1234,
+        ] {
             assert_eq!(WavFormat::from_format_tag(tag).format_tag(), tag);
         }
     }

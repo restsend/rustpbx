@@ -362,8 +362,7 @@ impl AppStateBuilder {
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
-                crate::console::ConsoleState::initialize(db_conn.clone(), console_config)
-                .await?,
+                crate::console::ConsoleState::initialize(db_conn.clone(), console_config).await?,
             ),
             None => None,
         };
@@ -591,18 +590,16 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
             ws_handler,
             axum::routing::get(
                 async move |client_ip: ClientAddr,
-                             ws: WebSocketUpgrade,
-                             axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-                             headers: axum::http::HeaderMap|
-                       -> Response {
+                            ws: WebSocketUpgrade,
+                            axum::extract::Query(params): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >,
+                            headers: axum::http::HeaderMap|
+                            -> Response {
                     let token = token.clone();
 
                     // Path B: Extract JWT from query param or Authorization header
-                    let pre_authed_agent = extract_ws_jwt(
-                        &params,
-                        &headers,
-                        &jwt_config,
-                    );
+                    let pre_authed_agent = extract_ws_jwt(&params, &headers, &jwt_config);
 
                     ws.protocols(["sip"]).on_upgrade(async move |socket| {
                         sip_ws_handler(

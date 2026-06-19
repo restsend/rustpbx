@@ -326,7 +326,8 @@ pub async fn execute_action(
             ..
         } => {
             let resolved_greeting_text = if greeting_api_url.is_some() {
-                match fetch_tts_text_from_api(greeting_api_url.as_deref().unwrap(), sess, ctx).await {
+                match fetch_tts_text_from_api(greeting_api_url.as_deref().unwrap(), sess, ctx).await
+                {
                     Some(text) => Some(text),
                     None => greeting_text.clone(),
                 }
@@ -454,12 +455,7 @@ pub async fn execute_action(
                 ctx.http_client.post(&url).json(&body)
             };
 
-            match crate::http_util::execute_request(
-                req_builder,
-                &opts.headers,
-                opts.timeout,
-            )
-            .await
+            match crate::http_util::execute_request(req_builder, &opts.headers, opts.timeout).await
             {
                 Ok(response) => {
                     let status = response.status().as_u16();
@@ -480,8 +476,7 @@ pub async fn execute_action(
                 Err(e) => {
                     let status = 0u16;
                     let body = serde_json::Value::Null;
-                    sess.variables
-                        .insert("api_status".into(), e.to_string());
+                    sess.variables.insert("api_status".into(), e.to_string());
                     Ok(ActionResult::WaitFor(WaitEvent::ApiResponse {
                         status,
                         body,
@@ -540,7 +535,8 @@ pub async fn execute_action(
                 sess.variables.insert(format!("voip_hdr_{}", k), v.clone());
             }
             if success.is_some() || failure.is_some() {
-                sess.variables.insert("voip_bridge_branch".into(), "true".into());
+                sess.variables
+                    .insert("voip_bridge_branch".into(), "true".into());
                 Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                     "voip_bridge:{}",
                     uri

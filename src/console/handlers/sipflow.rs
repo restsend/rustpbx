@@ -1,7 +1,7 @@
-use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::console::config_helpers::{
     ensure_table_mut, get_config_path, load_document, persist_document,
 };
+use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use axum::{
     Json, Router,

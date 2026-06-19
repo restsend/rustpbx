@@ -519,7 +519,8 @@ mod tests {
             .await
             .expect("connect in-memory sqlite");
         Migrator::up(&db, None).await.expect("apply migrations");
-        ConsoleState::initialize(db,
+        ConsoleState::initialize(
+            db,
             ConsoleConfig {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),

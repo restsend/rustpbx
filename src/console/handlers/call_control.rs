@@ -154,10 +154,7 @@ pub async fn list_active_calls_inner(
     Json(json!({ "data": all_entries })).into_response()
 }
 
-pub async fn show_active_call_inner(
-    state: &Arc<ConsoleState>,
-    session_id: &str,
-) -> Response {
+pub async fn show_active_call_inner(state: &Arc<ConsoleState>, session_id: &str) -> Response {
     if let Some(server) = state.sip_server() {
         let registry = server.active_call_registry.clone();
 
@@ -304,13 +301,7 @@ async fn forward_command_to_peers(
                         return None;
                     }
                     let body_text = resp.text().await.ok()?;
-                    Some(
-                        (
-                            status,
-                            Json(body_text),
-                        )
-                            .into_response(),
-                    )
+                    Some((status, Json(body_text)).into_response())
                 }
                 Err(_) => None,
             }
@@ -329,10 +320,7 @@ async fn forward_command_to_peers(
 }
 
 #[cfg(feature = "commerce")]
-async fn query_session_from_peers(
-    state: &ConsoleState,
-    session_id: &str,
-) -> Option<Response> {
+async fn query_session_from_peers(state: &ConsoleState, session_id: &str) -> Option<Response> {
     let peers = get_cluster_peers(state)?;
     if peers.is_empty() {
         return None;
@@ -360,13 +348,7 @@ async fn query_session_from_peers(
                         return None;
                     }
                     let body_text = resp.text().await.ok()?;
-                    Some(
-                        (
-                            status,
-                            Json(body_text),
-                        )
-                            .into_response(),
-                    )
+                    Some((status, Json(body_text)).into_response())
                 }
                 Err(_) => None,
             }
@@ -385,10 +367,7 @@ async fn query_session_from_peers(
 }
 
 #[cfg(feature = "commerce")]
-async fn fetch_peer_calls(
-    state: &ConsoleState,
-    limit: usize,
-) -> Vec<serde_json::Value> {
+async fn fetch_peer_calls(state: &ConsoleState, limit: usize) -> Vec<serde_json::Value> {
     let peers = match get_cluster_peers(state) {
         Some(p) if !p.is_empty() => p,
         _ => return Vec::new(),

@@ -17,6 +17,4 @@ pub use handler::*;
 pub use processor::*;
 pub use session::*;
 
-pub use proto::{
-    CallMeta, CallMetaStore, EventCallContext, RecordingMetadata, RwiEvent,
-};
+pub use proto::{CallMeta, CallMetaStore, EventCallContext, RecordingMetadata, RwiEvent};

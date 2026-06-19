@@ -27,10 +27,7 @@ pub(crate) fn permission_denied() -> Response {
 
 #[allow(dead_code)]
 pub(crate) fn not_found(label: impl Into<String>) -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        format!("{} not found", label.into()),
-    )
+    json_error(StatusCode::NOT_FOUND, format!("{} not found", label.into()))
 }
 
 #[allow(dead_code)]
@@ -136,10 +133,7 @@ pub(crate) fn parse_config_from_str(contents: &str) -> Result<Config, Response> 
         })
 }
 
-pub(crate) fn ensure_table_mut<'doc>(
-    doc: &'doc mut DocumentMut,
-    key: &str,
-) -> &'doc mut Table {
+pub(crate) fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
     let needs_init = doc
         .as_table()
         .get(key)

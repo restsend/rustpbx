@@ -48,7 +48,9 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
 }
 
 fn event_type_name(v: &serde_json::Value) -> Option<String> {
-    v.get("event_type").and_then(|t| t.as_str()).map(|s| s.to_string())
+    v.get("event_type")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
 }
 
 async fn recv_until(
@@ -121,8 +123,10 @@ impl TestCtx {
         )
         .await;
         let mut ws = ws_connect(&pbx.rwi_url).await;
-        let (sub_id, sub_json) =
-            rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+        let (sub_id, sub_json) = rwi_req(
+            "session.subscribe",
+            serde_json::json!({"contexts": ["default"]}),
+        );
         let sub_resp = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
         assert_eq!(sub_resp["status"].as_str().unwrap_or(""), "success");
         Self { pbx, ws }
@@ -146,7 +150,11 @@ impl TestCtx {
         (call_id, completed)
     }
 
-    async fn wait_event_by_type(&mut self, event_type: &str, timeout_secs: u64) -> serde_json::Value {
+    async fn wait_event_by_type(
+        &mut self,
+        event_type: &str,
+        timeout_secs: u64,
+    ) -> serde_json::Value {
         let et = event_type.to_string();
         recv_until(&mut self.ws, timeout_secs, move |v| {
             event_type_name(v).as_deref() == Some(&et)
@@ -181,7 +189,10 @@ async fn test_full_rwi_event_chain_with_recording() {
 
     let callee_port = portpicker::pick_unused_port().expect("no callee port");
     let mut ctx = TestCtx::new().await;
-    println!("[SETUP] PBX SIP:{}  RWI:{}", ctx.pbx.sip_port, ctx.pbx.rwi_url);
+    println!(
+        "[SETUP] PBX SIP:{}  RWI:{}",
+        ctx.pbx.sip_port, ctx.pbx.rwi_url
+    );
 
     let callee = TestUa::callee_with_username(callee_port, 2, "agent1001").await;
     println!("[SETUP] Callee on UDP port {}", callee_port);
@@ -235,17 +246,23 @@ async fn test_full_rwi_event_chain_with_recording() {
     assert_eq!(rec_stopped["event_type"], "record_stopped");
     assert_eq!(rec_stopped["call_id"], call_id);
     // record_stopped has enriched fields like unique_id
-    assert!(rec_stopped["unique_id"].is_string(), "record_stopped should have unique_id");
+    assert!(
+        rec_stopped["unique_id"].is_string(),
+        "record_stopped should have unique_id"
+    );
 
     // ── 6. call_hangup via gateway (real production code path) ──────
     println!("\n── 6. Sending call_hangup via RWI gateway ──");
     {
         let gw = ctx.pbx.gateway.read();
-        let hangup_event = rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallHangup {
-            call_id: call_id.clone(),
-            reason: Some("cleanup".to_string()),
-            sip_status: Some(200),
-        }, None);
+        let hangup_event = rustpbx::rwi::event::to_legacy_event(
+            &rustpbx::rwi::CallHangup {
+                call_id: call_id.clone(),
+                reason: Some("cleanup".to_string()),
+                sip_status: Some(200),
+            },
+            None,
+        );
         gw.send_event_to_call_owner(&call_id, &hangup_event);
         println!("    CallHangup dispatched via gateway.send_event_to_call_owner()");
         println!("    (same production code path used for call cleanup)");
@@ -286,7 +303,10 @@ async fn test_agent_state_change_rwi_event() {
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
     let mut ctx = TestCtx::new().await;
-    println!("[SETUP] PBX SIP:{}  RWI:{}", ctx.pbx.sip_port, ctx.pbx.rwi_url);
+    println!(
+        "[SETUP] PBX SIP:{}  RWI:{}",
+        ctx.pbx.sip_port, ctx.pbx.rwi_url
+    );
 
     // The CC addon's agent module sends AgentStateChanged through
     // gateway.broadcast(). We replicate this exact path.

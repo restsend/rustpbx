@@ -120,7 +120,12 @@ impl Recorder {
         // PCMU/PCMA are mono codecs (1 channel), we force stereo (2 channels) for better separation
         // of leg A and leg B audio in the recording.
         let channels = 2;
-        let mut writer = Box::new(CodecWavWriter::new(file, sample_rate, channels, Some(codec)));
+        let mut writer = Box::new(CodecWavWriter::new(
+            file,
+            sample_rate,
+            channels,
+            Some(codec),
+        ));
         writer.write_header()?;
 
         Ok(Self {

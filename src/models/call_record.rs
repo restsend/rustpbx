@@ -453,10 +453,7 @@ impl MigrationTrait for Migration {
         }
 
         if !manager
-            .has_index(
-                "rustpbx_call_records",
-                "idx_rustpbx_call_records_extension",
-            )
+            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_extension")
             .await?
         {
             manager

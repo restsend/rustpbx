@@ -12,9 +12,7 @@ use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet};
-use crate::sipflow::wav_utils::{
-    generate_wav_to_writer,
-};
+use crate::sipflow::wav_utils::generate_wav_to_writer;
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use std::sync::atomic::Ordering;
 
@@ -157,11 +155,7 @@ impl LocalBackend {
 impl SipFlowBackend for LocalBackend {
     async fn flush(&self) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self
-            .sender
-            .send(Command::Flush { done: tx })
-            .is_err()
-        {
+        if self.sender.send(Command::Flush { done: tx }).is_err() {
             warn!("SipFlowBackend flush: worker channel closed, skipping flush");
             return Ok(());
         }
@@ -247,7 +241,8 @@ impl SipFlowBackend for LocalBackend {
             if packets.is_empty() {
                 return Ok(Vec::<u8>::new());
             }
-            let payload_map = build_payload_maps(&mut storage, &call_id, start_time, end_time).await;
+            let payload_map =
+                build_payload_maps(&mut storage, &call_id, start_time, end_time).await;
             let mut cursor = std::io::Cursor::new(Vec::new());
             generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, &mut cursor)?;
             Ok::<Vec<u8>, anyhow::Error>(cursor.into_inner())
@@ -340,7 +335,10 @@ async fn build_payload_maps(
     call_id: &str,
     start_time: DateTime<Local>,
     end_time: DateTime<Local>,
-) -> (crate::sipflow::wav_utils::PayloadTypeMap, crate::sipflow::wav_utils::LegPayloadTypeMap) {
+) -> (
+    crate::sipflow::wav_utils::PayloadTypeMap,
+    crate::sipflow::wav_utils::LegPayloadTypeMap,
+) {
     use crate::sipflow::wav_utils::{build_payload_type_map, build_payload_type_map_by_leg};
     let media_sources = storage
         .query_media_sources(call_id, start_time, end_time)

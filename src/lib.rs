@@ -12,6 +12,7 @@ pub mod console;
 pub mod handler;
 pub mod license;
 
+pub mod http_util;
 pub mod media;
 pub mod metrics;
 pub mod models;
@@ -22,7 +23,6 @@ pub mod rwi;
 pub mod sipflow;
 pub mod storage;
 pub mod tls_reloader;
-pub mod http_util;
 pub mod tts;
 pub mod utils;
 pub mod version;

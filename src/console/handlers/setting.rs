@@ -3,10 +3,14 @@ use crate::config::{
     CallRecordConfig, CallRecordStorageConfig, Config, HttpRouterConfig, LocatorWebhookConfig,
     ProxyConfig, UserBackendConfig,
 };
-use crate::console::handlers::forms;
-use crate::console::{ConsoleState, middleware::AuthRequired};
 #[cfg(feature = "commerce")]
 use crate::console::ReloadTarget;
+use crate::console::config_helpers::{
+    ensure_table_mut, find_or_404, get_config_path, json_error, load_document,
+    parse_config_from_str, persist_document,
+};
+use crate::console::handlers::forms;
+use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
     ActiveModel as DepartmentActiveModel, Column as DepartmentColumn, Entity as DepartmentEntity,
 };
@@ -18,10 +22,6 @@ use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
 use crate::rwi::auth::RwiConfig;
-use crate::console::config_helpers::{
-    ensure_table_mut, find_or_404, get_config_path, json_error, load_document,
-    parse_config_from_str, persist_document,
-};
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
@@ -44,8 +44,8 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
-use std::time::Duration as StdDuration;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tokio::time;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
@@ -423,8 +423,13 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         if let Some(ext) = config.external_ip.as_ref() {
             key_items.push(json!({ "label": "External IP", "value": ext }));
         } else if let Some(url) = config.auto_external_ip.as_ref() {
-            let display = if url.is_empty() { "http://ifconfig.me" } else { url };
-            key_items.push(json!({ "label": "External IP", "value": format!("auto ({})", display) }));
+            let display = if url.is_empty() {
+                "http://ifconfig.me"
+            } else {
+                url
+            };
+            key_items
+                .push(json!({ "label": "External IP", "value": format!("auto ({})", display) }));
         }
         if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
@@ -937,7 +942,10 @@ async fn create_department(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
-    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+    if let Err(resp) = state
+        .require_permission(&user, "departments", "write")
+        .await
+    {
         return resp;
     }
     let name = payload.name.trim();
@@ -986,7 +994,10 @@ async fn update_department(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
-    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+    if let Err(resp) = state
+        .require_permission(&user, "departments", "write")
+        .await
+    {
         return resp;
     }
     let model = find_or_404!(DepartmentEntity, id, state.db(), "Department");
@@ -1027,7 +1038,10 @@ async fn delete_department(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if let Err(resp) = state.require_permission(&user, "departments", "write").await {
+    if let Err(resp) = state
+        .require_permission(&user, "departments", "write")
+        .await
+    {
         return resp;
     }
     let model = find_or_404!(DepartmentEntity, id, state.db(), "Department");
@@ -1901,24 +1915,20 @@ pub(crate) async fn update_storage_settings(
             Some(CallRecordStoragePayload::Disabled) | None => {
                 doc.remove("callrecord");
             }
-            Some(payload) => {
-                match serialize_to_item(&payload, "callrecord") {
-                    Ok(item) => doc["callrecord"] = item,
-                    Err(resp) => return resp,
-                }
-            }
+            Some(payload) => match serialize_to_item(&payload, "callrecord") {
+                Ok(item) => doc["callrecord"] = item,
+                Err(resp) => return resp,
+            },
         }
         modified = true;
     }
 
     if let Some(policy_opt) = payload.recording_policy {
         match policy_opt {
-            Some(policy_payload) => {
-                match serialize_to_item(&policy_payload, "recording_policy") {
-                    Ok(item) => doc["recording"] = item,
-                    Err(resp) => return resp,
-                }
-            }
+            Some(policy_payload) => match serialize_to_item(&policy_payload, "recording_policy") {
+                Ok(item) => doc["recording"] = item,
+                Err(resp) => return resp,
+            },
             None => {
                 doc.remove("recording");
             }
@@ -2480,7 +2490,10 @@ async fn cluster_reload_sse_handler(
         }
 
         let overall_status = if any_error { "error" } else { "ok" };
-        sse_send!("complete", serde_json::json!({"type": "complete", "overall_status": overall_status, "peers": peer_results_summary}));
+        sse_send!(
+            "complete",
+            serde_json::json!({"type": "complete", "overall_status": overall_status, "peers": peer_results_summary})
+        );
     });
 
     let sse_stream = futures::stream::unfold(rx, |mut rx| async move {
@@ -3012,7 +3025,9 @@ pub(crate) async fn test_http_router(
         "direction": "internal"
     });
 
-    let req = reqwest::Client::new().post(&payload.url).json(&test_request);
+    let req = reqwest::Client::new()
+        .post(&payload.url)
+        .json(&test_request);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(resp) => Json(json!({
             "status": "ok",
@@ -3380,11 +3395,9 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db,
-            ConsoleConfig::default(),
-        )
-        .await
-        .expect("initialize console state")
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
     }
 
     #[tokio::test]

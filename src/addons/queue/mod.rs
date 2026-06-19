@@ -1,6 +1,6 @@
-use crate::addons::{Addon, export_reload::ExportReloadHandler};
 #[cfg(feature = "console")]
 use crate::addons::SidebarItem;
+use crate::addons::{Addon, export_reload::ExportReloadHandler};
 use crate::app::AppState;
 #[cfg(feature = "console")]
 use crate::console::ReloadTarget;

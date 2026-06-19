@@ -471,7 +471,8 @@ impl SipFlowBuilder {
     pub fn build(self) -> SipFlow {
         let mut flow = SipFlow::new(self.backend, self.inspectors, self.enable_async_writer);
         // SAFETY: inner is behind Arc but we just created it, no other references exist.
-        let inner = Arc::get_mut(&mut flow.inner).expect("SipFlow inner uniquely held during build");
+        let inner =
+            Arc::get_mut(&mut flow.inner).expect("SipFlow inner uniquely held during build");
         inner.local_addrs = self.local_addrs;
         flow
     }

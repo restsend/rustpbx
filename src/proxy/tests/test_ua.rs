@@ -165,12 +165,9 @@ impl TestUa {
 
     /// Register with the proxy server
     pub async fn register(&self) -> Result<()> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.register_inner(),
-        )
-        .await
-        .map_err(|_| anyhow!("register timed out after 10s"))?
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.register_inner())
+            .await
+            .map_err(|_| anyhow!("register timed out after 10s"))?
     }
 
     async fn register_inner(&self) -> Result<()> {
@@ -1047,7 +1044,9 @@ mod tests {
             let sdp_offer = create_test_sdp("192.168.1.100", 5004, true);
             let alice_clone = alice.clone();
             let caller_handle =
-                crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_offer)).await });
+                crate::utils::spawn(
+                    async move { alice_clone.make_call("bob", Some(sdp_offer)).await },
+                );
 
             // Wait and answer incoming call by polling events (avoid draining issue)
             let mut answered = false;

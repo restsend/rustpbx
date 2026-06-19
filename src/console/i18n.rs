@@ -112,12 +112,7 @@ impl I18n {
                         e
                     );
                 } else {
-                    tracing::warn!(
-                        "i18n: failed to load {}/{}.toml: {}",
-                        base_dir,
-                        locale,
-                        e
-                    );
+                    tracing::warn!("i18n: failed to load {}/{}.toml: {}", base_dir, locale, e);
                 }
                 Translations::new()
             }
@@ -271,8 +266,7 @@ impl I18n {
     }
 
     pub fn available_locales_json(&self) -> serde_json::Value {
-        serde_json::to_value(self.available_locales())
-            .unwrap_or(serde_json::Value::Array(vec![]))
+        serde_json::to_value(self.available_locales()).unwrap_or(serde_json::Value::Array(vec![]))
     }
 
     /// Insert a value at a dot-separated path inside a JSON map.

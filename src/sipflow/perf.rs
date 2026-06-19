@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Shared performance counters for sipflow (atomics, no contention on hot path).
@@ -79,16 +79,11 @@ impl PerfDumper {
         self.last_time = now;
 
         // ── export to metrics ──
-        metrics::counter!("sipflow_packets_received_total", "component" => "sipflow")
-            .increment(dr);
-        metrics::counter!("sipflow_items_recorded_total", "component" => "sipflow")
-            .increment(dw);
-        metrics::counter!("sipflow_items_dropped_total", "component" => "sipflow")
-            .increment(dd);
-        metrics::counter!("sipflow_flushes_total", "component" => "sipflow")
-            .increment(df);
-        metrics::gauge!("sipflow_pending_items", "component" => "sipflow")
-            .set(pending as f64);
+        metrics::counter!("sipflow_packets_received_total", "component" => "sipflow").increment(dr);
+        metrics::counter!("sipflow_items_recorded_total", "component" => "sipflow").increment(dw);
+        metrics::counter!("sipflow_items_dropped_total", "component" => "sipflow").increment(dd);
+        metrics::counter!("sipflow_flushes_total", "component" => "sipflow").increment(df);
+        metrics::gauge!("sipflow_pending_items", "component" => "sipflow").set(pending as f64);
 
         if dr == 0 && dw == 0 && dd == 0 && df == 0 {
             return None;

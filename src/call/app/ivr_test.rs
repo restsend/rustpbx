@@ -1799,7 +1799,8 @@ action = { type = "transfer", target = "100" }
             bits_per_sample: 16,
             sample_format: crate::media::wav_reader::SampleFormat::Int,
         };
-        let mut writer = crate::media::wav_reader::WavWriter::create(path.to_str().unwrap(), spec).expect("WavWriter");
+        let mut writer = crate::media::wav_reader::WavWriter::create(path.to_str().unwrap(), spec)
+            .expect("WavWriter");
         for i in 0..num_samples {
             let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
             writer.write_sample(sample).expect("write_sample");
@@ -2584,9 +2585,11 @@ action = { type = "transfer", target = "100" }
                     bits_per_sample: 16,
                     sample_format: crate::media::wav_reader::SampleFormat::Int,
                 };
-                let mut writer =
-                    crate::media::wav_reader::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
-                        .unwrap();
+                let mut writer = crate::media::wav_reader::WavWriter::new(
+                    std::io::BufWriter::new(tmp.as_file_mut()),
+                    spec,
+                )
+                .unwrap();
                 for _ in 0..800 {
                     writer.write_sample(0i16).unwrap();
                 }

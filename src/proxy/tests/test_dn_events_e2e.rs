@@ -2,12 +2,12 @@ use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use crate::rwi::gateway::{EventCacheEntry, RwiGateway};
 use anyhow::Result;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tracing::info;
-use parking_lot::RwLock;
 
 struct DnEventCapture {
     events: Vec<String>,
@@ -201,8 +201,7 @@ async fn test_dn_events_register_and_call_flow() -> Result<()> {
         bob.answer_call(id, Some(bob_sdp.clone())).await?;
     }
 
-    let _alice_dialog_id = match tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-    {
+    let _alice_dialog_id = match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
         Ok(Ok(Ok(id))) => {
             info!("Call established: {}", id);
             Some(id)

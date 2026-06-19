@@ -201,7 +201,12 @@ async fn test_ivr_queue_agent_flow() {
     // Step 4: Verify audio flow
     let agent_stats = agent.rtp_stats_summary();
     let quality = agent.audio_quality_summary();
-    tracing::info!("Agent RTP stats: {}, quality: total={} silence={}", agent_stats, quality.total_frames, quality.silence_frames);
+    tracing::info!(
+        "Agent RTP stats: {}, quality: total={} silence={}",
+        agent_stats,
+        quality.total_frames,
+        quality.silence_frames
+    );
 
     // Clean up
     ws.close(None).await.unwrap();

@@ -1,8 +1,8 @@
 use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
-use crate::rwi::RwiGatewayRef;
 use crate::rwi::RwiEventSpec;
+use crate::rwi::RwiGatewayRef;
 use crate::rwi::gateway::SessionId;
 use crate::rwi::session::OwnershipMode;
 use async_trait::async_trait;
@@ -90,7 +90,6 @@ impl RwiApp {
         }
         gw.fan_out_excluding(&self.context_name, event, self.session_id.as_ref());
     }
-
 }
 
 #[async_trait]

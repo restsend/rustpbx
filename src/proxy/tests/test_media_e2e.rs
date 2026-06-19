@@ -1113,7 +1113,9 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(
+            async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await },
+        );
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;
@@ -1543,7 +1545,9 @@ async fn test_p2p_multi_codec_offer_call_establishes() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(
+            async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await },
+        );
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;
@@ -1763,7 +1767,9 @@ async fn test_p2p_opus_dynamic_pt_sdp_negotiation() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(
+            async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await },
+        );
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;

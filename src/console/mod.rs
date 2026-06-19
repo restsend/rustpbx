@@ -1,9 +1,9 @@
+use crate::app::AppStateInner;
 use crate::config::ConsoleConfig;
 use crate::console::i18n::{I18n, LocaleConfig, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::models::rbac::{role_permission, user_role};
 use crate::proxy::server::SipServerRef;
-use crate::app::AppStateInner;
 use anyhow::Result;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -676,11 +676,9 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db,
-            ConsoleConfig::default(),
-        )
-        .await
-        .expect("initialize console state")
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
     }
 
     #[tokio::test]
@@ -756,16 +754,32 @@ mod tests {
 
         assert!(state.pending_reload_targets().is_empty());
         state.mark_pending_reload(ReloadTarget::Routes);
-        assert!(state.pending_reload_targets().contains(&ReloadTarget::Routes));
+        assert!(
+            state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Routes)
+        );
         state.clear_pending_reload(ReloadTarget::Routes);
         assert!(state.pending_reload_targets().is_empty());
 
         // Multiple targets can be pending independently
         state.mark_pending_reload(ReloadTarget::Trunks);
         state.mark_pending_reload(ReloadTarget::Queues);
-        assert!(state.pending_reload_targets().contains(&ReloadTarget::Trunks));
-        assert!(state.pending_reload_targets().contains(&ReloadTarget::Queues));
-        assert!(!state.pending_reload_targets().contains(&ReloadTarget::Routes));
+        assert!(
+            state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Trunks)
+        );
+        assert!(
+            state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Queues)
+        );
+        assert!(
+            !state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Routes)
+        );
         state.clear_all_pending_reload();
         assert!(state.pending_reload_targets().is_empty());
     }
@@ -782,11 +796,9 @@ mod tests {
         config.base_path = "/admin".to_string();
         config.api_prefix = "/v1/api".to_string();
 
-        let state = ConsoleState::initialize(db,
-            config,
-        )
-        .await
-        .expect("initialize console state");
+        let state = ConsoleState::initialize(db, config)
+            .await
+            .expect("initialize console state");
 
         // Test base_path
         assert_eq!(state.base_path(), "/admin");

@@ -122,23 +122,49 @@ impl TestUa {
     /// Create a callee that immediately rejects with the given SIP code (e.g. 486 Busy, 480 Temporarily Unavailable).
     pub async fn callee_reject(sip_port: u16, username: &str, reject_code: u16) -> Self {
         Self::build_callee(BuildCallee {
-            sip_port, username: username.to_string(), ring_secs: 0, refer_reject: None, record_path: None,
-            reject_code: Some(reject_code), answer: None, hangup_after_secs: None,
-        }).await
+            sip_port,
+            username: username.to_string(),
+            ring_secs: 0,
+            refer_reject: None,
+            record_path: None,
+            reject_code: Some(reject_code),
+            answer: None,
+            hangup_after_secs: None,
+        })
+        .await
     }
 
     pub async fn callee_no_answer(sip_port: u16, username: &str, ring_secs: u64) -> Self {
         Self::build_callee(BuildCallee {
-            sip_port, username: username.to_string(), ring_secs, refer_reject: None, record_path: None,
-            reject_code: None, answer: Some(None), hangup_after_secs: None,
-        }).await
+            sip_port,
+            username: username.to_string(),
+            ring_secs,
+            refer_reject: None,
+            record_path: None,
+            reject_code: None,
+            answer: Some(None),
+            hangup_after_secs: None,
+        })
+        .await
     }
 
-    pub async fn callee_answer_then_hangup(sip_port: u16, ring_secs: u64, username: &str, after_secs: u64) -> Self {
+    pub async fn callee_answer_then_hangup(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        after_secs: u64,
+    ) -> Self {
         Self::build_callee(BuildCallee {
-            sip_port, username: username.to_string(), ring_secs, refer_reject: None, record_path: None,
-            reject_code: None, answer: Some(Some(AnswerConfig::Echo)), hangup_after_secs: Some(after_secs),
-        }).await
+            sip_port,
+            username: username.to_string(),
+            ring_secs,
+            refer_reject: None,
+            record_path: None,
+            reject_code: None,
+            answer: Some(Some(AnswerConfig::Echo)),
+            hangup_after_secs: Some(after_secs),
+        })
+        .await
     }
 
     async fn build_callee(opts: BuildCallee) -> Self {
@@ -156,7 +182,11 @@ impl TestUa {
             password: None,
             register: Some(false),
             ring: if opts.ring_secs > 0 {
-                Some(RingConfig { duration_secs: opts.ring_secs, ringback: None, local: None })
+                Some(RingConfig {
+                    duration_secs: opts.ring_secs,
+                    ringback: None,
+                    local: None,
+                })
             } else {
                 None
             },
@@ -164,8 +194,22 @@ impl TestUa {
             refer_reject: opts.refer_reject,
             record: opts.record_path,
             reject_prob: opts.reject_code.map(|_| 100),
-            hangup: opts.reject_code.map(|code| HangupConfig { code, after_secs: None }).or_else(|| opts.hangup_after_secs.map(|after| HangupConfig { code: 200, after_secs: Some(after) })),
-            audio_quality: Some(AudioQualityConfig { enabled: true, ..Default::default() }),
+            hangup: opts
+                .reject_code
+                .map(|code| HangupConfig {
+                    code,
+                    after_secs: None,
+                })
+                .or_else(|| {
+                    opts.hangup_after_secs.map(|after| HangupConfig {
+                        code: 200,
+                        after_secs: Some(after),
+                    })
+                }),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -192,7 +236,12 @@ impl TestUa {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        Self { cancel_token, domain, stats, record_path: None }
+        Self {
+            cancel_token,
+            domain,
+            stats,
+            record_path: None,
+        }
     }
 
     /// Create and start an outbound caller UA that will place calls to `target_uri`.

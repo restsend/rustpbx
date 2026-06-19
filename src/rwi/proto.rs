@@ -49,7 +49,6 @@ impl<T> RwiEnvelope<T> {
     }
 }
 
-
 /// Type alias for RWI event sender.
 pub type RwiEventTx = tokio::sync::mpsc::UnboundedSender<RwiEvent>;
 /// Type alias for RWI event receiver.
@@ -123,7 +122,6 @@ impl CallMetaStore {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RecordingMetadata {
@@ -144,7 +142,3 @@ pub struct RecordingMetadata {
     pub process_flag: Option<String>,
     pub root_call_id: Option<String>,
 }
-
-
-
-

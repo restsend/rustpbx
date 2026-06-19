@@ -17,7 +17,11 @@ pub fn count_when<C>(condition: C) -> SimpleExpr
 where
     C: IntoCondition,
 {
-    Func::count(sea_orm::sea_query::Expr::case(condition, sea_orm::sea_query::Expr::val(1))).into()
+    Func::count(sea_orm::sea_query::Expr::case(
+        condition,
+        sea_orm::sea_query::Expr::val(1),
+    ))
+    .into()
 }
 
 pub struct TaskGuard {

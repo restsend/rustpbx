@@ -407,7 +407,9 @@ impl AudioSource for FileAudioSource {
                     );
                     self.mp3_buffer_pos += available;
                     samples_read += available;
-                    if samples_read >= buffer.len() { break; }
+                    if samples_read >= buffer.len() {
+                        break;
+                    }
                 }
                 match decoder.next_frame() {
                     Ok(frame) => {
@@ -448,22 +450,36 @@ impl AudioSource for FileAudioSource {
             }
         }
 
-        for sample in buffer.iter_mut() { *sample = 0; }
+        for sample in buffer.iter_mut() {
+            *sample = 0;
+        }
         buffer.len()
     }
 
     fn sample_rate(&self) -> u32 {
-        if !self.pcm_cache.is_empty() { return self.cached_sample_rate; }
-        if let Some(ref reader) = self.wav_reader { reader.spec().sample_rate }
-        else if self.mp3_decoder.is_some() { self.mp3_sample_rate }
-        else { self.decoder.sample_rate() }
+        if !self.pcm_cache.is_empty() {
+            return self.cached_sample_rate;
+        }
+        if let Some(ref reader) = self.wav_reader {
+            reader.spec().sample_rate
+        } else if self.mp3_decoder.is_some() {
+            self.mp3_sample_rate
+        } else {
+            self.decoder.sample_rate()
+        }
     }
 
     fn channels(&self) -> u16 {
-        if !self.pcm_cache.is_empty() { return self.cached_channels; }
-        if let Some(ref reader) = self.wav_reader { reader.spec().channels }
-        else if self.mp3_decoder.is_some() { self.mp3_channels }
-        else { 1 }
+        if !self.pcm_cache.is_empty() {
+            return self.cached_channels;
+        }
+        if let Some(ref reader) = self.wav_reader {
+            reader.spec().channels
+        } else if self.mp3_decoder.is_some() {
+            self.mp3_channels
+        } else {
+            1
+        }
     }
 
     fn has_data(&self) -> bool {
