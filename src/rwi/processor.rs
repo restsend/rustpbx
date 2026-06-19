@@ -1175,6 +1175,11 @@ impl RwiCommandProcessor {
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
 
+        // CDR data for call completion reporting
+        let cdr_sender = server.callrecord_sender.clone();
+        let cdr_answered = std::sync::atomic::AtomicBool::new(false);
+        let cdr_start_time = chrono::Utc::now();
+
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let conference_manager = self.conference_manager.clone();
 
@@ -1624,6 +1629,11 @@ impl RwiCommandProcessor {
                                     }
                                     tracing::info!(%cmd_call_id, "App stopped in originate task");
                                 }
+                                CallCommand::Hangup(_) => {
+                                    tracing::info!(%cmd_call_id, "Hangup command received in originate task");
+                                    cmd_cancel.cancel();
+                                    break;
+                                }
                                 _ => {
                                     tracing::debug!(?cmd, "Unhandled command in originate task");
                                 }
@@ -1641,8 +1651,51 @@ impl RwiCommandProcessor {
             let cleanup = || {
                 let cancel = cancel_token.clone();
                 let aborted = cmd_aborted.clone();
+                let cdr_sender = cdr_sender.clone();
+                let cdr_answered = &cdr_answered;
+                let cdr_start_time = cdr_start_time;
+                let cdr_call_id = call_id.clone();
+                let cdr_caller = caller_display.clone();
+                let cdr_callee = callee_display.clone();
                 async move {
                     cancel.cancel();
+
+                    // Send CDR record when call completes
+                    if let Some(ref sender) = cdr_sender.as_ref() {
+                        use crate::callrecord::CallRecordHangupReason;
+                        let end_time = chrono::Utc::now();
+                        let duration = (end_time - cdr_start_time).num_seconds().max(0) as f64;
+                        let answered = cdr_answered.load(std::sync::atomic::Ordering::Relaxed);
+                        let record = crate::callrecord::CallRecord {
+                            call_id: cdr_call_id.clone(),
+                            caller: cdr_caller.clone(),
+                            callee: cdr_callee.clone(),
+                            start_time: cdr_start_time,
+                            ring_time: None,
+                            answer_time: if answered { Some(cdr_start_time) } else { None },
+                            end_time,
+                            status_code: if answered { 200 } else { 0 },
+                            hangup_reason: Some(if answered {
+                                CallRecordHangupReason::BySystem
+                            } else {
+                                CallRecordHangupReason::Canceled
+                            }),
+                            hangup_messages: vec![],
+                            recorder: vec![],
+                            sip_leg_roles: std::collections::HashMap::new(),
+                            leg_timeline: crate::callrecord::LegTimeline::default(),
+                            details: crate::callrecord::CallDetails {
+                                direction: "outbound".to_string(),
+                                status: if answered { "answered".to_string() } else { "no_answer".to_string() },
+                                from_number: Some(cdr_caller.clone()),
+                                to_number: Some(cdr_callee.clone()),
+                                ..Default::default()
+                            },
+                            extensions: http::Extensions::new(),
+                        };
+                        let _ = sender.send(record);
+                        tracing::debug!(call_id = %cdr_call_id, duration = %duration, answered, "CDR sent from RWI originate");
+                    }
 
                     match tokio::time::timeout(std::time::Duration::from_secs(5), &mut cmd_task)
                         .await
@@ -1707,6 +1760,8 @@ impl RwiCommandProcessor {
                 } => {
                     match result {
                         Ok((dialog_id, Some(resp))) if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful => {
+
+                            cdr_answered.store(true, std::sync::atomic::Ordering::Relaxed);
 
                             let sdp_answer = if resp.body().is_empty() {
                                 None
