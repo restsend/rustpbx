@@ -53,6 +53,9 @@ pub struct TestPbxInject {
     pub agent_registry: Option<Arc<dyn AgentRegistry>>,
     /// Additional dialplan inspectors to register (e.g. SBC JSON-RPC).
     pub dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
+    /// Addon registry for commercial addons (voicemail, etc.).
+    /// The caller must initialize addons and run migrations before passing.
+    pub addon_registry: Option<Arc<rustpbx::addons::registry::AddonRegistry>>,
 }
 
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
@@ -126,6 +129,9 @@ impl TestPbx {
             });
         if let Some(agent_registry) = inject.agent_registry {
             builder = builder.with_agent_registry(agent_registry);
+        }
+        if let Some(reg) = inject.addon_registry {
+            builder = builder.with_addon_registry(Some(reg));
         }
         for inspector in inject.dialplan_inspectors {
             builder = builder.with_dialplan_inspector(inspector);

@@ -272,7 +272,9 @@ impl SipSessionHandle {
 }
 
 /// Built-in factory that creates `CallApp` instances from app parameters.
-struct BuiltinAppFactory;
+struct BuiltinAppFactory {
+    addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+}
 
 impl AppFactory for BuiltinAppFactory {
     fn create_app(
@@ -411,6 +413,29 @@ impl AppFactory for BuiltinAppFactory {
             }
             "voicemail" => {
                 let extension = params.as_ref()?.get("extension")?.as_str()?.to_string();
+                let caller_id = context.call_info.caller.clone();
+                // Try the commercial addon first (full DB persistence, notifiers, S3).
+                #[cfg(feature = "addon-voicemail")]
+                if let Some(reg) = &self.addon_registry {
+                    if let Some(addon) = reg.get_addon("voicemail") {
+                        if let Some(vm) = addon
+                            .as_any()
+                            .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
+                        {
+                            match vm.build_app_shell(&extension, &caller_id) {
+                                Ok(app) => {
+                                    return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
+                                }
+                                Err(e) => tracing::warn!(
+                                    "voicemail addon build_app_shell failed: {}; \
+                                     falling back to core impl",
+                                    e
+                                ),
+                            }
+                        }
+                    }
+                }
+                // Fallback to the built-in core implementation.
                 let mut app = crate::call::app::voicemail::VoicemailApp::new(extension);
                 if let Some(greeting) = params
                     .as_ref()?
@@ -420,6 +445,42 @@ impl AppFactory for BuiltinAppFactory {
                     app = app.with_greeting_path(greeting);
                 }
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+            }
+            "check_voicemail" => {
+                #[cfg(feature = "addon-voicemail")]
+                if let Some(reg) = &self.addon_registry {
+                    if let Some(addon) = reg.get_addon("voicemail") {
+                        if let Some(vm) = addon
+                            .as_any()
+                            .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
+                        {
+                            match vm.build_check_app() {
+                                Ok(app) => {
+                                    return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
+                                }
+                                Err(e) => tracing::warn!(
+                                    "voicemail check_app build failed: {}", e
+                                ),
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            "conference" => {
+                let conf_id = params
+                    .as_ref()?
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default")
+                    .to_string();
+                let caller_id = context.call_info.caller.clone();
+                Some(
+                    Box::new(crate::call::app::conference::ConferenceApp::new(
+                        conf_id,
+                        caller_id,
+                    )) as Box<dyn crate::call::app::CallApp>,
+                )
             }
             "queue" => {
                 let pending = context.pending_queue.lock().unwrap().take()?;
@@ -868,7 +929,9 @@ impl SipSession {
                 handle: sip_handle.clone(),
                 context: Arc::new(app_ctx),
             })
-            .with_factory(Arc::new(BuiltinAppFactory)),
+            .with_factory(Arc::new(BuiltinAppFactory {
+                addon_registry: server.addon_registry.clone(),
+            })),
         );
 
         let initial = server_dialog.initial_request();
@@ -3301,6 +3364,17 @@ impl SipSession {
                         .await
                     {
                         warn!(error = %e, "Failed to start application");
+                    } else if app_name == "conference" {
+                        // After the conference app starts (which calls
+                        // ctrl.answer()), join all active legs into the
+                        // conference room.
+                        let conf_id = app_params
+                            .as_ref()
+                            .and_then(|p| p.get("id").and_then(|v| v.as_str()))
+                            .unwrap_or(&format!("conf-{}", self.id.0))
+                            .to_string();
+                        self.join_conference_mixer(&conf_id).await;
+                        self.start_caller_ingress_monitor_if_needed().await;
                     } else {
                         self.start_caller_ingress_monitor_if_needed().await;
                     }

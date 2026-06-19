@@ -9,8 +9,14 @@ use tracing::{debug, info, warn};
 
 impl SipSession {
     pub(super) async fn setup_conference_mixer(&mut self) {
-        let conf_id_str = format!("conf-{}", self.id.0);
-        let conf_id = crate::call::runtime::ConferenceId::from(conf_id_str.as_str());
+        self.join_conference_mixer(&format!("conf-{}", self.id.0))
+            .await;
+    }
+
+    /// Join all active legs into the given conference room.
+    /// Creates the room if it does not already exist.
+    pub(super) async fn join_conference_mixer(&mut self, conf_id_str: &str) {
+        let conf_id = crate::call::runtime::ConferenceId::from(conf_id_str);
 
         if self
             .server
