@@ -32,6 +32,9 @@ pub(crate) enum TransferTarget {
     Voicemail {
         extension: String,
     },
+    Conference {
+        id: String,
+    },
     /// WebSocket + PCM real-time VoIP bridge.
     VoipBridge {
         endpoint: String,
@@ -95,6 +98,12 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             return TransferTarget::Voicemail {
                 extension: ext.to_string(),
             };
+        }
+    }
+    if let Some(rest) = target.strip_prefix("conference:") {
+        let id = rest.trim();
+        if !id.is_empty() {
+            return TransferTarget::Conference { id: id.to_string() };
         }
     }
     if let Some(rest) = target.strip_prefix("voip_bridge:") {
@@ -233,6 +242,10 @@ impl SipSession {
             TransferTarget::Voicemail { extension } => {
                 info!(%leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
                 self.start_voicemail_app(&extension).await
+            }
+            TransferTarget::Conference { id } => {
+                info!(%leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
+                self.start_conference_app(&id).await
             }
             TransferTarget::VoipBridge {
                 endpoint,
@@ -513,6 +526,18 @@ impl SipSession {
             "voicemail",
             params,
             &format!("voicemail for '{}'", extension),
+        )
+        .await
+    }
+
+    /// Start a conference app that joins the session into the given conference room.
+    pub(crate) async fn start_conference_app(&self, conf_id: &str) -> Result<()> {
+        info!(conf_id = %conf_id, "Starting conference application");
+        let params = Some(serde_json::json!({"id": conf_id}));
+        self.ensure_app_running(
+            "conference",
+            params,
+            &format!("conference '{}'", conf_id),
         )
         .await
     }
