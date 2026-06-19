@@ -423,12 +423,12 @@ impl AppFactory for BuiltinAppFactory {
                             .as_any()
                             .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
                         {
-                            match vm.build_app_shell(&extension, &caller_id) {
+                            match vm.build_app(&extension, &caller_id) {
                                 Ok(app) => {
                                     return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
                                 }
                                 Err(e) => tracing::warn!(
-                                    "voicemail addon build_app_shell failed: {}; \
+                                    "voicemail addon build_app failed: {}; \
                                      falling back to core impl",
                                     e
                                 ),
