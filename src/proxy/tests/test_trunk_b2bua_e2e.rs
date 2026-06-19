@@ -58,7 +58,9 @@ async fn establish_call(
     let caller_clone = caller_ua.clone();
     let callee_str = callee.to_string();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await });
+        crate::utils::spawn(
+            async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await },
+        );
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -198,7 +200,9 @@ async fn send_dtmf_and_wait(
 ) -> Result<bool> {
     let digit_for_send = expected_digit.to_string();
     let send_handle =
-        crate::utils::spawn(async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await });
+        crate::utils::spawn(
+            async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await },
+        );
 
     let deadline = tokio::time::Instant::now() + timeout;
     let mut received = false;

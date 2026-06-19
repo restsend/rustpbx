@@ -20,8 +20,8 @@ pub fn generate_sine_wav(
     let num_samples = (sample_rate as f64 * duration_secs) as u64;
     for i in 0..num_samples {
         let t = i as f64 / sample_rate as f64;
-        let sample = (amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin() * 32767.0)
-            as i16;
+        let sample =
+            (amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin() * 32767.0) as i16;
         writer.write_sample(sample).unwrap();
     }
     writer.finalize().unwrap();
@@ -353,7 +353,11 @@ mod tests {
             "dominant freq should be near 440Hz, got {}",
             freq
         );
-        assert!(mag > 100.0, "magnitude at 440Hz should be significant, got {}", mag);
+        assert!(
+            mag > 100.0,
+            "magnitude at 440Hz should be significant, got {}",
+            mag
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -385,34 +389,36 @@ mod tests {
         let silence: Vec<i16> = vec![0; 1600];
         assert!(!has_audio_content(&silence, -40.0));
 
-        let signal: Vec<i16> = (0..1600).map(|i| {
-            let t = i as f64 / 8000.0;
-            (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
-        }).collect();
+        let signal: Vec<i16> = (0..1600)
+            .map(|i| {
+                let t = i as f64 / 8000.0;
+                (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
+            })
+            .collect();
         assert!(has_audio_content(&signal, -40.0));
     }
 
     #[test]
     fn test_cross_correlate_self() {
-        let signal: Vec<i16> = (0..800).map(|i| {
-            let t = i as f64 / 8000.0;
-            (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
-        }).collect();
+        let signal: Vec<i16> = (0..800)
+            .map(|i| {
+                let t = i as f64 / 8000.0;
+                (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
+            })
+            .collect();
 
         let corr = cross_correlate(&signal, &signal);
-        assert!(
-            corr > 0.99,
-            "self-correlation should be ~1.0, got {}",
-            corr
-        );
+        assert!(corr > 0.99, "self-correlation should be ~1.0, got {}", corr);
     }
 
     #[test]
     fn test_resample() {
-        let samples: Vec<i16> = (0..800).map(|i| {
-            let t = i as f64 / 8000.0;
-            (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
-        }).collect();
+        let samples: Vec<i16> = (0..800)
+            .map(|i| {
+                let t = i as f64 / 8000.0;
+                (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16
+            })
+            .collect();
 
         let resampled = resample_linear(&samples, 8000, 16000);
         assert_eq!(resampled.len(), 1600);
@@ -459,7 +465,8 @@ mod tests {
         let mut samples: Vec<i16> = vec![0; 3200];
         for i in 0..800 {
             let t = i as f64 / 8000.0;
-            samples[2400 + i] = (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16;
+            samples[2400 + i] =
+                (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 32768.0) as i16;
         }
 
         let start = find_signal_start(&samples, 0.01, 160);

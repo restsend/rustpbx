@@ -213,14 +213,8 @@ mod tests {
         let items = backend
             .query_flow(
                 "factory-test",
-                Local
-                    .timestamp_micros(base - 1)
-                    .single()
-                    .expect("valid dt"),
-                Local
-                    .timestamp_micros(base + 1)
-                    .single()
-                    .expect("valid dt"),
+                Local.timestamp_micros(base - 1).single().expect("valid dt"),
+                Local.timestamp_micros(base + 1).single().expect("valid dt"),
             )
             .await
             .expect("query should succeed");

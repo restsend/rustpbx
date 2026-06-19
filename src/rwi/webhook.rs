@@ -99,8 +99,6 @@ async fn run_rwi_webhook_handler(
     }
 }
 
-
-
 /// Send a test RWI event to a webhook URL.
 pub async fn send_test_event(
     url: &str,
@@ -131,32 +129,46 @@ pub async fn send_test_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    struct TestHttpServer { port: u16, received: Arc<Mutex<Vec<serde_json::Value>>> }
+    struct TestHttpServer {
+        port: u16,
+        received: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
     impl TestHttpServer {
         async fn start() -> Self {
             let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
             let rc = received.clone();
-            let app = axum::Router::new().route("/hook", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-                rc.lock().unwrap().push(body);
-                async { axum::Json(serde_json::json!({"status":"ok"})) }
-            }));
+            let app = axum::Router::new().route(
+                "/hook",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    rc.lock().unwrap().push(body);
+                    async { axum::Json(serde_json::json!({"status":"ok"})) }
+                }),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
-            crate::utils::spawn(async move { axum::serve(listener, app).await.ok(); });
+            crate::utils::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
             Self { port, received }
         }
-        fn url(&self) -> String { format!("http://127.0.0.1:{}/hook", self.port) }
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/hook", self.port)
+        }
     }
 
     async fn wait_for_events(received: &Arc<Mutex<Vec<serde_json::Value>>>, min: usize, ms: u64) {
         let start = std::time::Instant::now();
         loop {
-            if received.lock().unwrap().len() >= min { return; }
-            if start.elapsed() > Duration::from_millis(ms) { return; }
+            if received.lock().unwrap().len() >= min {
+                return;
+            }
+            if start.elapsed() > Duration::from_millis(ms) {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -164,11 +176,25 @@ mod tests {
     #[tokio::test]
     async fn test_webhook_receives_call_ringing() {
         let server = TestHttpServer::start().await;
-        let config = LocatorWebhookConfig { url: server.url(), events: vec![], headers: None, timeout_ms: Some(5000) };
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
         let tx = start_rwi_webhook_handler(config);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let entry = EventCacheEntry { sequence: 1, cached_at: chrono::Utc::now(), call_id: "c1".into(),
-            event: crate::rwi::event::to_legacy_event(&crate::rwi::CallRinging { call_id: "c1".into() }, None) };
+        let entry = EventCacheEntry {
+            sequence: 1,
+            cached_at: chrono::Utc::now(),
+            call_id: "c1".into(),
+            event: crate::rwi::event::to_legacy_event(
+                &crate::rwi::CallRinging {
+                    call_id: "c1".into(),
+                },
+                None,
+            ),
+        };
         tx.send(entry).ok();
         wait_for_events(&server.received, 1, 2000).await;
         let body = &server.received.lock().unwrap()[0];

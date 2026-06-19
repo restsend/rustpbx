@@ -148,10 +148,7 @@ impl StepIvrApp {
     }
 
     /// Attach the RWI gateway for real-time event emission.
-    pub fn with_rwi_gateway(
-        mut self,
-        gw: Option<crate::rwi::RwiGatewayRef>,
-    ) -> Self {
+    pub fn with_rwi_gateway(mut self, gw: Option<crate::rwi::RwiGatewayRef>) -> Self {
         self.rwi_gateway = gw;
         self
     }
@@ -313,8 +310,14 @@ impl StepIvrApp {
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let step_end = chrono::Utc::now().to_rfc3339();
 
-        let step_id = node.step_id.clone().or_else(|| self.current_step_id.clone());
-        let step_name = node.step_name.clone().or_else(|| self.current_step_name.clone());
+        let step_id = node
+            .step_id
+            .clone()
+            .or_else(|| self.current_step_id.clone());
+        let step_name = node
+            .step_name
+            .clone()
+            .or_else(|| self.current_step_name.clone());
 
         let trigger_event_type = self
             .current_trigger_event_type
@@ -350,7 +353,10 @@ impl StepIvrApp {
                 // recording the current step's trace.
                 if let Some(pending) = self.pending_take() {
                     let end = std::time::Instant::now();
-                    let duration = self.pending_start_instant.map(|s| end.duration_since(s).as_millis() as u64).unwrap_or(0);
+                    let duration = self
+                        .pending_start_instant
+                        .map(|s| end.duration_since(s).as_millis() as u64)
+                        .unwrap_or(0);
                     let step_end = chrono::Utc::now().to_rfc3339();
                     self.record_trace(IvrTraceEntry {
                         step_end_time: Some(step_end),
@@ -382,10 +388,10 @@ impl StepIvrApp {
                             extra: self.extra.clone(),
                         });
                         match terminal {
-                    TerminalAction::Transfer(target) => {
-                            self.last_transfer_target = Some(target.clone());
-                            (AppAction::Transfer(target), "terminal")
-                        }
+                            TerminalAction::Transfer(target) => {
+                                self.last_transfer_target = Some(target.clone());
+                                (AppAction::Transfer(target), "terminal")
+                            }
                             TerminalAction::Hangup { reason, code } => {
                                 (AppAction::Hangup { reason, code }, "terminal")
                             }
@@ -495,9 +501,17 @@ impl StepIvrApp {
             route_name: self.route_name.clone(),
             route_headers: self.route_headers.clone(),
             custom_data: self.custom_data.clone(),
-            step_start_time: Some(self.step_prev_start_time.clone().unwrap_or_else(|| now_rfc3339.clone())),
+            step_start_time: Some(
+                self.step_prev_start_time
+                    .clone()
+                    .unwrap_or_else(|| now_rfc3339.clone()),
+            ),
             step_end_time: Some(now_rfc3339.clone()),
-            step_duration_ms: if prev_step_duration_ms > 0 { Some(prev_step_duration_ms) } else { None },
+            step_duration_ms: if prev_step_duration_ms > 0 {
+                Some(prev_step_duration_ms)
+            } else {
+                None
+            },
             step_index: Some(self.step_index),
             transferred_from: self.transferred_from.clone(),
         };
@@ -505,7 +519,10 @@ impl StepIvrApp {
         // Finalize and record pending trace (WaitFor step just completed).
         if let Some(pending) = self.pending_take() {
             let end = std::time::Instant::now();
-            let duration = self.pending_start_instant.map(|s| end.duration_since(s).as_millis() as u64).unwrap_or(0);
+            let duration = self
+                .pending_start_instant
+                .map(|s| end.duration_since(s).as_millis() as u64)
+                .unwrap_or(0);
             let step_end = chrono::Utc::now().to_rfc3339();
             self.record_trace(IvrTraceEntry {
                 step_end_time: Some(step_end),
@@ -541,24 +558,25 @@ impl StepIvrApp {
         self.step_start_instant = Some(std::time::Instant::now());
 
         // Store trigger event info for __exec_node to use when recording trace after node execution
-        self.current_trigger_event_type = Some(ctx
-            .event
-            .as_ref()
-            .map(|e| match e {
-                ProviderEvent::SessionStart => "session_start",
-                ProviderEvent::AudioComplete { .. } => "audio_complete",
-                ProviderEvent::Dtmf { .. } => "dtmf",
-                ProviderEvent::DtmfTimeout => "dtmf_timeout",
-                ProviderEvent::ApiResponse { .. } => "api_response",
-                ProviderEvent::PhoneCollected { .. } => "phone_collected",
-                ProviderEvent::RecordingComplete { .. } => "recording_complete",
-                ProviderEvent::InputVoice { .. } => "input_voice",
-                ProviderEvent::Error { .. } => "error",
-                ProviderEvent::DtmfMenuInvalid { .. } => "dtmf_menu_invalid",
-                ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
-            })
-            .unwrap_or("unknown")
-            .to_string());
+        self.current_trigger_event_type = Some(
+            ctx.event
+                .as_ref()
+                .map(|e| match e {
+                    ProviderEvent::SessionStart => "session_start",
+                    ProviderEvent::AudioComplete { .. } => "audio_complete",
+                    ProviderEvent::Dtmf { .. } => "dtmf",
+                    ProviderEvent::DtmfTimeout => "dtmf_timeout",
+                    ProviderEvent::ApiResponse { .. } => "api_response",
+                    ProviderEvent::PhoneCollected { .. } => "phone_collected",
+                    ProviderEvent::RecordingComplete { .. } => "recording_complete",
+                    ProviderEvent::InputVoice { .. } => "input_voice",
+                    ProviderEvent::Error { .. } => "error",
+                    ProviderEvent::DtmfMenuInvalid { .. } => "dtmf_menu_invalid",
+                    ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
+                })
+                .unwrap_or("unknown")
+                .to_string(),
+        );
         self.current_trigger_event_detail = match &ctx.event {
             Some(ProviderEvent::Dtmf { digit }) => Some(format!("digit={}", digit)),
             Some(ProviderEvent::ApiResponse { status, .. }) => Some(format!("status={}", status)),
@@ -928,7 +946,10 @@ impl CallApp for StepIvrApp {
             .get("session_id")
             .cloned()
             .unwrap_or_default();
-        self.provider.on_session_end(&end_reason, &session_id).await.ok();
+        self.provider
+            .on_session_end(&end_reason, &session_id)
+            .await
+            .ok();
         let status = match &end_reason {
             EndReason::Normal => "completed",
             EndReason::Transfer(_) => "completed",
@@ -994,7 +1015,11 @@ mod tests {
             Ok(())
         }
 
-        async fn on_session_end(&self, _reason: &EndReason, _session_id: &str) -> anyhow::Result<()> {
+        async fn on_session_end(
+            &self,
+            _reason: &EndReason,
+            _session_id: &str,
+        ) -> anyhow::Result<()> {
             *self.end_called.lock().unwrap() = true;
             Ok(())
         }
@@ -1614,10 +1639,7 @@ mod tests {
             custom_data: None,
             transferred_from: None,
         };
-        step_provider
-            .on_session_start(&session)
-            .await
-            .unwrap();
+        step_provider.on_session_start(&session).await.unwrap();
 
         let ctx = ProviderContext {
             session_id: session.session_id.clone(),

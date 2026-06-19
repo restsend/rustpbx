@@ -192,7 +192,11 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
     );
     {
         let q = bob.audio_quality_summary();
-        tracing::info!("bob audio quality after SBC call: total={} silence={}", q.total_frames, q.silence_frames);
+        tracing::info!(
+            "bob audio quality after SBC call: total={} silence={}",
+            q.total_frames,
+            q.silence_frames
+        );
     }
 
     // ── Cleanup ──────────────────────────────────────────────────────────
@@ -472,7 +476,11 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
     );
     {
         let q = bob.audio_quality_summary();
-        tracing::info!("bob audio quality (header injection): total={} silence={}", q.total_frames, q.silence_frames);
+        tracing::info!(
+            "bob audio quality (header injection): total={} silence={}",
+            q.total_frames,
+            q.silence_frames
+        );
     }
 
     cancel_token.cancel();
@@ -632,7 +640,11 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
     );
     {
         let q = bob.audio_quality_summary();
-        tracing::info!("bob audio quality (multi-rule): total={} silence={}", q.total_frames, q.silence_frames);
+        tracing::info!(
+            "bob audio quality (multi-rule): total={} silence={}",
+            q.total_frames,
+            q.silence_frames
+        );
     }
 
     cancel_token.cancel();
@@ -892,7 +904,11 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
     );
     {
         let q = bob.audio_quality_summary();
-        tracing::info!("bob audio quality (callee rewrite): total={} silence={}", q.total_frames, q.silence_frames);
+        tracing::info!(
+            "bob audio quality (callee rewrite): total={} silence={}",
+            q.total_frames,
+            q.silence_frames
+        );
     }
 
     cancel_token.cancel();

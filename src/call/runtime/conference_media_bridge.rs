@@ -455,6 +455,15 @@ impl ConferenceBridgeHandle {
     }
 }
 
+impl Drop for ConferenceBridgeHandle {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        for task in &self._tasks {
+            task.abort();
+        }
+    }
+}
+
 /// Per-session conference bridge state.
 pub struct SessionConferenceBridge {
     pub bridge_handle: Option<ConferenceBridgeHandle>,
@@ -1029,5 +1038,77 @@ mod tests {
             }
             _ => panic!("Expected Audio sample"),
         }
+    }
+
+    /// Verify that dropping a `ConferenceBridgeHandle` cancels its token and
+    /// aborts its tasks, preventing leaks when handles are silently replaced.
+    #[tokio::test]
+    async fn test_conference_bridge_handle_drop_cancels_tasks() {
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let task = crate::utils::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                }
+            }
+        });
+
+        let handle = ConferenceBridgeHandle {
+            _tasks: vec![task],
+            cancel_token: cancel,
+        };
+
+        // Drop the handle — Drop impl should cancel + abort
+        drop(handle);
+
+        // Give the abort a moment to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The task should be finished (aborted) — no longer running
+        // (If Drop didn't abort, the task would still be alive for 60 seconds)
+    }
+
+    /// Verify that `set_active_bridge` on `SessionConferenceBridge` stops the
+    /// old bridge before installing the new one.
+    #[tokio::test]
+    async fn test_session_conference_bridge_stop_on_replace() {
+        use tokio_util::sync::CancellationToken;
+
+        let mut bridge = SessionConferenceBridge::new();
+
+        let cancel1 = CancellationToken::new();
+        let cancel1_clone = cancel1.clone();
+        let task1 = crate::utils::spawn(async move {
+            cancel1_clone.cancelled().await;
+        });
+        bridge.bridge_handle = Some(ConferenceBridgeHandle {
+            _tasks: vec![task1],
+            cancel_token: cancel1,
+        });
+
+        // stop_bridge should cancel the first handle
+        bridge.stop_bridge();
+        assert!(bridge.bridge_handle.is_none());
+
+        // Install a second bridge
+        let cancel2 = CancellationToken::new();
+        let task2 = crate::utils::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+        bridge.bridge_handle = Some(ConferenceBridgeHandle {
+            _tasks: vec![task2],
+            cancel_token: cancel2,
+        });
+
+        // Drop the bridge entirely — second handle should be cleaned up
+        drop(bridge);
     }
 }

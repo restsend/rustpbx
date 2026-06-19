@@ -54,7 +54,6 @@ struct QueryExtensionsFilters {
     registered_at_to: Option<String>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Default)]
 struct ExtensionLocatorRecord {
     binding_key: String,
@@ -265,10 +264,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
-        .route(
-            "/extensions",
-            put(create_extension).post(query_extensions),
-        )
+        .route("/extensions", put(create_extension).post(query_extensions))
         .route(
             "/extensions/{id}",
             patch(update_extension).delete(delete_extension),
@@ -714,7 +710,10 @@ async fn delete_extension(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if let Err(resp) = state.require_permission(&user, "extensions", "delete").await {
+    if let Err(resp) = state
+        .require_permission(&user, "extensions", "delete")
+        .await
+    {
         return resp;
     }
     match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
@@ -772,11 +771,9 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db,
-            ConsoleConfig::default(),
-        )
-        .await
-        .expect("initialize console state")
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
     }
 
     async fn insert_extension(db: &sea_orm::DatabaseConnection, extension: &str) -> ExtensionModel {

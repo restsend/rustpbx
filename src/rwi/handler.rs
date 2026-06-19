@@ -1,9 +1,9 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerRef;
+use crate::rwi::RwiGatewayRef;
 use crate::rwi::auth::{RwiAuth, RwiIdentity};
 use crate::rwi::processor::{CommandError, CommandResult, RwiCommandProcessor};
-use crate::rwi::RwiGatewayRef;
 use crate::rwi::session::{RwiCommandMessage, RwiCommandPayload};
 use axum::{
     Extension,
@@ -278,9 +278,7 @@ async fn handle_text_message(
         }
         RwiCommandPayload::DetachCall { call_id } => {
             let mut gw = gateway.write();
-            if gw
-                .release_call_ownership(&session_id.to_string(), call_id)
-            {
+            if gw.release_call_ownership(&session_id.to_string(), call_id) {
                 gw.detach_supervisor(&session_id.to_string(), call_id);
             }
         }
@@ -305,12 +303,11 @@ async fn handle_text_message(
         ) = result
     {
         let mut gw = gateway.write();
-        let _ = gw
-            .claim_call_ownership(
-                &session_id.to_string(),
-                cid.clone(),
-                crate::rwi::session::OwnershipMode::Control,
-            );
+        let _ = gw.claim_call_ownership(
+            &session_id.to_string(),
+            cid.clone(),
+            crate::rwi::session::OwnershipMode::Control,
+        );
     }
 
     let event = build_command_result_event(&action_id, &action, call_id.as_deref(), result);

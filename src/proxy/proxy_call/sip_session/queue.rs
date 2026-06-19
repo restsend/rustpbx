@@ -305,7 +305,11 @@ impl SipSession {
                 ..
             })) => {
                 info!("Queue fallback - play then hangup");
-                Err((status_code.code(), status_code.text().to_string(), reason.clone()))
+                Err((
+                    status_code.code(),
+                    status_code.text().to_string(),
+                    reason.clone(),
+                ))
             }
             Some(QueueFallbackAction::Failure(FailureAction::Transfer(target))) => {
                 info!(target = ?target, "Queue fallback - transfer");
@@ -317,12 +321,7 @@ impl SipSession {
                         callee_state_rx,
                     ))
                     .await
-                    .map_err(|e| {
-                        into_callee_err(
-                            &StatusCode::TemporarilyUnavailable,
-                            Some(format!("Transfer failed: {}", e)),
-                        )
-                    }),
+                    .map_err(super::map_queue_xfer_err),
                     TransferEndpoint::Queue(queue_name) => Box::pin(self.handle_queue_transfer(
                         LegId::from("caller"),
                         queue_name,
@@ -331,12 +330,7 @@ impl SipSession {
                         callee_state_rx,
                     ))
                     .await
-                    .map_err(|e| {
-                        into_callee_err(
-                            &StatusCode::TemporarilyUnavailable,
-                            Some(format!("Transfer failed: {}", e)),
-                        )
-                    }),
+                    .map_err(super::map_queue_xfer_err),
                     TransferEndpoint::Ivr(ivr_name) => {
                         info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
                         self.start_ivr_app(ivr_name).await.map_err(|e| {
@@ -382,12 +376,7 @@ impl SipSession {
                                 callee_state_rx,
                             ))
                             .await
-                            .map_err(|e| {
-                                into_callee_err(
-                                    &StatusCode::TemporarilyUnavailable,
-                                    Some(format!("Transfer failed: {}", e)),
-                                )
-                            })
+                            .map_err(super::map_queue_xfer_err)
                         } else {
                             warn!(skill_group = %skill_group_id, "No agents found for this skill group");
                             Err(into_callee_err(

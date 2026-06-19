@@ -9,10 +9,10 @@ mod helpers;
 
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::TestPbx;
+use rustpbx::call::SipUser;
 use rustpbx::call::app::agent_registry::{
     AgentRecord, AgentRegistry, PresenceState, RoutingStrategy,
 };
-use rustpbx::call::SipUser;
 use rustpbx::config::{ProxyConfig, UserBackendConfig};
 use rustpbx::proxy::routing::{RouteQueueConfig, RouteRule};
 use std::collections::HashMap;
@@ -105,7 +105,12 @@ impl AgentRegistry for TestAgentRegistry {
     }
 
     async fn list_agents(&self) -> Vec<AgentRecord> {
-        self.agents.read().await.iter().map(Self::to_record).collect()
+        self.agents
+            .read()
+            .await
+            .iter()
+            .map(Self::to_record)
+            .collect()
     }
 
     async fn update_presence(
@@ -113,21 +118,39 @@ impl AgentRegistry for TestAgentRegistry {
         agent_id: &str,
         new_state: PresenceState,
     ) -> anyhow::Result<()> {
-        if let Some(a) = self.agents.write().await.iter_mut().find(|a| a.agent_id == agent_id) {
+        if let Some(a) = self
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|a| a.agent_id == agent_id)
+        {
             a.presence = new_state;
         }
         Ok(())
     }
 
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        if let Some(a) = self.agents.write().await.iter_mut().find(|a| a.agent_id == agent_id) {
+        if let Some(a) = self
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|a| a.agent_id == agent_id)
+        {
             a.presence = PresenceState::Busy { call_id: None };
         }
         Ok(())
     }
 
     async fn end_call(&self, agent_id: &str, _talk_time_secs: u64) -> anyhow::Result<()> {
-        if let Some(a) = self.agents.write().await.iter_mut().find(|a| a.agent_id == agent_id) {
+        if let Some(a) = self
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|a| a.agent_id == agent_id)
+        {
             a.presence = PresenceState::Wrapup { call_id: None };
         }
         Ok(())
@@ -151,7 +174,10 @@ impl AgentRegistry for TestAgentRegistry {
         required_skills: &[String],
         _strategy: RoutingStrategy,
     ) -> Option<AgentRecord> {
-        self.find_available_agents(required_skills).await.into_iter().next()
+        self.find_available_agents(required_skills)
+            .await
+            .into_iter()
+            .next()
     }
 
     async fn resolve_target(&self, target_uri: &str) -> Vec<String> {
@@ -162,7 +188,11 @@ impl AgentRegistry for TestAgentRegistry {
                 .filter(|a| a.skills.iter().any(|s| s == sg_id))
                 .map(|a| a.uri.clone())
                 .collect();
-            tracing::info!("resolve_target '{}' → {} agents", target_uri, matching.len());
+            tracing::info!(
+                "resolve_target '{}' → {} agents",
+                target_uri,
+                matching.len()
+            );
             return matching;
         }
         vec![]
@@ -184,7 +214,8 @@ max_retries = 3
 [[ivr.root.entries]]
 key = "1"
 action = { type = "queue", target = "support" }
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn build_queue_config() -> HashMap<String, RouteQueueConfig> {
@@ -200,7 +231,10 @@ mode = "sequential"
 uri = "skill-group:support"
 "#;
     let mut m = HashMap::new();
-    m.insert("support".to_string(), toml::from_str(toml_str).expect("queue config"));
+    m.insert(
+        "support".to_string(),
+        toml::from_str(toml_str).expect("queue config"),
+    );
     m
 }
 
@@ -241,7 +275,9 @@ async fn test_ivr_dtmf_queue_agent_flow() {
     // Agent registry: one agent with skill "support"
     let registry = Arc::new(TestAgentRegistry::new());
     let agent_uri = format!("sip:agent1@127.0.0.1:{}", agent_port);
-    registry.add_agent("agent1", "Agent 1", &agent_uri, vec!["support"]).await;
+    registry
+        .add_agent("agent1", "Agent 1", &agent_uri, vec!["support"])
+        .await;
 
     // Start PBX
     let proxy_config = ProxyConfig {
@@ -277,13 +313,7 @@ async fn test_ivr_dtmf_queue_agent_flow() {
 
     // Caller: call support-test, send DTMF "1" after 2s, hangup after 20s
     let target = format!("sip:support-test@127.0.0.1:{}", sip_port);
-    let caller = TestUa::caller_with_dtmf(
-        caller_port,
-        "caller1",
-        target.clone(),
-        "2s:1",
-    )
-    .await;
+    let caller = TestUa::caller_with_dtmf(caller_port, "caller1", target.clone(), "2s:1").await;
     tracing::info!("Caller up on {}, target={}", caller_port, target);
 
     // Wait for: IVR answer → greeting → DTMF "1" → queue → agent ring → answer → audio
@@ -291,16 +321,44 @@ async fn test_ivr_dtmf_queue_agent_flow() {
 
     let caller_rx = caller.rtp_stats_summary();
     let caller_quality = caller.audio_quality_summary();
-    tracing::info!("Caller RTP: {}, quality: total={} silence={}", caller_rx, caller_quality.total_frames, caller_quality.silence_frames);
+    tracing::info!(
+        "Caller RTP: {}, quality: total={} silence={}",
+        caller_rx,
+        caller_quality.total_frames,
+        caller_quality.silence_frames
+    );
 
     let agent_rx = agent.rtp_stats_summary();
     let agent_quality = agent.audio_quality_summary();
-    tracing::info!("Agent RTP: {}, quality: total={} silence={}", agent_rx, agent_quality.total_frames, agent_quality.silence_frames);
+    tracing::info!(
+        "Agent RTP: {}, quality: total={} silence={}",
+        agent_rx,
+        agent_quality.total_frames,
+        agent_quality.silence_frames
+    );
 
-    assert!(agent.has_rtp_rx(), "Agent should have RX RTP. Stats: {}", agent_rx);
-    assert!(caller.has_rtp_rx(), "Caller should have RX RTP. Stats: {}", caller_rx);
-    assert!(agent_quality.has_audio(), "Agent should have non-silent audio (total={}, silence={})", agent_quality.total_frames, agent_quality.silence_frames);
-    assert!(caller_quality.has_audio(), "Caller should have non-silent audio (total={}, silence={})", caller_quality.total_frames, caller_quality.silence_frames);
+    assert!(
+        agent.has_rtp_rx(),
+        "Agent should have RX RTP. Stats: {}",
+        agent_rx
+    );
+    assert!(
+        caller.has_rtp_rx(),
+        "Caller should have RX RTP. Stats: {}",
+        caller_rx
+    );
+    assert!(
+        agent_quality.has_audio(),
+        "Agent should have non-silent audio (total={}, silence={})",
+        agent_quality.total_frames,
+        agent_quality.silence_frames
+    );
+    assert!(
+        caller_quality.has_audio(),
+        "Caller should have non-silent audio (total={}, silence={})",
+        caller_quality.total_frames,
+        caller_quality.silence_frames
+    );
 
     tracing::info!("=== IVR → DTMF → Queue → Agent PASSED ===");
 

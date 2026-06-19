@@ -626,7 +626,9 @@ impl ProxyModule for RegistrarModule {
                     metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
                         if location.expires == 0 {
-                            locator_events.send(LocatorEvent::Unregistered(location)).ok();
+                            locator_events
+                                .send(LocatorEvent::Unregistered(location))
+                                .ok();
                         } else {
                             locator_events.send(LocatorEvent::Registered(location)).ok();
                         }

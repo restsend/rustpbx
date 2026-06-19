@@ -224,7 +224,10 @@ impl StorageManager {
             self.call_id_cache.clear();
         }
 
-        let file = self.raw_file.as_mut().ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
+        let file = self
+            .raw_file
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
         let offset = file.metadata()?.len();
 
         file.write_all(&0x5346u16.to_be_bytes())?; // Magic
@@ -577,11 +580,7 @@ impl StorageManager {
             results
                 .entry(key)
                 .or_insert_with(|| {
-                    MediaStatsAccumulator::new(
-                        packet.leg,
-                        packet.src,
-                        header.map(|h| h.ssrc),
-                    )
+                    MediaStatsAccumulator::new(packet.leg, packet.src, header.map(|h| h.ssrc))
                 })
                 .observe(packet.timestamp as u64, header);
         }
@@ -685,8 +684,7 @@ impl StorageManager {
             for row in rows {
                 let offset = u64::try_from(row.offset)?;
                 let size = usize::try_from(row.size)?;
-                let payload =
-                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
+                let payload = read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
 
                 results.push(StoredMediaPacket {
                     leg: row.leg,
@@ -946,33 +944,15 @@ mod tests {
         let p2 = b"rtp-payload-2";
 
         storage
-            .write_processed(make_rtp_processed(
-                t0,
-                call_id,
-                0,
-                "127.0.0.1:4000",
-                p0,
-            ))
+            .write_processed(make_rtp_processed(t0, call_id, 0, "127.0.0.1:4000", p0))
             .await
             .expect("write t0");
         storage
-            .write_processed(make_rtp_processed(
-                t1,
-                call_id,
-                0,
-                "127.0.0.1:4000",
-                p1,
-            ))
+            .write_processed(make_rtp_processed(t1, call_id, 0, "127.0.0.1:4000", p1))
             .await
             .expect("write t1");
         storage
-            .write_processed(make_rtp_processed(
-                t2,
-                call_id,
-                0,
-                "127.0.0.1:4000",
-                p2,
-            ))
+            .write_processed(make_rtp_processed(t2, call_id, 0, "127.0.0.1:4000", p2))
             .await
             .expect("write t2");
         storage.force_flush().await.expect("flush");
@@ -1062,7 +1042,11 @@ mod tests {
             .query_flow("call-0", start, end)
             .await
             .expect("query_flow");
-        assert_eq!(one_call.len(), 10, "query_flow returns only call-0's 10 SIP msgs");
+        assert_eq!(
+            one_call.len(),
+            10,
+            "query_flow returns only call-0's 10 SIP msgs"
+        );
 
         // query_flow_in_range WITHOUT call_id filter → ALL calls' SIP messages!
         let all_calls = storage

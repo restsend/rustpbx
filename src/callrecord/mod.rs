@@ -538,8 +538,7 @@ impl CallRecordManagerBuilder {
                 .map_err(|e| {
                     warn!(
                         bucket,
-                        endpoint,
-                        "CallRecordManager failed to initialize S3 storage: {}", e
+                        endpoint, "CallRecordManager failed to initialize S3 storage: {}", e
                     );
                     e
                 })?;
@@ -781,16 +780,14 @@ impl CallRecordManager {
         let mut futures = FuturesUnordered::new();
         let mut receiver_closed = false;
         let mut shutting_down = false;
-        let mut shutdown_timeout: Pin<Box<dyn Future<Output = ()> + Send>> =
-            Box::pin(pending());
+        let mut shutdown_timeout: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(pending());
 
         loop {
             if (receiver_closed || shutting_down) && futures.is_empty() {
                 break;
             }
 
-            let can_receive =
-                !receiver_closed && !shutting_down && futures.len() < max_concurrent;
+            let can_receive = !receiver_closed && !shutting_down && futures.len() < max_concurrent;
 
             tokio::select! {
                 record = receiver.recv(), if can_receive => {

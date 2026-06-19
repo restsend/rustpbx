@@ -204,8 +204,17 @@ async fn test_queue_prompts_hold_music() {
         caller.rtp_stats_summary()
     );
     let q = caller.audio_quality_summary();
-    assert!(q.has_audio(), "caller should have non-silent audio from hold music. Quality: {:?}", q);
-    tracing::info!("Hold music RTP OK — caller: {}, quality: total={} silence={}", caller.rtp_stats_summary(), q.total_frames, q.silence_frames);
+    assert!(
+        q.has_audio(),
+        "caller should have non-silent audio from hold music. Quality: {:?}",
+        q
+    );
+    tracing::info!(
+        "Hold music RTP OK — caller: {}, quality: total={} silence={}",
+        caller.rtp_stats_summary(),
+        q.total_frames,
+        q.silence_frames
+    );
 
     // Clean up
     let (_, app_stop_json) = rwi_req("call.app_stop", serde_json::json!({"call_id": call_id}));
@@ -333,7 +342,11 @@ async fn test_queue_agent_transfer_flow() {
     );
     {
         let q = caller.audio_quality_summary();
-        assert!(q.has_audio(), "Phase 1: caller should have non-silent audio. Quality: {:?}", q);
+        assert!(
+            q.has_audio(),
+            "Phase 1: caller should have non-silent audio. Quality: {:?}",
+            q
+        );
     }
 
     // Phase 2: Stop queue → add agent leg
@@ -383,7 +396,11 @@ async fn test_queue_agent_transfer_flow() {
     );
     {
         let q = agent.audio_quality_summary();
-        assert!(q.has_audio(), "Phase 2: agent should have non-silent audio. Quality: {:?}", q);
+        assert!(
+            q.has_audio(),
+            "Phase 2: agent should have non-silent audio. Quality: {:?}",
+            q
+        );
     }
 
     tracing::info!(

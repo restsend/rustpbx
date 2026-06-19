@@ -40,7 +40,10 @@ impl TokenCache {
                 return Some(entry.user.clone());
             } else {
                 cache.pop(key);
-                debug!(key_prefix = &key[..8.min(key.len())], "token cache entry expired");
+                debug!(
+                    key_prefix = &key[..8.min(key.len())],
+                    "token cache entry expired"
+                );
             }
         }
         None
@@ -81,7 +84,8 @@ impl HttpTokenAuthBackend {
         let cache = if cache_ttl.is_zero() || cache_size == 0 {
             None
         } else {
-            let max = NonZeroUsize::new(cache_size).unwrap_or_else(|| NonZeroUsize::new(10000).unwrap());
+            let max =
+                NonZeroUsize::new(cache_size).unwrap_or_else(|| NonZeroUsize::new(10000).unwrap());
             Some(TokenCache::new(max, cache_ttl))
         };
 
@@ -132,7 +136,11 @@ impl AuthBackend for HttpTokenAuthBackend {
             .unwrap_or_default();
         let realm = original.uri().host().to_string();
 
-        match self.backend.fetch_user(&username, Some(&realm), Some(original)).await {
+        match self
+            .backend
+            .fetch_user(&username, Some(&realm), Some(original))
+            .await
+        {
             Ok(Some(user)) => {
                 if !user.enabled {
                     info!(username = %username, "Token-authenticated user is disabled");

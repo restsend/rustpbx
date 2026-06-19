@@ -509,8 +509,7 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         let codec = descriptor.codec;
         let clock_rate = descriptor.clock_rate as u64;
 
-        let raw_target =
-            (rtp_diff.saturating_mul(target_sample_rate as u64) / clock_rate) as u32;
+        let raw_target = (rtp_diff.saturating_mul(target_sample_rate as u64) / clock_rate) as u32;
         let target_timestamp = raw_target.saturating_add(ssrc_offset);
 
         // Update the running max per-leg (used to offset the next new SSRC).

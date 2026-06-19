@@ -67,13 +67,13 @@ impl JwtValidator {
             .decode(parts[2])
             .map_err(|_| JwtError::Malformed)?;
 
-        mac.verify_slice(&provided_sig).map_err(|_| JwtError::InvalidSignature)?;
+        mac.verify_slice(&provided_sig)
+            .map_err(|_| JwtError::InvalidSignature)?;
 
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(parts[1])
             .map_err(|_| JwtError::Malformed)?;
-        let claims: Value =
-            serde_json::from_slice(&payload).map_err(|_| JwtError::Malformed)?;
+        let claims: Value = serde_json::from_slice(&payload).map_err(|_| JwtError::Malformed)?;
 
         if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
             let now = SystemTime::now()
@@ -119,10 +119,10 @@ impl JwtValidator {
 
 pub fn generate_hs256_jwt(claims: &Value, secret: &str) -> String {
     let header = serde_json::json!({"alg": "HS256", "typ": "JWT"});
-    let header_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap_or_default());
-    let payload_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap_or_default());
+    let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&header).unwrap_or_default());
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(claims).unwrap_or_default());
     let signing_input = format!("{}.{}", header_b64, payload_b64);
 
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");

@@ -452,10 +452,17 @@ impl RwiGateway {
     /// Also caches the event for session resumption.
     pub fn send_event_to_call_owner(&self, call_id: &CallId, event: &RwiEvent) {
         // Feed DTMF digits to any active DtmfCollect tap for this call.
-        if event.event_type == "dtmf"
-        {
-            let digit_char = event.payload.get("digit").and_then(|v| v.as_str()).and_then(|s| s.chars().next());
-            let leg_id = event.payload.get("leg_id").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+        if event.event_type == "dtmf" {
+            let digit_char = event
+                .payload
+                .get("digit")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.chars().next());
+            let leg_id = event
+                .payload
+                .get("leg_id")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
             if let Some(c) = digit_char {
                 if let Ok(taps) = self.dtmf_taps.lock() {
                     if let Some(tx) = taps.get(call_id) {
@@ -498,12 +505,7 @@ impl RwiGateway {
     /// Fan-out an event to all sessions subscribed to a context.
     /// Used for inbound `call.incoming` notifications.
     /// Also caches the event for session resumption.
-    pub fn fan_out_event_to_context(
-        &self,
-        context: &str,
-        event: &RwiEvent,
-        call_id: &CallId,
-    ) {
+    pub fn fan_out_event_to_context(&self, context: &str, event: &RwiEvent, call_id: &CallId) {
         self.fan_out_event_to_context_excluding(context, event, call_id, None);
     }
 
@@ -602,7 +604,11 @@ impl RwiGateway {
             let mut payload = flat.payload.clone();
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
             merge_event_context(&mut payload, Some(&ctx));
-            return RwiEvent { event_type: flat.event_type, call_id: flat.call_id.clone(), payload };
+            return RwiEvent {
+                event_type: flat.event_type,
+                call_id: flat.call_id.clone(),
+                payload,
+            };
         }
         flat.clone()
     }
@@ -617,7 +623,9 @@ impl RwiGateway {
     fn send_flat_to_session(&self, session_id: &SessionId, flat: &RwiEvent) {
         if let Some(sender) = self.session_event_senders.get(session_id) {
             if let Some(filter) = self.session_event_filters.get(session_id) {
-                if !filter.contains(flat.event_type) { return; }
+                if !filter.contains(flat.event_type) {
+                    return;
+                }
             }
             let _ = sender.send(flat.payload.clone());
         }
@@ -627,14 +635,20 @@ impl RwiGateway {
         let mut cache_state = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
         let now = chrono::Utc::now();
         while let Some(front) = cache_state.cache.front() {
-            if now.signed_duration_since(front.cached_at).num_seconds() as u64 > self.max_cache_age_secs {
+            if now.signed_duration_since(front.cached_at).num_seconds() as u64
+                > self.max_cache_age_secs
+            {
                 cache_state.cache.pop_front();
-            } else { break; }
+            } else {
+                break;
+            }
         }
         let seq = cache_state.next_sequence;
         cache_state.next_sequence += 1;
         cache_state.cache.push_back(EventCacheEntry {
-            sequence: seq, cached_at: now, call_id: call_id.clone(),
+            sequence: seq,
+            cached_at: now,
+            call_id: call_id.clone(),
             event: flat.clone(),
         });
         seq
@@ -644,19 +658,33 @@ impl RwiGateway {
         let flat = RwiEvent::from_spec(event, None);
         if let Some(tx) = &self.webhook_tx {
             let mut cs = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
-            let seq = cs.next_sequence; cs.next_sequence += 1;
-            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: String::new(), event: flat.clone() });
+            let seq = cs.next_sequence;
+            cs.next_sequence += 1;
+            let _ = tx.send(EventCacheEntry {
+                sequence: seq,
+                cached_at: chrono::Utc::now(),
+                call_id: String::new(),
+                event: flat.clone(),
+            });
         }
         self.dispatch_flat(&flat);
     }
 
     pub fn send_to_owner<E: RwiEventSpec>(&self, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event.call_id().expect("send_to_owner requires event.call_id()").to_string();
+        let cid = event
+            .call_id()
+            .expect("send_to_owner requires event.call_id()")
+            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: enriched.clone() });
+            let _ = tx.send(EventCacheEntry {
+                sequence: seq,
+                cached_at: chrono::Utc::now(),
+                call_id: cid.clone(),
+                event: enriched.clone(),
+            });
         }
         if let Some(owner_id) = self.call_ownership.get(&cid) {
             self.send_flat_to_session(owner_id, &enriched);
@@ -665,14 +693,24 @@ impl RwiGateway {
 
     pub fn fan_out<E: RwiEventSpec>(&self, context: &str, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event.call_id().expect("fan_out requires event.call_id()").to_string();
+        let cid = event
+            .call_id()
+            .expect("fan_out requires event.call_id()")
+            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: enriched.clone() });
+            let _ = tx.send(EventCacheEntry {
+                sequence: seq,
+                cached_at: chrono::Utc::now(),
+                call_id: cid.clone(),
+                event: enriched.clone(),
+            });
         }
         if let Some(subscribers) = self.context_subscriptions.get(context) {
-            for session_id in subscribers { self.send_flat_to_session(session_id, &enriched); }
+            for session_id in subscribers {
+                self.send_flat_to_session(session_id, &enriched);
+            }
         }
     }
 
@@ -682,17 +720,32 @@ impl RwiGateway {
         self.send_flat_to_session(session_id, &enriched);
     }
 
-    pub fn fan_out_excluding<E: RwiEventSpec>(&self, context: &str, event: &E, exclude: Option<&SessionId>) {
+    pub fn fan_out_excluding<E: RwiEventSpec>(
+        &self,
+        context: &str,
+        event: &E,
+        exclude: Option<&SessionId>,
+    ) {
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event.call_id().expect("fan_out_excluding requires event.call_id()").to_string();
+        let cid = event
+            .call_id()
+            .expect("fan_out_excluding requires event.call_id()")
+            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry { sequence: seq, cached_at: chrono::Utc::now(), call_id: cid.clone(), event: enriched.clone() });
+            let _ = tx.send(EventCacheEntry {
+                sequence: seq,
+                cached_at: chrono::Utc::now(),
+                call_id: cid.clone(),
+                event: enriched.clone(),
+            });
         }
         if let Some(subscribers) = self.context_subscriptions.get(context) {
             for session_id in subscribers {
-                if exclude.map_or(false, |e| e == session_id) { continue; }
+                if exclude.map_or(false, |e| e == session_id) {
+                    continue;
+                }
                 self.send_flat_to_session(session_id, &enriched);
             }
         }
@@ -716,7 +769,12 @@ mod tests {
     use super::*;
     use crate::rwi::auth::RwiIdentity;
 
-    fn create_identity() -> RwiIdentity { RwiIdentity { token: "t".into(), scopes: vec![] } }
+    fn create_identity() -> RwiIdentity {
+        RwiIdentity {
+            token: "t".into(),
+            scopes: vec![],
+        }
+    }
 
     #[tokio::test]
     async fn test_broadcast_generic() {
@@ -724,7 +782,9 @@ mod tests {
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
-        gw.broadcast(&crate::rwi::CallRinging { call_id: "c1".into() });
+        gw.broadcast(&crate::rwi::CallRinging {
+            call_id: "c1".into(),
+        });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_ringing"));
     }
@@ -735,8 +795,11 @@ mod tests {
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
-        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control).unwrap();
-        gw.send_to_owner(&crate::rwi::CallAnswered { call_id: "c1".into() });
+        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.send_to_owner(&crate::rwi::CallAnswered {
+            call_id: "c1".into(),
+        });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_answered"));
     }

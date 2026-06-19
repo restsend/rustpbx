@@ -1,6 +1,6 @@
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use crate::utils::count_when;
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
+use crate::utils::count_when;
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -370,7 +370,11 @@ async fn build_dashboard_payload(
 
     let transaction_running = state
         .sip_server()
-        .map(|server| server.runnings_tx.load(std::sync::atomic::Ordering::Relaxed) as u32)
+        .map(|server| {
+            server
+                .runnings_tx
+                .load(std::sync::atomic::Ordering::Relaxed) as u32
+        })
         .unwrap_or(0);
     let transaction_capacity = capacity;
 

@@ -209,8 +209,11 @@ mod tests {
                 bits_per_sample: 16,
                 sample_format: crate::media::wav_reader::SampleFormat::Int,
             };
-            let mut writer =
-                crate::media::wav_reader::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).unwrap();
+            let mut writer = crate::media::wav_reader::WavWriter::new(
+                std::io::BufWriter::new(tmp.as_file_mut()),
+                spec,
+            )
+            .unwrap();
             for _ in 0..8000 {
                 writer.write_sample(0i16).unwrap();
             }

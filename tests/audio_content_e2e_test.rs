@@ -210,11 +210,7 @@ async fn test_tone_delivery_via_originate() {
                 );
 
                 let (freq, mag) = find_dominant_frequency(region, rec_sr, 200.0, 800.0, 5.0);
-                tracing::info!(
-                    "Dominant frequency: {:.0} Hz (magnitude: {:.1})",
-                    freq,
-                    mag
-                );
+                tracing::info!("Dominant frequency: {:.0} Hz (magnitude: {:.1})", freq, mag);
                 assert!(
                     (freq - 440.0).abs() < 30.0,
                     "Dominant frequency should be near 440 Hz, got {:.0} Hz",
@@ -489,13 +485,8 @@ async fn test_echo_bidirectional_audio() {
                 tracing::info!("Caller RX RMS: {:.1} dB", rms_db);
 
                 if has_audio_content(region, -35.0) {
-                    let (freq, mag) =
-                        find_dominant_frequency(region, rec_sr, 200.0, 800.0, 5.0);
-                    tracing::info!(
-                        "Caller RX dominant freq: {:.0} Hz (mag: {:.1})",
-                        freq,
-                        mag
-                    );
+                    let (freq, mag) = find_dominant_frequency(region, rec_sr, 200.0, 800.0, 5.0);
+                    tracing::info!("Caller RX dominant freq: {:.0} Hz (mag: {:.1})", freq, mag);
                 }
             }
         }

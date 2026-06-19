@@ -45,10 +45,7 @@ pub fn decode_sip_value(value: &[u8]) -> Result<(String, String, Vec<u8>)> {
     }
     let src = String::from_utf8_lossy(&value[2..2 + src_len]).into_owned();
     let dst_len_offset = 2 + src_len;
-    let dst_len = u16::from_be_bytes([
-        value[dst_len_offset],
-        value[dst_len_offset + 1],
-    ]) as usize;
+    let dst_len = u16::from_be_bytes([value[dst_len_offset], value[dst_len_offset + 1]]) as usize;
     let dst_start = dst_len_offset + 2;
     if value.len() < dst_start + dst_len {
         bail!("sip value too short for dst + payload");

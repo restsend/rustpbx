@@ -132,13 +132,14 @@ impl MediaEngine {
     /// Send a command to the engine without waiting for a result.
     pub fn send(&self, cmd: MediaCommand) -> Result<()> {
         let cmd_debug = format!("{cmd:?}");
-        let cmd_short = cmd_debug.split_once('{').map(|(h, _)| h).unwrap_or(&cmd_debug);
-        self.cmd_tx
-            .try_send(cmd)
-            .map_err(|e| {
-                warn!("MediaEngine command channel full (cmd={cmd_short}): {e}");
-                anyhow!("MediaEngine command channel: {}", e)
-            })
+        let cmd_short = cmd_debug
+            .split_once('{')
+            .map(|(h, _)| h)
+            .unwrap_or(&cmd_debug);
+        self.cmd_tx.try_send(cmd).map_err(|e| {
+            warn!("MediaEngine command channel full (cmd={cmd_short}): {e}");
+            anyhow!("MediaEngine command channel: {}", e)
+        })
     }
 
     /// Send a command asynchronously (backpressure-aware).
@@ -148,7 +149,6 @@ impl MediaEngine {
             .await
             .map_err(|e| anyhow!("MediaEngine command channel: {}", e))
     }
-
 }
 
 // ---------------------------------------------------------------------------

@@ -329,10 +329,7 @@ async fn upload_signaling_flow(
     let data = jsonl.into_bytes();
 
     let result = match upload_config {
-        SipFlowUploadConfig::S3 {
-            root,
-            ..
-        } => {
+        SipFlowUploadConfig::S3 { root, .. } => {
             let full_key = if root.is_empty() {
                 signaling_key.to_string()
             } else {
@@ -370,11 +367,7 @@ pub(crate) fn sipflow_s3_url(endpoint: &str, bucket: &str, key: &str) -> String 
     )
 }
 
-async fn upload_s3(
-    storage: &Storage,
-    key: &str,
-    data: Vec<u8>,
-) -> Result<()> {
+async fn upload_s3(storage: &Storage, key: &str, data: Vec<u8>) -> Result<()> {
     storage.write(key, Bytes::from(data)).await?;
     Ok(())
 }

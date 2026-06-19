@@ -98,11 +98,7 @@ impl FlowDbBackend {
         }
     }
 
-    fn scan_sip_flow_in_range(
-        &self,
-        start_ts: i64,
-        end_ts: i64,
-    ) -> Result<Vec<SipFlowItem>> {
+    fn scan_sip_flow_in_range(&self, start_ts: i64, end_ts: i64) -> Result<Vec<SipFlowItem>> {
         let iter = self
             .engine
             .scan(ScanRange::prefix_time_range(SIP_PREFIX, start_ts, end_ts))?;
@@ -197,7 +193,9 @@ impl FlowDbBackend {
         let leg_sources = self
             .scan_media_sources(call_id, start_ts, end_ts, leg_filter)
             .unwrap_or_default();
-        let flow = self.scan_sip_flow_in_range(start_ts, end_ts).unwrap_or_default();
+        let flow = self
+            .scan_sip_flow_in_range(start_ts, end_ts)
+            .unwrap_or_default();
         let payload_map = build_payload_type_map(&flow);
         let leg_payload_map = build_payload_type_map_by_leg(&flow, &leg_sources);
         (payload_map, leg_payload_map)
@@ -237,13 +235,23 @@ impl SipFlowBackend for FlowDbBackend {
             SipFlowMsgType::Sip => {
                 let key = make_sip_key(call_id, counter);
                 let value = encode_sip_value(&item.src_addr, &item.dst_addr, &item.payload);
-                Record { key: key.into(), ts, expire_at, value }
+                Record {
+                    key: key.into(),
+                    ts,
+                    expire_at,
+                    value,
+                }
             }
             SipFlowMsgType::Rtp => {
                 let leg = item.leg.unwrap_or(0);
                 let key = make_rtp_key(call_id, leg, counter);
                 let value = encode_rtp_value(leg, &item.src_addr, &item.payload);
-                Record { key: key.into(), ts, expire_at, value }
+                Record {
+                    key: key.into(),
+                    ts,
+                    expire_at,
+                    value,
+                }
             }
         };
 
@@ -269,7 +277,9 @@ impl SipFlowBackend for FlowDbBackend {
         let end_ts = end_time.timestamp_micros();
         let prefix = sip_call_prefix(call_id);
 
-        let iter = self.engine.scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+        let iter = self
+            .engine
+            .scan_prefix_time_range(&prefix, start_ts, end_ts)?;
 
         let mut items: Vec<SipFlowItem> = iter
             .filter_map(|result| {
@@ -451,15 +461,9 @@ mod tests {
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend
-            .record(call_id, make_sip_item(t0, call_id))
-            .unwrap();
-        backend
-            .record(call_id, make_sip_item(t1, call_id))
-            .unwrap();
-        backend
-            .record(call_id, make_sip_item(t2, call_id))
-            .unwrap();
+        backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
+        backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
+        backend.record(call_id, make_sip_item(t2, call_id)).unwrap();
         backend.flush().await.unwrap();
 
         let items = backend
@@ -488,15 +492,9 @@ mod tests {
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend
-            .record(call_id, make_sip_item(t0, call_id))
-            .unwrap();
-        backend
-            .record(call_id, make_sip_item(t1, call_id))
-            .unwrap();
-        backend
-            .record(call_id, make_sip_item(t2, call_id))
-            .unwrap();
+        backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
+        backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
+        backend.record(call_id, make_sip_item(t2, call_id)).unwrap();
         backend.flush().await.unwrap();
 
         let items = backend

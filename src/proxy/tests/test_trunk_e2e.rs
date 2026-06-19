@@ -273,7 +273,9 @@ mod tests {
         let alice_clone = alice.clone();
         let caller_sdp = _caller_sdp.clone();
         let caller_handle =
-            crate::utils::spawn(async move { alice_clone.make_call("bob", Some(caller_sdp)).await });
+            crate::utils::spawn(
+                async move { alice_clone.make_call("bob", Some(caller_sdp)).await },
+            );
 
         // Bob answers
         let mut bob_dialog_id = None;

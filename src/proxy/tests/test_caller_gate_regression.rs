@@ -24,7 +24,7 @@
 //! **This test FAILS before the fix and PASSES after the fix.**
 
 use super::e2e_test_server::E2eTestServer;
-use super::test_ua::{TestUaEvent};
+use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
@@ -84,7 +84,11 @@ async fn test_webrtc_rtp_caller_gate_opens_on_same_sdp_200ok() -> Result<()> {
     // alice calls bob
     let alice_clone = alice.clone();
     let caller_handle = crate::utils::spawn(async move {
-        timeout(Duration::from_secs(15), alice_clone.make_call("bob", Some(alice_sdp))).await
+        timeout(
+            Duration::from_secs(15),
+            alice_clone.make_call("bob", Some(alice_sdp)),
+        )
+        .await
     });
 
     // bob: receive INVITE → send 183 + SDP → wait → send 200 OK with SAME SDP

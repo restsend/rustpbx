@@ -1,6 +1,6 @@
 use super::locator::{
-    Locator, RealmChecker, choose_registered_aor, is_local_realm, is_location_expired,
-    is_webrtc_invalid_host, now_epoch_secs, sort_locations_by_recency, UNREGISTER_GRACE_SECS,
+    Locator, RealmChecker, UNREGISTER_GRACE_SECS, choose_registered_aor, is_local_realm,
+    is_location_expired, is_webrtc_invalid_host, now_epoch_secs, sort_locations_by_recency,
 };
 use crate::call::Location;
 use anyhow::Result;
@@ -545,7 +545,12 @@ impl Locator for DbLocator {
                         .order_by_desc(Column::Id)
                         .all(&self.db)
                         .await
-                        .map_err(|e| anyhow::anyhow!("Database error on lookup by username for .invalid host: {}", e))?;
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Database error on lookup by username for .invalid host: {}",
+                                e
+                            )
+                        })?;
                 }
             }
         }

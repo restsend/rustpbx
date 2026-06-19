@@ -70,10 +70,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
-        .route(
-            "/sip-trunk",
-            put(create_sip_trunk).post(query_sip_trunks),
-        )
+        .route("/sip-trunk", put(create_sip_trunk).post(query_sip_trunks))
         .route(
             "/sip-trunk/{id}",
             patch(update_sip_trunk).delete(delete_sip_trunk),
@@ -976,11 +973,9 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db,
-            ConsoleConfig::default(),
-        )
-        .await
-        .expect("initialize console state")
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
     }
 
     #[tokio::test]

@@ -59,7 +59,8 @@ async fn test_b2bua_full_flow() {
 
     // Alice calls Bob
     let alice_sdp = dummy_sdp.clone();
-    let call_task = crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+    let call_task =
+        crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     // Bob waits for incoming call and answers it
     let bob_sdp = dummy_sdp.clone();
@@ -193,7 +194,8 @@ async fn test_rtp_to_webrtc_bridge() {
     // Bob (RTP) calls Alice (WebRTC)
     let bob_rtp_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n".to_string();
 
-    let call_task = crate::utils::spawn(async move { bob_ua.make_call("alice", Some(bob_rtp_sdp)).await });
+    let call_task =
+        crate::utils::spawn(async move { bob_ua.make_call("alice", Some(bob_rtp_sdp)).await });
 
     // Alice should receive incoming call and answer
     let answer_task = crate::utils::spawn(async move {

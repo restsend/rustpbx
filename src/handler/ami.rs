@@ -1,11 +1,11 @@
+#[cfg(feature = "console")]
+use crate::console::ReloadTarget;
 use crate::{
     app::AppState,
     config::{Config, ProxyConfig},
     handler::middleware::clientaddr::ClientAddr,
     preflight,
 };
-#[cfg(feature = "console")]
-use crate::console::ReloadTarget;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -1277,9 +1277,7 @@ async fn cluster_dispatch_command_handler(
             if result.success {
                 let mut resp = serde_json::json!({ "message": "Command dispatched" });
                 if let Some(data) = result.data {
-                    resp.as_object_mut()
-                        .unwrap()
-                        .insert("data".into(), data);
+                    resp.as_object_mut().unwrap().insert("data".into(), data);
                 }
                 Json(resp).into_response()
             } else {

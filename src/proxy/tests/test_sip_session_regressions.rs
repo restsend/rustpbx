@@ -474,7 +474,13 @@ async fn test_queue_transfer_without_return_ivr_keeps_hangup_fallback_when_no_ag
     session.callee_event_tx = Some(callee_tx);
 
     let err = session
-        .handle_queue_transfer(LegId::from("caller"), "support", None, Vec::new(), &mut callee_rx)
+        .handle_queue_transfer(
+            LegId::from("caller"),
+            "support",
+            None,
+            Vec::new(),
+            &mut callee_rx,
+        )
         .await
         .expect_err("without return_ivr, hangup fallback should surface failure");
     assert!(

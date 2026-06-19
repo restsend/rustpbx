@@ -2,19 +2,18 @@ use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::proxy::routing::TrunkConfig;
 use crate::proxy::tests::e2e_test_server::E2eTestServer;
 use anyhow::Result;
+use rsipstack::EndpointBuilder;
 use rsipstack::sip::{
-    Method, SipMessage, Version,
+    Method, Param, SipMessage, Version,
     headers::CallId,
     headers::typed::CSeq,
     typed::{From as FromHeader, To as ToHeader, Via},
     uri::Tag,
-    Param,
 };
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use rsipstack::transport::udp::UdpConnection;
-use rsipstack::EndpointBuilder;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -38,10 +37,7 @@ fn trunk_options_proxy_config() -> ProxyConfig {
     }
 }
 
-async fn send_options(
-    server_addr: &str,
-    local_port: u16,
-) -> Result<Option<u16>> {
+async fn send_options(server_addr: &str, local_port: u16) -> Result<Option<u16>> {
     let cancel = CancellationToken::new();
     let tl = TransportLayer::new(cancel.child_token());
     let udp = UdpConnection::create_connection(

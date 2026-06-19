@@ -493,44 +493,57 @@ async fn test_leg_timeline_via_call_resume() {
 
         // Simulate call lifecycle events
         let events = vec![
-            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallIncoming {
-                call_id: "timeline-call".to_string(),
-                context: "timeline-test".to_string(),
-                caller: "sip:customer@test.com".to_string(),
-                callee: "sip:service@test.com".to_string(),
-                dial_direction: "inbound".to_string(),
-                trunk: None,
-                sip_headers: std::collections::HashMap::new(),
-                root_call_id: None,
-                caller_name: None,
-                callee_name: None,
-                called_phone: None,
-                app_id: None,
-                routing_target: None,
-                uuid: None,
-                routing_path: None,
-            }, None),
-            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallAnswered  { 
-                call_id: "timeline-call".to_string(),
-            }, None),
-            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallBridged  { 
-                leg_a: "timeline-call".to_string(),
-                leg_b: "agent-leg".to_string(),
-            }, None),
-            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallUnbridged  { 
-                call_id: "timeline-call".to_string(),
-            }, None),
-            rustpbx::rwi::event::to_legacy_event(&rustpbx::rwi::CallTransferred  { 
-                call_id: "timeline-call".to_string(),
-            }, None),
+            rustpbx::rwi::event::to_legacy_event(
+                &rustpbx::rwi::CallIncoming {
+                    call_id: "timeline-call".to_string(),
+                    context: "timeline-test".to_string(),
+                    caller: "sip:customer@test.com".to_string(),
+                    callee: "sip:service@test.com".to_string(),
+                    dial_direction: "inbound".to_string(),
+                    trunk: None,
+                    sip_headers: std::collections::HashMap::new(),
+                    root_call_id: None,
+                    caller_name: None,
+                    callee_name: None,
+                    called_phone: None,
+                    app_id: None,
+                    routing_target: None,
+                    uuid: None,
+                    routing_path: None,
+                },
+                None,
+            ),
+            rustpbx::rwi::event::to_legacy_event(
+                &rustpbx::rwi::CallAnswered {
+                    call_id: "timeline-call".to_string(),
+                },
+                None,
+            ),
+            rustpbx::rwi::event::to_legacy_event(
+                &rustpbx::rwi::CallBridged {
+                    leg_a: "timeline-call".to_string(),
+                    leg_b: "agent-leg".to_string(),
+                },
+                None,
+            ),
+            rustpbx::rwi::event::to_legacy_event(
+                &rustpbx::rwi::CallUnbridged {
+                    call_id: "timeline-call".to_string(),
+                },
+                None,
+            ),
+            rustpbx::rwi::event::to_legacy_event(
+                &rustpbx::rwi::CallTransferred {
+                    call_id: "timeline-call".to_string(),
+                },
+                None,
+            ),
         ];
 
         for event in events {
             gw.cache_event(&"timeline-call".to_string(), &event);
         }
-
     }
-
 
     // Resume the call and verify events
     let (_, json) = req(

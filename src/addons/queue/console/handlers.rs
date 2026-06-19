@@ -53,10 +53,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route("/queues/reload", post(reload_queues_handler))
         .route("/queues/download-audio", post(download_audio_handler))
         .route("/queues/sound/{*file_path}", get(serve_sound_handler))
-        .route(
-            "/queues/{id}",
-            patch(update_queue).delete(delete_queue),
-        )
+        .route("/queues/{id}", patch(update_queue).delete(delete_queue))
         .route("/queues/{id}/export", post(export_queue))
 }
 
@@ -747,15 +744,10 @@ pub async fn download_audio_handler(
     let dest_path = sounds_dir.join(&filename);
 
     // Download
-    let opts = crate::http_util::HttpFetchOptions::new()
-        .with_timeout(std::time::Duration::from_secs(30));
-    match crate::http_util::fetch_bytes(
-        &reqwest::Client::new(),
-        reqwest::Method::GET,
-        &url,
-        &opts,
-    )
-    .await
+    let opts =
+        crate::http_util::HttpFetchOptions::new().with_timeout(std::time::Duration::from_secs(30));
+    match crate::http_util::fetch_bytes(&reqwest::Client::new(), reqwest::Method::GET, &url, &opts)
+        .await
     {
         Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {

@@ -117,7 +117,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
-        .route("/call-records", get(query_call_records).post(query_call_records))
+        .route(
+            "/call-records",
+            get(query_call_records).post(query_call_records),
+        )
         .route(
             "/call-records/{id}",
             patch(update_call_record).delete(delete_call_record),
@@ -330,10 +333,13 @@ async fn stream_call_recording(
     let stream_leg = match parse_recording_stream_selector(query.stream.as_deref()) {
         Ok(selection) => selection,
         Err(message) => {
-            return bad_request(json!({
-                "message": message,
-                "allowed": ["A", "B", "mixed", "caller", "callee"],
-            }).to_string());
+            return bad_request(
+                json!({
+                    "message": message,
+                    "allowed": ["A", "B", "mixed", "caller", "callee"],
+                })
+                .to_string(),
+            );
         }
     };
 
@@ -391,8 +397,7 @@ async fn stream_call_recording(
             .generate_wav_file(&record.call_id, start_time, end_time, stream_leg)
             .await;
 
-        if let Ok(temp_file) = wav_result
-        {
+        if let Ok(temp_file) = wav_result {
             let temp_path = temp_file.path().to_owned();
             let file_len = match std::fs::metadata(&temp_path) {
                 Ok(m) => m.len(),
@@ -598,7 +603,8 @@ async fn download_call_record_metadata(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
+    let model =
+        crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let cdr_data = match load_cdr_data(&state, &model).await {
         Some(data) => data,
@@ -878,7 +884,8 @@ async fn update_call_record(
     }
 
     let db = state.db();
-    let mut record = crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
+    let mut record =
+        crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let mut active: CallRecordActiveModel = record.clone().into();
     let mut changed = false;
@@ -1405,7 +1412,12 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
 
 pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
     let app = state.app_state()?;
-    let root = match app.config().callrecord.as_ref().map(|config| &config.storage) {
+    let root = match app
+        .config()
+        .callrecord
+        .as_ref()
+        .map(|config| &config.storage)
+    {
         Some(crate::config::CallRecordStorageConfig::Local { root })
         | Some(crate::config::CallRecordStorageConfig::S3 { root, .. }) => root.as_str(),
         _ => "",
@@ -1810,7 +1822,8 @@ mod tests {
     }
 
     async fn create_console_state(db: DatabaseConnection) -> Arc<ConsoleState> {
-        ConsoleState::initialize(db,
+        ConsoleState::initialize(
+            db,
             ConsoleConfig {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),

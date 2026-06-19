@@ -19,25 +19,10 @@ impl SipSession {
                 .await;
         }
 
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        let resolved_target_leg = self.resolve_supervisor_target(&target_leg)?;
-
-        let conf_id = format!("supervisor-{}-listen", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
-
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, resolved_target_leg));
-        self.start_conference_media_bridge(&conf_id, &target_participant_leg)
+        self.require_leg(&supervisor_leg)?;
+        let resolved_target_leg = self.resolve_supervisor_target(&target_leg, false)?;
+        self.start_supervisor_bridge_pair("listen", &supervisor_leg, &resolved_target_leg)
             .await?;
-
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
-            .await?;
-
-        self.conference_bridge.conf_id = Some(conf_id);
-
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
         info!(
             session_id = %self.id,
             supervisor = %supervisor_leg,
@@ -47,10 +32,18 @@ impl SipSession {
         Ok(())
     }
 
-    pub(super) fn resolve_supervisor_target(&self, target_leg: &LegId) -> Result<LegId> {
-        if self.legs.contains_key(target_leg) {
-            Ok(target_leg.clone())
-        } else if self.legs.contains_key(&LegId::new("callee")) {
+    /// Resolve a supervisor target leg, optionally skipping the exact match
+    /// (used by cross-session listen where the target_leg may be a session id).
+    /// Falls back to "callee" then "caller".
+    pub(super) fn resolve_supervisor_target(
+        &self,
+        target_leg: &LegId,
+        skip_exact: bool,
+    ) -> Result<LegId> {
+        if !skip_exact && self.legs.contains_key(target_leg) {
+            return Ok(target_leg.clone());
+        }
+        if self.legs.contains_key(&LegId::new("callee")) {
             warn!(
                 session_id = %self.id,
                 requested_leg = %target_leg,
@@ -69,22 +62,31 @@ impl SipSession {
         }
     }
 
-    pub(super) async fn ensure_supervisor_conference(&self, conf_id: &str) -> Result<()> {
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            info!(conf_id = %conf_id, "Creating supervisor conference");
-            self.server
-                .conference_manager
-                .create_conference(conf_id_obj, Some(3))
-                .await
-                .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
-        }
+    /// Common body for listen/whisper: ensure conference, bridge both legs,
+    /// store conf_id and update supervisor leg state.
+    async fn start_supervisor_bridge_pair(
+        &mut self,
+        kind: &str,
+        supervisor_leg: &LegId,
+        target_leg: &LegId,
+    ) -> Result<()> {
+        let conf_id = format!("supervisor-{}-{}", self.id.0, kind);
+        self.ensure_conference(&conf_id, Some(3)).await?;
+
+        let target_handle = self
+            .start_conference_media_bridge(&conf_id, &self.participant_leg(target_leg))
+            .await?;
+        self.legs
+            .set_conference_bridge_handle(target_leg.clone(), target_handle);
+
+        let sup_handle = self
+            .start_conference_media_bridge(&conf_id, &self.participant_leg(supervisor_leg))
+            .await?;
+        self.legs
+            .set_conference_bridge_handle(supervisor_leg.clone(), sup_handle);
+
+        self.conference_bridge.conf_id = Some(conf_id);
+        self.update_leg_state(supervisor_leg, LegState::Connected);
         Ok(())
     }
 
@@ -94,27 +96,10 @@ impl SipSession {
         target_leg: LegId,
         _supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
-
-        let conf_id = format!("supervisor-{}-whisper", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
-
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, target_leg));
-        self.start_conference_media_bridge(&conf_id, &target_participant_leg)
+        self.require_leg(&supervisor_leg)?;
+        self.require_leg(&target_leg)?;
+        self.start_supervisor_bridge_pair("whisper", &supervisor_leg, &target_leg)
             .await?;
-
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
-            .await?;
-
-        self.conference_bridge.conf_id = Some(conf_id);
-
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
         info!(
             session_id = %self.id,
             supervisor = %supervisor_leg,
@@ -130,20 +115,16 @@ impl SipSession {
         target_leg: LegId,
         _supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
+        self.require_leg(&supervisor_leg)?;
+        self.require_leg(&target_leg)?;
 
         let conf_id = format!("supervisor-{}-barge", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
+        self.ensure_conference(&conf_id, Some(3)).await?;
 
         let leg_ids: Vec<LegId> = self.legs.keys().cloned().collect();
 
         for leg_id in &leg_ids {
-            let participant_leg = LegId::new(format!("{}-{}", self.id.0, leg_id));
+            let participant_leg = self.participant_leg(leg_id);
             if let Err(e) = self
                 .start_conference_media_bridge(&conf_id, &participant_leg)
                 .await
@@ -152,10 +133,8 @@ impl SipSession {
             }
         }
 
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
+        self.start_conference_media_bridge(&conf_id, &self.participant_leg(&supervisor_leg))
             .await?;
-
         self.conference_bridge.conf_id = Some(conf_id);
 
         self.update_leg_state(&supervisor_leg, LegState::Connected);
@@ -177,45 +156,13 @@ impl SipSession {
         // when the caller passes the session ID as the target leg) and prefer the
         // real "callee" or "caller" leg instead.
         let target_is_session_id = target_leg.0 == self.id.0;
-        let resolved_target_leg = if !target_is_session_id && self.legs.contains_key(&target_leg) {
-            target_leg
-        } else if self.legs.contains_key(&LegId::new("callee")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Cross-session supervisor listen target leg not found, falling back to callee"
-            );
-            LegId::new("callee")
-        } else if self.legs.contains_key(&LegId::new("caller")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Cross-session supervisor listen target leg not found, falling back to caller"
-            );
-            LegId::new("caller")
-        } else {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        };
+        let resolved_target_leg =
+            self.resolve_supervisor_target(&target_leg, target_is_session_id)?;
 
         let conf_id = format!("supervisor-{}-{}", self.id.0, supervisor_session_id);
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+        self.ensure_conference(&conf_id, Some(3)).await?;
 
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            info!(conf_id = %conf_id, "Creating supervisor conference");
-            self.server
-                .conference_manager
-                .create_conference(conf_id_obj.clone(), Some(3))
-                .await
-                .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
-        }
-
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, resolved_target_leg));
+        let target_participant_leg = self.participant_leg(&resolved_target_leg);
         match self
             .start_conference_media_bridge(&conf_id, &target_participant_leg)
             .await
@@ -226,8 +173,7 @@ impl SipSession {
                     leg_id = %resolved_target_leg,
                     "Supervisor conference media bridge started for target"
                 );
-                self.conference_bridge.bridge_handle = Some(handle);
-                self.conference_bridge.conf_id = Some(conf_id.clone());
+                self.set_active_bridge(conf_id.clone(), handle);
             }
             Err(e) => {
                 return Err(anyhow!(
@@ -238,25 +184,13 @@ impl SipSession {
             }
         }
 
-        let registry = &self.server.active_call_registry;
-        if let Some(handle) = registry.get_handle(supervisor_session_id) {
-            let join_cmd = CallCommand::JoinMixer {
+        self.forward_command(
+            supervisor_session_id,
+            CallCommand::JoinMixer {
                 mixer_id: conf_id.clone(),
-            };
-            handle
-                .send_command(join_cmd)
-                .map_err(|e| anyhow!("Failed to notify supervisor session: {}", e))?;
-            info!(
-                supervisor_session = %supervisor_session_id,
-                conf_id = %conf_id,
-                "Notified supervisor session to join conference"
-            );
-        } else {
-            return Err(anyhow!(
-                "Supervisor session {} not found",
-                supervisor_session_id
-            ));
-        }
+            },
+            "notify supervisor session",
+        )?;
 
         info!(
             session_id = %self.id,
@@ -273,12 +207,8 @@ impl SipSession {
         target_leg: LegId,
         _supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
+        self.require_leg(&supervisor_leg)?;
+        self.require_leg(&target_leg)?;
 
         if let Some(ref mixer) = self.supervisor_mixer.take() {
             mixer.stop();
@@ -307,9 +237,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_supervisor_stop(&mut self, supervisor_leg: LegId) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
+        self.require_leg(&supervisor_leg)?;
 
         if let Some(ref mixer) = self.supervisor_mixer {
             mixer.stop();

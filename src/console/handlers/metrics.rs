@@ -217,7 +217,9 @@ fn collect_transaction_metrics(state: &ConsoleState) -> TransactionMetrics {
     let mut metrics = TransactionMetrics::default();
 
     if let Some(server) = state.sip_server() {
-        metrics.running = server.runnings_tx.load(std::sync::atomic::Ordering::Relaxed) as u32;
+        metrics.running = server
+            .runnings_tx
+            .load(std::sync::atomic::Ordering::Relaxed) as u32;
         metrics.max_concurrency = server.proxy_config.max_concurrency.unwrap_or(0) as u32;
         let stats = server.endpoint.inner.get_stats();
         metrics.endpoint_running = stats.running_transactions;

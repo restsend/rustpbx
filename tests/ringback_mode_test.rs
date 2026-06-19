@@ -889,10 +889,7 @@ mod ringback_tone_audio_tests {
         assert_eq!(reader.spec().sample_rate, 8000);
         assert_eq!(reader.spec().bits_per_sample, 16);
 
-        let samples: Vec<i16> = reader
-            .samples()
-            .map(|s| s.expect("read sample"))
-            .collect();
+        let samples: Vec<i16> = reader.samples().map(|s| s.expect("read sample")).collect();
         assert_eq!(samples.len(), 240, "should read back 240 samples");
 
         // Verify PCM content matches

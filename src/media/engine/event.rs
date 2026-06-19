@@ -18,8 +18,12 @@ pub struct RecordResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MediaEvent {
     // ── Session ──────────────────────────────────────────────────────────
-    SessionCreated { session_id: String },
-    SessionDestroyed { session_id: String },
+    SessionCreated {
+        session_id: String,
+    },
+    SessionDestroyed {
+        session_id: String,
+    },
 
     // ── Leg ──────────────────────────────────────────────────────────────
     LegAdded {
@@ -56,15 +60,25 @@ pub enum MediaEvent {
     },
 
     // ── Recording ────────────────────────────────────────────────────────
-    RecordingStarted { session_id: String },
+    RecordingStarted {
+        session_id: String,
+    },
     RecordingStopped {
         session_id: String,
         result: RecordResult,
     },
-    RecordingPaused { session_id: String },
-    RecordingResumed { session_id: String },
-    SipFlowStarted { session_id: String },
-    SipFlowStopped { session_id: String },
+    RecordingPaused {
+        session_id: String,
+    },
+    RecordingResumed {
+        session_id: String,
+    },
+    SipFlowStarted {
+        session_id: String,
+    },
+    SipFlowStopped {
+        session_id: String,
+    },
 
     // ── DTMF ─────────────────────────────────────────────────────────────
     DtmfCollected {
@@ -105,14 +119,18 @@ impl MediaEvent {
     /// Extract the session_id this event belongs to, if applicable.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::SessionCreated { session_id }
-            | Self::SessionDestroyed { session_id } => Some(session_id),
-            Self::LegAdded { session_id, .. }
-            | Self::LegRemoved { session_id, .. } => Some(session_id),
-            Self::BridgeEstablished { session_id, .. }
-            | Self::BridgeBroken { session_id, .. } => Some(session_id),
-            Self::PlayStarted { session_id, .. }
-            | Self::PlayFinished { session_id, .. } => Some(session_id),
+            Self::SessionCreated { session_id } | Self::SessionDestroyed { session_id } => {
+                Some(session_id)
+            }
+            Self::LegAdded { session_id, .. } | Self::LegRemoved { session_id, .. } => {
+                Some(session_id)
+            }
+            Self::BridgeEstablished { session_id, .. } | Self::BridgeBroken { session_id, .. } => {
+                Some(session_id)
+            }
+            Self::PlayStarted { session_id, .. } | Self::PlayFinished { session_id, .. } => {
+                Some(session_id)
+            }
             Self::RecordingStarted { session_id }
             | Self::RecordingStopped { session_id, .. }
             | Self::RecordingPaused { session_id }
@@ -120,10 +138,12 @@ impl MediaEvent {
             | Self::SipFlowStarted { session_id }
             | Self::SipFlowStopped { session_id } => Some(session_id),
             Self::DtmfCollected { session_id, .. } => Some(session_id),
-            Self::MixerJoined { session_id, .. }
-            | Self::MixerLeft { session_id, .. } => Some(session_id),
-            Self::LegHeld { session_id, .. }
-            | Self::LegUnheld { session_id, .. } => Some(session_id),
+            Self::MixerJoined { session_id, .. } | Self::MixerLeft { session_id, .. } => {
+                Some(session_id)
+            }
+            Self::LegHeld { session_id, .. } | Self::LegUnheld { session_id, .. } => {
+                Some(session_id)
+            }
             Self::Error { session_id, .. } => Some(session_id),
         }
     }

@@ -36,12 +36,10 @@ async fn test_queue_direct_sip_target() {
         strategy: RouteQueueStrategyConfig {
             mode: QueueDialMode::Sequential,
             wait_timeout_secs: Some(15),
-            targets: vec![
-                RouteQueueTargetConfig {
-                    uri: agent1_uri.clone(),
-                    label: Some("Agent 1".to_string()),
-                },
-            ],
+            targets: vec![RouteQueueTargetConfig {
+                uri: agent1_uri.clone(),
+                label: Some("Agent 1".to_string()),
+            }],
         },
         ..Default::default()
     };
@@ -80,12 +78,7 @@ async fn test_queue_direct_sip_target() {
 
     // ── Start PBX ──────────────────────────────────────────────────────────
     let _pbx = TestPbx::start_with_inject(sip_port, inject).await;
-    tracing::info!(
-        sip_port,
-        caller_port,
-        agent1_port,
-        "TestPbx started"
-    );
+    tracing::info!(sip_port, caller_port, agent1_port, "TestPbx started");
 
     // ── Start agent UA (sipbot, auto-answer after 2s) ─────────────
     let agent1 = TestUa::callee_with_username(agent1_port, 2, "agent1").await;
@@ -103,16 +96,18 @@ async fn test_queue_direct_sip_target() {
     let caller_rx = caller.has_rtp_rx();
     let caller_tx = caller.has_rtp_tx();
 
-    tracing::info!(
-        "Agent stats: {}", agent1.rtp_stats_summary()
-    );
+    tracing::info!("Agent stats: {}", agent1.rtp_stats_summary());
 
-    tracing::info!(
-        "Caller stats: {}", caller.rtp_stats_summary()
-    );
+    tracing::info!("Caller stats: {}", caller.rtp_stats_summary());
 
-    assert!(agent_rx || agent_tx, "Agent should have received/sent RTP audio");
-    assert!(caller_rx || caller_tx, "Caller should have received/sent RTP audio");
+    assert!(
+        agent_rx || agent_tx,
+        "Agent should have received/sent RTP audio"
+    );
+    assert!(
+        caller_rx || caller_tx,
+        "Caller should have received/sent RTP audio"
+    );
 
     agent1.stop();
     caller.stop();

@@ -206,7 +206,7 @@ fn pcmu_offer(origin: &str, media_port: u16) -> String {
 }
 
 #[tokio::test]
-    #[ignore = "Requires running PBX infrastructure"]
+#[ignore = "Requires running PBX infrastructure"]
 async fn test_ivr_queue_e2e() {
     tracing_subscriber::fmt()
         .with_file(true)

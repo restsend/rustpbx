@@ -69,15 +69,13 @@ impl HttpRegistry {
     async fn fetch_agent(&self, agent_id: &str) -> anyhow::Result<Option<AgentRecord>> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
 
-        let opts = crate::http_util::HttpFetchOptions::new()
-            .with_headers(self.headers_map());
+        let opts = crate::http_util::HttpFetchOptions::new().with_headers(self.headers_map());
         let req = self.client.get(&url);
-        let resp =
-            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
-                Ok(r) => r,
-                Err(e) if e.to_string().contains("404") => return Ok(None),
-                Err(e) => return Err(e),
-            };
+        let resp = match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+            Ok(r) => r,
+            Err(e) if e.to_string().contains("404") => return Ok(None),
+            Err(e) => return Err(e),
+        };
 
         let data: serde_json::Value = resp
             .json()

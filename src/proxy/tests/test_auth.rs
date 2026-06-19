@@ -6,9 +6,9 @@ use super::common::{
     create_test_server, create_test_server_with_config, create_transaction,
     extract_nonce_from_proxy_authenticate,
 };
-use crate::call::{SipUser, TransactionCookie};
 use crate::auth::jwt_auth_backend::JwtAuthBackend;
 use crate::auth::jwt_validator::{JwtValidator, generate_hs256_jwt};
+use crate::call::{SipUser, TransactionCookie};
 use crate::config::{JwtAuthConfig, ProxyConfig, RtpConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::auth::{AuthBackend, AuthModule};
@@ -1441,10 +1441,9 @@ async fn test_jwt_auth_backend_valid_token() {
     );
 
     let mut request = request;
-    request.headers.push(Header::Other(
-        "X-Auth-Token".to_string(),
-        token,
-    ));
+    request
+        .headers
+        .push(Header::Other("X-Auth-Token".to_string(), token));
 
     let cookie = TransactionCookie::default();
     let result = backend.authenticate(&request, &cookie).await;
@@ -1477,7 +1476,10 @@ async fn test_jwt_auth_backend_invalid_token_falls_through() {
     let cookie = TransactionCookie::default();
     let result = backend.authenticate(&request, &cookie).await;
     assert!(result.is_ok());
-    assert!(result.unwrap().is_none(), "invalid JWT should return None (fall through)");
+    assert!(
+        result.unwrap().is_none(),
+        "invalid JWT should return None (fall through)"
+    );
 }
 
 #[tokio::test]
@@ -1497,7 +1499,10 @@ async fn test_jwt_auth_backend_no_token_falls_through() {
     let cookie = TransactionCookie::default();
     let result = backend.authenticate(&request, &cookie).await;
     assert!(result.is_ok());
-    assert!(result.unwrap().is_none(), "no JWT header should return None (fall through)");
+    assert!(
+        result.unwrap().is_none(),
+        "no JWT header should return None (fall through)"
+    );
 }
 
 #[tokio::test]
@@ -1535,10 +1540,9 @@ async fn test_jwt_auth_backend_with_check_local_user() {
     );
 
     let mut request = request;
-    request.headers.push(Header::Other(
-        "X-Auth-Token".to_string(),
-        token,
-    ));
+    request
+        .headers
+        .push(Header::Other("X-Auth-Token".to_string(), token));
 
     let cookie = TransactionCookie::default();
     let result = backend.authenticate(&request, &cookie).await;
@@ -1549,7 +1553,13 @@ async fn test_jwt_auth_backend_with_check_local_user() {
     assert_eq!(user.display_name, Some("Alice Test".to_string()));
 
     // Verify server is set up correctly
-    assert!(server_inner.user_backend.get_user("alice", Some("rustpbx.com"), None).await.is_ok());
+    assert!(
+        server_inner
+            .user_backend
+            .get_user("alice", Some("rustpbx.com"), None)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -1596,10 +1606,9 @@ async fn test_jwt_auth_module_integration_no_401() {
     );
 
     let mut request = request;
-    request.headers.push(Header::Other(
-        "X-Auth-Token".to_string(),
-        token,
-    ));
+    request
+        .headers
+        .push(Header::Other("X-Auth-Token".to_string(), token));
 
     let (mut tx, _) = create_transaction(request).await;
     let result = module
@@ -1697,9 +1706,7 @@ impl TokenAuthTestServer {
         let app = axum::Router::new().route(
             "/auth",
             axum::routing::post(
-                move |
-                    axum::Form(form): axum::Form<HashMap<String, String>>,
-                | {
+                move |axum::Form(form): axum::Form<HashMap<String, String>>| {
                     rc.fetch_add(1, Ordering::SeqCst);
                     let token = form.get("X-Auth-Token").cloned().unwrap_or_default();
                     let username = form.get("username").cloned().unwrap_or_default();
@@ -1733,7 +1740,10 @@ impl TokenAuthTestServer {
         crate::utils::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
-        Self { port, request_count }
+        Self {
+            port,
+            request_count,
+        }
     }
 
     /// Start a server that always returns 500 (for retry testing).
@@ -1760,7 +1770,10 @@ impl TokenAuthTestServer {
         crate::utils::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
-        Self { port, request_count }
+        Self {
+            port,
+            request_count,
+        }
     }
 
     fn url(&self) -> String {
@@ -1847,7 +1860,11 @@ async fn test_http_token_auth_no_token_falls_through() {
     let result = auth_backend.authenticate(&request, &cookie).await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_none(), "no token → should fall through");
-    assert_eq!(server.request_count(), 0, "should not make HTTP request without token");
+    assert_eq!(
+        server.request_count(),
+        0,
+        "should not make HTTP request without token"
+    );
 }
 
 #[tokio::test]
@@ -1877,7 +1894,10 @@ async fn test_http_token_auth_invalid_token_falls_through() {
     let cookie = TransactionCookie::default();
     let result = auth_backend.authenticate(&request, &cookie).await;
     assert!(result.is_ok());
-    assert!(result.unwrap().is_none(), "invalid token → should fall through");
+    assert!(
+        result.unwrap().is_none(),
+        "invalid token → should fall through"
+    );
     assert_eq!(server.request_count(), 1);
 }
 
@@ -1917,7 +1937,9 @@ async fn test_http_token_auth_cache_hit() {
     // Second call: cache hit, no HTTP request
     let result2 = auth_backend.authenticate(&request, &cookie).await;
     assert!(result2.is_ok());
-    let user2 = result2.unwrap().expect("second call should succeed via cache");
+    let user2 = result2
+        .unwrap()
+        .expect("second call should succeed via cache");
     assert_eq!(user2.username, "alice");
     assert_eq!(server.request_count(), 1, "second call should use cache");
 }
@@ -1959,7 +1981,11 @@ async fn test_http_token_auth_cache_ttl_expiry() {
     // Second call: cache expired, new HTTP request
     let result2 = auth_backend.authenticate(&request, &cookie).await;
     assert!(result2.is_ok());
-    assert_eq!(server.request_count(), 2, "expired cache should trigger new HTTP request");
+    assert_eq!(
+        server.request_count(),
+        2,
+        "expired cache should trigger new HTTP request"
+    );
 }
 
 #[tokio::test]

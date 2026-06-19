@@ -694,7 +694,10 @@ mod tests {
         assert!(is_within_unregister_grace(1000, 1000));
         assert!(is_within_unregister_grace(1000, 1003));
         // at the boundary (exactly GRACE_SECS ago) → still within
-        assert!(is_within_unregister_grace(1000, 1000 + UNREGISTER_GRACE_SECS));
+        assert!(is_within_unregister_grace(
+            1000,
+            1000 + UNREGISTER_GRACE_SECS
+        ));
         // older than grace → outside
         assert!(!is_within_unregister_grace(
             1000,
@@ -906,8 +909,9 @@ mod tests {
         let locator = MemoryLocator::new();
         let registered_uri: rsipstack::sip::Uri =
             "sip:test_user@real-domain.com".try_into().unwrap();
-        let lookup_uri: rsipstack::sip::Uri =
-            "sip:test_user@abcdef123456.invalid;transport=ws".try_into().unwrap();
+        let lookup_uri: rsipstack::sip::Uri = "sip:test_user@abcdef123456.invalid;transport=ws"
+            .try_into()
+            .unwrap();
 
         let destination = SipAddr {
             r#type: Some(Transport::Ws),
@@ -930,7 +934,11 @@ mod tests {
             .unwrap();
 
         let locations = locator.lookup(&lookup_uri).await.unwrap();
-        assert_eq!(locations.len(), 1, "should find registration via .invalid lookup");
+        assert_eq!(
+            locations.len(),
+            1,
+            "should find registration via .invalid lookup"
+        );
         assert_eq!(
             locations[0].destination,
             Some(destination),

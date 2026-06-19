@@ -193,7 +193,8 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let json: serde_json::Value = fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
+        let json: serde_json::Value =
+            fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
             let flow_array = json["flow"]
@@ -231,7 +232,8 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let json: serde_json::Value = fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
+        let json: serde_json::Value =
+            fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
             let stats = json["stats"]
@@ -239,11 +241,11 @@ impl SipFlowBackend for RemoteBackend {
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|v| {
-                            let packet_count = v
-                                .get("packet_count")
-                                .or_else(|| v.get("count"))
-                                .and_then(|value| value.as_u64())
-                                .unwrap_or(0) as usize;
+                            let packet_count =
+                                v.get("packet_count")
+                                    .or_else(|| v.get("count"))
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0) as usize;
                             let lost_packets = v
                                 .get("lost_packets")
                                 .and_then(|value| value.as_u64())

@@ -85,11 +85,15 @@ impl TestCtx {
         let pbx = TestPbx::start(sip_port).await;
         let mut ws = ws_connect(&pbx.rwi_url).await;
 
-        let (action_id, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+        let (action_id, sub_json) = rwi_req(
+            "session.subscribe",
+            serde_json::json!({"contexts": ["default"]}),
+        );
         ws.send(Message::Text(sub_json.into())).await.unwrap();
         let v = recv_until(&mut ws, 5, |v| {
             (v["type"] == "command_completed" || v["type"] == "command_failed")
-                && v.get("action_id").map_or(false, |a| a == action_id.as_str())
+                && v.get("action_id")
+                    .map_or(false, |a| a == action_id.as_str())
         })
         .await;
         assert_eq!(v["type"], "command_completed", "subscribe failed: {v}");
@@ -114,18 +118,21 @@ impl TestCtx {
         let call_id_clone = call_id.clone();
         let completed = recv_until(&mut self.ws, 15, move |v| {
             (v["type"] == "command_completed" || v["type"] == "command_failed")
-                && v.get("call_id").map_or(false, |c| c == call_id_clone.as_str())
+                && v.get("call_id")
+                    .map_or(false, |c| c == call_id_clone.as_str())
         })
         .await;
-        assert_eq!(completed["type"], "command_completed", "originate failed: {completed}");
+        assert_eq!(
+            completed["type"], "command_completed",
+            "originate failed: {completed}"
+        );
         completed
     }
 
     async fn wait_event(&mut self, name: &str, timeout_secs: u64) -> serde_json::Value {
         let name_owned = name.to_string();
         recv_until(&mut self.ws, timeout_secs, move |v| {
-            v.get(&name_owned).is_some()
-                || v.to_string().contains(&name_owned)
+            v.get(&name_owned).is_some() || v.to_string().contains(&name_owned)
         })
         .await
     }
@@ -149,10 +156,16 @@ async fn test_agent_callout_answer() {
     ctx.originate(&uri).await;
 
     let ringing = ctx.wait_event("call_ringing", 5).await;
-    tracing::info!("Event: call_ringing = {}", ringing.to_string().chars().take(200).collect::<String>());
+    tracing::info!(
+        "Event: call_ringing = {}",
+        ringing.to_string().chars().take(200).collect::<String>()
+    );
 
     let answered = ctx.wait_event("call_answered", 10).await;
-    tracing::info!("Event: call_answered = {}", answered.to_string().chars().take(200).collect::<String>());
+    tracing::info!(
+        "Event: call_answered = {}",
+        answered.to_string().chars().take(200).collect::<String>()
+    );
 
     assert!(ringing.get("call_ringing").is_some() || ringing.to_string().contains("ringing"));
     assert!(answered.get("call_answered").is_some() || answered.to_string().contains("answered"));
@@ -177,29 +190,36 @@ async fn test_agent_callout_no_answer() {
     let callee = TestUa::callee_no_answer(callee_port, "alice", 60).await;
 
     let uri = ctx.sip_uri_for(callee_port, "alice");
-    ctx.ws.send(Message::Text(
-        rwi_req(
-            "call.originate",
-            serde_json::json!({
-                "call_id": format!("callout-noanswer-{}", Uuid::new_v4()),
-                "destination": uri,
-                "caller_id": format!("sip:agent@{}", ctx.pbx.sip_host()),
-                "context": "default",
-                "timeout_secs": 5,
-            }),
-        )
-        .1
-        .into(),
-    ))
-    .await
-    .unwrap();
+    ctx.ws
+        .send(Message::Text(
+            rwi_req(
+                "call.originate",
+                serde_json::json!({
+                    "call_id": format!("callout-noanswer-{}", Uuid::new_v4()),
+                    "destination": uri,
+                    "caller_id": format!("sip:agent@{}", ctx.pbx.sip_host()),
+                    "context": "default",
+                    "timeout_secs": 5,
+                }),
+            )
+            .1
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     let ringing = ctx.wait_event("call_ringing", 5).await;
-    tracing::info!("Event: call_ringing = {}", ringing.to_string().chars().take(200).collect::<String>());
+    tracing::info!(
+        "Event: call_ringing = {}",
+        ringing.to_string().chars().take(200).collect::<String>()
+    );
     assert!(ringing.get("call_ringing").is_some() || ringing.to_string().contains("ringing"));
 
     let no_answer = ctx.wait_event("call_no_answer", 15).await;
-    tracing::info!("Event: call_no_answer = {}", no_answer.to_string().chars().take(200).collect::<String>());
+    tracing::info!(
+        "Event: call_no_answer = {}",
+        no_answer.to_string().chars().take(200).collect::<String>()
+    );
     assert!(
         no_answer.get("call_no_answer").is_some() || no_answer.to_string().contains("no_answer"),
         "Expected call_no_answer event, got: {}",
@@ -222,22 +242,23 @@ async fn test_agent_callout_busy() {
     let callee = TestUa::callee_reject(callee_port, "alice", 486).await;
 
     let uri = ctx.sip_uri_for(callee_port, "alice");
-    ctx.ws.send(Message::Text(
-        rwi_req(
-            "call.originate",
-            serde_json::json!({
-                "call_id": format!("callout-busy-{}", Uuid::new_v4()),
-                "destination": uri,
-                "caller_id": format!("sip:agent@{}", ctx.pbx.sip_host()),
-                "context": "default",
-                "timeout_secs": 10,
-            }),
-        )
-        .1
-        .into(),
-    ))
-    .await
-    .unwrap();
+    ctx.ws
+        .send(Message::Text(
+            rwi_req(
+                "call.originate",
+                serde_json::json!({
+                    "call_id": format!("callout-busy-{}", Uuid::new_v4()),
+                    "destination": uri,
+                    "caller_id": format!("sip:agent@{}", ctx.pbx.sip_host()),
+                    "context": "default",
+                    "timeout_secs": 10,
+                }),
+            )
+            .1
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     let busy_event = recv_until(&mut ctx.ws, 10, |v| {
         v.get("call_busy").is_some()
@@ -245,12 +266,19 @@ async fn test_agent_callout_busy() {
             || v.get("call_hangup").is_some()
     })
     .await;
-    tracing::info!("Event (busy scenario) = {}", busy_event.to_string().chars().take(300).collect::<String>());
+    tracing::info!(
+        "Event (busy scenario) = {}",
+        busy_event.to_string().chars().take(300).collect::<String>()
+    );
 
     let is_busy = busy_event.get("call_busy").is_some();
     let is_hangup = busy_event.get("call_hangup").is_some();
     let is_no_answer = busy_event.get("call_no_answer").is_some();
-    assert!(is_busy || is_hangup || is_no_answer, "Expected call_busy/call_hangup/call_no_answer, got: {}", busy_event);
+    assert!(
+        is_busy || is_hangup || is_no_answer,
+        "Expected call_busy/call_hangup/call_no_answer, got: {}",
+        busy_event
+    );
 
     callee.stop();
     ctx.ws.close(None).await.unwrap();

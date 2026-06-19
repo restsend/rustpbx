@@ -155,7 +155,11 @@ async fn test_registrar_with_custom_expires() {
 
     // Should have approximately 120 seconds expiry (from the config)
     // Actual may vary due to max-expires limits in the config
-    assert!(locations[0].expires > 30, "expected expires around 120, got {}", locations[0].expires);
+    assert!(
+        locations[0].expires > 30,
+        "expected expires around 120, got {}",
+        locations[0].expires
+    );
 }
 
 #[tokio::test]

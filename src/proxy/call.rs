@@ -12,8 +12,9 @@ use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::CallSessionBuilder;
 use crate::proxy::proxy_call::sip_session::SipSession;
 use crate::proxy::routing::{
-    RouteRule, SourceTrunk, TrunkConfig, build_source_trunk, source_addr_ip,
+    RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, match_invite},
+    source_addr_ip,
 };
 use crate::proxy::routing::{
     extract_from_user as routing_extract_from_user, extract_to_user as routing_extract_to_user,
@@ -887,11 +888,7 @@ impl CallModule {
         Ok(dialplan)
     }
 
-    fn apply_recording_policy(
-        &self,
-        mut dialplan: Dialplan,
-        caller: &SipUser,
-    ) -> Dialplan {
+    fn apply_recording_policy(&self, mut dialplan: Dialplan, caller: &SipUser) -> Dialplan {
         let policy = match dialplan.recording_policy.as_ref() {
             Some(overrides) => {
                 let mut merged = self
@@ -2893,7 +2890,10 @@ mod tests {
             .await
             .expect("route should resolve");
         assert_eq!(
-            dialplan.recording_policy.as_ref().and_then(|p| p.auto_start),
+            dialplan
+                .recording_policy
+                .as_ref()
+                .and_then(|p| p.auto_start),
             Some(false)
         );
         let dialplan = module.apply_recording_policy(dialplan, &caller);

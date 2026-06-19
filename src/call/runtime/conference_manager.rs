@@ -118,7 +118,11 @@ impl ConferenceRoom {
     }
 
     /// Add a participant with an explicit role
-    pub fn add_participant_with_role(&mut self, leg_id: LegId, role: ParticipantRole) -> Result<()> {
+    pub fn add_participant_with_role(
+        &mut self,
+        leg_id: LegId,
+        role: ParticipantRole,
+    ) -> Result<()> {
         if let Some(max) = self.max_participants
             && self.participants.len() >= max
         {
@@ -241,7 +245,8 @@ impl ConferenceManager {
         conf_id: ConferenceId,
         max_participants: Option<usize>,
     ) -> Result<ConferenceRoom> {
-        self.create_conference_ex(conf_id, max_participants, None, None).await
+        self.create_conference_ex(conf_id, max_participants, None, None)
+            .await
     }
 
     /// Create a new conference with extended options (host, timeout)
@@ -352,7 +357,8 @@ impl ConferenceManager {
         conf_id: &ConferenceId,
         leg_id: LegId,
     ) -> Result<ParticipantChannels> {
-        self.add_participant_ex(conf_id, leg_id, ParticipantRole::Member).await
+        self.add_participant_ex(conf_id, leg_id, ParticipantRole::Member)
+            .await
     }
 
     /// Add a participant with an explicit role
@@ -421,7 +427,11 @@ impl ConferenceManager {
     /// Remove a participant from a conference.
     /// Returns the number of remaining participants.
     /// If 0 or 1 remain, the conference is auto-destroyed.
-    pub async fn remove_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<usize> {
+    pub async fn remove_participant(
+        &self,
+        conf_id: &ConferenceId,
+        leg_id: &LegId,
+    ) -> Result<usize> {
         // Remove from conference room
         let remaining;
         {
@@ -577,7 +587,11 @@ impl ConferenceManager {
 
     /// Host ends the entire conference for all participants.
     /// Validates that the caller is the host before destroying.
-    pub async fn end_by_host(&self, conf_id: &ConferenceId, host_leg_id: &LegId) -> Result<Vec<LegId>> {
+    pub async fn end_by_host(
+        &self,
+        conf_id: &ConferenceId,
+        host_leg_id: &LegId,
+    ) -> Result<Vec<LegId>> {
         let (is_host, participant_ids) = {
             let conferences = self.conferences.read().await;
             let conf = conferences
@@ -1030,12 +1044,7 @@ mod tests {
 
         let host_leg = LegId::new("agent-b");
         manager
-            .create_conference_ex(
-                conf_id.clone(),
-                None,
-                Some(host_leg.clone()),
-                None,
-            )
+            .create_conference_ex(conf_id.clone(), None, Some(host_leg.clone()), None)
             .await
             .unwrap();
 
@@ -1085,12 +1094,25 @@ mod tests {
         let leg_b = LegId::new("leg-b");
         let leg_c = LegId::new("leg-c");
 
-        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
-        manager.add_participant(&conf_id, leg_b.clone()).await.unwrap();
-        manager.add_participant(&conf_id, leg_c.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_a.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg_b.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg_c.clone())
+            .await
+            .unwrap();
 
         assert_eq!(
-            manager.get_conference(&conf_id).await.unwrap().participant_count(),
+            manager
+                .get_conference(&conf_id)
+                .await
+                .unwrap()
+                .participant_count(),
             3
         );
 
@@ -1102,7 +1124,8 @@ mod tests {
         // Remove leg_b -> 1 remain (C still in conference), stays alive
         let remaining = manager.remove_participant(&conf_id, &leg_b).await.unwrap();
         assert_eq!(remaining, 1);
-        assert!(manager.get_conference(&conf_id).await.is_some(),
+        assert!(
+            manager.get_conference(&conf_id).await.is_some(),
             "Conference should stay alive with 1 participant remaining"
         );
 
@@ -1122,7 +1145,10 @@ mod tests {
             .unwrap();
 
         let leg_a = LegId::new("leg-a");
-        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_a.clone())
+            .await
+            .unwrap();
 
         // Remove the only participant -> auto-destroy
         let remaining = manager.remove_participant(&conf_id, &leg_a).await.unwrap();
@@ -1140,17 +1166,15 @@ mod tests {
 
         // Create with 1 second timeout
         manager
-            .create_conference_ex(
-                conf_id.clone(),
-                None,
-                None,
-                Some(1),
-            )
+            .create_conference_ex(conf_id.clone(), None, None, Some(1))
             .await
             .unwrap();
 
         let leg_a = LegId::new("leg-a");
-        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_a.clone())
+            .await
+            .unwrap();
 
         assert!(manager.get_conference(&conf_id).await.is_some());
 
@@ -1176,8 +1200,14 @@ mod tests {
         let leg_a = LegId::new("leg-a");
         let leg_b = LegId::new("leg-b");
 
-        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
-        manager.add_participant(&conf_id, leg_b.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_a.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg_b.clone())
+            .await
+            .unwrap();
 
         // Remove leg_a via remove_leg_from_all -> 1 remains (leg_b), conference stays alive
         manager.remove_leg_from_all(&leg_a).await.unwrap();

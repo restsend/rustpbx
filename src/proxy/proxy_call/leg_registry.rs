@@ -142,17 +142,16 @@ impl LegRegistry {
         self.tasks.drain()
     }
 
-    pub fn set_conference_bridge_handle(
-        &mut self,
-        id: LegId,
-        handle: ConferenceBridgeHandle,
-    ) {
+    pub fn set_conference_bridge_handle(&mut self, id: LegId, handle: ConferenceBridgeHandle) {
         if let Some(old) = self.conference_bridge_handles.insert(id.clone(), handle) {
             old.stop();
         }
     }
 
-    pub fn remove_conference_bridge_handle(&mut self, id: &LegId) -> Option<ConferenceBridgeHandle> {
+    pub fn remove_conference_bridge_handle(
+        &mut self,
+        id: &LegId,
+    ) -> Option<ConferenceBridgeHandle> {
         self.conference_bridge_handles.remove(id)
     }
 
@@ -223,6 +222,10 @@ impl Drop for LegRegistry {
             for handle in handles {
                 handle.abort();
             }
+        }
+        // Stop all conference bridge handles (cancels their tasks)
+        for (_, handle) in self.conference_bridge_handles.drain() {
+            handle.stop();
         }
     }
 }

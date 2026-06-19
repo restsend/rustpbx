@@ -244,7 +244,12 @@ async fn test_ivr_queue_agent_flow() {
     // Step 4: Verify audio stats
     let agent_stats = agent.rtp_stats_summary();
     let quality = agent.audio_quality_summary();
-    tracing::info!("Agent RTP stats: {}, quality: total={} silence={}", agent_stats, quality.total_frames, quality.silence_frames);
+    tracing::info!(
+        "Agent RTP stats: {}, quality: total={} silence={}",
+        agent_stats,
+        quality.total_frames,
+        quality.silence_frames
+    );
 
     // Clean up
     ws.close(None).await.unwrap();
@@ -368,7 +373,11 @@ async fn test_queue_to_agent_rtp_complete() {
     );
     {
         let q = caller.audio_quality_summary();
-        assert!(q.has_audio(), "Phase 1: caller should have non-silent audio from hold music. Quality: {:?}", q);
+        assert!(
+            q.has_audio(),
+            "Phase 1: caller should have non-silent audio from hold music. Quality: {:?}",
+            q
+        );
     }
     tracing::info!(
         "Phase 1 OK – caller queue RTP: {}",
@@ -426,7 +435,11 @@ async fn test_queue_to_agent_rtp_complete() {
     );
     {
         let q = agent.audio_quality_summary();
-        assert!(q.has_audio(), "Phase 2: agent should have non-silent audio. Quality: {:?}", q);
+        assert!(
+            q.has_audio(),
+            "Phase 2: agent should have non-silent audio. Quality: {:?}",
+            q
+        );
     }
     tracing::info!(
         "Phase 2 OK – agent RTP: {}, caller RTP: {}",
@@ -467,7 +480,11 @@ async fn test_queue_to_agent_rtp_complete() {
     );
     {
         let q = caller.audio_quality_summary();
-        assert!(q.has_audio(), "Phase 3: caller should have non-silent audio after re-queue. Quality: {:?}", q);
+        assert!(
+            q.has_audio(),
+            "Phase 3: caller should have non-silent audio after re-queue. Quality: {:?}",
+            q
+        );
     }
     tracing::info!(
         "Phase 3 OK – re-queued caller RTP: {}",

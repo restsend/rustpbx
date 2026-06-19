@@ -69,11 +69,7 @@ async fn establish_call(
 }
 
 /// Wait for a DtmfInfo event with the expected digit, polling up to `timeout`.
-async fn wait_for_dtmf(
-    ua: &TestUa,
-    expected_digit: &str,
-    timeout: Duration,
-) -> bool {
+async fn wait_for_dtmf(ua: &TestUa, expected_digit: &str, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         let events = ua.process_dialog_events().await.unwrap_or_default();
@@ -98,7 +94,9 @@ async fn send_and_wait_for_dtmf(
 ) -> Result<bool> {
     let digit_for_send = expected_digit.to_string();
     let send_handle =
-        crate::utils::spawn(async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await });
+        crate::utils::spawn(
+            async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await },
+        );
 
     let received = wait_for_dtmf(receiver, expected_digit, timeout).await;
 

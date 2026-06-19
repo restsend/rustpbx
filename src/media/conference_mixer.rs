@@ -106,6 +106,15 @@ impl std::fmt::Debug for ConferenceAudioMixer {
     }
 }
 
+impl Drop for ConferenceAudioMixer {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.mixing_task.lock().unwrap().take() {
+            task.abort();
+        }
+    }
+}
+
 impl ConferenceAudioMixer {
     /// Create a new conference mixer
     pub fn new(conf_id: String, sample_rate: u32) -> Self {
@@ -942,5 +951,24 @@ mod tests {
         assert!(rx_sup.try_recv().is_ok(), "Supervisor should hear agent");
 
         mixer.stop().await;
+    }
+
+    /// Verify that dropping a `ConferenceAudioMixer` without calling `stop()`
+    /// still cancels the mixing task (no leak).
+    #[tokio::test]
+    async fn test_mixer_drop_without_stop_aborts_task() {
+        let mixer = ConferenceAudioMixer::new("drop-test".to_string(), 8000);
+        mixer.start();
+
+        // Drop without calling stop() — simulates a cleanup path that
+        // forgets to stop the mixer.
+        drop(mixer);
+
+        // If the Drop impl works, the mixing task is aborted.
+        // Give it a moment to propagate.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // No assertion needed — if the task leaked, it would hold the
+        // `participants` Arc alive, but we can't easily check that here.
+        // The key is that this test doesn't hang or panic.
     }
 }

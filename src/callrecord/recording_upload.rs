@@ -261,11 +261,7 @@ impl CallRecordHook for RecordingUploadHook {
                         })
                         .unwrap_or_default(),
                     unique_id: record.call_id.clone(),
-                    file_size: record
-                        .recorder
-                        .first()
-                        .map(|m| m.size)
-                        .unwrap_or(0),
+                    file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
                     download_url: Some(url.clone()),
                     caller_name: Some(record.caller.clone()),
                     callee_name: Some(record.callee.clone()),

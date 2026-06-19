@@ -54,10 +54,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
-        .route(
-            "/routing",
-            post(query_routing).put(create_routing),
-        )
+        .route("/routing", post(query_routing).put(create_routing))
         .route(
             "/routing/{id}",
             patch(update_routing).delete(delete_routing),
@@ -573,8 +570,7 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
 fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
         Some(proxy_config) => {
-            let catalog =
-                crate::console::catalog::build_forwarding_catalog(&proxy_config);
+            let catalog = crate::console::catalog::build_forwarding_catalog(&proxy_config);
             tracing::info!(
                 queue_count = catalog.queues.len(),
                 ivr_count = catalog.ivr_projects.len(),
@@ -1574,11 +1570,9 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db,
-            ConsoleConfig::default(),
-        )
-        .await
-        .expect("initialize console state")
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
     }
 
     #[tokio::test]
@@ -1663,8 +1657,14 @@ mod tests {
                 select: RoutingSelectionStrategy::RoundRobin,
                 hash_key: None,
                 trunks: vec![
-                    RouteTrunkDocument { name: "trunk-b".into(), weight: 100 },
-                    RouteTrunkDocument { name: "trunk-c".into(), weight: 50 },
+                    RouteTrunkDocument {
+                        name: "trunk-b".into(),
+                        weight: 100,
+                    },
+                    RouteTrunkDocument {
+                        name: "trunk-c".into(),
+                        weight: 50,
+                    },
                 ],
                 target_type: RouteTargetKind::SipTrunk,
                 queue_file: None,
@@ -1678,17 +1678,30 @@ mod tests {
         let value = serde_json::to_value(&doc).unwrap();
         let obj = value.as_object().expect("value should be object");
 
-        let source_trunk_val = obj.get("source_trunk").expect("source_trunk key should exist");
+        let source_trunk_val = obj
+            .get("source_trunk")
+            .expect("source_trunk key should exist");
         assert_eq!(source_trunk_val, &Value::String("trunk-a".into()));
 
-        let action = obj.get("action").expect("action key should exist").as_object().expect("action should be object");
-        let trunks = action.get("trunks").expect("action.trunks key should exist").as_array().expect("trunks should be array");
+        let action = obj
+            .get("action")
+            .expect("action key should exist")
+            .as_object()
+            .expect("action should be object");
+        let trunks = action
+            .get("trunks")
+            .expect("action.trunks key should exist")
+            .as_array()
+            .expect("trunks should be array");
         assert_eq!(trunks.len(), 2);
         assert_eq!(trunks[0].get("name").unwrap().as_str().unwrap(), "trunk-b");
         assert_eq!(trunks[0].get("weight").unwrap().as_i64().unwrap(), 100);
         assert_eq!(trunks[1].get("name").unwrap().as_str().unwrap(), "trunk-c");
         assert_eq!(trunks[1].get("weight").unwrap().as_i64().unwrap(), 50);
-        assert_eq!(action.get("target_type").unwrap().as_str().unwrap(), "sip_trunk");
+        assert_eq!(
+            action.get("target_type").unwrap().as_str().unwrap(),
+            "sip_trunk"
+        );
     }
 
     #[test]
@@ -1706,9 +1719,10 @@ mod tests {
             action: RouteActionDocument {
                 select: RoutingSelectionStrategy::RoundRobin,
                 hash_key: None,
-                trunks: vec![
-                    RouteTrunkDocument { name: "trunk-b".into(), weight: 100 },
-                ],
+                trunks: vec![RouteTrunkDocument {
+                    name: "trunk-b".into(),
+                    weight: 100,
+                }],
                 target_type: RouteTargetKind::SipTrunk,
                 queue_file: None,
                 voicemail_extension: None,

@@ -1,8 +1,8 @@
 //! Tests for FileAudioSource pre-decode cache behaviour.
 
+use super::AudioSource;
 use super::FileAudioSource;
 use super::mix_stereo_to_mono;
-use super::AudioSource;
 use crate::media::wav_reader::{SampleFormat, WavSpec, WavWriter};
 use tempfile::NamedTempFile;
 
@@ -15,8 +15,8 @@ fn write_wav(sample_rate: u32, samples: &[i16]) -> NamedTempFile {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        let mut writer = WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
-            .expect("WavWriter");
+        let mut writer =
+            WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).expect("WavWriter");
         for &s in samples {
             writer.write_sample(s).expect("write_sample");
         }
@@ -34,8 +34,8 @@ fn write_stereo_wav(sample_rate: u32, samples: &[i16]) -> NamedTempFile {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        let mut writer = WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
-            .expect("WavWriter");
+        let mut writer =
+            WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).expect("WavWriter");
         for &s in samples {
             writer.write_sample(s).expect("write_sample");
         }
@@ -51,7 +51,10 @@ async fn test_predecode_small_wav() {
     let path = tmp.path().to_string_lossy().to_string();
 
     let mut src = FileAudioSource::new(path, false).await.unwrap();
-    assert!(!src.pcm_cache.is_empty(), "small file should be pre-decoded");
+    assert!(
+        !src.pcm_cache.is_empty(),
+        "small file should be pre-decoded"
+    );
     assert_eq!(src.pcm_cache.len(), 4000);
     assert_eq!(src.cached_channels, 1);
     assert_eq!(src.cached_sample_rate, 8000);
@@ -104,7 +107,10 @@ async fn test_predecode_skip_large_file() {
         src.pcm_cache.is_empty(),
         "file > 5 MB should skip pre-decode"
     );
-    assert!(src.wav_reader.is_some(), "streaming reader should be present");
+    assert!(
+        src.wav_reader.is_some(),
+        "streaming reader should be present"
+    );
 }
 
 #[test]

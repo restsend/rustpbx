@@ -17,9 +17,13 @@ pub async fn detect_external_ip(url: &str) -> Result<IpAddr, anyhow::Error> {
 
     let body = fetch_text(&reqwest::Client::new(), url, &opts).await?;
     let ip_str = body.trim();
-    let ip: IpAddr = ip_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("response from {} is not a valid IP address: {}", url, ip_str))?;
+    let ip: IpAddr = ip_str.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "response from {} is not a valid IP address: {}",
+            url,
+            ip_str
+        )
+    })?;
 
     Ok(ip)
 }
