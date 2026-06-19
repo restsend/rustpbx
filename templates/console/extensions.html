@@ -14,6 +14,13 @@
                 <p class="text-sm text-slate-500 sm:max-w-xl">{{ "extension.review_search" | t }}</p>
             </div>
             <div class="flex gap-3">
+                <button @click="importModal = true"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                    </svg>
+                    {{ "extension.csv_import" | t }}
+                </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -430,6 +437,150 @@
     </div>
 </div>
 
+<!-- CSV Import Modal -->
+<div x-show="importModal" x-cloak class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto pt-10 pb-10"
+    @click.self="importModal = false">
+    <div class="w-full max-w-3xl rounded-xl bg-white shadow-2xl ring-1 ring-black/5">
+        <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+            <h3 class="text-lg font-semibold text-slate-800">{{ "extension.csv_import_title" | t }}</h3>
+            <button @click="importModal = false" class="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                <svg class="h-5 w-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- Step 1: Upload -->
+        <div x-show="importStep === 'upload'" class="p-6 space-y-4">
+            <div class="rounded-lg bg-slate-50 p-4">
+                <h4 class="text-sm font-semibold text-slate-700 mb-2">{{ "extension.csv_example_title" | t }}</h4>
+                <pre class="mb-2 overflow-x-auto rounded bg-white p-3 text-xs text-slate-600 font-mono border border-slate-200">extension,display_name,email,sip_password,login_disabled,voicemail_disabled,allow_guest_calls,call_forwarding_mode,call_forwarding_destination,call_forwarding_timeout,notes,departments
+1001,Alice,alice@example.com,pass123,false,false,false,none,,,Sales team,Support
+1002,Bob,,,false,true,false,always,1001,30,,Support
+1003,Charlie,,autopass,true,false,true,,,10,Forward to Alice,Sales</pre>
+                <p class="mb-2 text-xs text-slate-500">{{ "extension.csv_example_hint" | t }}</p>
+                <button @click="downloadCsvExample()" class="text-xs font-medium text-sky-600 hover:text-sky-800 inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M7.5 12l4.5 4.5m0 0l4.5-4.5M12 16.5V3" />
+                    </svg>
+                    {{ "extension.csv_download_example" | t }}
+                </button>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">{{ "extension.csv_select_file" | t }}</label>
+                <input type="file" accept=".csv,.txt" @change="handleCsvFile($event)"
+                    class="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-sky-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-sky-700 hover:file:bg-sky-100">
+            </div>
+            <p x-show="importError" class="text-xs text-red-600" x-text="importError"></p>
+            <div class="flex justify-end gap-2 pt-2">
+                <button @click="importModal = false" class="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                    {{ "common.cancel" | t }}
+                </button>
+            </div>
+        </div>
+
+        <!-- Step 2: Preview -->
+        <div x-show="importStep === 'preview'" class="p-6 space-y-4">
+            <div class="flex items-center gap-3 text-sm">
+                <span class="font-medium text-slate-700">{{ "extension.csv_preview_title" | t }}</span>
+                <span class="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600"
+                    x-text="importPreview.length + ' rows found'"></span>
+                <span x-show="importErrors.length" class="rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-600"
+                    x-text="importErrors.length + ' errors'"></span>
+                <span x-show="importPreview.filter(r => !r._error).length > 0" class="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-600"
+                    x-text="importPreview.filter(r => !r._error).length + ' valid'"></span>
+            </div>
+
+            <template x-if="importErrors.length">
+                <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 space-y-1">
+                    <template x-for="(err, i) in importErrors" :key="i">
+                        <p><span class="font-semibold">Row <span x-text="err.row"></span>:</span> <span x-text="err.message"></span></p>
+                    </template>
+                </div>
+            </template>
+
+            <div class="max-h-72 overflow-y-auto">
+                <table class="min-w-full divide-y divide-slate-200 text-xs">
+                    <thead class="bg-slate-50 text-left text-[11px] font-semibold uppercase text-slate-500">
+                        <tr>
+                            <th class="px-3 py-2">#</th>
+                            <th class="px-3 py-2">Extension</th>
+                            <th class="px-3 py-2">Display Name</th>
+                            <th class="px-3 py-2">Login</th>
+                            <th class="px-3 py-2">Voicemail</th>
+                            <th class="px-3 py-2">Forwarding</th>
+                            <th class="px-3 py-2">Departments</th>
+                            <th class="px-3 py-2">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <template x-for="(row, i) in importPreview" :key="i">
+                            <tr :class="row._error ? 'bg-red-50' : (row._warn ? 'bg-amber-50' : '')">
+                                <td class="px-3 py-2 text-slate-500" x-text="i + 1"></td>
+                                <td class="px-3 py-2 font-medium text-slate-700" x-text="row.extension"></td>
+                                <td class="px-3 py-2 text-slate-600" x-text="row.display_name || '—'"></td>
+                                <td class="px-3 py-2" x-text="row.login_disabled || 'false'"></td>
+                                <td class="px-3 py-2" x-text="row.voicemail_disabled || 'false'"></td>
+                                <td class="px-3 py-2" x-text="row.call_forwarding_mode || '—'"></td>
+                                <td class="px-3 py-2" x-text="row.departments || '—'"></td>
+                                <td class="px-3 py-2">
+                                    <span x-show="row._error" class="text-red-600 font-semibold" x-text="row._error"></span>
+                                    <span x-show="row._warn && !row._error" class="text-amber-600 font-semibold" x-text="row._warn"></span>
+                                    <span x-show="!row._error && !row._warn" class="text-emerald-600 font-semibold">OK</span>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="flex justify-between gap-2 pt-2">
+                <button @click="importStep = 'upload'; importError = ''"
+                    class="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                    {{ "common.back" | t }}
+                </button>
+                <button @click="doImport()" :disabled="importing || importPreview.filter(r => !r._error).length === 0"
+                    class="rounded-lg bg-sky-600 px-6 py-2 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed">
+                    <span x-show="!importing">{{ "extension.csv_confirm_import" | t }}</span>
+                    <span x-show="importing">
+                        <svg class="inline h-4 w-4 animate-spin -mt-0.5 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                        </svg>
+                        {{ "extension.csv_importing" | t }}
+                    </span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Step 3: Result -->
+        <div x-show="importStep === 'result'" class="p-6 space-y-4">
+            <div :class="importResult.status === 'ok' ? 'rounded-lg border border-emerald-200 bg-emerald-50 p-4' : 'rounded-lg border border-red-200 bg-red-50 p-4'">
+                <h4 class="text-sm font-semibold mb-1"
+                    :class="importResult.status === 'ok' ? 'text-emerald-800' : 'text-red-800'"
+                    x-text="importResult.status === 'ok' ? '{{ "extension.csv_import_success" | t }}' : '{{ "extension.csv_import_failed" | t }}'"></h4>
+                <p class="text-xs" :class="importResult.status === 'ok' ? 'text-emerald-700' : 'text-red-700'">
+                    {{ "extension.csv_imported" | t }}: <span class="font-semibold" x-text="importResult.imported || 0"></span>
+                    &middot;
+                    {{ "extension.csv_skipped" | t }}: <span class="font-semibold" x-text="importResult.skipped || 0"></span>
+                </p>
+                <template x-if="importResult.errors && importResult.errors.length">
+                    <div class="mt-2 space-y-1 max-h-48 overflow-y-auto">
+                        <template x-for="(e, i) in importResult.errors" :key="i">
+                            <p class="text-xs text-red-600" x-text="e"></p>
+                        </template>
+                    </div>
+                </template>
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+                <button @click="importModal = false; importStep = 'upload'; importRawText = ''; importPreview = []; importErrors = []; importResult = {}; importError = ''; fetchExtensions()"
+                    class="rounded-lg bg-sky-600 px-6 py-2 text-xs font-semibold text-white hover:bg-sky-500">
+                    {{ "extension.csv_done" | t }}
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('extensionsPage', (options) => {
@@ -503,6 +654,15 @@
                     toggle: null,
                     delete: null,
                 },
+                // CSV import state
+                importModal: false,
+                importStep: 'upload',
+                importRawText: '',
+                importPreview: [],
+                importErrors: [],
+                importResult: {},
+                importing: false,
+                importError: '',
                 init() {
                     this.departments = (this.filtersRaw.departments || []).map((item) => ({
                         id: item.id,
@@ -961,6 +1121,88 @@
                     } finally {
                         this.processing.delete = null;
                     }
+                },
+                handleCsvFile(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    this.importError = '';
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        this.importRawText = e.target.result;
+                        this.previewCsv();
+                    };
+                    reader.onerror = () => { this.importError = 'Failed to read file'; };
+                    reader.readAsText(file);
+                },
+                previewCsv() {
+                    const text = this.importRawText.trim();
+                    if (!text) { this.importError = 'File is empty'; return; }
+                    const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+                    if (lines.length < 2) { this.importError = 'No data rows found (only header or comments)'; return; }
+                    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                    const extIdx = headers.indexOf('extension');
+                    if (extIdx < 0) { this.importError = 'CSV must have an \'extension\' column'; return; }
+                    const existingExts = new Set(this.extensions.map(e => e.extension));
+                    this.importPreview = [];
+                    this.importErrors = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        const row = this.parseCsvLine(lines[i], headers);
+                        if (!row.extension) {
+                            row._error = 'extension is required';
+                            this.importErrors.push({ row: i, message: row._error });
+                        } else if (existingExts.has(row.extension)) {
+                            row._warn = 'extension already exists (will be skipped)';
+                        }
+                        this.importPreview.push(row);
+                    }
+                    this.importStep = 'preview';
+                },
+                parseCsvLine(line, headers) {
+                    const values = [];
+                    let current = '', inQuotes = false;
+                    for (let c = 0; c < line.length; c++) {
+                        const ch = line[c];
+                        if (ch === '"') { inQuotes = !inQuotes; }
+                        else if (ch === ',' && !inQuotes) { values.push(current.trim()); current = ''; }
+                        else { current += ch; }
+                    }
+                    values.push(current.trim());
+                    const obj = {};
+                    for (let h = 0; h < headers.length; h++) {
+                        obj[headers[h]] = values[h] || '';
+                    }
+                    return obj;
+                },
+                downloadCsvExample() {
+                    const csv = 'extension,display_name,email,sip_password,login_disabled,voicemail_disabled,allow_guest_calls,call_forwarding_mode,call_forwarding_destination,call_forwarding_timeout,notes,departments\n'
+                        + '1001,Alice,alice@example.com,pass123,false,false,false,none,,,Sales team,Support\n'
+                        + '1002,Bob,,,false,true,false,always,1001,30,,Support\n'
+                        + '1003,Charlie,,autopass,true,false,true,,,10,Forward to Alice,Sales\n';
+                    const blob = new Blob([csv], { type: 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'extension_import_example.csv';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                },
+                async doImport() {
+                    this.importing = true;
+                    try {
+                        const rows = this.importPreview.filter(r => !r._error);
+                        const r = await fetch(this.apiBase + '/extensions/import', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ extensions: rows })
+                        });
+                        this.importResult = await r.json();
+                        this.importStep = 'result';
+                        await this.fetchExtensions();
+                    } catch(e) {
+                        this.importResult = { status: 'error', message: e.message, imported: 0, skipped: 0, errors: [e.message] };
+                        this.importStep = 'result';
+                    }
+                    finally { this.importing = false; }
                 },
                 remainingTtl(record) {
                     if (!record || typeof record !== 'object') {

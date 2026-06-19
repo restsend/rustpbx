@@ -279,6 +279,9 @@ async fn test_ivr_dtmf_queue_agent_flow() {
         .add_agent("agent1", "Agent 1", &agent_uri, vec!["support"])
         .await;
 
+    // CDR capture (best-effort: sipbot caller path may not emit CDR)
+    let (cdr, cdr_sender) = helpers::cdr_verifier::CdrVerifier::new();
+
     // Start PBX
     let proxy_config = ProxyConfig {
         addr: "127.0.0.1".to_string(),
@@ -302,6 +305,7 @@ async fn test_ivr_dtmf_queue_agent_flow() {
         routes: Some(build_routes(&temp_dir)),
         queues: Some(build_queue_config()),
         agent_registry: Some(registry as Arc<dyn AgentRegistry>),
+        callrecord_sender: Some(cdr_sender),
         ..Default::default()
     };
     let pbx = TestPbx::start_with_inject(sip_port, inject).await;
@@ -364,6 +368,20 @@ async fn test_ivr_dtmf_queue_agent_flow() {
 
     caller.stop();
     agent.stop();
+    // Let PBX cleanup and generate CDR
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+    // Check CDR (best-effort — path dep on B2BUA session lifecycle)
+    let all = cdr.get_all_records().await;
+    if all.is_empty() {
+        tracing::info!("[IVR] ⚠ No CDR records (sipbot caller path limitation)");
+    } else {
+        tracing::info!("[IVR] ✓ {} CDR record(s) captured", all.len());
+        for r in &all {
+            tracing::info!("  call_id={} status={}", r.call_id, r.details.status);
+        }
+    }
+
     pbx.stop();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

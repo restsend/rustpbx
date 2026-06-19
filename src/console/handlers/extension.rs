@@ -12,7 +12,7 @@ use crate::models::{
     },
 };
 use crate::proxy::server::SipServerRef;
-use axum::routing::{get, patch, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use axum::{
     extract::{Path as AxumPath, State},
@@ -269,6 +269,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             "/extensions/{id}",
             patch(update_extension).delete(delete_extension),
         )
+        .route("/extensions/import", post(csv_import_extensions))
 }
 
 async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
@@ -729,6 +730,273 @@ async fn delete_extension(
     }
 }
 
+fn parse_bool_string(s: &str) -> Option<bool> {
+    match s.trim().to_lowercase().as_str() {
+        "true" | "yes" | "1" | "on" => Some(true),
+        "false" | "no" | "0" | "off" | "" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_i32_string(s: &str) -> Option<i32> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<i32>().ok()
+}
+
+#[derive(Deserialize, Default)]
+pub struct CsvExtensionRow {
+    pub extension: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub sip_password: Option<String>,
+    #[serde(default)]
+    pub login_disabled: Option<String>,
+    #[serde(default)]
+    pub voicemail_disabled: Option<String>,
+    #[serde(default)]
+    pub allow_guest_calls: Option<String>,
+    #[serde(default)]
+    pub call_forwarding_mode: Option<String>,
+    #[serde(default)]
+    pub call_forwarding_destination: Option<String>,
+    #[serde(default)]
+    pub call_forwarding_timeout: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub departments: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CsvExtensionImportPayload {
+    pub extensions: Vec<CsvExtensionRow>,
+}
+
+pub async fn csv_import_extensions(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<CsvExtensionImportPayload>,
+) -> Response {
+    if let Err(resp) = state
+        .require_permission(&user, "extensions", "write")
+        .await
+    {
+        return resp;
+    }
+    let db = state.db();
+    let now = Utc::now();
+
+    let mut existing_extensions: std::collections::HashSet<String> = ExtensionEntity::find()
+        .all(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.extension)
+        .collect();
+
+    let all_depts = DepartmentEntity::find().all(db).await.unwrap_or_default();
+    let dept_map: std::collections::HashMap<String, i64> = all_depts
+        .iter()
+        .map(|d| (d.name.clone(), d.id))
+        .collect();
+
+    let mut imported = 0u32;
+    let mut skipped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for (i, row) in payload.extensions.iter().enumerate() {
+        let ext_number = row.extension.trim().to_string();
+
+        if ext_number.is_empty() {
+            skipped += 1;
+            errors.push(format!("Row {}: extension number is required", i + 1));
+            continue;
+        }
+
+        if ext_number.len() > 32 {
+            skipped += 1;
+            errors.push(format!(
+                "Row {}: extension '{}' exceeds maximum length of 32 characters",
+                i + 1,
+                ext_number
+            ));
+            continue;
+        }
+
+        if existing_extensions.contains(&ext_number) {
+            skipped += 1;
+            errors.push(format!(
+                "Row {}: extension '{}' already exists",
+                i + 1,
+                ext_number
+            ));
+            continue;
+        }
+
+        let validate_bool = |val: &Option<String>| -> Option<bool> {
+            val.as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .and_then(parse_bool_string)
+        };
+
+        let login_disabled = validate_bool(&row.login_disabled).unwrap_or(false);
+        let voicemail_disabled = validate_bool(&row.voicemail_disabled).unwrap_or(false);
+        let allow_guest_calls = validate_bool(&row.allow_guest_calls).unwrap_or(false);
+
+        if let Some(ref raw) = row.login_disabled {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && parse_bool_string(trimmed).is_none() {
+                skipped += 1;
+                errors.push(format!(
+                    "Row {}: extension '{}' has invalid login_disabled value '{}'",
+                    i + 1, ext_number, raw
+                ));
+                continue;
+            }
+        }
+        if let Some(ref raw) = row.voicemail_disabled {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && parse_bool_string(trimmed).is_none() {
+                skipped += 1;
+                errors.push(format!(
+                    "Row {}: extension '{}' has invalid voicemail_disabled value '{}'",
+                    i + 1, ext_number, raw
+                ));
+                continue;
+            }
+        }
+        if let Some(ref raw) = row.allow_guest_calls {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && parse_bool_string(trimmed).is_none() {
+                skipped += 1;
+                errors.push(format!(
+                    "Row {}: extension '{}' has invalid allow_guest_calls value '{}'",
+                    i + 1, ext_number, raw
+                ));
+                continue;
+            }
+        }
+
+        let call_forwarding_timeout = row
+            .call_forwarding_timeout
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .and_then(parse_i32_string);
+
+        if let Some(ref raw) = row.call_forwarding_timeout {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && parse_i32_string(trimmed).is_none() {
+                skipped += 1;
+                errors.push(format!(
+                    "Row {}: extension '{}' has invalid call_forwarding_timeout value '{}'",
+                    i + 1, ext_number, raw
+                ));
+                continue;
+            }
+        }
+
+        let display_name = row.display_name.clone().filter(|s| !s.is_empty());
+        let email = row.email.clone().filter(|s| !s.is_empty());
+        let sip_password = row.sip_password.clone().filter(|s| !s.is_empty());
+        let call_forwarding_mode = row.call_forwarding_mode.clone().filter(|s| !s.is_empty());
+        let call_forwarding_destination = row
+            .call_forwarding_destination
+            .clone()
+            .filter(|s| !s.is_empty());
+        let notes = row.notes.clone().filter(|s| !s.is_empty());
+
+        let dept_names: Vec<&str> = row
+            .departments
+            .as_deref()
+            .map(|d| {
+                d.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut dept_ids = Vec::new();
+        let mut unknown_depts = Vec::new();
+        for name in &dept_names {
+            if let Some(&id) = dept_map.get(*name) {
+                dept_ids.push(id);
+            } else {
+                unknown_depts.push(*name);
+            }
+        }
+
+        let active = ExtensionActiveModel {
+            extension: Set(ext_number.clone()),
+            display_name: Set(display_name),
+            email: Set(email),
+            sip_password: Set(sip_password),
+            login_disabled: Set(login_disabled),
+            voicemail_disabled: Set(voicemail_disabled),
+            allow_guest_calls: Set(allow_guest_calls),
+            call_forwarding_mode: Set(call_forwarding_mode),
+            call_forwarding_destination: Set(call_forwarding_destination),
+            call_forwarding_timeout: Set(call_forwarding_timeout),
+            notes: Set(notes),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            registered_at: Set(None),
+            status: Set(None),
+            ..Default::default()
+        };
+
+        match active.insert(db).await {
+            Ok(model) => {
+                if !unknown_depts.is_empty() {
+                    errors.push(format!(
+                        "Row {}: extension '{}' imported but unknown departments: {}",
+                        i + 1,
+                        ext_number,
+                        unknown_depts.join(", ")
+                    ));
+                }
+                if !dept_ids.is_empty() {
+                    if let Err(err) =
+                        ExtensionEntity::replace_departments(db, model.id, &dept_ids).await
+                    {
+                        errors.push(format!(
+                            "Row {}: extension '{}' imported but department assignment failed: {}",
+                            i + 1,
+                            ext_number,
+                            err
+                        ));
+                    }
+                }
+                imported += 1;
+                existing_extensions.insert(ext_number);
+            }
+            Err(e) => {
+                skipped += 1;
+                errors.push(format!(
+                    "Row {}: extension '{}' failed to insert: {}",
+                    i + 1,
+                    ext_number,
+                    e
+                ));
+            }
+        }
+    }
+
+    Json(json!({
+        "status": if imported > 0 { "ok" } else { "error" },
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors,
+    }))
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,5 +1204,216 @@ mod tests {
         };
         let resp = create_extension(State(state), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csv_import_extensions_basic() {
+        let state = setup_state().await;
+        let user = dummy_user();
+        let payload = CsvExtensionImportPayload {
+            extensions: vec![
+                CsvExtensionRow {
+                    extension: "2001".into(),
+                    display_name: Some("Alice".into()),
+                    email: Some("alice@test.com".into()),
+                    sip_password: Some("secret123".into()),
+                    login_disabled: Some("false".into()),
+                    voicemail_disabled: Some("false".into()),
+                    allow_guest_calls: Some("true".into()),
+                    call_forwarding_mode: Some("".into()),
+                    call_forwarding_destination: Some("".into()),
+                    call_forwarding_timeout: Some("".into()),
+                    notes: Some("test".into()),
+                    departments: Some("".into()),
+                },
+                CsvExtensionRow {
+                    extension: "2002".into(),
+                    display_name: Some("Bob".into()),
+                    email: Some("".into()),
+                    sip_password: Some("".into()),
+                    login_disabled: Some("true".into()),
+                    voicemail_disabled: Some("true".into()),
+                    allow_guest_calls: Some("false".into()),
+                    call_forwarding_mode: Some("always".into()),
+                    call_forwarding_destination: Some("1001".into()),
+                    call_forwarding_timeout: Some("30".into()),
+                    notes: Some("".into()),
+                    departments: Some("".into()),
+                },
+            ],
+        };
+        let resp = csv_import_extensions(
+            State(state.clone()),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["imported"], 2);
+        assert_eq!(parsed["skipped"], 0);
+
+        let extensions = ExtensionEntity::find().all(state.db()).await.unwrap();
+        let ext_names: Vec<&str> = extensions.iter().map(|e| e.extension.as_str()).collect();
+        assert!(ext_names.contains(&"2001"));
+        assert!(ext_names.contains(&"2002"));
+    }
+
+    #[tokio::test]
+    async fn csv_import_extensions_duplicate() {
+        let state = setup_state().await;
+        insert_extension(state.db(), "3001").await;
+        let user = dummy_user();
+        let payload = CsvExtensionImportPayload {
+            extensions: vec![
+                CsvExtensionRow {
+                    extension: "3001".into(),
+                    ..Default::default()
+                },
+                CsvExtensionRow {
+                    extension: "3002".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let resp = csv_import_extensions(
+            State(state.clone()),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["imported"], 1);
+        assert_eq!(parsed["skipped"], 1);
+        let errors = parsed["errors"].as_array().unwrap();
+        assert!(errors[0].as_str().unwrap().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn csv_import_extensions_empty_extension() {
+        let state = setup_state().await;
+        let user = dummy_user();
+        let payload = CsvExtensionImportPayload {
+            extensions: vec![CsvExtensionRow {
+                extension: "".into(),
+                ..Default::default()
+            }],
+        };
+        let resp = csv_import_extensions(
+            State(state),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["imported"], 0);
+        assert_eq!(parsed["skipped"], 1);
+        assert!(parsed["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("extension number is required"));
+    }
+
+    #[tokio::test]
+    async fn csv_import_extensions_with_departments() {
+        let state = setup_state().await;
+        let db = state.db();
+        let sales = department::ActiveModel {
+            name: Set("Sales".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert sales");
+        let support = department::ActiveModel {
+            name: Set("Support".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert support");
+
+        let user = dummy_user();
+        let payload = CsvExtensionImportPayload {
+            extensions: vec![CsvExtensionRow {
+                extension: "4001".into(),
+                display_name: Some("Dept Test".into()),
+                departments: Some("Sales,Support".into()),
+                ..Default::default()
+            }],
+        };
+        let resp = csv_import_extensions(
+            State(state.clone()),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["imported"], 1);
+
+        let ext = ExtensionEntity::find()
+            .filter(ExtensionColumn::Extension.eq("4001"))
+            .one(db)
+            .await
+            .unwrap()
+            .expect("extension found");
+        let ext_depts = ext
+            .find_related(crate::models::department::Entity)
+            .all(db)
+            .await
+            .unwrap();
+        let dept_names: Vec<&str> = ext_depts.iter().map(|d| d.name.as_str()).collect();
+        assert!(dept_names.contains(&"Sales"));
+        assert!(dept_names.contains(&"Support"));
+    }
+
+    #[tokio::test]
+    async fn csv_import_extensions_invalid_bool() {
+        let state = setup_state().await;
+        let user = dummy_user();
+        let payload = CsvExtensionImportPayload {
+            extensions: vec![CsvExtensionRow {
+                extension: "5001".into(),
+                login_disabled: Some("invalid".into()),
+                ..Default::default()
+            }],
+        };
+        let resp = csv_import_extensions(
+            State(state),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["imported"], 0);
+        assert_eq!(parsed["skipped"], 1);
+        assert!(parsed["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("invalid login_disabled"));
     }
 }

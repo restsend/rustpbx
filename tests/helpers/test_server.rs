@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use rustpbx::{
     call::app::agent_registry::AgentRegistry,
+    callrecord::CallRecordSender,
     config::ProxyConfig,
     media::engine::MediaEngine,
     proxy::{
@@ -56,6 +57,8 @@ pub struct TestPbxInject {
     /// Addon registry for commercial addons (voicemail, etc.).
     /// The caller must initialize addons and run migrations before passing.
     pub addon_registry: Option<Arc<rustpbx::addons::registry::AddonRegistry>>,
+    /// CDR record sender — if set, CDR records will be sent here.
+    pub callrecord_sender: Option<CallRecordSender>,
 }
 
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
@@ -132,6 +135,9 @@ impl TestPbx {
         }
         if let Some(reg) = inject.addon_registry {
             builder = builder.with_addon_registry(Some(reg));
+        }
+        if let Some(sender) = inject.callrecord_sender {
+            builder = builder.with_callrecord_sender(Some(sender));
         }
         for inspector in inject.dialplan_inspectors {
             builder = builder.with_dialplan_inspector(inspector);

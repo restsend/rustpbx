@@ -1,0 +1,37 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        test:
+          - name: p2p-comprehensive
+            cmd: cargo test --test e2e_p2p_comprehensive_test -- --nocapture
+          - name: p2p-demo
+            cmd: cargo test --test e2e_p2p_demo_test -- --nocapture
+          - name: queue
+            cmd: cargo test --test e2e_queue_test --test e2e_queue_comprehensive_test -- --nocapture
+          - name: conference
+            cmd: cargo test --test e2e_conference_test -- --nocapture
+          - name: wholesale
+            cmd: cargo test --features wholesale --test e2e_wholesale_test -- --nocapture
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: install sipbot
+        run: cargo install sipbot || true
+      - run: ${{ matrix.test.cmd }}
+        timeout-minutes: 5

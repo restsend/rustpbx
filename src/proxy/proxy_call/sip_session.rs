@@ -182,6 +182,7 @@ pub struct SipSession {
     pub dtmf_digits: Vec<char>,
 
     pub reporter: Option<CallReporter>,
+    cdr_sent: Arc<std::sync::atomic::AtomicBool>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
     pub recording_paused: Arc<std::sync::atomic::AtomicBool>,
 
@@ -978,6 +979,7 @@ impl SipSession {
             callee_event_tx: None,
             callee_guards: Vec::new(),
             reporter: None,
+            cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             recorder: Arc::new(RwLock::new(None)),
             recording_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             app_event_bridge: app_event_bridge.clone(),
@@ -7204,6 +7206,7 @@ impl SipSession {
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
             reporter.report(snapshot);
+            self.cdr_sent.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Fire on_call_ended hooks.
@@ -9505,6 +9508,17 @@ impl Drop for SipSession {
                     error = %e,
                     "Drop: engine DestroySession failed (session may already be destroyed)"
                 );
+            }
+        }
+
+        // Safety net: send CDR if cleanup() was never called
+        // (e.g. tokio task cancellation, B2BUA session stuck in process()).
+        if !self.cdr_sent.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(reporter) = &self.reporter {
+                let snapshot = self.record_snapshot();
+                reporter.report(snapshot);
+                self.cdr_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }
         }
 
