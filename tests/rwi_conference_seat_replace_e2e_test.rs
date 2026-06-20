@@ -82,12 +82,15 @@ async fn wait_for_event(
             if json.get(event_type).is_some() {
                 return json;
             }
+            if json["event_type"].as_str() == Some(event_type) {
+                return serde_json::json!({ event_type: json });
+            }
         }
     }
 }
 
 fn has_event(events: &[serde_json::Value], event_type: &str) -> bool {
-    events.iter().any(|e| e.get(event_type).is_some())
+    events.iter().any(|e| e.get(event_type).is_some() || e["event_type"].as_str() == Some(event_type))
 }
 
 #[tokio::test]

@@ -71,9 +71,12 @@ async fn wait_for_event(
 
         if let Message::Text(t) = msg {
             let json: serde_json::Value = serde_json::from_str(&t).expect("invalid json");
-            // RWI events are serialized as {event_type: {...}}, not {event: "type"}
+            // RWI events are serialized as {event_type: {...}} (legacy) or {..., event_type: "..."} (modern)
             if json.get(event_type).is_some() {
                 return json;
+            }
+            if json["event_type"].as_str() == Some(event_type) {
+                return serde_json::json!({ event_type: json });
             }
         }
     }
@@ -99,6 +102,11 @@ async fn wait_for_any_event(
             for event_type in event_types {
                 if json.get(*event_type).is_some() {
                     return ((*event_type).to_string(), json);
+                }
+                if json["event_type"].as_str() == Some(event_type) {
+                    let mut wrapped = serde_json::Map::new();
+                    wrapped.insert((*event_type).to_string(), json);
+                    return ((*event_type).to_string(), serde_json::Value::Object(wrapped));
                 }
             }
         }

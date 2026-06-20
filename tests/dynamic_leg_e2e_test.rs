@@ -257,7 +257,7 @@ async fn test_dynamic_sip_leg_add() {
     assert_eq!(v["type"], "command_completed");
 
     // Wait for answer
-    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
+    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
     tracing::info!("Bob answered");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
