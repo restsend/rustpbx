@@ -6,7 +6,11 @@ mod helpers;
 use helpers::cdr_verifier::CdrVerifier;
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TestPbx, TestPbxInject};
-use rustpbx::config::MediaProxyMode;
+use rustpbx::config::{MediaProxyMode, ProxyConfig};
+use rustpbx::proxy::routing::{
+    MatchConditions, QueueDialMode, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
+    RouteQueueTargetConfig, RouteRule,
+};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -124,4 +128,70 @@ async fn test_queue_sequential_two_agents() {
     eprintln!("[QUEUE] ✓ Sequential: a1 answered, a2 skipped");
 
     drop(_caller); a1.stop(); a2.stop(); pbx.stop();
+}
+
+/// Queue agent reject 480 — agent declines, no RTP flows.
+#[tokio::test]
+async fn test_queue_agent_reject_fallback() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let sp = portpicker::pick_unused_port().unwrap();
+    let cp = portpicker::pick_unused_port().unwrap();
+    let ap = portpicker::pick_unused_port().unwrap();
+
+    let mut queues = HashMap::new();
+    queues.insert("test".to_string(), RouteQueueConfig {
+        name: Some("test".to_string()),
+        accept_immediately: true,
+        strategy: RouteQueueStrategyConfig {
+            mode: QueueDialMode::Sequential,
+            wait_timeout_secs: Some(8),
+            targets: vec![
+                RouteQueueTargetConfig {
+                    uri: format!("sip:rejecter@127.0.0.1:{}", ap),
+                    label: Some("Rejecter".to_string()),
+                },
+            ],
+        },
+        ..Default::default()
+    });
+
+    let routes = vec![RouteRule {
+        name: "to-test".to_string(),
+        priority: 10,
+        match_conditions: MatchConditions {
+            to_user: Some("testqueue".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            queue: Some("test".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let pbx = TestPbx::start_with_inject(sp, TestPbxInject {
+        proxy_config: Some(ProxyConfig {
+            modules: Some(vec!["registrar".to_string(), "call".to_string()]),
+            acl_rules: Some(vec!["allow all".to_string()]),
+            ensure_user: Some(false),
+            media_proxy: MediaProxyMode::All,
+            ..Default::default()
+        }),
+        routes: Some(routes),
+        queues: Some(queues),
+        ..Default::default()
+    }).await;
+
+    let agent = TestUa::callee_reject(ap, "rejecter", 480).await;
+    let caller = TestUa::caller_with_target(cp, "caller",
+        format!("sip:testqueue@127.0.0.1:{}", sp)).await;
+
+    sleep(Duration::from_secs(10)).await;
+
+    assert!(!agent.has_rtp_rx(), "rejecting agent should have no RTP");
+
+    caller.stop();
+    agent.stop();
+    pbx.stop();
 }

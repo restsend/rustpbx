@@ -1,5 +1,4 @@
 use crate::{
-    addons::registry::AddonRegistry,
     call::{Dialplan, TransactionCookie},
     callrecord::CallRecordSender,
     proxy::proxy_call::sip_session::SipSession,
@@ -32,7 +31,6 @@ pub struct CallSessionBuilder {
     max_forwards: u32,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
-    addon_registry: Option<Arc<AddonRegistry>>,
 }
 
 impl CallSessionBuilder {
@@ -43,7 +41,6 @@ impl CallSessionBuilder {
             max_forwards,
             cancel_token: None,
             call_record_sender: None,
-            addon_registry: None,
         }
     }
 
@@ -57,10 +54,6 @@ impl CallSessionBuilder {
         self
     }
 
-    pub fn with_addon_registry(mut self, registry: Option<Arc<AddonRegistry>>) -> Self {
-        self.addon_registry = registry;
-        self
-    }
 
     pub async fn build_and_serve(
         self,

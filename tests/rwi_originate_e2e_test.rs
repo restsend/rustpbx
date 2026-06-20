@@ -59,20 +59,6 @@ async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
     .await
 }
 
-/// Wait for the next text frame (up to 5 s).
-#[allow(dead_code)]
-async fn recv_next(ws: &mut WsStream) -> serde_json::Value {
-    let msg = timeout(Duration::from_secs(5), ws.next())
-        .await
-        .expect("recv timeout")
-        .expect("stream ended")
-        .expect("ws error");
-    match msg {
-        Message::Text(t) => serde_json::from_str(&t).expect("not JSON"),
-        other => panic!("unexpected frame: {other:?}"),
-    }
-}
-
 /// Read frames until `predicate(frame)` returns `true` or timeout expires.
 async fn recv_until(
     ws: &mut WsStream,

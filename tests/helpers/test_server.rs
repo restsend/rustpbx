@@ -64,24 +64,18 @@ pub struct TestPbxInject {
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
 pub struct TestPbx {
     /// Base WebSocket URL for connecting RWI clients, e.g. `ws://127.0.0.1:<port>/rwi/v1`.
-    #[allow(dead_code)]
     pub rwi_url: String,
     /// SIP port this server is listening on (UDP).
-    #[allow(dead_code)]
     pub sip_port: u16,
     /// `127.0.0.1` IP where the SIP server is bound.
-    #[allow(dead_code)]
     pub sip_addr: String,
     /// RWI gateway — can be used to inject events in tests.
-    #[allow(dead_code)]
     pub gateway: RwiGatewayRef,
     /// Shared call registry (same instance as in the SipServer).
-    #[allow(dead_code)]
     pub registry: Arc<ActiveProxyCallRegistry>,
     /// Cancellation token — cancel to shut everything down.
     pub cancel_token: CancellationToken,
     /// In-process media engine — can send InjectAudio / StopPlayback etc.
-    #[allow(dead_code)]
     pub media_engine: MediaEngine,
 }
 
@@ -89,7 +83,6 @@ impl TestPbx {
     /// Start a TestPbx bound to the given `sip_port`.
     ///
     /// Use `portpicker::pick_unused_port().unwrap()` to choose ports.
-    #[allow(dead_code)]
     pub async fn start(sip_port: u16) -> Self {
         Self::start_with_inject(sip_port, TestPbxInject::default()).await
     }
@@ -236,13 +229,11 @@ impl TestPbx {
     }
 
     /// Return the SIP address string: `127.0.0.1:<sip_port>`.
-    #[allow(dead_code)]
     pub fn sip_host(&self) -> String {
         format!("{}:{}", self.sip_addr, self.sip_port)
     }
 
     /// Shut down the server.
-    #[allow(dead_code)]
     pub fn stop(&self) {
         self.cancel_token.cancel();
     }

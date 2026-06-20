@@ -27,35 +27,6 @@ pub fn generate_sine_wav(
     writer.finalize().unwrap();
 }
 
-#[allow(dead_code)]
-pub fn generate_dual_tone_wav(
-    path: &Path,
-    freq1_hz: f64,
-    freq2_hz: f64,
-    duration_secs: f64,
-    sample_rate: u32,
-    amplitude: f64,
-) {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let mut writer = WavWriter::create(path, spec).unwrap();
-    let num_samples = (sample_rate as f64 * duration_secs) as u64;
-    for i in 0..num_samples {
-        let t = i as f64 / sample_rate as f64;
-        let val = amplitude
-            * ((2.0 * std::f64::consts::PI * freq1_hz * t).sin()
-                + (2.0 * std::f64::consts::PI * freq2_hz * t).sin())
-            / 2.0
-            * 32767.0;
-        writer.write_sample(val as i16).unwrap();
-    }
-    writer.finalize().unwrap();
-}
-
 pub fn generate_dtmf_wav(
     path: &Path,
     digits: &str,

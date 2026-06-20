@@ -274,6 +274,7 @@ impl SipSessionHandle {
 
 /// Built-in factory that creates `CallApp` instances from app parameters.
 struct BuiltinAppFactory {
+    #[cfg(feature = "addon-voicemail")]
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
 }
 
@@ -414,7 +415,6 @@ impl AppFactory for BuiltinAppFactory {
             }
             "voicemail" => {
                 let extension = params.as_ref()?.get("extension")?.as_str()?.to_string();
-                let caller_id = context.call_info.caller.clone();
                 // Try the commercial addon first (full DB persistence, notifiers, S3).
                 #[cfg(feature = "addon-voicemail")]
                 if let Some(reg) = &self.addon_registry {
@@ -423,6 +423,7 @@ impl AppFactory for BuiltinAppFactory {
                             .as_any()
                             .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
                         {
+                            let caller_id = context.call_info.caller.clone();
                             match vm.build_app(&extension, &caller_id) {
                                 Ok(app) => {
                                     return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
@@ -931,6 +932,7 @@ impl SipSession {
                 context: Arc::new(app_ctx),
             })
             .with_factory(Arc::new(BuiltinAppFactory {
+                #[cfg(feature = "addon-voicemail")]
                 addon_registry: server.addon_registry.clone(),
             })),
         );

@@ -37,18 +37,14 @@ struct BuildCallee {
 /// A SIP UA backed by `sipbot`.
 pub struct TestUa {
     pub cancel_token: CancellationToken,
-    #[allow(dead_code)]
     pub domain: String,
     /// Shared call statistics for RTP validation
-    #[allow(dead_code)]
     pub stats: Arc<CallStats>,
     /// WAV file path where sipbot records RX/TX audio (stereo 16kHz, L=RX, R=TX)
-    #[allow(dead_code)]
     pub record_path: Option<String>,
 }
 
 impl TestUa {
-    #[allow(dead_code)]
     pub async fn callee(sip_port: u16, ring_secs: u64) -> Self {
         Self::callee_with_username(sip_port, ring_secs, "bob").await
     }
@@ -317,7 +313,6 @@ impl TestUa {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn callee_with_refer_reject(
         sip_port: u16,
         ring_secs: u64,
@@ -417,13 +412,11 @@ impl TestUa {
     }
 
     /// Return a `sip:<user>@<host>:<port>` URI for this UA.
-    #[allow(dead_code)]
     pub fn sip_uri(&self, user: &str) -> String {
         format!("sip:{}@{}", user, self.domain)
     }
 
     /// Get RTP statistics summary as a string
-    #[allow(dead_code)]
     pub fn rtp_stats_summary(&self) -> String {
         use std::sync::atomic::Ordering;
         let tx_p = self.stats.tx_packets.load(Ordering::Relaxed);
@@ -434,35 +427,18 @@ impl TestUa {
     }
 
     /// Check if any RTP packets were received (RX > 0)
-    #[allow(dead_code)]
     pub fn has_rtp_rx(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.stats.rx_packets.load(Ordering::Relaxed) > 0
     }
 
     /// Check if any RTP packets were transmitted (TX > 0)
-    #[allow(dead_code)]
     pub fn has_rtp_tx(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.stats.tx_packets.load(Ordering::Relaxed) > 0
     }
 
-    /// Get the number of received DTMF events
-    #[allow(dead_code)]
-    pub fn rx_dtmf_count(&self) -> u64 {
-        use std::sync::atomic::Ordering;
-        self.stats.rx_dtmf_events.load(Ordering::Relaxed)
-    }
-
-    /// Get the number of transmitted DTMF events
-    #[allow(dead_code)]
-    pub fn tx_dtmf_count(&self) -> u64 {
-        use std::sync::atomic::Ordering;
-        self.stats.tx_dtmf_events.load(Ordering::Relaxed)
-    }
-
     /// Get audio quality summary for assertions
-    #[allow(dead_code)]
     pub fn audio_quality_summary(&self) -> AudioQualitySummary {
         use std::sync::atomic::Ordering;
         AudioQualitySummary {
