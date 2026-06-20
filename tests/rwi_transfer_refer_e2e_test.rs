@@ -20,12 +20,6 @@ async fn ws_connect(rwi_url: &str) -> WsStream {
     ws
 }
 
-#[allow(dead_code)]
-async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
-    ws.send(Message::Text(json.into())).await.unwrap();
-    recv_next(ws).await
-}
-
 /// Send a request with an auto-generated action_id and wait for the matching response.
 async fn ws_send_recv_with_id(
     ws: &mut WsStream,
@@ -57,19 +51,6 @@ async fn ws_send_recv_with_id(
                 return v;
             }
         }
-    }
-}
-
-#[allow(dead_code)]
-async fn recv_next(ws: &mut WsStream) -> serde_json::Value {
-    let msg = timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("recv timeout")
-        .expect("stream closed")
-        .expect("ws error");
-    match msg {
-        Message::Text(t) => serde_json::from_str(&t).expect("invalid json"),
-        _ => panic!("unexpected msg type"),
     }
 }
 

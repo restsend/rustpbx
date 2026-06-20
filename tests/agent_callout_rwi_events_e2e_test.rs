@@ -75,8 +75,6 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
 struct TestCtx {
     pbx: TestPbx,
     ws: WsStream,
-    #[allow(dead_code)]
-    sip_port: u16,
 }
 
 impl TestCtx {
@@ -98,7 +96,7 @@ impl TestCtx {
         .await;
         assert_eq!(v["type"], "command_completed", "subscribe failed: {v}");
 
-        Self { pbx, ws, sip_port }
+        Self { pbx, ws }
     }
 
     async fn originate(&mut self, callee_uri: &str) -> serde_json::Value {

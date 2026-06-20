@@ -53,16 +53,8 @@ impl Default for CdrExpectation {
 }
 
 impl CdrExpectation {
-    pub fn with_direction(mut self, d: &str) -> Self {
-        self.expected_direction = Some(d.to_string());
-        self
-    }
     pub fn with_status(mut self, s: &str) -> Self {
         self.expected_status = Some(s.to_string());
-        self
-    }
-    pub fn with_recording(mut self, r: bool) -> Self {
-        self.expect_recording = r;
         self
     }
     pub fn with_hangup_reason(mut self, r: CallRecordHangupReason) -> Self {
@@ -73,16 +65,8 @@ impl CdrExpectation {
         self.min_duration_secs = Some(s);
         self
     }
-    pub fn with_max_duration(mut self, s: f64) -> Self {
-        self.max_duration_secs = Some(s);
-        self
-    }
     pub fn with_caller(mut self, c: &str) -> Self {
         self.expected_caller = Some(c.to_string());
-        self
-    }
-    pub fn with_callee(mut self, c: &str) -> Self {
-        self.expected_callee = Some(c.to_string());
         self
     }
 }
@@ -183,7 +167,6 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> Vec<Strin
 /// Uses an internal mpsc channel to receive CallRecords.
 pub struct CdrVerifier {
     records: Arc<RwLock<Vec<CallRecord>>>,
-    sender: CallRecordSender,
     _receiver_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -213,16 +196,10 @@ impl CdrVerifier {
         (
             Self {
                 records,
-                sender: sender.clone(),
                 _receiver_handle,
             },
             sender,
         )
-    }
-
-    /// Get the CallRecordSender for injecting into TestPbx.
-    pub fn sender(&self) -> CallRecordSender {
-        self.sender.clone()
     }
 
     /// Wait for a CDR record with specific call_id.
@@ -247,42 +224,9 @@ impl CdrVerifier {
         None
     }
 
-    /// Wait for ANY CDR record (returns the first one received).
-    pub async fn wait_for_any(&self, timeout_secs: u64) -> Option<CallRecord> {
-        let start = tokio::time::Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-
-        while start.elapsed() < timeout {
-            let records = self.records.read().await;
-            if let Some(record) = records.first() {
-                return Some(record.clone());
-            }
-            drop(records);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        warn!(timeout_secs, "Timeout waiting for any CDR record");
-        None
-    }
-
     /// Get all captured records.
     pub async fn get_all_records(&self) -> Vec<CallRecord> {
         self.records.read().await.clone()
-    }
-
-    /// Find a record by call_id.
-    pub async fn find_by_call_id(&self, call_id: &str) -> Option<CallRecord> {
-        self.records
-            .read()
-            .await
-            .iter()
-            .find(|r| r.call_id == call_id)
-            .cloned()
-    }
-
-    /// Clear all captured records.
-    pub async fn clear(&self) {
-        self.records.write().await.clear();
     }
 
     /// Assert a CDR record matches expectations. Panics on failure.

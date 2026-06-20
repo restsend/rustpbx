@@ -28,8 +28,6 @@ use rustpbx::proxy::user::MemoryUserBackend;
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 struct OptionsResponder {
-    #[allow(dead_code)]
-    cancel: CancellationToken,
     port: u16,
 }
 
@@ -80,13 +78,9 @@ impl OptionsResponder {
         });
 
         sleep(Duration::from_millis(300)).await;
-        Self { cancel, port }
+        Self { port }
     }
 
-    #[allow(dead_code)]
-    fn stop(&self) {
-        self.cancel.cancel();
-    }
     fn addr(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }

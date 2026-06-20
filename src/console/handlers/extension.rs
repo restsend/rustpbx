@@ -1332,14 +1332,14 @@ mod tests {
     async fn csv_import_extensions_with_departments() {
         let state = setup_state().await;
         let db = state.db();
-        let sales = department::ActiveModel {
+        let _ = department::ActiveModel {
             name: Set("Sales".to_string()),
             ..Default::default()
         }
         .insert(db)
         .await
         .expect("insert sales");
-        let support = department::ActiveModel {
+        let _ = department::ActiveModel {
             name: Set("Support".to_string()),
             ..Default::default()
         }

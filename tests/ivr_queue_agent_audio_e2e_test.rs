@@ -83,33 +83,6 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
     (id, json)
 }
 
-#[allow(dead_code)]
-async fn recv_until<F>(ws: &mut WsStream, timeout_ms: u64, predicate: F) -> serde_json::Value
-where
-    F: Fn(&serde_json::Value) -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            panic!("recv_until: timed out waiting for matching frame");
-        }
-        let msg = timeout(remaining, ws.next())
-            .await
-            .expect("recv_until timeout")
-            .expect("stream ended")
-            .expect("ws error");
-        let v: serde_json::Value = match msg {
-            Message::Text(t) => serde_json::from_str(&t).expect("not JSON"),
-            Message::Ping(_) | Message::Pong(_) => continue,
-            other => panic!("unexpected frame: {other:?}"),
-        };
-        if predicate(&v) {
-            return v;
-        }
-    }
-}
-
 fn create_tone_wav(path: &std::path::Path, freq: f64) {
     generate_sine_wav(path, freq, 2.0, 8000, 0.5);
 }

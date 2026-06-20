@@ -196,47 +196,6 @@ impl RwiCollector {
             .await
     }
 
-    /// Wait for a command response matching action_id.
-    pub async fn wait_for_response(
-        &self,
-        action_id: &str,
-        timeout_secs: u64,
-    ) -> Option<serde_json::Value> {
-        self.wait_for(timeout_secs, |v| {
-            (v["type"] == "command_completed" || v["type"] == "command_failed")
-                && v["action_id"].as_str() == Some(action_id)
-        })
-        .await
-    }
-
-    /// Collect events until the specified event_type is received or timeout.
-    pub async fn collect_until(
-        &self,
-        event_type: &str,
-        timeout_secs: u64,
-    ) -> Vec<serde_json::Value> {
-        let start = tokio::time::Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-
-        loop {
-            if start.elapsed() >= timeout {
-                break;
-            }
-            let events = self.events.read().await;
-            if events.iter().any(|v| is_rwi_event(v, event_type)) {
-                return events.clone();
-            }
-            drop(events);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        self.events.read().await.clone()
-    }
-
-    /// Get all collected events.
-    pub async fn get_all(&self) -> Vec<serde_json::Value> {
-        self.events.read().await.clone()
-    }
-
     /// Get event types in order.
     pub async fn get_event_types(&self) -> Vec<String> {
         self.events
@@ -278,37 +237,6 @@ impl RwiCollector {
         );
     }
 
-    /// Count how many times each event type was received.
-    pub async fn event_counts(&self) -> Vec<(String, usize)> {
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let event_types = self.get_event_types().await;
-        for et in event_types {
-            *counts.entry(et).or_default() += 1;
-        }
-        let mut result: Vec<_> = counts.into_iter().collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
-        result
-    }
-
-    /// Assert that a specific event was received at least once.
-    pub async fn assert_event_received(&self, event_type: &str) {
-        let found = self
-            .wait_for_event_type(event_type, 1)
-            .await
-            .is_some();
-        assert!(found, "expected event '{}' not received", event_type);
-    }
-
-    /// Assert that a specific event was NOT received.
-    pub async fn assert_event_not_received(&self, event_type: &str) {
-        let types = self.get_event_types().await;
-        assert!(
-            !types.contains(&event_type.to_string()),
-            "unexpected event '{}' was received",
-            event_type
-        );
-    }
 }
 
 impl Drop for RwiCollector {

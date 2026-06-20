@@ -1458,8 +1458,7 @@ impl CallModule {
             dialplan = dialplan.with_extension(exts);
         }
         let proxy_call = CallSessionBuilder::new(cookie.clone(), dialplan, 70)
-            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_addon_registry(self.inner.server.addon_registry.clone());
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone());
         let _ = proxy_call.report_failure(self.inner.server.clone(), code, reason);
     }
 
