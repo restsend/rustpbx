@@ -144,6 +144,8 @@ impl IntoResponse for RenderTemplate<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::console::handlers::test_helpers::setup_state;
+
     use super::*;
     use crate::config::ConsoleConfig;
     use crate::models::migration::Migrator;
@@ -157,22 +159,6 @@ mod tests {
     #[cfg(feature = "addon-wholesale")]
     use sea_orm::{ActiveValue::Set, EntityTrait};
 
-    async fn setup_state() -> Arc<ConsoleState> {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect sqlite memory");
-        Migrator::up(&db, None).await.expect("run migrations");
-        #[cfg(feature = "addon-wholesale")]
-        {
-            use crate::addons::wholesale::migration::Migrator as WholesaleMigrator;
-            WholesaleMigrator::up(&db, None)
-                .await
-                .expect("run wholesale migrations");
-        }
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
-    }
 
     #[tokio::test]
     async fn superuser_has_no_agent_id() {

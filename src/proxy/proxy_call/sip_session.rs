@@ -824,7 +824,12 @@ impl SipSession {
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
     ) -> (Self, SipSessionHandle, mpsc::Receiver<CallCommand>) {
-        let session_id = SessionId::from(context.session_id.clone());
+        // Clone-once locals used repeatedly below
+        let session_id_str = context.session_id.clone();
+        let original_caller = context.original_caller.clone();
+        let original_callee = context.original_callee.clone();
+
+        let session_id = SessionId::from(session_id_str.clone());
 
         let media_profile = if use_media_proxy {
             MediaRuntimeProfile::from_media_path(MediaPathMode::Anchored)
@@ -849,9 +854,9 @@ impl SipSession {
 
         // Build ApplicationContext for call apps (IVR, voicemail, etc.)
         let call_info = CallInfo {
-            session_id: context.session_id.clone(),
-            caller: context.original_caller.clone(),
-            callee: context.original_callee.clone(),
+            session_id: session_id_str.clone(),
+            caller: original_caller.clone(),
+            callee: original_callee.clone(),
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
             sip_headers: {
@@ -884,10 +889,10 @@ impl SipSession {
         // (call_hangup, call_no_answer, etc.) are enriched with call context.
         if let Some(ref gw) = server.rwi_gateway {
             let meta = crate::rwi::proto::CallMeta {
-                caller: Some(context.original_caller.clone()),
-                callee: Some(context.original_callee.clone()),
-                caller_name: Some(context.original_caller.clone()),
-                callee_name: Some(context.original_callee.clone()),
+                caller: Some(original_caller.clone()),
+                callee: Some(original_callee.clone()),
+                caller_name: Some(original_caller.clone()),
+                callee_name: Some(original_callee.clone()),
                 direction: Some(context.dialplan.direction.to_string()),
                 trunk: context
                     .metadata
@@ -899,7 +904,7 @@ impl SipSession {
                 agent_name: None,
             };
             let store = gw.read().meta_store.clone();
-            let sid = context.session_id.clone();
+            let sid = session_id_str.clone();
             crate::utils::spawn(async move {
                 store.insert(sid, meta).await;
             });
@@ -909,10 +914,10 @@ impl SipSession {
         // The old SessionAction→CallCommand bridge has been removed — the
         // unified SipSessionHandle speaks CallCommand natively.
         let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new(
-            context.session_id.clone(),
+            session_id_str.clone(),
             crate::call::DialDirection::Inbound,
-            Some(context.original_caller.clone()),
-            Some(context.original_callee.clone()),
+            Some(original_caller.clone()),
+            Some(original_callee.clone()),
             None,
         );
         let (bridge_handle, _action_rx) =
@@ -927,7 +932,7 @@ impl SipSession {
 
         let app_runtime: Arc<dyn AppRuntime> = Arc::new(
             DefaultAppRuntime::new(AppRuntimeConfig {
-                session_id: context.session_id.clone(),
+                session_id: session_id_str.clone(),
                 handle: sip_handle.clone(),
                 context: Arc::new(app_ctx),
             })
@@ -1004,6 +1009,11 @@ impl SipSession {
         let session_id = context.session_id.clone();
         info!(session_id = %session_id, "Starting unified SIP session");
 
+        // Save commonly-needed fields before consuming context
+        let original_caller = context.original_caller.clone();
+        let original_callee = context.original_callee.clone();
+        let dialplan_clone = context.dialplan.clone();
+
         let local_contact = context
             .dialplan
             .caller_contact
@@ -1034,7 +1044,7 @@ impl SipSession {
             server.clone(),
             cancel_token.clone(),
             call_record_sender,
-            context.clone(),
+            context,
             server_dialog.clone(),
             use_media_proxy,
             caller_peer,
@@ -1043,7 +1053,7 @@ impl SipSession {
 
         session.reporter = Some(CallReporter {
             server: server.clone(),
-            context: context.clone(),
+            context: session.context.clone(),
             call_record_sender: session.call_record_sender.clone(),
         });
 
@@ -1069,7 +1079,7 @@ impl SipSession {
         // Emit CallIncoming event via RWI gateway if configured.
         let incoming_sip_headers = {
             let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
-            if let Some(ref routed) = context.dialplan.routed_headers {
+            if let Some(ref routed) = session.context.dialplan.routed_headers {
                 for h in routed {
                     hdrs.insert(h.name().to_string(), h.value().to_string());
                 }
@@ -1080,8 +1090,8 @@ impl SipSession {
             let ev = crate::rwi::CallIncoming {
                 call_id: session_id.clone(),
                 context: "default".into(),
-                caller: context.original_caller.clone(),
-                callee: context.original_callee.clone(),
+                caller: original_caller,
+                callee: original_callee,
                 dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: incoming_sip_headers,
@@ -1131,8 +1141,7 @@ impl SipSession {
                 .await
         });
 
-        let max_setup_duration = context
-            .dialplan
+        let max_setup_duration = dialplan_clone
             .max_ring_time
             .clamp(Duration::from_secs(30), Duration::from_secs(120));
         let teardown_duration = Duration::from_secs(2);

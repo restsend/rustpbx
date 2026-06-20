@@ -641,6 +641,8 @@ fn normalize_api_prefix(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::console::handlers::test_helpers::setup_state;
+
     use super::*;
     use crate::config::ConsoleConfig;
     use crate::models::migration::Migrator;
@@ -671,15 +673,6 @@ mod tests {
         }
     }
 
-    async fn setup_state() -> Arc<ConsoleState> {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect sqlite memory");
-        Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
-    }
 
     #[tokio::test]
     async fn superuser_has_wildcard_permission() {

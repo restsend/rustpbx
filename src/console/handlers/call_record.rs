@@ -433,10 +433,11 @@ async fn stream_call_recording(
                     .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
             }
 
-            let path_str = temp_path.to_string_lossy().to_string();
-            std::mem::forget(temp_file);
+            let tmp_path = temp_file.into_temp_path();
+            let path_str = tmp_path.to_string_lossy().to_string();
             let response = stream_file_with_range(&path_str, file_len, &headers).await;
             let _ = std::fs::remove_file(&path_str);
+            drop(tmp_path);
             return response;
         }
     }
@@ -1768,50 +1769,8 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
+    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
 
-    fn superuser() -> user::Model {
-        let now = Utc::now();
-        user::Model {
-            id: 1,
-            email: "admin@rustpbx.com".into(),
-            username: "admin".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: true,
-            is_superuser: true,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
-
-    fn unprivileged_user() -> user::Model {
-        let now = Utc::now();
-        user::Model {
-            id: 99,
-            email: "limited@rustpbx.com".into(),
-            username: "limited".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: false,
-            is_superuser: false,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:")

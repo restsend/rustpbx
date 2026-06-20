@@ -3359,6 +3359,8 @@ async fn assign_user_roles(
 
 #[cfg(test)]
 mod tests {
+    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
+
     use super::*;
     use crate::config::ConsoleConfig;
     use crate::models::migration::Migrator;
@@ -3368,37 +3370,6 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn superuser() -> UserModel {
-        let now = Utc::now();
-        UserModel {
-            id: 1,
-            email: "admin@test.com".into(),
-            username: "admin".into(),
-            password_hash: "x".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: true,
-            is_superuser: true,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
-
-    async fn setup_state() -> Arc<ConsoleState> {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect sqlite memory");
-        Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
-    }
 
     #[tokio::test]
     async fn list_roles_returns_seeded_roles() {

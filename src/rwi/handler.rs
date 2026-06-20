@@ -178,8 +178,15 @@ async fn handle_websocket(
         _ = recv_task => {}
     }
 
-    let mut gw = gateway.write();
-    gw.remove_session(&session_id);
+    let (cleanup_call_ids, meta_store) = {
+        let mut gw = gateway.write();
+        let call_ids = gw.remove_session(&session_id);
+        let meta = gw.meta_store.clone();
+        (call_ids, meta)
+    };
+    for call_id in &cleanup_call_ids {
+        meta_store.remove(call_id).await;
+    }
 }
 
 /// Process one text frame from the WebSocket.
@@ -285,7 +292,7 @@ async fn handle_text_message(
         _ => {}
     }
 
-    let call_id = extract_call_id(&command);
+    let call_id = extract_call_id(&command).map(|s| s.to_string());
 
     // For originate/attach, remember whether we should claim ownership on success
     let should_claim_ownership = matches!(
@@ -564,93 +571,93 @@ fn parse_action(
     Ok(req.into())
 }
 
-fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
+fn extract_call_id<'a>(cmd: &'a RwiCommandPayload) -> Option<&'a str> {
     match cmd {
         RwiCommandPayload::Subscribe { .. } => None,
         RwiCommandPayload::Unsubscribe { .. } => None,
         RwiCommandPayload::ListCalls => None,
-        RwiCommandPayload::AttachCall { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::DetachCall { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::Originate(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::Answer { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::Reject { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::Ring { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::Hangup { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.clone()),
-        RwiCommandPayload::Unbridge { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::Transfer { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::TransferReplace { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::TransferAttended { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::TransferComplete { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::AttachCall { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::DetachCall { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::Originate(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::Answer { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::Reject { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::Ring { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::Hangup { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.as_str()),
+        RwiCommandPayload::Unbridge { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::Transfer { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::TransferReplace { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::TransferAttended { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::TransferComplete { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::TransferCancel {
             consultation_call_id,
-        } => Some(consultation_call_id.clone()),
-        RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::CallUnhold { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::SetRingbackSource { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SetVar { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::MediaPlay(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::MediaStreamStart(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::MediaStreamStop { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::MediaInjectStart(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::MediaInjectStop { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::CallSendDtmf { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::DtmfCollect(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::RecordStart(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::RecordPause { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::RecordResume { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::RecordStop { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::QueueEnqueue(r) => Some(r.call_id.clone()),
-        RwiCommandPayload::QueueDequeue { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::QueueHold { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::QueueUnhold { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::QueueSetPriority { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::QueueAssignAgent { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::QueueRequeue { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::SupervisorListen { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.clone()),
+        } => Some(consultation_call_id.as_str()),
+        RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::CallUnhold { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::SetRingbackSource { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SetVar { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::MediaPlay(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::MediaStreamStart(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::MediaStreamStop { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::MediaInjectStart(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::MediaInjectStop { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::CallSendDtmf { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::DtmfCollect(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::RecordStart(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::RecordPause { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::RecordResume { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::RecordStop { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueEnqueue(r) => Some(r.call_id.as_str()),
+        RwiCommandPayload::QueueDequeue { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueHold { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueUnhold { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueSetPriority { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueAssignAgent { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::QueueRequeue { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::SupervisorListen { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.as_str()),
         RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
-            Some(target_call_id.clone())
+            Some(target_call_id.as_str())
         }
-        RwiCommandPayload::SupervisorStop { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::LegAdd { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::LegRemove { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::AppStart { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::AppStop { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::AppChain { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::ConferenceCreate(req) => Some(req.conf_id.clone()),
-        RwiCommandPayload::ConferenceAdd { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceRemove { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceMute { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceUnmute { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceDestroy { conf_id } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceEnd { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceKick { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceMuteAll { conf_id } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceInfo { conf_id } => Some(conf_id.clone()),
+        RwiCommandPayload::SupervisorStop { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.as_str()),
+        RwiCommandPayload::LegAdd { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::LegRemove { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::AppStart { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::AppStop { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::AppChain { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::ConferenceCreate(req) => Some(req.conf_id.as_str()),
+        RwiCommandPayload::ConferenceAdd { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceRemove { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceMute { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceUnmute { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceDestroy { conf_id } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceEnd { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceKick { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceMuteAll { conf_id } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceInfo { conf_id } => Some(conf_id.as_str()),
         RwiCommandPayload::ConferenceList => None,
-        RwiCommandPayload::ConferenceMerge { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ConferenceSeatReplace { conf_id, .. } => Some(conf_id.clone()),
-        RwiCommandPayload::ParallelOriginate(req) => Some(req.operation_id.clone()),
+        RwiCommandPayload::ConferenceMerge { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ConferenceSeatReplace { conf_id, .. } => Some(conf_id.as_str()),
+        RwiCommandPayload::ParallelOriginate(req) => Some(req.operation_id.as_str()),
         RwiCommandPayload::SessionResume { .. } => None,
-        RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.as_str()),
         // CC addon commands
-        RwiCommandPayload::AgentRegister { agent_id, .. } => Some(agent_id.clone()),
-        RwiCommandPayload::AgentUnregister { agent_id } => Some(agent_id.clone()),
-        RwiCommandPayload::AgentStatusUpdate { agent_id, .. } => Some(agent_id.clone()),
-        RwiCommandPayload::AgentStats { agent_id } => agent_id.clone(),
-        RwiCommandPayload::QueueStats { queue_id } => queue_id.clone(),
-        RwiCommandPayload::ConsultInitiate { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::ConsultMerge { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::ConsultComplete { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::AgentRegister { agent_id, .. } => Some(agent_id.as_str()),
+        RwiCommandPayload::AgentUnregister { agent_id } => Some(agent_id.as_str()),
+        RwiCommandPayload::AgentStatusUpdate { agent_id, .. } => Some(agent_id.as_str()),
+        RwiCommandPayload::AgentStats { agent_id } => agent_id.as_deref(),
+        RwiCommandPayload::QueueStats { queue_id } => queue_id.as_deref(),
+        RwiCommandPayload::ConsultInitiate { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::ConsultMerge { call_id, .. } => Some(call_id.as_str()),
+        RwiCommandPayload::ConsultComplete { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::ConsultCancel {
             consultation_call_id,
-        } => Some(consultation_call_id.clone()),
+        } => Some(consultation_call_id.as_str()),
     }
 }

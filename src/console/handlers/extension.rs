@@ -999,6 +999,8 @@ pub async fn csv_import_extensions(
 
 #[cfg(test)]
 mod tests {
+    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
+
     use super::*;
     use crate::{
         config::ConsoleConfig,
@@ -1012,37 +1014,8 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
 
-    fn dummy_user() -> user::Model {
-        let now = Utc::now();
-        user::Model {
-            id: 1,
-            email: "tester@rustpbx.com".into(),
-            username: "tester".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: true,
-            is_superuser: true,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
 
-    async fn setup_state() -> Arc<ConsoleState> {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect sqlite memory");
-        Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
-    }
+
 
     async fn insert_extension(db: &sea_orm::DatabaseConnection, extension: &str) -> ExtensionModel {
         ExtensionActiveModel {
@@ -1100,7 +1073,7 @@ mod tests {
             });
 
             let response =
-                query_extensions(State(state), AuthRequired(dummy_user()), Json(query)).await;
+                query_extensions(State(state), AuthRequired(superuser()), Json(query)).await;
 
             assert_eq!(response.status(), StatusCode::OK);
 
@@ -1132,27 +1105,6 @@ mod tests {
         assert_eq!(combined_ids, vec![ext_both.id]);
     }
 
-    fn unprivileged_user() -> user::Model {
-        let now = Utc::now();
-        user::Model {
-            id: 99,
-            email: "limited@rustpbx.com".into(),
-            username: "limited".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: false,
-            is_superuser: false,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
 
     #[tokio::test]
     async fn create_extension_denied_without_permission() {
@@ -1197,7 +1149,7 @@ mod tests {
     #[tokio::test]
     async fn create_extension_allowed_for_superuser() {
         let state = setup_state().await;
-        let user = dummy_user();
+        let user = superuser();
         let payload = ExtensionPayload {
             extension: Some("5003".into()),
             ..Default::default()
@@ -1209,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn csv_import_extensions_basic() {
         let state = setup_state().await;
-        let user = dummy_user();
+        let user = superuser();
         let payload = CsvExtensionImportPayload {
             extensions: vec![
                 CsvExtensionRow {
@@ -1267,7 +1219,7 @@ mod tests {
     async fn csv_import_extensions_duplicate() {
         let state = setup_state().await;
         insert_extension(state.db(), "3001").await;
-        let user = dummy_user();
+        let user = superuser();
         let payload = CsvExtensionImportPayload {
             extensions: vec![
                 CsvExtensionRow {
@@ -1301,7 +1253,7 @@ mod tests {
     #[tokio::test]
     async fn csv_import_extensions_empty_extension() {
         let state = setup_state().await;
-        let user = dummy_user();
+        let user = superuser();
         let payload = CsvExtensionImportPayload {
             extensions: vec![CsvExtensionRow {
                 extension: "".into(),
@@ -1347,7 +1299,7 @@ mod tests {
         .await
         .expect("insert support");
 
-        let user = dummy_user();
+        let user = superuser();
         let payload = CsvExtensionImportPayload {
             extensions: vec![CsvExtensionRow {
                 extension: "4001".into(),
@@ -1389,7 +1341,7 @@ mod tests {
     #[tokio::test]
     async fn csv_import_extensions_invalid_bool() {
         let state = setup_state().await;
-        let user = dummy_user();
+        let user = superuser();
         let payload = CsvExtensionImportPayload {
             extensions: vec![CsvExtensionRow {
                 extension: "5001".into(),

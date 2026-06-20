@@ -123,9 +123,10 @@ impl RwiGateway {
         self.webhook_tx = Some(tx);
     }
 
-    pub fn remove_session(&mut self, session_id: &SessionId) {
+    pub fn remove_session(&mut self, session_id: &SessionId) -> Vec<CallId> {
         self.session_event_senders.remove(session_id);
         self.session_event_filters.remove(session_id);
+        let mut cleanup_call_ids = Vec::new();
         if let Some(session) = self.sessions.remove(session_id) {
             let session = session.read();
             for ctx in &session.subscribed_contexts {
@@ -135,11 +136,14 @@ impl RwiGateway {
             }
             for call_id in session.owned_calls.keys() {
                 self.call_ownership.remove(call_id);
+                self.remove_call_vars(call_id);
+                cleanup_call_ids.push(call_id.clone());
             }
             for call_id in session.supervisor_targets.keys() {
                 self.supervisor_calls.remove(call_id);
             }
         }
+        cleanup_call_ids
     }
 
     pub fn subscribe(
