@@ -448,7 +448,8 @@ async fn test_pcm_frame_does_not_break_session_state() {
                 || v.get("call_id").is_some()
                 || v.get("call_ringing").is_some()
                 || v.get("call_answered").is_some()
-                || v.get("dtmf").is_some();
+                || v.get("dtmf").is_some()
+                || v.get("event_type").is_some();
             assert!(is_event, "Should receive an event: {}", v);
         }
         _ => panic!("Expected text message"),

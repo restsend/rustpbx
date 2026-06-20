@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::console::ConsoleState;
+use crate::console::config_helpers::json_error;
 use crate::console::middleware::AuthRequired;
 use axum::{
     Router,
@@ -374,17 +375,6 @@ fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Ta
         .get_mut(key)
         .and_then(Item::as_table_mut)
         .expect("table")
-}
-
-pub(super) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(json!({
-            "success": false,
-            "message": message.into(),
-        })),
-    )
-        .into_response()
 }
 
 /// Convert a `LicenseStatus` to a human-readable label for the UI.

@@ -31,8 +31,9 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
 #[cfg(feature = "commerce")]
 pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) -> Response {
     use super::addons::{
-        get_config_path, json_error, load_document, parse_config_from_str, persist_document,
+        get_config_path, load_document, parse_config_from_str, persist_document,
     };
+    use crate::console::config_helpers::json_error;
     use toml_edit::{Item, Table};
 
     let license_key = license_key.trim().to_string();
@@ -193,7 +194,7 @@ pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) 
 /// Non-commerce stub so `addons.rs` can still reference the symbol without errors.
 #[cfg(not(feature = "commerce"))]
 pub async fn verify_license_key(_state: Arc<ConsoleState>, _license_key: String) -> Response {
-    use super::addons::json_error;
+    use crate::console::config_helpers::json_error;
     json_error(
         StatusCode::NOT_FOUND,
         "License management is not available in this build.",
