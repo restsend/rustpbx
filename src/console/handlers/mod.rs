@@ -24,8 +24,7 @@ pub mod user;
 pub mod utils;
 
 pub fn bad_request(message: impl Into<String>) -> axum::response::Response {
-    let text = message.into();
-    (StatusCode::BAD_REQUEST, Json(json!({ "message": text }))).into_response()
+    crate::console::config_helpers::json_error(StatusCode::BAD_REQUEST, message)
 }
 
 #[allow(clippy::result_large_err)]
@@ -42,6 +41,10 @@ pub fn normalize_optional_string(value: &Option<String>) -> Option<String> {
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
+}
+
+pub fn sanitize_optional_string(value: Option<String>) -> Option<String> {
+    normalize_optional_string(&value)
 }
 
 pub fn router(state: Arc<ConsoleState>) -> Router {
@@ -123,14 +126,13 @@ async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> impl
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod test_helpers {
     use crate::{config::ConsoleConfig, console::ConsoleState, models::migration::Migrator};
-    use axum::{body::to_bytes, extract::State, http::StatusCode};
     use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
 
-    async fn setup_state() -> Arc<ConsoleState> {
+    pub async fn setup_state() -> Arc<ConsoleState> {
         let db = Database::connect("sqlite::memory:")
             .await
             .expect("connect sqlite memory");
@@ -139,6 +141,60 @@ mod tests {
             .await
             .expect("initialize console state")
     }
+
+    pub fn superuser() -> crate::models::user::Model {
+        let now = chrono::Utc::now();
+        crate::models::user::Model {
+            id: 1,
+            email: "admin@rustpbx.com".into(),
+            username: "admin".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    pub fn unprivileged_user() -> crate::models::user::Model {
+        let now = chrono::Utc::now();
+        crate::models::user::Model {
+            id: 2,
+            email: "user@rustpbx.com".into(),
+            username: "user".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_helpers::setup_state;
+    use crate::{config::ConsoleConfig, console::ConsoleState, models::migration::Migrator};
+    use axum::{body::to_bytes, extract::State, http::StatusCode};
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
 
     #[tokio::test]
     async fn pending_reloads_handler_false_initially() {

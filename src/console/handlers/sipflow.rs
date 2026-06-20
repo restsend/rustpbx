@@ -486,7 +486,7 @@ async fn query_media(
                 }
             };
             let path_str = temp_path.to_string_lossy().to_string();
-            std::mem::forget(temp_file);
+            let _tmp_path = temp_file.into_temp_path();
 
             let stream = ReaderStream::new(file);
             let body = axum::body::Body::from_stream(stream);

@@ -1,5 +1,5 @@
 use crate::console::config_helpers::{find_or_404, internal_error};
-use crate::console::handlers::{bad_request, forms};
+use crate::console::handlers::{bad_request, forms, sanitize_optional_string};
 use crate::console::{ConsoleState, ReloadTarget, middleware::AuthRequired};
 use crate::models::{
     routing::{
@@ -411,12 +411,6 @@ fn default_direction_value() -> RoutingDirection {
 
 fn default_priority_value() -> i32 {
     DEFAULT_PRIORITY
-}
-
-fn sanitize_optional_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn normalize_selection(value: Option<String>) -> RoutingSelectionStrategy {
@@ -1511,6 +1505,8 @@ pub async fn delete_routing(
 
 #[cfg(test)]
 mod tests {
+    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
+
     use super::*;
     use crate::{
         config::ConsoleConfig, console::middleware::AuthRequired, models::migration::Migrator,
@@ -1521,59 +1517,6 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
 
-    fn superuser() -> crate::models::user::Model {
-        let now = Utc::now();
-        crate::models::user::Model {
-            id: 1,
-            email: "admin@rustpbx.com".into(),
-            username: "admin".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: true,
-            is_superuser: true,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
-
-    fn unprivileged_user() -> crate::models::user::Model {
-        let now = Utc::now();
-        crate::models::user::Model {
-            id: 99,
-            email: "limited@rustpbx.com".into(),
-            username: "limited".into(),
-            password_hash: "hashed".into(),
-            reset_token: None,
-            reset_token_expires: None,
-            last_login_at: None,
-            last_login_ip: None,
-            created_at: now,
-            updated_at: now,
-            is_active: true,
-            is_staff: false,
-            is_superuser: false,
-            mfa_enabled: false,
-            mfa_secret: None,
-            auth_source: "local".into(),
-        }
-    }
-
-    async fn setup_state() -> Arc<ConsoleState> {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect sqlite memory");
-        Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
-    }
 
     #[tokio::test]
     async fn create_routing_denied_without_permission() {
