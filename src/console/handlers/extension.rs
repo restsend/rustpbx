@@ -783,10 +783,7 @@ pub async fn csv_import_extensions(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<CsvExtensionImportPayload>,
 ) -> Response {
-    if let Err(resp) = state
-        .require_permission(&user, "extensions", "write")
-        .await
-    {
+    if let Err(resp) = state.require_permission(&user, "extensions", "write").await {
         return resp;
     }
     let db = state.db();
@@ -801,10 +798,8 @@ pub async fn csv_import_extensions(
         .collect();
 
     let all_depts = DepartmentEntity::find().all(db).await.unwrap_or_default();
-    let dept_map: std::collections::HashMap<String, i64> = all_depts
-        .iter()
-        .map(|d| (d.name.clone(), d.id))
-        .collect();
+    let dept_map: std::collections::HashMap<String, i64> =
+        all_depts.iter().map(|d| (d.name.clone(), d.id)).collect();
 
     let mut imported = 0u32;
     let mut skipped = 0u32;
@@ -855,7 +850,9 @@ pub async fn csv_import_extensions(
                 skipped += 1;
                 errors.push(format!(
                     "Row {}: extension '{}' has invalid login_disabled value '{}'",
-                    i + 1, ext_number, raw
+                    i + 1,
+                    ext_number,
+                    raw
                 ));
                 continue;
             }
@@ -866,7 +863,9 @@ pub async fn csv_import_extensions(
                 skipped += 1;
                 errors.push(format!(
                     "Row {}: extension '{}' has invalid voicemail_disabled value '{}'",
-                    i + 1, ext_number, raw
+                    i + 1,
+                    ext_number,
+                    raw
                 ));
                 continue;
             }
@@ -877,7 +876,9 @@ pub async fn csv_import_extensions(
                 skipped += 1;
                 errors.push(format!(
                     "Row {}: extension '{}' has invalid allow_guest_calls value '{}'",
-                    i + 1, ext_number, raw
+                    i + 1,
+                    ext_number,
+                    raw
                 ));
                 continue;
             }
@@ -895,7 +896,9 @@ pub async fn csv_import_extensions(
                 skipped += 1;
                 errors.push(format!(
                     "Row {}: extension '{}' has invalid call_forwarding_timeout value '{}'",
-                    i + 1, ext_number, raw
+                    i + 1,
+                    ext_number,
+                    raw
                 ));
                 continue;
             }
@@ -1003,19 +1006,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::ConsoleConfig,
         console::handlers::forms::ListQuery,
-        models::{department, extension::Model as ExtensionModel, migration::Migrator, user},
+        models::{department, extension::Model as ExtensionModel},
     };
     use axum::{Json, body::to_bytes, extract::State, http::StatusCode};
-    use chrono::Utc;
-    use sea_orm::{ActiveValue::Set, Database};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::ActiveValue::Set;
     use serde_json::Value;
     use std::sync::Arc;
-
-
-
 
     async fn insert_extension(db: &sea_orm::DatabaseConnection, extension: &str) -> ExtensionModel {
         ExtensionActiveModel {
@@ -1105,7 +1102,6 @@ mod tests {
         assert_eq!(combined_ids, vec![ext_both.id]);
     }
 
-
     #[tokio::test]
     async fn create_extension_denied_without_permission() {
         let state = setup_state().await;
@@ -1194,12 +1190,8 @@ mod tests {
                 },
             ],
         };
-        let resp = csv_import_extensions(
-            State(state.clone()),
-            AuthRequired(user),
-            Json(payload),
-        )
-        .await;
+        let resp =
+            csv_import_extensions(State(state.clone()), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1232,12 +1224,8 @@ mod tests {
                 },
             ],
         };
-        let resp = csv_import_extensions(
-            State(state.clone()),
-            AuthRequired(user),
-            Json(payload),
-        )
-        .await;
+        let resp =
+            csv_import_extensions(State(state.clone()), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1260,12 +1248,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let resp = csv_import_extensions(
-            State(state),
-            AuthRequired(user),
-            Json(payload),
-        )
-        .await;
+        let resp = csv_import_extensions(State(state), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1274,10 +1257,12 @@ mod tests {
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["imported"], 0);
         assert_eq!(parsed["skipped"], 1);
-        assert!(parsed["errors"][0]
-            .as_str()
-            .unwrap()
-            .contains("extension number is required"));
+        assert!(
+            parsed["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("extension number is required")
+        );
     }
 
     #[tokio::test]
@@ -1308,12 +1293,8 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let resp = csv_import_extensions(
-            State(state.clone()),
-            AuthRequired(user),
-            Json(payload),
-        )
-        .await;
+        let resp =
+            csv_import_extensions(State(state.clone()), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1349,12 +1330,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let resp = csv_import_extensions(
-            State(state),
-            AuthRequired(user),
-            Json(payload),
-        )
-        .await;
+        let resp = csv_import_extensions(State(state), AuthRequired(user), Json(payload)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1363,9 +1339,11 @@ mod tests {
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["imported"], 0);
         assert_eq!(parsed["skipped"], 1);
-        assert!(parsed["errors"][0]
-            .as_str()
-            .unwrap()
-            .contains("invalid login_disabled"));
+        assert!(
+            parsed["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("invalid login_disabled")
+        );
     }
 }

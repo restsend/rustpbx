@@ -12,10 +12,22 @@ mod ringback_mode_tests {
         assert!(!should_passthrough(RingbackMode::Local, has_early_media));
         assert!(!should_passthrough(RingbackMode::Local, no_early_media));
 
-        assert!(!should_play_local(RingbackMode::Passthrough, has_early_media));
-        assert!(!should_play_local(RingbackMode::Passthrough, no_early_media));
-        assert!(should_passthrough(RingbackMode::Passthrough, has_early_media));
-        assert!(!should_passthrough(RingbackMode::Passthrough, no_early_media));
+        assert!(!should_play_local(
+            RingbackMode::Passthrough,
+            has_early_media
+        ));
+        assert!(!should_play_local(
+            RingbackMode::Passthrough,
+            no_early_media
+        ));
+        assert!(should_passthrough(
+            RingbackMode::Passthrough,
+            has_early_media
+        ));
+        assert!(!should_passthrough(
+            RingbackMode::Passthrough,
+            no_early_media
+        ));
 
         assert!(!should_play_local(RingbackMode::Auto, has_early_media));
         assert!(should_play_local(RingbackMode::Auto, no_early_media));
@@ -46,10 +58,6 @@ mod ringback_mode_tests {
         }
     }
 } // mod ringback_mode_tests
-
-
-
-
 
 #[cfg(test)]
 mod ringback_audio_tests {
@@ -209,7 +217,6 @@ mod ringback_audio_tests {
         assert_eq!(audio.play_duration_for(&StatusCode::NotFound), None);
         assert_eq!(audio.play_duration_for(&StatusCode::Decline), None);
     }
-
 } // mod ringback_audio_tests
 
 #[cfg(test)]

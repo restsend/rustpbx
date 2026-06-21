@@ -147,9 +147,11 @@ async fn test_supervisor_listen_command_accepted() {
 
     // Wait for agent to answer
     let _answered = recv_until(&mut ws, 10, |v| {
-        let legacy = v.get("call_answered")
+        let legacy = v
+            .get("call_answered")
             .and_then(|a| a.get("call_id"))
-            .and_then(|id| id.as_str()) == Some(&agent_call_id);
+            .and_then(|id| id.as_str())
+            == Some(&agent_call_id);
         let modern = v["event_type"].as_str() == Some("call_answered")
             && v["call_id"].as_str() == Some(&agent_call_id);
         legacy || modern
@@ -226,7 +228,10 @@ async fn test_supervisor_whisper_command_accepted() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Try supervisor.whisper
     let supervisor_call_id = format!("e2e-whisper-sup-{}", Uuid::new_v4());
@@ -284,7 +289,10 @@ async fn test_supervisor_barge_command_accepted() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Try supervisor.barge
     let supervisor_call_id = format!("e2e-barge-sup-{}", Uuid::new_v4());
@@ -359,9 +367,11 @@ async fn test_supervisor_listen_full_flow() {
     let agent_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         recv_until(&mut ws, 15, |v| {
-            let legacy = v.get("call_answered")
+            let legacy = v
+                .get("call_answered")
                 .and_then(|a| a.get("call_id"))
-                .and_then(|id| id.as_str()) == Some(&agent_call_id);
+                .and_then(|id| id.as_str())
+                == Some(&agent_call_id);
             let modern = v["event_type"].as_str() == Some("call_answered")
                 && v["call_id"].as_str() == Some(&agent_call_id);
             legacy || modern
@@ -396,9 +406,11 @@ async fn test_supervisor_listen_full_flow() {
     let sup_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         recv_until(&mut ws, 15, |v| {
-            let legacy = v.get("call_answered")
+            let legacy = v
+                .get("call_answered")
                 .and_then(|a| a.get("call_id"))
-                .and_then(|id| id.as_str()) == Some(&supervisor_call_id);
+                .and_then(|id| id.as_str())
+                == Some(&supervisor_call_id);
             let modern = v["event_type"].as_str() == Some("call_answered")
                 && v["call_id"].as_str() == Some(&supervisor_call_id);
             legacy || modern
@@ -474,7 +486,10 @@ async fn test_supervisor_whisper_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Originate supervisor
     let supervisor_call_id = format!("e2e-whisper-supervisor-{}", Uuid::new_v4());
@@ -489,7 +504,10 @@ async fn test_supervisor_whisper_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &sup_json, &sup_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Call supervisor.whisper
     let (whisper_id, whisper_json) = rwi_req(
@@ -545,7 +563,10 @@ async fn test_supervisor_barge_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Originate supervisor
     let supervisor_call_id = format!("e2e-barge-supervisor-{}", Uuid::new_v4());
@@ -560,7 +581,10 @@ async fn test_supervisor_barge_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &sup_json, &sup_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Call supervisor.barge
     let (barge_id, barge_json) = rwi_req(
@@ -616,7 +640,10 @@ async fn test_supervisor_takeover_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Originate supervisor
     let supervisor_call_id = format!("e2e-takeover-supervisor-{}", Uuid::new_v4());
@@ -631,7 +658,10 @@ async fn test_supervisor_takeover_full_flow() {
         }),
     );
     ws_send_recv_with_id(&mut ws, &sup_json, &sup_id).await;
-    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")).await;
+    recv_until(&mut ws, 10, |v| {
+        v.get("call_answered").is_some() || v["event_type"].as_str() == Some("call_answered")
+    })
+    .await;
 
     // Call supervisor.takeover
     let (takeover_id, takeover_json) = rwi_req(

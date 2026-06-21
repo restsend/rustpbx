@@ -248,7 +248,13 @@ impl CallReporter {
         };
 
         if let Some(ref sender) = self.call_record_sender {
-            let _ = sender.send(record);
+            // Bounded channel: drop new records (with a warn log) if the
+            // saver has fallen behind, instead of buffering indefinitely.
+            // `try_send` is sync, so the existing synchronous emit path is
+            // preserved.
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = sender.try_send(record) {
+                tracing::warn!("call record channel full; dropping record to bound memory");
+            }
         }
     }
 }

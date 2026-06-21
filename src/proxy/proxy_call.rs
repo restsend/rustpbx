@@ -54,7 +54,6 @@ impl CallSessionBuilder {
         self
     }
 
-
     pub async fn build_and_serve(
         self,
         server: SipServerRef,

@@ -183,6 +183,8 @@ pub struct ClusterEventHub {
     local_sip_addr: SocketAddr,
     peers: Vec<SocketAddr>,
     handlers: RwLock<Vec<Arc<dyn ClusterEventHandler>>>,
+    /// Child of the SIP server's cancel token; used to stop the dispatcher.
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ClusterEventHub {
@@ -192,6 +194,7 @@ impl ClusterEventHub {
         endpoint_inner: EndpointInnerRef,
         local_sip_addr: SocketAddr,
         peers: Vec<SocketAddr>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             locator_events,
@@ -200,6 +203,7 @@ impl ClusterEventHub {
             local_sip_addr,
             peers,
             handlers: RwLock::new(Vec::new()),
+            cancel,
         }
     }
 
@@ -208,20 +212,30 @@ impl ClusterEventHub {
     }
 
     /// Subscribe to local locator events and forward to peers.
+    ///
+    /// The dispatcher loop listens on `self.cancel` so it stops
+    /// deterministically when the server shuts down instead of waiting for
+    /// the underlying broadcast channel to close.
     pub async fn start(self: Arc<Self>) {
         let mut rx = self.locator_events.subscribe();
+        let cancel = self.cancel.clone();
         let this = self.clone();
         crate::utils::spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        this.dispatch_local_locator_event(event).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("cluster event hub: lagged, missed {} locator events", n);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break;
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    res = rx.recv() => {
+                        match res {
+                            Ok(event) => {
+                                this.dispatch_local_locator_event(event).await;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("cluster event hub: lagged, missed {} locator events", n);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -453,11 +467,15 @@ impl ProxyModule for ClusterEventModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
+        // The dispatcher must stop when the server shuts down. The hub holds
+        // a child of the server's cancel_token for this purpose.
         self.hub.clone().start().await;
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
+        // Cancellation is driven by the server's cancel_token (the hub holds
+        // a child token), so spawned tasks exit when the server shuts down.
         Ok(())
     }
 
@@ -1012,6 +1030,7 @@ mod tests {
             endpoint.inner.clone(),
             "127.0.0.1:5060".parse().unwrap(),
             vec![],
+            tokio_util::sync::CancellationToken::new(),
         ))
     }
 
@@ -1163,6 +1182,7 @@ mod tests {
             endpoint.inner.clone(),
             "127.0.0.1:5060".parse().unwrap(),
             vec![],
+            tokio_util::sync::CancellationToken::new(),
         ));
 
         let handler = Arc::new(CountingHandler::new());

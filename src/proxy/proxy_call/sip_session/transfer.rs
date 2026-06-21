@@ -534,12 +534,8 @@ impl SipSession {
     pub(crate) async fn start_conference_app(&self, conf_id: &str) -> Result<()> {
         info!(conf_id = %conf_id, "Starting conference application");
         let params = Some(serde_json::json!({"id": conf_id}));
-        self.ensure_app_running(
-            "conference",
-            params,
-            &format!("conference '{}'", conf_id),
-        )
-        .await
+        self.ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
+            .await
     }
 
     /// Establish a WebSocket + PCM real‑time bridge to an external VoIP endpoint.

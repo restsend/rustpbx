@@ -355,6 +355,18 @@ impl Locator for MemoryLocator {
         let mut location = location;
         let key = location.binding_key();
         let mut locations = self.locations.lock().await;
+
+        // Opportunistic GC: prune expired bindings for THIS identifier on
+        // every register. Without this, clients that crash without sending
+        // REGISTER expires=0 leave stale entries forever (lookup() only
+        // sweeps the entries it actually visits, so never-looked-up AoRs
+        // would accumulate). This stays O(1) amortised because each AoR's
+        // binding map is small (typically a single binding).
+        if let Some(map) = locations.get_mut(&identifier) {
+            let now = Instant::now();
+            map.retain(|_, loc| !loc.is_expired_at(now));
+        }
+
         let entry = locations
             .entry(identifier.clone())
             .or_insert_with(HashMap::new);

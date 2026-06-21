@@ -426,7 +426,9 @@ impl AppFactory for BuiltinAppFactory {
                             let caller_id = context.call_info.caller.clone();
                             match vm.build_app(&extension, &caller_id) {
                                 Ok(app) => {
-                                    return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
+                                    return Some(
+                                        Box::new(app) as Box<dyn crate::call::app::CallApp>
+                                    );
                                 }
                                 Err(e) => tracing::warn!(
                                     "voicemail addon build_app failed: {}; \
@@ -458,11 +460,11 @@ impl AppFactory for BuiltinAppFactory {
                         {
                             match vm.build_check_app() {
                                 Ok(app) => {
-                                    return Some(Box::new(app) as Box<dyn crate::call::app::CallApp>);
+                                    return Some(
+                                        Box::new(app) as Box<dyn crate::call::app::CallApp>
+                                    );
                                 }
-                                Err(e) => tracing::warn!(
-                                    "voicemail check_app build failed: {}", e
-                                ),
+                                Err(e) => tracing::warn!("voicemail check_app build failed: {}", e),
                             }
                         }
                     }
@@ -477,12 +479,9 @@ impl AppFactory for BuiltinAppFactory {
                     .unwrap_or("default")
                     .to_string();
                 let caller_id = context.call_info.caller.clone();
-                Some(
-                    Box::new(crate::call::app::conference::ConferenceApp::new(
-                        conf_id,
-                        caller_id,
-                    )) as Box<dyn crate::call::app::CallApp>,
-                )
+                Some(Box::new(crate::call::app::conference::ConferenceApp::new(
+                    conf_id, caller_id,
+                )) as Box<dyn crate::call::app::CallApp>)
             }
             "queue" => {
                 let pending = context.pending_queue.lock().unwrap().take()?;
@@ -5727,13 +5726,7 @@ impl SipSession {
         egress_profile: crate::media::negotiate::NegotiatedLegProfile,
         recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
         leg: crate::media::recorder::Leg,
-        sipflow_tx: Option<
-            tokio::sync::mpsc::Sender<(
-                crate::media::recorder::Leg,
-                rustrtc::media::frame::MediaSample,
-                u64,
-            )>,
-        >,
+        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
         session_id: &str,
         direction: &str,
     ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
@@ -5780,7 +5773,7 @@ impl SipSession {
             const RECORDER_CHANNEL_CAPACITY: usize = 256;
             let (tx, mut rx) = mpsc::channel::<(
                 crate::media::recorder::Leg,
-                rustrtc::media::frame::MediaSample,
+                crate::media::engine::command::SharedMediaSample,
             )>(RECORDER_CHANNEL_CAPACITY);
             let recorder_arc = recorder.clone();
             crate::utils::spawn(async move {
@@ -7217,7 +7210,8 @@ impl SipSession {
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
             reporter.report(snapshot);
-            self.cdr_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.cdr_sent
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Fire on_call_ended hooks.
@@ -9528,7 +9522,8 @@ impl Drop for SipSession {
             if let Some(reporter) = &self.reporter {
                 let snapshot = self.record_snapshot();
                 reporter.report(snapshot);
-                self.cdr_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.cdr_sent
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }
         }

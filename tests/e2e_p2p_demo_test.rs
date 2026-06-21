@@ -12,7 +12,7 @@ mod helpers;
 use helpers::cdr_verifier::{CdrExpectation, CdrVerifier};
 use helpers::rwi_collector::RwiCollector;
 use helpers::sipbot_helper::TestUa;
-use helpers::test_server::{TestPbx, TestPbxInject, TEST_TOKEN};
+use helpers::test_server::{TEST_TOKEN, TestPbx, TestPbxInject};
 use rustpbx::callrecord::CallRecordHangupReason;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -61,7 +61,9 @@ async fn test_p2p_basic_call_cdr_and_events() {
 
     // Verify RWI events
     rwi.wait_for_event_type("call_ringing", 5).await.unwrap();
-    rwi.wait_for_event_type("call_early_media", 5).await.unwrap();
+    rwi.wait_for_event_type("call_early_media", 5)
+        .await
+        .unwrap();
     rwi.wait_for_event_type("call_answered", 10).await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
@@ -95,9 +97,12 @@ async fn test_p2p_basic_call_cdr_and_events() {
             .with_hangup_reason(CallRecordHangupReason::BySystem)
             .with_min_duration(0.0),
     );
-    eprintln!("[test] ✓ CDR verified: status={}, duration={}s, hangup={:?}",
-        record.details.status, (record.end_time - record.start_time).num_seconds(),
-        record.hangup_reason);
+    eprintln!(
+        "[test] ✓ CDR verified: status={}, duration={}s, hangup={:?}",
+        record.details.status,
+        (record.end_time - record.start_time).num_seconds(),
+        record.hangup_reason
+    );
 
     bob.stop();
     pbx.stop();
@@ -196,9 +201,12 @@ async fn test_p2p_hold_resume_via_rwi() {
             .with_hangup_reason(CallRecordHangupReason::BySystem)
             .with_min_duration(2.0),
     );
-    eprintln!("[test] ✓ CDR for hold call: status={}, duration={}s, hangup={:?}",
-        record.details.status, (record.end_time - record.start_time).num_seconds(),
-        record.hangup_reason);
+    eprintln!(
+        "[test] ✓ CDR for hold call: status={}, duration={}s, hangup={:?}",
+        record.details.status,
+        (record.end_time - record.start_time).num_seconds(),
+        record.hangup_reason
+    );
 
     bob.stop();
     pbx.stop();

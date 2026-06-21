@@ -204,7 +204,7 @@ impl RecordingPolicy {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
     pub http_addr: String,
@@ -1012,7 +1012,7 @@ pub enum RouteResult {
     Abort(StatusCode, Option<String>),
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AmiConfig {
     pub allows: Option<Vec<String>>,
 }
@@ -1304,15 +1304,6 @@ impl Default for Config {
     }
 }
 
-impl Clone for Config {
-    fn clone(&self) -> Self {
-        // This is a bit expensive but Config is not cloned often in hot paths
-        // and implementing Clone manually for all nested structs is tedious
-        let s = toml::to_string(self).unwrap();
-        toml::from_str(&s).unwrap()
-    }
-}
-
 impl Config {
     pub fn load(path: &str) -> Result<Self, Error> {
         let mut config: Self = toml::from_str(
@@ -1541,5 +1532,42 @@ mod tests {
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.peers.is_empty());
+    }
+
+    /// Regression: `Config::clone` used to round-trip through TOML which is
+    /// expensive (called on every server bootstrap and config reload). The
+    /// derive(d Clone implementation must produce a deeply-equal copy while
+    /// avoiding the serialization hop. We assert equality on a representative
+    /// field set covering primitives, Vec, nested config and Option types.
+    #[test]
+    fn test_config_clone_preserves_all_fields() {
+        let mut original = Config::default();
+        original.http_addr = "127.0.0.1:8080".to_string();
+        original.http_gzip = true;
+        original.http_access_skip_paths = vec!["/health".to_string(), "/metrics".to_string()];
+        original.proxy.addr = "127.0.0.1:5060".to_string();
+        original.proxy.useragent = Some("TestPBX/1.0".to_string());
+        original.database_url = "sqlite://test.db".to_string();
+        original.demo_mode = true;
+        original.ami = Some(AmiConfig {
+            allows: Some(vec!["10.0.0.0/8".to_string()]),
+        });
+        original.recording = Some(RecordingPolicy::default());
+
+        let cloned = original.clone();
+
+        // Equality is intentionally checked via TOML round-trip serialization
+        // (not PartialEq, which is not derived) so we exercise the same
+        // surface the previous implementation relied on, but at clone time we
+        // no longer pay that cost.
+        let original_toml = toml::to_string(&original).unwrap();
+        let cloned_toml = toml::to_string(&cloned).unwrap();
+        assert_eq!(original_toml, cloned_toml, "Config::clone lost data");
+
+        // Mutating the clone must not bleed into the original (deep copy).
+        let mut cloned2 = original.clone();
+        cloned2.http_addr = "0.0.0.0:9999".to_string();
+        assert_ne!(original.http_addr, cloned2.http_addr);
+        assert_eq!(original.http_addr, "127.0.0.1:8080");
     }
 }

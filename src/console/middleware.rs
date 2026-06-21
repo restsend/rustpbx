@@ -147,10 +147,6 @@ mod tests {
     use crate::console::handlers::test_helpers::setup_state;
 
     use super::*;
-    use crate::config::ConsoleConfig;
-    use crate::models::migration::Migrator;
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "addon-wholesale")]
     use crate::addons::wholesale::models::wholesale_agent;
@@ -158,7 +154,6 @@ mod tests {
     use chrono::Utc;
     #[cfg(feature = "addon-wholesale")]
     use sea_orm::{ActiveValue::Set, EntityTrait};
-
 
     #[tokio::test]
     async fn superuser_has_no_agent_id() {

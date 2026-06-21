@@ -7,10 +7,12 @@ use crate::proxy::server::SipServerRef;
 use anyhow::Result;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use lru::LruCache;
 use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
@@ -22,7 +24,18 @@ pub mod i18n;
 pub mod middleware;
 pub use handlers::router;
 
-pub type PermCache = HashMap<i64, (Instant, HashSet<String>)>;
+/// Permission cache: `user_id -> (cached_at, permission set)`.
+///
+/// Implemented as an `LruCache` so inactive users are evicted automatically
+/// instead of accumulating for the lifetime of the process. The TTL check
+/// happens on read in [`ConsoleState::user_permissions`]; the LRU cap only
+/// bounds memory and does not change the effective TTL.
+pub type PermCache = LruCache<i64, (Instant, HashSet<String>)>;
+
+/// Maximum number of cached permission entries. Each entry is small (a few
+/// permissions strings), so 1024 covers realistic admin-console usage while
+/// keeping memory bounded if many distinct users log in briefly.
+pub const PERM_CACHE_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReloadTarget {
@@ -72,7 +85,9 @@ impl ConsoleState {
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
             i18n,
-            perm_cache: Arc::new(Mutex::new(HashMap::new())),
+            perm_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(PERM_CACHE_CAP).expect("non-zero cap"),
+            ))),
             pending_reload: Arc::new(RwLock::new(BTreeSet::new())),
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
         }))
@@ -329,7 +344,7 @@ impl ConsoleState {
         }
 
         const TTL_SECS: u64 = 300;
-        if let Ok(cache) = self.perm_cache.lock()
+        if let Ok(mut cache) = self.perm_cache.lock()
             && let Some((ts, perms)) = cache.get(&user.id)
             && ts.elapsed().as_secs() < TTL_SECS
         {
@@ -339,7 +354,7 @@ impl ConsoleState {
         let perms = self.load_permissions_from_db(user.id).await;
 
         if let Ok(mut cache) = self.perm_cache.lock() {
-            cache.insert(user.id, (Instant::now(), perms.clone()));
+            cache.put(user.id, (Instant::now(), perms.clone()));
         }
 
         perms
@@ -673,7 +688,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn superuser_has_wildcard_permission() {
         let state = setup_state().await;
@@ -738,7 +752,30 @@ mod tests {
         let user = make_user(300, false);
         state.user_permissions(&user).await;
         let cache = state.perm_cache.lock().expect("lock cache");
-        assert!(cache.contains_key(&300));
+        assert!(cache.contains(&300));
+    }
+
+    /// Regression: `PermCache` used to be an unbounded `HashMap` that kept
+    /// inactive users forever. The LRU cap must evict least-recently-used
+    /// entries so memory stays bounded regardless of how many distinct users
+    /// briefly query their permissions.
+    #[tokio::test]
+    async fn permission_cache_evicts_lru_entries_beyond_cap() {
+        let state = setup_state().await;
+        // PERM_CACHE_CAP+1 distinct users must fit into a PERM_CACHE_CAP cache.
+        for id in 0..(PERM_CACHE_CAP as i64 + 1) {
+            let user = make_user(id, false);
+            state.user_permissions(&user).await;
+        }
+        let cache = state.perm_cache.lock().expect("lock cache");
+        assert_eq!(cache.len(), PERM_CACHE_CAP, "cache should be at capacity");
+        // The very first user we inserted (id=0) must have been evicted.
+        assert!(
+            !cache.contains(&0),
+            "least-recently-used user should have been evicted"
+        );
+        // The most recent user must still be present.
+        assert!(cache.contains(&(PERM_CACHE_CAP as i64)));
     }
 
     #[tokio::test]

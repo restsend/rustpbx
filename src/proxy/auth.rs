@@ -210,22 +210,26 @@ impl AuthModule {
         Some((call_id, from_tag))
     }
 
-    pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
+    /// Build the shared `Digest realm="...", nonce="...", algorithm=MD5`
+    /// challenge string used by both `create_proxy_auth_challenge` and
+    /// `create_www_auth_challenge`. Centralising the format prevents the two
+    /// variants from drifting out of sync.
+    fn build_digest_challenge(&self, realm: &str) -> String {
+        // NOTE: a fresh nonce is generated on every call so callers must not
+        // share the returned string between two distinct challenges.
         let nonce = rsipstack::transaction::random_text(16);
-        let proxy_auth = ProxyAuthenticate::new(format!(
+        format!(
             r#"Digest realm="{}", nonce="{}", algorithm=MD5"#,
             realm, nonce
-        ));
-        Ok(proxy_auth)
+        )
+    }
+
+    pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
+        Ok(ProxyAuthenticate::new(self.build_digest_challenge(realm)))
     }
 
     pub fn create_www_auth_challenge(&self, realm: &str) -> Result<WwwAuthenticate> {
-        let nonce = rsipstack::transaction::random_text(16);
-        let www_auth = WwwAuthenticate::new(format!(
-            r#"Digest realm="{}", nonce="{}", algorithm=MD5"#,
-            realm, nonce
-        ));
-        Ok(www_auth)
+        Ok(WwwAuthenticate::new(self.build_digest_challenge(realm)))
     }
 
     fn is_cluster_peer_source(&self, tx: &Transaction) -> bool {

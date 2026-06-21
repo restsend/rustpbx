@@ -312,8 +312,9 @@ impl EngineCore {
                     crate::utils::spawn(async move {
                         use crate::sipflow::{SipFlowItem, SipFlowMsgType};
                         while let Some((leg, sample, received_at_micros)) = rx.recv().await {
-                            if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample
-                                && let Some(ref rtp_packet) = frame.raw_packet
+                            // `sample` is `Arc<MediaSample>`; deref to read.
+                            if let rustrtc::media::frame::MediaSample::Audio(frame) = &*sample
+                                && let Some(rtp_packet) = &frame.raw_packet
                                 && let Ok(rtp_bytes) = rtp_packet.marshal()
                             {
                                 let leg_id = match leg {

@@ -67,8 +67,16 @@ impl PhoneAuth {
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token);
 
         let expires_at = Instant::now() + Duration::from_secs(TOKEN_TTL_SECS);
+        let now = Instant::now();
 
         if let Ok(mut tokens) = self.tokens.try_write() {
+            // Drop any expired entries so agents that log in once and never
+            // return do not accumulate stale tokens for the lifetime of the
+            // process. This is purely opportunistic GC; correctness is
+            // unaffected because expired tokens are rejected at validate time.
+            tokens.retain(|t| t.agent_id == agent_id || t.expires_at > now);
+            // The retain above kept the old entry for this agent (if any);
+            // drop it so the new token replaces it.
             tokens.retain(|t| t.agent_id != agent_id);
             tokens.push(AgentToken {
                 agent_id: agent_id.to_string(),
@@ -202,6 +210,50 @@ impl MessageInspector for TokenInjector {
 
     fn after_received(&self, msg: SipMessage, _from: &SipAddr) -> SipMessage {
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn generate_token_evicts_expired_entries_for_other_agents() {
+        // Regression: `tokens` used to only retain-by-agent on each
+        // generate_token. Expired entries for OTHER agents accumulated
+        // forever. Verify that generating a new token sweeps them.
+        let auth = PhoneAuth::with_secret("test-secret".to_string());
+
+        // Issue a token for agent-a; then back-date it so it is expired.
+        auth.generate_token("agent-a");
+        {
+            let mut tokens = auth.tokens.write().await;
+            assert_eq!(tokens.len(), 1);
+            tokens[0].expires_at = Instant::now() - Duration::from_secs(1);
+        }
+
+        // Generate a token for agent-b — the expired agent-a entry must be
+        // swept, leaving only the new agent-b entry.
+        auth.generate_token("agent-b");
+
+        let tokens = auth.tokens.read().await;
+        assert_eq!(tokens.len(), 1, "expired entries should be evicted");
+        assert_eq!(tokens[0].agent_id, "agent-b");
+    }
+
+    #[tokio::test]
+    async fn generate_token_replaces_existing_for_same_agent() {
+        // Existing behaviour must be preserved: a fresh token for the same
+        // agent replaces the previous one (no duplicates).
+        let auth = PhoneAuth::with_secret("test-secret".to_string());
+        auth.generate_token("agent-a");
+        auth.generate_token("agent-a");
+        let tokens = auth.tokens.read().await;
+        assert_eq!(
+            tokens.iter().filter(|t| t.agent_id == "agent-a").count(),
+            1,
+            "exactly one entry per agent"
+        );
     }
 }
 

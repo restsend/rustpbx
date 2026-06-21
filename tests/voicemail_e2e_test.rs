@@ -71,22 +71,24 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
     (id, json)
 }
 
-async fn ws_cmd(
-    ws: &mut WsStream,
-    action: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
+async fn ws_cmd(ws: &mut WsStream, action: &str, params: serde_json::Value) -> serde_json::Value {
     let (id, json) = rwi_req(action, params);
     ws.send(Message::Text(json.into())).await.unwrap();
     recv_until(ws, 15, |v| {
-        (v["type"] == "command_completed" || v["type"] == "command_failed")
-            && v["action_id"] == id
+        (v["type"] == "command_completed" || v["type"] == "command_failed") && v["action_id"] == id
     })
     .await
 }
 
-async fn wait_for_event(ws: &mut WsStream, event_name: &str, max_wait_secs: u64) -> serde_json::Value {
-    recv_until(ws, max_wait_secs, |v| v["event_type"].as_str() == Some(event_name)).await
+async fn wait_for_event(
+    ws: &mut WsStream,
+    event_name: &str,
+    max_wait_secs: u64,
+) -> serde_json::Value {
+    recv_until(ws, max_wait_secs, |v| {
+        v["event_type"].as_str() == Some(event_name)
+    })
+    .await
 }
 
 /// Voicemail via RWI originate: verify greeting/beep RTP audio reaches the callee.
@@ -112,18 +114,28 @@ async fn test_voicemail_rwi_originate_rtp_audio() {
     .await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success", "subscribe failed: {v}");
 
     // Originate to the callee (direct call, no voicemail app).
     let call_id = format!("vm-call-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_id,
-        "destination": format!("sip:callee@127.0.0.1:{}", caller_port),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_id,
+            "destination": format!("sip:callee@127.0.0.1:{}", caller_port),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "originate failed: {r}");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
@@ -132,20 +144,33 @@ async fn test_voicemail_rwi_originate_rtp_audio() {
     generate_sine_wav(&tone_path, 440.0, 3.0, 8000, 0.5);
 
     let handle = pbx.registry.get_handle(&call_id).expect("call handle");
-    handle.send_command(CallCommand::Play {
-        leg_id: None,
-        source: DomainMediaSource::File {
-            path: tone_path.to_str().unwrap().to_string(),
-        },
-        options: Some(PlayOptions { loop_playback: false, ..Default::default() }),
-    }).expect("send Play command");
+    handle
+        .send_command(CallCommand::Play {
+            leg_id: None,
+            source: DomainMediaSource::File {
+                path: tone_path.to_str().unwrap().to_string(),
+            },
+            options: Some(PlayOptions {
+                loop_playback: false,
+                ..Default::default()
+            }),
+        })
+        .expect("send Play command");
 
     // Wait for tone to play and be echoed back by the callee.
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     // The callee (echo bot) should have received the tone (RX) and echoed it (TX).
-    assert!(callee.has_rtp_rx(), "callee should have RX RTP. Stats: {}", callee.rtp_stats_summary());
-    assert!(callee.has_rtp_tx(), "callee should have TX RTP. Stats: {}", callee.rtp_stats_summary());
+    assert!(
+        callee.has_rtp_rx(),
+        "callee should have RX RTP. Stats: {}",
+        callee.rtp_stats_summary()
+    );
+    assert!(
+        callee.has_rtp_tx(),
+        "callee should have TX RTP. Stats: {}",
+        callee.rtp_stats_summary()
+    );
     let q = callee.audio_quality_summary();
     tracing::info!("callee audio quality: {q:?}");
     assert!(q.has_audio(), "callee should have non-silent audio");
@@ -158,11 +183,19 @@ async fn test_voicemail_rwi_originate_rtp_audio() {
         let (rx_ch, _tx_ch, _rec_sr) = read_wav_stereo(&record_path);
         assert!(!rx_ch.is_empty(), "RX channel should have samples");
         let rms = helpers::audio_verifier::compute_rms(&rx_ch);
-        tracing::info!("recording RX RMS: {rms:.1} dB, total samples: {}", rx_ch.len());
+        tracing::info!(
+            "recording RX RMS: {rms:.1} dB, total samples: {}",
+            rx_ch.len()
+        );
     }
 
     // Cleanup
-    let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+    let _ = ws_cmd(
+        &mut ws,
+        "call.hangup",
+        serde_json::json!({"call_id": call_id}),
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&temp_dir);
     pbx.stop();
 }
@@ -178,19 +211,29 @@ async fn test_voicemail_route_rtp_audio() {
     let callee = TestUa::callee_with_username(callee_port, 1, "alice").await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success");
 
     // Originate to the callee — this goes through the PBX call handling,
     // not through any app. It tests basic SIP → callee flow with RTP.
     let call_id = format!("vm-route-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_id,
-        "destination": format!("sip:alice@127.0.0.1:{}", callee_port),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_id,
+            "destination": format!("sip:alice@127.0.0.1:{}", callee_port),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
@@ -201,22 +244,40 @@ async fn test_voicemail_route_rtp_audio() {
     generate_sine_wav(&tone_path, 440.0, 3.0, 8000, 0.5);
 
     let handle = pbx.registry.get_handle(&call_id).expect("call handle");
-    handle.send_command(CallCommand::Play {
-        leg_id: None,
-        source: DomainMediaSource::File {
-            path: tone_path.to_str().unwrap().to_string(),
-        },
-        options: Some(PlayOptions { loop_playback: false, ..Default::default() }),
-    }).expect("send Play");
+    handle
+        .send_command(CallCommand::Play {
+            leg_id: None,
+            source: DomainMediaSource::File {
+                path: tone_path.to_str().unwrap().to_string(),
+            },
+            options: Some(PlayOptions {
+                loop_playback: false,
+                ..Default::default()
+            }),
+        })
+        .expect("send Play");
 
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    assert!(callee.has_rtp_rx(), "callee should have RX RTP. Stats: {}", callee.rtp_stats_summary());
-    assert!(callee.has_rtp_tx(), "callee should have TX RTP. Stats: {}", callee.rtp_stats_summary());
+    assert!(
+        callee.has_rtp_rx(),
+        "callee should have RX RTP. Stats: {}",
+        callee.rtp_stats_summary()
+    );
+    assert!(
+        callee.has_rtp_tx(),
+        "callee should have TX RTP. Stats: {}",
+        callee.rtp_stats_summary()
+    );
     let q = callee.audio_quality_summary();
     assert!(q.has_audio(), "callee should have non-silent audio: {q:?}");
 
-    let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+    let _ = ws_cmd(
+        &mut ws,
+        "call.hangup",
+        serde_json::json!({"call_id": call_id}),
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&temp_dir);
     callee.stop();
     pbx.stop();

@@ -182,6 +182,12 @@ struct CommandCacheEntry {
     result: Option<String>,
 }
 
+/// Soft cap that triggers opportunistic eviction of expired dedup-cache
+/// entries inside [`CommandDeduplicationCache::record`]. Picked generously to
+/// avoid any per-command overhead in normal operation while still bounding
+/// memory for long-lived sessions.
+const COMMAND_DEDUP_SOFT_CAP: usize = 256;
+
 #[derive(Clone)]
 struct CommandDeduplicationCache {
     entries: Arc<RwLock<HashMap<String, CommandCacheEntry>>>,
@@ -213,6 +219,13 @@ impl CommandDeduplicationCache {
 
     async fn record(&self, action_id: String, result: Option<String>) {
         let mut entries = self.entries.write().await;
+        // Opportunistic GC: when the cache grows past a soft cap, evict expired
+        // entries before inserting the new one. Keeps memory bounded for
+        // long-lived sessions without adding a background task.
+        if entries.len() >= COMMAND_DEDUP_SOFT_CAP {
+            let now = Instant::now();
+            entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+        }
         entries.insert(
             action_id.clone(),
             CommandCacheEntry {
@@ -295,6 +308,11 @@ struct RingbackState {
     _target_call_id: String,
     _source_call_id: String,
 }
+
+/// Soft cap that triggers opportunistic eviction of stale [`RingbackState`]
+/// entries inside [`RwiCommandProcessor::set_ringback_source`]. RingbackState
+/// has no explicit stop path, so without this the map would grow unbounded.
+const RINGBACK_STATES_SOFT_CAP: usize = 64;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -1686,14 +1704,26 @@ impl RwiCommandProcessor {
                             leg_timeline: crate::callrecord::LegTimeline::default(),
                             details: crate::callrecord::CallDetails {
                                 direction: "outbound".to_string(),
-                                status: if answered { "answered".to_string() } else { "no_answer".to_string() },
+                                status: if answered {
+                                    "answered".to_string()
+                                } else {
+                                    "no_answer".to_string()
+                                },
                                 from_number: Some(cdr_caller.clone()),
                                 to_number: Some(cdr_callee.clone()),
                                 ..Default::default()
                             },
                             extensions: http::Extensions::new(),
                         };
-                        let _ = sender.send(record);
+                        // Bounded channel: drop on Full to bound memory.
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            sender.try_send(record)
+                        {
+                            tracing::warn!(
+                                call_id = %cdr_call_id,
+                                "call record channel full; dropping RWI-originated CDR"
+                            );
+                        }
                         tracing::debug!(call_id = %cdr_call_id, duration = %duration, answered, "CDR sent from RWI originate");
                     }
 
@@ -3873,6 +3903,17 @@ impl RwiCommandProcessor {
             _source_call_id: source_call_id.to_string(),
         };
         let mut states = self.ringback_states.write().await;
+        // Opportunistic GC: drop entries whose target/source call has already
+        // left the registry. RingbackState has no explicit "stop" path, so
+        // without this the map would grow unbounded inside a long-lived
+        // session. Behaviour is unchanged because such entries are stale.
+        if states.len() >= RINGBACK_STATES_SOFT_CAP {
+            let registry = self.call_registry.clone();
+            states.retain(|id, state| {
+                registry.get_handle(id).is_some()
+                    || registry.get_handle(&state._source_call_id).is_some()
+            });
+        }
         states.insert(target_call_id.to_string(), ringback_state);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaRingbackPassthroughStarted {
@@ -5611,6 +5652,112 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Call not found"));
+    }
+
+    /// Verifies the opportunistic GC inside `set_ringback_source`: when the
+    /// soft cap is exceeded, entries whose target/source call has left the
+    /// registry must be evicted while live entries are preserved. This locks
+    /// in the leak fix without changing observable behaviour for live calls.
+    #[tokio::test]
+    async fn test_set_ringback_source_evicts_stale_entries_above_soft_cap() {
+        // Use the public soft-cap constant so the test tracks the production
+        // threshold. We deliberately insert *stale* entries (call ids that are
+        // not registered) directly into the underlying map, then add one live
+        // target/source pair plus one extra insert that should trigger GC.
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+
+        // Seed one live call pair that must survive GC.
+        let _target = create_test_call(
+            &registry,
+            "live-target",
+            "1001",
+            "2000",
+            DialDirection::Inbound,
+        );
+        let _source = create_test_call(
+            &registry,
+            "live-source",
+            "1002",
+            "2001",
+            DialDirection::Inbound,
+        );
+
+        let (processor, _cm) = create_test_processor_with_registry(registry.clone());
+
+        // Pre-populate ringback_states with stale entries above the soft cap.
+        {
+            let mut states = processor.ringback_states.write().await;
+            for i in 0..(RINGBACK_STATES_SOFT_CAP + 1) {
+                states.insert(
+                    format!("stale-target-{i}"),
+                    RingbackState {
+                        _target_call_id: format!("stale-target-{i}"),
+                        _source_call_id: format!("stale-source-{i}"),
+                    },
+                );
+            }
+            assert!(states.len() > RINGBACK_STATES_SOFT_CAP);
+        }
+
+        // Triggering insert: target/source both live, must succeed and run GC.
+        let result = processor
+            .process_command(RwiCommandPayload::SetRingbackSource {
+                target_call_id: "live-target".into(),
+                source_call_id: "live-source".into(),
+            })
+            .await;
+        assert!(result.is_ok(), "{:?}", result);
+
+        // After GC: only the live entry we just inserted must remain.
+        let states = processor.ringback_states.read().await;
+        assert_eq!(
+            states.len(),
+            1,
+            "stale ringback entries were not evicted, remaining: {}",
+            states.len()
+        );
+        assert!(states.contains_key("live-target"));
+        // Sanity: registry still reports the live handles.
+        assert!(registry.get_handle("live-target").is_some());
+        assert!(registry.get_handle("live-source").is_some());
+    }
+
+    /// `CommandDeduplicationCache::record` must opportunistically evict
+    /// expired entries once the soft cap is exceeded, so dedup correctness is
+    /// preserved without unbounded growth.
+    #[tokio::test]
+    async fn test_command_dedup_cache_evicts_expired_entries_above_soft_cap() {
+        let cache = CommandDeduplicationCache::new(60);
+        // Use a backdated `received_at` for inserted entries so they are
+        // already expired when GC runs. We achieve this by inserting normally
+        // then mutating `received_at` through the public API is not possible,
+        // so instead we drive eviction through sheer count: cap is 256; we
+        // insert 256 fresh entries (which are NOT yet expired) plus one more,
+        // then verify the cache size stays bounded by the soft cap.
+        for i in 0..COMMAND_DEDUP_SOFT_CAP {
+            cache
+                .record(format!("action-{i}"), Some(format!("result-{i}")))
+                .await;
+        }
+        // None are expired yet, so the cache must hold all of them.
+        assert_eq!(cache.len().await, COMMAND_DEDUP_SOFT_CAP);
+        // Recording one more triggers cleanup_expired; since nothing is
+        // expired, size grows to SOFT_CAP + 1.
+        cache.record("action-trigger".into(), None).await;
+        assert_eq!(cache.len().await, COMMAND_DEDUP_SOFT_CAP + 1);
+
+        // Now wait past TTL so subsequent records evict everything old.
+        // Use a fresh short-TTL cache to keep the test fast and deterministic.
+        let short = CommandDeduplicationCache::new(0);
+        // TTL of 0 means any entry is immediately expired; record once to
+        // populate, then push past the cap and confirm eviction occurs.
+        for i in 0..(COMMAND_DEDUP_SOFT_CAP + 1) {
+            short.record(format!("old-{i}"), None).await;
+        }
+        // With TTL=0 every entry is expired by the time we cross the cap,
+        // so after the final record the cache must contain only that record.
+        let len = short.len().await;
+        assert!(len <= 1, "expected at most 1 entry after GC, got {}", len);
     }
 
     #[tokio::test]

@@ -1758,19 +1758,18 @@ fn parse_recording_stream_selector(stream: Option<&str>) -> Result<Option<i32>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::console::handlers::test_helpers::{superuser, unprivileged_user};
     use crate::media::wav_reader::SampleFormat;
     use crate::{
         config::ConsoleConfig,
         console::{ConsoleState, middleware::AuthRequired},
-        models::{call_record, migration::Migrator, user},
+        models::{call_record, migration::Migrator},
     };
     use axum::{extract::State, http::StatusCode};
     use chrono::Utc;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
-    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
-
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:")

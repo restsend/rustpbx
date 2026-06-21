@@ -73,24 +73,26 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
 }
 
 /// Send a command and wait for command_completed with matching action_id.
-async fn ws_cmd(
-    ws: &mut WsStream,
-    action: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
+async fn ws_cmd(ws: &mut WsStream, action: &str, params: serde_json::Value) -> serde_json::Value {
     let (id, json) = rwi_req(action, params);
     ws.send(Message::Text(json.into())).await.unwrap();
     recv_until(ws, 10, |v| {
-        (v["type"] == "command_completed" || v["type"] == "command_failed")
-            && v["action_id"] == id
+        (v["type"] == "command_completed" || v["type"] == "command_failed") && v["action_id"] == id
     })
     .await
 }
 
 /// Wait for an unsolicited RWI event (e.g. call_answered, conference_ended_by_host).
 /// RWI event format: {"event_type": "call_answered", ...}
-async fn wait_for_event(ws: &mut WsStream, event_name: &str, max_wait_secs: u64) -> serde_json::Value {
-    recv_until(ws, max_wait_secs, |v| v["event_type"].as_str() == Some(event_name)).await
+async fn wait_for_event(
+    ws: &mut WsStream,
+    event_name: &str,
+    max_wait_secs: u64,
+) -> serde_json::Value {
+    recv_until(ws, max_wait_secs, |v| {
+        v["event_type"].as_str() == Some(event_name)
+    })
+    .await
 }
 
 #[tokio::test]
@@ -110,60 +112,90 @@ async fn test_conference_three_way_audio() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success", "subscribe failed: {v}");
 
     // Originate Alice
     let call_a = Uuid::new_v4().to_string();
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_a,
-        "destination": format!("sip:alice@127.0.0.1:{}", a_port),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_a,
+            "destination": format!("sip:alice@127.0.0.1:{}", a_port),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "originate alice failed: {r}");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
     // Originate Bob
     let call_b = Uuid::new_v4().to_string();
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_b,
-        "destination": format!("sip:bob@127.0.0.1:{}", b_port),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_b,
+            "destination": format!("sip:bob@127.0.0.1:{}", b_port),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "originate bob failed: {r}");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
     // Originate Carol
     let call_c = Uuid::new_v4().to_string();
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_c,
-        "destination": format!("sip:carol@127.0.0.1:{}", c_port),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_c,
+            "destination": format!("sip:carol@127.0.0.1:{}", c_port),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "originate carol failed: {r}");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
     // Create conference with Alice as host
     let conf_id = format!("three-way-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "conference.create", serde_json::json!({
-        "conference_id": conf_id,
-        "host_call_id": call_a,
-        "max_members": 4,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.create",
+        serde_json::json!({
+            "conference_id": conf_id,
+            "host_call_id": call_a,
+            "max_members": 4,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "create conf failed: {r}");
 
     // Add participants
     for call_id in [&call_a, &call_b, &call_c] {
-        let r = ws_cmd(&mut ws, "conference.add", serde_json::json!({
-            "conference_id": conf_id,
-            "call_id": call_id,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "conference.add",
+            serde_json::json!({
+                "conference_id": conf_id,
+                "call_id": call_id,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success", "add {call_id} failed: {r}");
     }
 
@@ -183,25 +215,45 @@ async fn test_conference_three_way_audio() {
     }
 
     // Mute/unmute Bob
-    let r = ws_cmd(&mut ws, "conference.mute", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_b,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.mute",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_b,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "mute bob failed: {r}");
 
-    let r = ws_cmd(&mut ws, "conference.unmute", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_b,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.unmute",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_b,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "unmute bob failed: {r}");
 
     // Destroy
-    let r = ws_cmd(&mut ws, "conference.destroy", serde_json::json!({
-        "conference_id": conf_id,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.destroy",
+        serde_json::json!({
+            "conference_id": conf_id,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "destroy failed: {r}");
 
     // Cleanup
     for call_id in [&call_a, &call_b, &call_c] {
-        let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+        let _ = ws_cmd(
+            &mut ws,
+            "call.hangup",
+            serde_json::json!({"call_id": call_id}),
+        )
+        .await;
     }
 
     alice.stop();
@@ -225,57 +277,98 @@ async fn test_conference_host_end_all() {
     let carol = TestUa::callee_with_username(c_port, 1, "carol").await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success");
 
     let call_a = Uuid::new_v4().to_string();
     let call_b = Uuid::new_v4().to_string();
     let call_c = Uuid::new_v4().to_string();
 
-    for (call_id, port, user) in [(&call_a, a_port, "alice"), (&call_b, b_port, "bob"), (&call_c, c_port, "carol")] {
-        let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-            "call_id": call_id,
-            "destination": format!("sip:{user}@127.0.0.1:{port}"),
-            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-            "context": "default",
-            "timeout_secs": 15,
-        })).await;
+    for (call_id, port, user) in [
+        (&call_a, a_port, "alice"),
+        (&call_b, b_port, "bob"),
+        (&call_c, c_port, "carol"),
+    ] {
+        let r = ws_cmd(
+            &mut ws,
+            "call.originate",
+            serde_json::json!({
+                "call_id": call_id,
+                "destination": format!("sip:{user}@127.0.0.1:{port}"),
+                "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+                "context": "default",
+                "timeout_secs": 15,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
         let _ = wait_for_event(&mut ws, "call_answered", 15).await;
     }
 
     let conf_id = format!("host-end-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "conference.create", serde_json::json!({
-        "conference_id": conf_id, "host_call_id": call_a, "max_members": 4,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.create",
+        serde_json::json!({
+            "conference_id": conf_id, "host_call_id": call_a, "max_members": 4,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
     for call_id in [&call_a, &call_b, &call_c] {
-        let r = ws_cmd(&mut ws, "conference.add", serde_json::json!({
-            "conference_id": conf_id, "call_id": call_id,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "conference.add",
+            serde_json::json!({
+                "conference_id": conf_id, "call_id": call_id,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
     }
 
     // Host ends
-    let r = ws_cmd(&mut ws, "conference.end", serde_json::json!({
-        "conference_id": conf_id, "host_call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.end",
+        serde_json::json!({
+            "conference_id": conf_id, "host_call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success", "host end failed: {r}");
 
     let event = wait_for_event(&mut ws, "conference_ended_by_host", 5).await;
     let removed = event["removed_call_ids"]
-        .as_array().map(|a| a.len()).unwrap_or(0);
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert_eq!(removed, 3, "expected 3 removed call_ids in event: {event}");
 
     // After end, operations should fail
-    let r = ws_cmd(&mut ws, "conference.mute", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.mute",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "error");
 
     for call_id in [&call_a, &call_b, &call_c] {
-        let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+        let _ = ws_cmd(
+            &mut ws,
+            "call.hangup",
+            serde_json::json!({"call_id": call_id}),
+        )
+        .await;
     }
 
     alice.stop();
@@ -297,54 +390,94 @@ async fn test_conference_auto_destroy_on_empty() {
     let bob = TestUa::callee_with_username(b_port, 1, "bob").await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success");
 
     let call_a = Uuid::new_v4().to_string();
     let call_b = Uuid::new_v4().to_string();
 
     for (call_id, port, user) in [(&call_a, a_port, "alice"), (&call_b, b_port, "bob")] {
-        let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-            "call_id": call_id,
-            "destination": format!("sip:{user}@127.0.0.1:{port}"),
-            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-            "context": "default",
-            "timeout_secs": 15,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "call.originate",
+            serde_json::json!({
+                "call_id": call_id,
+                "destination": format!("sip:{user}@127.0.0.1:{port}"),
+                "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+                "context": "default",
+                "timeout_secs": 15,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
         let _ = wait_for_event(&mut ws, "call_answered", 15).await;
     }
 
     let conf_id = format!("auto-destroy-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "conference.create", serde_json::json!({
-        "conference_id": conf_id, "max_members": 4,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.create",
+        serde_json::json!({
+            "conference_id": conf_id, "max_members": 4,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
     for call_id in [&call_a, &call_b] {
-        let r = ws_cmd(&mut ws, "conference.add", serde_json::json!({
-            "conference_id": conf_id, "call_id": call_id,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "conference.add",
+            serde_json::json!({
+                "conference_id": conf_id, "call_id": call_id,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
     }
 
     // Remove all → auto-destroy
-    let _ = ws_cmd(&mut ws, "conference.remove", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_a,
-    })).await;
-    let _ = ws_cmd(&mut ws, "conference.remove", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_b,
-    })).await;
+    let _ = ws_cmd(
+        &mut ws,
+        "conference.remove",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_a,
+        }),
+    )
+    .await;
+    let _ = ws_cmd(
+        &mut ws,
+        "conference.remove",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_b,
+        }),
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let r = ws_cmd(&mut ws, "conference.mute", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.mute",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "error");
 
     for call_id in [&call_a, &call_b] {
-        let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+        let _ = ws_cmd(
+            &mut ws,
+            "call.hangup",
+            serde_json::json!({"call_id": call_id}),
+        )
+        .await;
     }
 
     alice.stop();
@@ -362,39 +495,69 @@ async fn test_conference_timeout_auto_destroy() {
     let alice = TestUa::callee_with_username(a_port, 1, "alice").await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success");
 
     let call_a = Uuid::new_v4().to_string();
-    let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-        "call_id": call_a,
-        "destination": format!("sip:alice@127.0.0.1:{a_port}"),
-        "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-        "context": "default",
-        "timeout_secs": 15,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({
+            "call_id": call_a,
+            "destination": format!("sip:alice@127.0.0.1:{a_port}"),
+            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
     let conf_id = format!("timeout-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "conference.create", serde_json::json!({
-        "conference_id": conf_id, "max_members": 4, "max_duration_secs": 3,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.create",
+        serde_json::json!({
+            "conference_id": conf_id, "max_members": 4, "max_duration_secs": 3,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
-    let r = ws_cmd(&mut ws, "conference.add", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.add",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let r = ws_cmd(&mut ws, "conference.mute", serde_json::json!({
-        "conference_id": conf_id, "call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.mute",
+        serde_json::json!({
+            "conference_id": conf_id, "call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "error");
 
-    let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_a})).await;
+    let _ = ws_cmd(
+        &mut ws,
+        "call.hangup",
+        serde_json::json!({"call_id": call_a}),
+    )
+    .await;
     alice.stop();
     pbx.stop();
 }
@@ -412,51 +575,86 @@ async fn test_conference_non_host_cannot_end() {
     let bob = TestUa::callee_with_username(b_port, 1, "bob").await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let v = ws_cmd(&mut ws, "session.subscribe", serde_json::json!({"contexts": ["default"]})).await;
+    let v = ws_cmd(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
     assert_eq!(v["status"], "success");
 
     let call_a = Uuid::new_v4().to_string();
     let call_b = Uuid::new_v4().to_string();
 
     for (call_id, port, user) in [(&call_a, a_port, "alice"), (&call_b, b_port, "bob")] {
-        let r = ws_cmd(&mut ws, "call.originate", serde_json::json!({
-            "call_id": call_id,
-            "destination": format!("sip:{user}@127.0.0.1:{port}"),
-            "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
-            "context": "default",
-            "timeout_secs": 15,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "call.originate",
+            serde_json::json!({
+                "call_id": call_id,
+                "destination": format!("sip:{user}@127.0.0.1:{port}"),
+                "caller_id": format!("sip:pbx@{}", pbx.sip_host()),
+                "context": "default",
+                "timeout_secs": 15,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
         let _ = wait_for_event(&mut ws, "call_answered", 15).await;
     }
 
     let conf_id = format!("non-host-{}", Uuid::new_v4());
-    let r = ws_cmd(&mut ws, "conference.create", serde_json::json!({
-        "conference_id": conf_id, "host_call_id": call_a, "max_members": 4,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.create",
+        serde_json::json!({
+            "conference_id": conf_id, "host_call_id": call_a, "max_members": 4,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
     for call_id in [&call_a, &call_b] {
-        let r = ws_cmd(&mut ws, "conference.add", serde_json::json!({
-            "conference_id": conf_id, "call_id": call_id,
-        })).await;
+        let r = ws_cmd(
+            &mut ws,
+            "conference.add",
+            serde_json::json!({
+                "conference_id": conf_id, "call_id": call_id,
+            }),
+        )
+        .await;
         assert_eq!(r["status"], "success");
     }
 
     // Bob (non-host) tries to end → should fail
-    let r = ws_cmd(&mut ws, "conference.end", serde_json::json!({
-        "conference_id": conf_id, "host_call_id": call_b,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.end",
+        serde_json::json!({
+            "conference_id": conf_id, "host_call_id": call_b,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "error", "non-host should not be able to end");
 
     // Alice (host) can end
-    let r = ws_cmd(&mut ws, "conference.end", serde_json::json!({
-        "conference_id": conf_id, "host_call_id": call_a,
-    })).await;
+    let r = ws_cmd(
+        &mut ws,
+        "conference.end",
+        serde_json::json!({
+            "conference_id": conf_id, "host_call_id": call_a,
+        }),
+    )
+    .await;
     assert_eq!(r["status"], "success");
 
     for call_id in [&call_a, &call_b] {
-        let _ = ws_cmd(&mut ws, "call.hangup", serde_json::json!({"call_id": call_id})).await;
+        let _ = ws_cmd(
+            &mut ws,
+            "call.hangup",
+            serde_json::json!({"call_id": call_id}),
+        )
+        .await;
     }
 
     alice.stop();

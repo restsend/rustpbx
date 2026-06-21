@@ -1,6 +1,4 @@
-use crate::call::app::{
-    AppAction, ApplicationContext, CallApp, CallAppType, CallController,
-};
+use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType, CallController};
 use async_trait::async_trait;
 
 /// A minimal conference call app.
