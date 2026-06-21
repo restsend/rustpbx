@@ -9,7 +9,7 @@ mod helpers;
 use helpers::cdr_verifier::{CdrExpectation, CdrVerifier};
 use helpers::rwi_collector::RwiCollector;
 use helpers::sipbot_helper::TestUa;
-use helpers::test_server::{TestPbx, TestPbxInject, TEST_TOKEN};
+use helpers::test_server::{TEST_TOKEN, TestPbx, TestPbxInject};
 use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -34,10 +34,13 @@ async fn test_conference_three_party_with_cdr() {
     let carol_port = portpicker::pick_unused_port().unwrap();
 
     let (cdr, cdr_sender) = CdrVerifier::new();
-    let pbx = TestPbx::start_with_inject(sip_port, TestPbxInject {
-        callrecord_sender: Some(cdr_sender),
-        ..Default::default()
-    })
+    let pbx = TestPbx::start_with_inject(
+        sip_port,
+        TestPbxInject {
+            callrecord_sender: Some(cdr_sender),
+            ..Default::default()
+        },
+    )
     .await;
 
     let mut rwi = RwiCollector::connect(&pbx.rwi_url, TEST_TOKEN).await;
@@ -157,18 +160,25 @@ async fn test_conference_three_party_with_cdr() {
     let all_records = cdr.get_all_records().await;
     eprintln!("[test] CDR records: {}", all_records.len());
     for r in &all_records {
-        eprintln!("  call_id={} status={} caller={:.30}",
-            r.call_id, r.details.status, r.caller);
+        eprintln!(
+            "  call_id={} status={} caller={:.30}",
+            r.call_id, r.details.status, r.caller
+        );
     }
     assert!(!all_records.is_empty(), "should have CDR records");
     assert!(all_records.len() >= 3, "should have at least 3 CDR records");
 
     for cid in &call_ids {
-        let record = cdr.wait_for_record(cid, 3).await
+        let record = cdr
+            .wait_for_record(cid, 3)
+            .await
             .unwrap_or_else(|| panic!("CDR not found for {}", cid));
-        cdr.assert_cdr(&record, &CdrExpectation::default()
-            .with_status("answered")
-            .with_min_duration(0.5));
+        cdr.assert_cdr(
+            &record,
+            &CdrExpectation::default()
+                .with_status("answered")
+                .with_min_duration(0.5),
+        );
     }
     eprintln!("[test] ✓ All 3 CDR records verified");
 

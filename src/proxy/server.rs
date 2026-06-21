@@ -815,6 +815,7 @@ impl SipServerBuilder {
                 endpoint.inner.clone(),
                 local_cluster_addr,
                 self.cluster_peers.clone(),
+                cancel_token.child_token(),
             )))
         } else {
             None

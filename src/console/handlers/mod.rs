@@ -189,12 +189,9 @@ pub mod test_helpers {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_helpers::setup_state;
-    use crate::{config::ConsoleConfig, console::ConsoleState, models::migration::Migrator};
+    use super::*;
     use axum::{body::to_bytes, extract::State, http::StatusCode};
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
 
     #[tokio::test]
     async fn pending_reloads_handler_false_initially() {

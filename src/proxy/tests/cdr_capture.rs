@@ -17,7 +17,9 @@ pub struct CdrCapture {
 impl CdrCapture {
     /// Create a new CDR capture with a channel
     pub fn new() -> (Self, CallRecordSender) {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<CallRecord>();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<CallRecord>(
+            crate::callrecord::CALL_RECORD_CHANNEL_CAPACITY,
+        );
         let records = Arc::new(RwLock::new(Vec::new()));
         let records_clone = records.clone();
 
@@ -372,7 +374,7 @@ mod tests {
         let mut record = create_test_record();
         record.call_id = "test-456".to_string();
 
-        sender.send(record.clone()).unwrap();
+        sender.send(record.clone()).await.unwrap();
 
         let found = capture
             .wait_for_record("test-456", Duration::from_secs(1))

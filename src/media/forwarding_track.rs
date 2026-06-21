@@ -1,3 +1,4 @@
+use crate::media::engine::command::SharedMediaSample;
 use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
 use crate::media::{ReceiveTimestampClock, Track, recorder::Leg};
@@ -43,8 +44,8 @@ pub struct ForwardingTrack {
     audio_mapping: Mutex<Option<AudioMapping>>,
     audio_timing: Mutex<Option<RtpTiming>>,
     dtmf_timing: Mutex<Option<RtpTiming>>,
-    recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
-    sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample, u64)>>,
+    recorder_tx: Option<mpsc::Sender<(Leg, SharedMediaSample)>>,
+    sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
     receive_clock: ReceiveTimestampClock,
     recorder_leg: Leg,
     dtmf_mapping: Mutex<Option<DtmfMapping>>,
@@ -61,8 +62,8 @@ impl ForwardingTrack {
     pub fn new(
         track_id: String,
         inner: Arc<dyn MediaStreamTrack>,
-        recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
-        sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample, u64)>>,
+        recorder_tx: Option<mpsc::Sender<(Leg, SharedMediaSample)>>,
+        sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
         recorder_leg: Leg,
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
@@ -255,15 +256,29 @@ impl MediaStreamTrack for ForwardingTrack {
             let sample = self.inner.recv().await?;
             let received_at_micros = self.receive_clock.now_micros();
 
-            if let Some(tx) = &self.recorder_tx {
-                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone())) {
+            // Hot-path optimisation: when one or both capture tees are wired,
+            // wrap the sample in an `Arc` *once* and share it across channels
+            // instead of deep-cloning `MediaSample` (which deep-clones the
+            // `raw_packet.payload` `Vec<u8>`). At most one `MediaSample::clone`
+            // happens per packet (to construct the Arc) and the second
+            // `try_send` only bumps a refcount.
+            let needs_recorder = self.recorder_tx.is_some();
+            let needs_sipflow = self.sipflow_tx.is_some();
+            let shared = if needs_recorder || needs_sipflow {
+                Some(Arc::new(sample.clone()))
+            } else {
+                None
+            };
+            if let (Some(tx), Some(shared)) = (&self.recorder_tx, &shared) {
+                if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared))) {
                     trace!(track_id = %self.track_id, "ForwardingTrack recorder channel full: {e}");
                 }
             }
 
             // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
-            if let Some(tx) = &self.sipflow_tx {
-                if let Err(e) = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros))
+            if let (Some(tx), Some(shared)) = (&self.sipflow_tx, &shared) {
+                if let Err(e) =
+                    tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros))
                 {
                     trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
                 }
@@ -423,7 +438,7 @@ mod tests {
     /// the channel without blocking recv(), and must NOT be dropped.
     #[tokio::test]
     async fn sample_forwarded_to_recorder_channel() {
-        let (tx, mut rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let (tx, mut rx) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample.clone());
 
@@ -480,7 +495,7 @@ mod tests {
     /// blocking the hot path and without interfering with the recorder_tx.
     #[tokio::test]
     async fn sipflow_tx_receives_sample() {
-        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(256);
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample.clone());
 
@@ -513,8 +528,8 @@ mod tests {
     /// must receive its own copy of the sample.
     #[tokio::test]
     async fn both_recorder_and_sipflow_receive_sample() {
-        let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
-        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(256);
+        let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample.clone());
 
@@ -547,9 +562,9 @@ mod tests {
 
     #[tokio::test]
     async fn sipflow_full_channel_does_not_block() {
-        let (sf_tx, _sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(1);
+        let (sf_tx, _sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(1);
 
-        let _ = sf_tx.try_send((Leg::A, audio_sample(0), 1));
+        let _ = sf_tx.try_send((Leg::A, Arc::new(audio_sample(0)), 1));
 
         let track = OneShotTrack::new(audio_sample(0));
         let ft = ForwardingTrack::new(

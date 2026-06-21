@@ -3359,17 +3359,12 @@ async fn assign_user_roles(
 
 #[cfg(test)]
 mod tests {
-    use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
+    use crate::console::handlers::test_helpers::{setup_state, superuser};
 
     use super::*;
-    use crate::config::ConsoleConfig;
-    use crate::models::migration::Migrator;
     use crate::models::rbac;
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
     use std::io::Write;
     use tempfile::NamedTempFile;
-
 
     #[tokio::test]
     async fn list_roles_returns_seeded_roles() {

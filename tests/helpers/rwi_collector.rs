@@ -17,10 +17,7 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio_tungstenite::{
-    tungstenite::Message,
-    MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tracing::{debug, warn};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -50,20 +47,36 @@ fn extract_rwi_event_type(v: &serde_json::Value) -> String {
     }
     // Legacy format: top-level key matching known events
     let known_events = [
-        "call_ringing", "call_answered", "call_early_media",
-        "call_hangup", "call_busy", "call_no_answer",
-        "call_incoming", "call_bridged", "call_unbridged",
+        "call_ringing",
+        "call_answered",
+        "call_early_media",
+        "call_hangup",
+        "call_busy",
+        "call_no_answer",
+        "call_incoming",
+        "call_bridged",
+        "call_unbridged",
         "call_transferred",
-        "record_started", "record_stopped",
-        "media_hold_started", "media_hold_stopped",
-        "media_play_started", "media_play_finished",
-        "dtmf", "dtmf_collected",
-        "conference_created", "conference_destroyed",
-        "queue_joined", "queue_left",
-        "supervisor_listen_started", "supervisor_whisper_started",
-        "supervisor_barge_started", "supervisor_takeover_started",
-        "ivr_step_trace", "ivr_node_entered",
-        "agent_state_changed", "dn_state_changed",
+        "record_started",
+        "record_stopped",
+        "media_hold_started",
+        "media_hold_stopped",
+        "media_play_started",
+        "media_play_finished",
+        "dtmf",
+        "dtmf_collected",
+        "conference_created",
+        "conference_destroyed",
+        "queue_joined",
+        "queue_left",
+        "supervisor_listen_started",
+        "supervisor_whisper_started",
+        "supervisor_barge_started",
+        "supervisor_takeover_started",
+        "ivr_step_trace",
+        "ivr_node_entered",
+        "agent_state_changed",
+        "dn_state_changed",
         "parallel_originate_started",
     ];
     if let Some(obj) = v.as_object() {
@@ -213,9 +226,7 @@ impl RwiCollector {
         let mut errors = Vec::new();
 
         for expected_type in expected {
-            let found = event_types[idx..]
-                .iter()
-                .position(|t| t == expected_type);
+            let found = event_types[idx..].iter().position(|t| t == expected_type);
             match found {
                 Some(pos) => {
                     idx += pos + 1;
@@ -236,7 +247,6 @@ impl RwiCollector {
             event_types.join(" → ")
         );
     }
-
 }
 
 impl Drop for RwiCollector {

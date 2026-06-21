@@ -272,9 +272,12 @@ async fn test_agent_callout_busy() {
         busy_event.to_string().chars().take(300).collect::<String>()
     );
 
-    let is_busy = busy_event.get("call_busy").is_some() || busy_event["event_type"].as_str() == Some("call_busy");
-    let is_hangup = busy_event.get("call_hangup").is_some() || busy_event["event_type"].as_str() == Some("call_hangup");
-    let is_no_answer = busy_event.get("call_no_answer").is_some() || busy_event["event_type"].as_str() == Some("call_no_answer");
+    let is_busy = busy_event.get("call_busy").is_some()
+        || busy_event["event_type"].as_str() == Some("call_busy");
+    let is_hangup = busy_event.get("call_hangup").is_some()
+        || busy_event["event_type"].as_str() == Some("call_hangup");
+    let is_no_answer = busy_event.get("call_no_answer").is_some()
+        || busy_event["event_type"].as_str() == Some("call_no_answer");
     assert!(
         is_busy || is_hangup || is_no_answer,
         "Expected call_busy/call_hangup/call_no_answer, got: {}",

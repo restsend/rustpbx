@@ -164,6 +164,13 @@ impl PresenceManager {
         *lock = Some(tx);
     }
 
+    /// Drop the notify sender so the dispatcher task observes channel-closed.
+    /// Called from `PresenceModule::on_stop` to ensure deterministic shutdown.
+    pub fn clear_notify_tx(&self) {
+        let mut lock = self.notify_tx.write().unwrap();
+        *lock = None;
+    }
+
     pub async fn load_from_db(&self) -> Result<()> {
         if let Some(db) = &self.database {
             let states = presence::Entity::find().all(db).await?;
@@ -267,6 +274,13 @@ impl PresenceManager {
     pub fn set_mwi_tx(&self, tx: tokio::sync::mpsc::Sender<MwiTrigger>) {
         let mut lock = self.mwi_tx.write().unwrap();
         *lock = Some(tx);
+    }
+
+    /// Drop the MWI sender so the dispatch task observes channel-closed.
+    /// Called from `PresenceModule::on_stop` to ensure deterministic shutdown.
+    pub fn clear_mwi_tx(&self) {
+        let mut lock = self.mwi_tx.write().unwrap();
+        *lock = None;
     }
 
     /// Add (or refresh) an MWI subscription for `extension`.
@@ -409,14 +423,25 @@ impl ProxyModule for PresenceModule {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
         self.manager.set_notify_tx(tx);
 
+        // All background tasks below are tied to a child of the server's
+        // cancel token so they shut down deterministically on `on_stop`.
+        let cancel = self.server.cancel_token.child_token();
+
         // Spawn listener for notification requests (e.g. from UI or PUBLISH)
         let module_clone = self.clone();
+        let cancel_notify = cancel.clone();
         crate::utils::spawn(async move {
-            while let Some(identity) = rx.recv().await {
-                let state = module_clone.manager.get_state(&identity);
-                let subscribers = module_clone.manager.get_subscribers(&identity);
-                for sub in subscribers {
-                    let _ = module_clone.send_notify(&identity, &sub, &state).await;
+            loop {
+                tokio::select! {
+                    _ = cancel_notify.cancelled() => break,
+                    identity = rx.recv() => {
+                        let Some(identity) = identity else { break };
+                        let state = module_clone.manager.get_state(&identity);
+                        let subscribers = module_clone.manager.get_subscribers(&identity);
+                        for sub in subscribers {
+                            let _ = module_clone.send_notify(&identity, &sub, &state).await;
+                        }
+                    }
                 }
             }
         });
@@ -425,40 +450,70 @@ impl ProxyModule for PresenceModule {
         let (mwi_tx, mut mwi_rx) = tokio::sync::mpsc::channel::<MwiTrigger>(100);
         self.manager.set_mwi_tx(mwi_tx);
         let mwi_module = self.clone();
+        let cancel_mwi = cancel.clone();
         crate::utils::spawn(async move {
-            while let Some(trigger) = mwi_rx.recv().await {
-                let subscribers = mwi_module.manager.get_mwi_subscribers(&trigger.extension);
-                for sub in subscribers {
-                    let _ = mwi_module.send_mwi_notify(&trigger, &sub).await;
+            loop {
+                tokio::select! {
+                    _ = cancel_mwi.cancelled() => break,
+                    trigger = mwi_rx.recv() => {
+                        let Some(trigger) = trigger else { break };
+                        let subscribers = mwi_module.manager.get_mwi_subscribers(&trigger.extension);
+                        for sub in subscribers {
+                            let _ = mwi_module.send_mwi_notify(&trigger, &sub).await;
+                        }
+                    }
                 }
             }
         });
 
         // Spawn listener for locator events
         let manager = self.manager.clone();
+        let cancel_locator = cancel.clone();
         if let Some(mut rx) = self.server.locator_events.as_ref().map(|tx| tx.subscribe()) {
             crate::utils::spawn(async move {
                 let source = EventSource::Local;
-                while let Ok(event) = rx.recv().await {
-                    manager.handle_locator_event(event, &source).await;
+                loop {
+                    tokio::select! {
+                        _ = cancel_locator.cancelled() => break,
+                        res = rx.recv() => {
+                            if let Ok(event) = res {
+                                manager.handle_locator_event(event, &source).await;
+                            } else {
+                                // channel closed; exit gracefully
+                                break;
+                            }
+                        }
+                    }
                 }
             });
         }
 
         // Spawn background cleanup for expired subscriptions (presence + MWI)
         let manager_cleanup = self.manager.clone();
+        let cancel_cleanup = cancel.clone();
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                manager_cleanup.cleanup_expired();
-                manager_cleanup.cleanup_expired_mwi();
+                tokio::select! {
+                    _ = cancel_cleanup.cancelled() => break,
+                    _ = interval.tick() => {
+                        manager_cleanup.cleanup_expired();
+                        manager_cleanup.cleanup_expired_mwi();
+                    }
+                }
             }
         });
 
         Ok(())
     }
     async fn on_stop(&self) -> Result<()> {
+        // Cancelling the server token's children signals every spawned task
+        // above to exit promptly. We also clear the channel senders held by
+        // the manager so receivers observe channel-closed even without the
+        // select! arms firing.
+        self.manager.clear_notify_tx();
+        self.manager.clear_mwi_tx();
         Ok(())
     }
 

@@ -106,7 +106,10 @@ async fn wait_for_any_event(
                 if json["event_type"].as_str() == Some(event_type) {
                     let mut wrapped = serde_json::Map::new();
                     wrapped.insert((*event_type).to_string(), json);
-                    return ((*event_type).to_string(), serde_json::Value::Object(wrapped));
+                    return (
+                        (*event_type).to_string(),
+                        serde_json::Value::Object(wrapped),
+                    );
                 }
             }
         }

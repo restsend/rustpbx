@@ -94,8 +94,7 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> Vec<Strin
     }
 
     if expected.expect_recording {
-        let has_recording =
-            !record.recorder.is_empty() || record.details.recording_url.is_some();
+        let has_recording = !record.recorder.is_empty() || record.details.recording_url.is_some();
         if !has_recording {
             errors.push("expected recording but none found".to_string());
         }
@@ -107,17 +106,11 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> Vec<Strin
                 let reason_str = format!("{:?}", r);
                 let expected_str = format!("{:?}", reason);
                 if reason_str != expected_str {
-                    errors.push(format!(
-                        "hangup_reason: expected={:?}, got={:?}",
-                        reason, r
-                    ));
+                    errors.push(format!("hangup_reason: expected={:?}, got={:?}", reason, r));
                 }
             }
             None => {
-                errors.push(format!(
-                    "hangup_reason: expected={:?}, got=None",
-                    reason
-                ));
+                errors.push(format!("hangup_reason: expected={:?}, got=None", reason));
             }
         }
     }
@@ -174,8 +167,9 @@ impl CdrVerifier {
     /// Create a new CDR verifier.
     /// Returns (CdrVerifier, CallRecordSender).
     pub fn new() -> (Self, CallRecordSender) {
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::unbounded_channel::<CallRecord>();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<CallRecord>(
+            rustpbx::callrecord::CALL_RECORD_CHANNEL_CAPACITY,
+        );
         let records = Arc::new(RwLock::new(Vec::new()));
         let records_clone = records.clone();
 
@@ -203,11 +197,7 @@ impl CdrVerifier {
     }
 
     /// Wait for a CDR record with specific call_id.
-    pub async fn wait_for_record(
-        &self,
-        call_id: &str,
-        timeout_secs: u64,
-    ) -> Option<CallRecord> {
+    pub async fn wait_for_record(&self, call_id: &str, timeout_secs: u64) -> Option<CallRecord> {
         let start = tokio::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
 
@@ -246,7 +236,10 @@ impl CdrVerifier {
             record.hangup_reason.is_some(),
             "expected hangup_reason to be present"
         );
-        assert!(record_duration_secs(record) > 0, "expected call duration > 0");
+        assert!(
+            record_duration_secs(record) > 0,
+            "expected call duration > 0"
+        );
     }
 
     /// Assert call was rejected — hangup reason present.

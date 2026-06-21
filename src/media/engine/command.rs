@@ -15,18 +15,18 @@ use tokio::sync::mpsc;
 // SipFlowCapture channels — shared types for SipFlow RTP sample forwarding
 // ---------------------------------------------------------------------------
 
+/// Reference-counted media sample used on hot capture paths.
+///
+/// `MediaSample` carries `AudioFrame`/`VideoFrame` whose `raw_packet` field
+/// deep-clones its `Vec<u8>` payload. On the RTP forwarding hot path the same
+/// sample is teed to both the recorder and SipFlow capture channels, so we
+/// share it via `Arc` to make the second `try_send` essentially free.
+pub type SharedMediaSample = Arc<rustrtc::media::frame::MediaSample>;
+
 /// Channel type used to forward raw RTP samples to the SipFlow capture backend.
 /// Matches the type alias in sip_session.rs so the engine can accept it directly.
-pub type SipFlowCaptureTx = mpsc::Sender<(
-    crate::media::recorder::Leg,
-    rustrtc::media::frame::MediaSample,
-    u64,
-)>;
-pub type SipFlowCaptureRx = mpsc::Receiver<(
-    crate::media::recorder::Leg,
-    rustrtc::media::frame::MediaSample,
-    u64,
-)>;
+pub type SipFlowCaptureTx = mpsc::Sender<(crate::media::recorder::Leg, SharedMediaSample, u64)>;
+pub type SipFlowCaptureRx = mpsc::Receiver<(crate::media::recorder::Leg, SharedMediaSample, u64)>;
 
 // ---------------------------------------------------------------------------
 // PcmFrame (used by PcmStream transport)

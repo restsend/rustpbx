@@ -30,9 +30,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
 /// Core license-key verification logic — commerce builds only.
 #[cfg(feature = "commerce")]
 pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) -> Response {
-    use super::addons::{
-        get_config_path, load_document, parse_config_from_str, persist_document,
-    };
+    use super::addons::{get_config_path, load_document, parse_config_from_str, persist_document};
     use crate::console::config_helpers::json_error;
     use toml_edit::{Item, Table};
 

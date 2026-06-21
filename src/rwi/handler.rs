@@ -594,7 +594,9 @@ fn extract_call_id<'a>(cmd: &'a RwiCommandPayload) -> Option<&'a str> {
         } => Some(consultation_call_id.as_str()),
         RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::CallUnhold { call_id } => Some(call_id.as_str()),
-        RwiCommandPayload::SetRingbackSource { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SetRingbackSource { target_call_id, .. } => {
+            Some(target_call_id.as_str())
+        }
         RwiCommandPayload::SetVar { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::MediaPlay(r) => Some(r.call_id.as_str()),
@@ -617,7 +619,9 @@ fn extract_call_id<'a>(cmd: &'a RwiCommandPayload) -> Option<&'a str> {
         RwiCommandPayload::QueueAssignAgent { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::QueueRequeue { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::SupervisorListen { target_call_id, .. } => Some(target_call_id.as_str()),
-        RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.as_str()),
+        RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => {
+            Some(target_call_id.as_str())
+        }
         RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.as_str()),
         RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
             Some(target_call_id.as_str())
