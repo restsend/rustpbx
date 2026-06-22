@@ -27,6 +27,19 @@ exclude = [
     "src/addons/telemetry/**",
     "src/addons/voicemail",
     "src/addons/voicemail/**",
+    "docs",
+    "docs/**",
+    "fixtures",
+    "fixtures/**",
+    "tests",
+    "tests/**",
+    ".github",
+    ".github/**",
+    "Dockerfile",
+    "Dockerfile.*",
+    "Cross.toml",
+    "*.sql",
+    "rustpbx.sqlite3",
 ]
 
 [features]
