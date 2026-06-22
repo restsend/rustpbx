@@ -11,21 +11,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  e2e:
+  e2e-default:
+    name: e2e (default features)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        test:
-          - name: p2p-comprehensive
-            cmd: cargo test --test e2e_p2p_comprehensive_test -- --nocapture
-          - name: p2p-demo
-            cmd: cargo test --test e2e_p2p_demo_test -- --nocapture
-          - name: queue
-            cmd: cargo test --test e2e_queue_comprehensive_test -- --nocapture
-          - name: conference
-            cmd: cargo test --test e2e_conference_test -- --nocapture
-          - name: wholesale
-            cmd: cargo test --features wholesale --test e2e_wholesale_test -- --nocapture
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: install sipbot
+        run: cargo install sipbot || true
+      - name: Run default E2E tests
+        run: cargo test --test e2e_p2p_comprehensive_test --test e2e_p2p_demo_test --test e2e_queue_comprehensive_test --test e2e_conference_test -- --nocapture
+        timeout-minutes: 10
+
+  e2e-wholesale:
+    name: e2e (wholesale)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,12 +39,13 @@ jobs:
           test -n "$CNB_TOKEN" || { echo "CNB_TOKEN secret is required"; exit 1; }
           git config --global credential.helper store
           printf "protocol=https\nhost=cnb.cool\nusername=%s\npassword=%s\n\n" "$CNB_USERNAME" "$CNB_TOKEN" | git credential approve
-      - name: Checkout submodules
+      - name: Checkout wholesale submodule
         run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
+          git submodule sync --recursive src/addons/wholesale
+          git submodule update --init --recursive --depth=1 src/addons/wholesale
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: install sipbot
         run: cargo install sipbot || true
-      - run: ${{ matrix.test.cmd }}
+      - name: Run wholesale E2E tests
+        run: cargo test --features wholesale --test e2e_wholesale_test -- --nocapture
         timeout-minutes: 10
