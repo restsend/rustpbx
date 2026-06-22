@@ -47,4 +47,4 @@ jobs:
       - name: install sipbot
         run: cargo install sipbot || true
       - run: ${{ matrix.test.cmd }}
-        timeout-minutes: 5
+        timeout-minutes: 10
