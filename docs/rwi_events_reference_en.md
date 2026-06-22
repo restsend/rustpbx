@@ -43,7 +43,14 @@ Or via query parameter: `GET /rwi/v1?token=<token>`
 url = "https://myapp.example.com/rwi-events"
 timeout_ms = 5000
 headers = { Authorization = "Bearer your-token" }
-events = ["call_hangup", "record_stopped", "dn_state_changed"]   # empty = all events
+# empty = all events (recommended). To allow-list, use valid event types.
+# Note: agent status is "agent_state_changed" (the old "dn_state_changed" was
+# removed); recording data (download URL, file size) is delivered via
+# "recording_metadata_available" and "record_end" — "record_stopped" alone
+# carries no recording URL.
+# Example allow-list:
+# events = ["call_hangup", "record_stopped", "recording_metadata_available", "record_end", "agent_state_changed"]
+events = []
 ```
 
 | Field | Type | Default | Description |

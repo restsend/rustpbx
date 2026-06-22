@@ -43,7 +43,13 @@ Authorization: Bearer <token>
 url = "https://myapp.example.com/rwi-events"
 timeout_ms = 5000
 headers = { Authorization = "Bearer your-token" }
-events = ["call_hangup", "record_stopped", "dn_state_changed"]   # 空 = 全部事件
+# 空 = 全部事件(推荐)。如需白名单过滤,请使用有效的事件类型。
+# 注意:坐席状态是 "agent_state_changed"(旧的 "dn_state_changed" 已废弃移除);
+# 录音数据(下载 URL、文件大小)通过 "recording_metadata_available" 和
+# "record_end" 投递 —— 仅 "record_stopped" 不带录音 URL。
+# 白名单示例:
+# events = ["call_hangup", "record_stopped", "recording_metadata_available", "record_end", "agent_state_changed"]
+events = []
 ```
 
 ---

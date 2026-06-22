@@ -200,4 +200,98 @@ mod tests {
         let body = &server.received.lock().unwrap()[0];
         assert_eq!(body["event_type"], "call_ringing");
     }
+
+    /// Regression: agent status, recording metadata, and recording finalization
+    /// events must all be deliverable through the RWI webhook. These three event
+    /// types are the ones most commonly missing because of a stale `events`
+    /// allow-list (the docs used to suggest `dn_state_changed`, which no longer
+    /// exists, and omitted the recording-data events).
+    #[tokio::test]
+    async fn test_webhook_receives_agent_and_recording_events() {
+        let server = TestHttpServer::start().await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let now = chrono::Utc::now();
+
+        // agent_state_changed: broadcast-style event (empty call_id, sequence=0,
+        // intentionally NOT deduped by the handler).
+        let agent_entry = EventCacheEntry {
+            sequence: 0,
+            cached_at: now,
+            call_id: String::new(),
+            event: crate::rwi::event::RwiEvent {
+                event_type: "agent_state_changed",
+                call_id: None,
+                payload: serde_json::json!({
+                    "event_type": "agent_state_changed",
+                    "agent_id": "agent-1",
+                    "from_status": "offline",
+                    "to_status": "idle",
+                }),
+            },
+        };
+        // recording_metadata_available: carries the download URL after upload.
+        let rec_meta_entry = EventCacheEntry {
+            sequence: 100,
+            cached_at: now,
+            call_id: "call-1".into(),
+            event: crate::rwi::event::RwiEvent {
+                event_type: "recording_metadata_available",
+                call_id: Some("call-1".into()),
+                payload: serde_json::json!({
+                    "event_type": "recording_metadata_available",
+                    "call_id": "call-1",
+                    "metadata": { "download_url": "https://example.com/rec.wav" },
+                }),
+            },
+        };
+        // record_end: recording finalization (url/duration/file_size).
+        let record_end_entry = EventCacheEntry {
+            sequence: 101,
+            cached_at: now,
+            call_id: "call-1".into(),
+            event: crate::rwi::event::RwiEvent {
+                event_type: "record_end",
+                call_id: Some("call-1".into()),
+                payload: serde_json::json!({
+                    "event_type": "record_end",
+                    "call_id": "call-1",
+                    "url": "https://example.com/rec.wav",
+                    "duration_secs": 12,
+                    "file_size": 1024,
+                }),
+            },
+        };
+
+        tx.send(agent_entry).ok();
+        tx.send(rec_meta_entry).ok();
+        tx.send(record_end_entry).ok();
+
+        wait_for_events(&server.received, 3, 2000).await;
+
+        let received = server.received.lock().unwrap();
+        let types: Vec<String> = received
+            .iter()
+            .map(|v| v["event_type"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            types.contains(&"agent_state_changed".to_string()),
+            "agent_state_changed should be delivered via webhook: {types:?}"
+        );
+        assert!(
+            types.contains(&"recording_metadata_available".to_string()),
+            "recording_metadata_available should be delivered via webhook: {types:?}"
+        );
+        assert!(
+            types.contains(&"record_end".to_string()),
+            "record_end should be delivered via webhook: {types:?}"
+        );
+    }
 }
