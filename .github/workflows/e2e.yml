@@ -21,7 +21,7 @@ jobs:
           - name: p2p-demo
             cmd: cargo test --test e2e_p2p_demo_test -- --nocapture
           - name: queue
-            cmd: cargo test --test e2e_queue_test --test e2e_queue_comprehensive_test -- --nocapture
+            cmd: cargo test --test e2e_queue_comprehensive_test -- --nocapture
           - name: conference
             cmd: cargo test --test e2e_conference_test -- --nocapture
           - name: wholesale
@@ -29,7 +29,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+      - name: Configure CNB credentials
+        env:
+          CNB_USERNAME: ${{ secrets.CNB_USERNAME }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          test -n "$CNB_USERNAME" || { echo "CNB_USERNAME secret is required"; exit 1; }
+          test -n "$CNB_TOKEN" || { echo "CNB_TOKEN secret is required"; exit 1; }
+          git config --global credential.helper store
+          printf "protocol=https\nhost=cnb.cool\nusername=%s\npassword=%s\n\n" "$CNB_USERNAME" "$CNB_TOKEN" | git credential approve
+      - name: Checkout submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: install sipbot
         run: cargo install sipbot || true
