@@ -409,8 +409,8 @@ impl MessageInspector for SipFlow {
         modified_msg
     }
 
-    fn after_received(&self, msg: SipMessage, from: &SipAddr) -> SipMessage {
-        self.record_sip(false, &msg, Some(from));
+    fn after_received(&self, msg: SipMessage, from: Option<&SipAddr>) -> SipMessage {
+        self.record_sip(false, &msg, from);
         let mut modified_msg = msg;
         for inspector in &self.inner.inspectors {
             modified_msg = inspector.after_received(modified_msg, from);

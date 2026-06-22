@@ -208,7 +208,7 @@ impl MessageInspector for TokenInjector {
         msg
     }
 
-    fn after_received(&self, msg: SipMessage, _from: &SipAddr) -> SipMessage {
+    fn after_received(&self, msg: SipMessage, _from: Option<&SipAddr>) -> SipMessage {
         msg
     }
 }

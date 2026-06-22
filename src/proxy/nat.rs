@@ -134,8 +134,9 @@ impl MessageInspector for NatInspector {
         msg
     }
 
-    fn after_received(&self, msg: SipMessage, from: &SipAddr) -> SipMessage {
+    fn after_received(&self, msg: SipMessage, from: Option<&SipAddr>) -> SipMessage {
         let mut msg = msg;
+        let Some(from) = from else { return msg };
         if let SipMessage::Response(ref mut resp) = msg {
             // Check if it's a 2xx for INVITE or a 1xx/2xx response that might be used for target learning
             let kind = resp.status_code.kind();
@@ -205,7 +206,7 @@ mod tests {
             .unwrap()
             .into();
 
-        let rewritten = NatInspector::new().after_received(msg, &from);
+        let rewritten = NatInspector::new().after_received(msg, Some(&from));
         let text = rewritten.to_string();
         let contact_line = text
             .lines()
