@@ -40,7 +40,7 @@ impl MessageInspector for InviteCaptureInspector {
     fn after_received(
         &self,
         msg: rsipstack::sip::SipMessage,
-        from: &rsipstack::transport::SipAddr,
+        from: Option<&rsipstack::transport::SipAddr>,
     ) -> rsipstack::sip::SipMessage {
         if let rsipstack::sip::SipMessage::Request(request) = &msg
             && request.method == rsipstack::sip::Method::Invite
@@ -52,7 +52,7 @@ impl MessageInspector for InviteCaptureInspector {
         {
             let mut lock = self.captured.lock().expect("capture lock poisoned");
             lock.push(CapturedInvite {
-                from_addr: from.clone(),
+                from_addr: from.cloned().unwrap_or_default(),
                 request: request.clone(),
             });
         }

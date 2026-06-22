@@ -90,7 +90,7 @@ impl MessageInspector for CapabilityHeadersInspector {
         msg
     }
 
-    fn after_received(&self, msg: SipMessage, _from: &SipAddr) -> SipMessage {
+    fn after_received(&self, msg: SipMessage, _from: Option<&SipAddr>) -> SipMessage {
         msg
     }
 }

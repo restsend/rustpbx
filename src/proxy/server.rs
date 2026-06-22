@@ -1358,7 +1358,7 @@ impl MessageInspector for CompositeMessageInspector {
     fn after_received(
         &self,
         mut msg: rsipstack::sip::SipMessage,
-        from: &rsipstack::transport::SipAddr,
+        from: Option<&rsipstack::transport::SipAddr>,
     ) -> rsipstack::sip::SipMessage {
         for inspector in &self.inspectors {
             msg = inspector.after_received(msg, from);
