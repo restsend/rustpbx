@@ -1922,9 +1922,11 @@ mod tests {
                 transferred_from: None,
             }
         };
-        let transfer = step_provider.next_action(ctx).await.unwrap();
+        let action = step_provider.next_action(ctx).await.unwrap();
+        // Latest step_ivr_provider.py maps DTMF "2" to a queue action targeting
+        // "sales" (see examples/step_ivr_provider.py::IvrSession.next_action).
         assert!(
-            matches!(transfer.action, EntryAction::Transfer { ref target } if target == "agent")
+            matches!(action.action, EntryAction::Queue { ref target, .. } if target == "sales")
         );
 
         step_provider

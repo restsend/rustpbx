@@ -356,6 +356,10 @@ pub struct QueueApp {
     // ── 升级策略 ──
     /// Skill groups already escalated (to avoid duplicates).
     escalated_groups: Vec<String>,
+    /// RWI gateway captured from the application context (for queue lifecycle
+    /// webhook events). Captured in `on_enter` so that `on_exit` (which has no
+    /// context) can still emit abandon events.
+    rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
 }
 
 impl QueueApp {
@@ -381,6 +385,7 @@ impl QueueApp {
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
+            rwi_gateway: None,
         }
     }
 
@@ -400,6 +405,17 @@ impl QueueApp {
     pub fn with_stats(mut self, stats: Arc<RwLock<HashMap<String, QueueStats>>>) -> Self {
         self.stats = stats;
         self
+    }
+
+    /// Broadcast a queue lifecycle RWI event via the gateway (if captured).
+    /// Mirrors the ACD engine bridge in `cc/mod.rs` (`to_legacy_event` +
+    /// `broadcast_event`) so that queue events look identical regardless of
+    /// which subsystem generated them.
+    fn emit_rwi<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
+        if let Some(ref gw) = self.rwi_gateway {
+            let gw = gw.read();
+            gw.broadcast_event(&crate::rwi::event::to_legacy_event(event, None));
+        }
     }
 
     /// Update queue statistics.
@@ -442,6 +458,21 @@ impl QueueApp {
                 code: Some(486),
             },
         };
+
+        // Emit RWI queue lifecycle event: a fallback action was executed.
+        let action_label = match &action {
+            AppAction::Transfer(t) => format!("transfer:{}", t),
+            AppAction::Hangup { .. } => "hangup".to_string(),
+            _ => "other".to_string(),
+        };
+        self.emit_rwi(&crate::rwi::event::QueueFallbackExecuted {
+            call_id: self.call_id.clone(),
+            queue_id: self.config.name.clone(),
+            action: action_label,
+            reason: "no_agent".to_string(),
+            trace_id: self.call_id.clone(),
+        });
+
         Ok(action)
     }
 
@@ -648,6 +679,13 @@ impl QueueApp {
             "Queue: call abandoned, playing busy prompt or fallback"
         );
 
+        // Emit RWI queue lifecycle event: the call abandoned the queue.
+        self.emit_rwi(&crate::rwi::event::QueueLeft {
+            call_id: self.call_id.clone(),
+            queue_id: queue_id.clone(),
+            reason: Some("abandoned".to_string()),
+        });
+
         let prompts = self
             .plan
             .voice_prompts
@@ -681,6 +719,13 @@ impl QueueApp {
             wait_secs,
             "Queue: call abandoned, playing no-answer prompt or fallback"
         );
+
+        // Emit RWI queue lifecycle event: the call abandoned the queue.
+        self.emit_rwi(&crate::rwi::event::QueueLeft {
+            call_id: self.call_id.clone(),
+            queue_id: queue_id.clone(),
+            reason: Some("abandoned".to_string()),
+        });
 
         let prompts = self
             .plan
@@ -952,6 +997,10 @@ impl CallApp for QueueApp {
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
 
+        // Capture the RWI gateway so that `on_exit` (which has no context) can
+        // still emit abandon events later in the lifecycle.
+        self.rwi_gateway = ctx.rwi_gateway.clone();
+
         ctx.set_queue_name(&queue_id).await;
 
         // Record call offered
@@ -960,6 +1009,12 @@ impl CallApp for QueueApp {
             stats.current_waiting += 1;
         })
         .await;
+
+        // Notify external systems that the call entered the queue.
+        self.emit_rwi(&crate::rwi::event::QueueJoined {
+            call_id: self.call_id.clone(),
+            queue_id: queue_id.clone(),
+        });
 
         // Resolve agents dynamically if skill routing is enabled
         if self.config.skill_routing_enabled {
@@ -1013,7 +1068,12 @@ impl CallApp for QueueApp {
             let strategy = self.config.routing_strategy;
 
             if let Some(agent) = registry
-                .select_agent_with_policy(skills, strategy, self.config.acd_policy.as_deref())
+                .select_agent_with_policy(
+                    skills,
+                    strategy,
+                    self.config.acd_policy.as_deref(),
+                    &self.call_id,
+                )
                 .await
             {
                 info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
@@ -1044,6 +1104,13 @@ impl CallApp for QueueApp {
                     }),
                 )
                 .await?;
+
+                // Emit RWI queue lifecycle event: an agent is being offered.
+                self.emit_rwi(&crate::rwi::event::QueueAgentOffered {
+                    call_id: self.call_id.clone(),
+                    queue_id: queue_id.clone(),
+                    agent_id: agent.agent_id.clone(),
+                });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
                 self.dial_attempts = 1;
@@ -1342,6 +1409,25 @@ impl CallApp for QueueApp {
                             "Queue: call connected to agent (exiting app, bridge is established by SipSession)"
                         );
 
+                        // Emit RWI queue lifecycle events: agent connected, then
+                        // the call left the queue (dequeue). This mirrors the
+                        // ACD engine's Connected/CallDequeued emission.
+                        let connected_agent_id = data
+                            .get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(agent_uri)
+                            .to_string();
+                        self.emit_rwi(&crate::rwi::event::QueueAgentConnected {
+                            call_id: self.call_id.clone(),
+                            queue_id: queue_id.clone(),
+                            agent_id: connected_agent_id.clone(),
+                        });
+                        self.emit_rwi(&crate::rwi::event::QueueLeft {
+                            call_id: self.call_id.clone(),
+                            queue_id: queue_id.clone(),
+                            reason: Some("connected".to_string()),
+                        });
+
                         // Exit the app — the agent is already connected via LegAdd/LegConnected
                         // and the media bridge is set up by SipSession's update_media_path().
                         // No need for Transfer (which would create a new call).
@@ -1363,6 +1449,13 @@ impl CallApp for QueueApp {
                                 )
                                 .await;
                         }
+
+                        // Emit RWI queue lifecycle event: an agent is being offered.
+                        self.emit_rwi(&crate::rwi::event::QueueAgentOffered {
+                            call_id: self.call_id.clone(),
+                            queue_id: queue_id.clone(),
+                            agent_id: agent_id.to_string(),
+                        });
                     }
                     Ok(AppAction::Continue)
                 }
@@ -1456,6 +1549,12 @@ impl CallApp for QueueApp {
                 )
                 .await?;
 
+                // Emit RWI queue lifecycle event: the wait timed out.
+                self.emit_rwi(&crate::rwi::event::QueueWaitTimeout {
+                    call_id: self.call_id.clone(),
+                    queue_id: self.config.name.clone(),
+                });
+
                 self.play_busy_and_then_fallback(ctrl).await
             }
             "escalation_check" => {
@@ -1485,6 +1584,16 @@ impl CallApp for QueueApp {
                 stats.current_waiting = stats.current_waiting.saturating_sub(1);
             })
             .await;
+
+            // Emit RWI queue lifecycle event: the caller abandoned (e.g. hung
+            // up while waiting). The gateway was captured in `on_enter`.
+            // Guarded so that already-connected calls don't emit a duplicate
+            // abandon (they emit QueueLeft{reason:"connected"} instead).
+            self.emit_rwi(&crate::rwi::event::QueueLeft {
+                call_id: self.call_id.clone(),
+                queue_id,
+                reason: Some("abandoned".to_string()),
+            });
         }
 
         self.state = QueueState::Done;

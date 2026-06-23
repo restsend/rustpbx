@@ -268,12 +268,15 @@ pub trait AgentRegistry: Send + Sync {
 
     /// Select best agent with an optional ACD policy hint.
     ///
-    /// Default implementation ignores policy and calls `select_agent`.
+    /// `call_id` identifies the call being routed; addon implementations use it
+    /// to emit scheduling webhook events. Default implementation ignores policy
+    /// and calls `select_agent`.
     async fn select_agent_with_policy(
         &self,
         required_skills: &[String],
         strategy: RoutingStrategy,
         _policy: Option<&str>,
+        _call_id: &str,
     ) -> Option<AgentRecord> {
         self.select_agent(required_skills, strategy).await
     }
@@ -288,11 +291,14 @@ pub trait AgentRegistry: Send + Sync {
 
     /// Resolve target URI with an optional ACD policy hint.
     ///
-    /// Default implementation ignores policy and calls `resolve_target`.
+    /// `call_id` identifies the call being routed; addon implementations use it
+    /// to emit scheduling webhook events. Default implementation ignores policy
+    /// and calls `resolve_target`.
     async fn resolve_target_with_policy(
         &self,
         target_uri: &str,
         _policy: Option<&str>,
+        _call_id: &str,
     ) -> Vec<String> {
         self.resolve_target(target_uri).await
     }

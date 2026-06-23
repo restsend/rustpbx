@@ -27,6 +27,10 @@ impl MigratorTrait for Migrator {
             Box::new(super::add_sip_trunk_rewrite_hostport::Migration),
             Box::new(super::add_metadata_column::Migration),
             Box::new(super::alter_rewrite_columns_length::Migration),
+            // Addon tables — declared here so the core migrator provisions the
+            // `rustpbx_queues` table alongside the rest of the schema. The queue
+            // migration is idempotent (uses `if_not_exists`).
+            Box::new(crate::addons::queue::models::Migration),
         ]
     }
 }

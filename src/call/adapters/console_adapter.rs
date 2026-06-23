@@ -47,7 +47,7 @@ fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
 /// * `Err` - Conversion failed
 pub fn console_to_call_command(
     payload: CallCommandPayload,
-    session_id: &str,
+    _session_id: &str,
 ) -> Result<CallCommand> {
     match payload {
         CallCommandPayload::Hangup {
@@ -63,19 +63,34 @@ pub fn console_to_call_command(
         }
 
         CallCommandPayload::Accept { callee, sdp } => {
-            // Accept is similar to Answer but with additional context
-            // For now, we map it to Answer with the leg being the session itself
-            // The callee and sdp fields are used internally by the session
-            let _ = (callee, sdp); // Acknowledge but don't use for now
+            // The incoming leg of a proxied call is always the "caller" leg.
+            // NOTE: the unified `Answer` command carries only a leg_id; the SDP
+            // is resolved internally by the session (see process_command Answer
+            // branch). Map to the caller leg so a real SIP 200 OK is sent.
+            let _ = (callee, sdp);
             Ok(CallCommand::Answer {
-                leg_id: LegId::new(session_id),
+                leg_id: LegId::new("caller"),
             })
         }
 
-        CallCommandPayload::Transfer { target } => Ok(CallCommand::Transfer {
-            leg_id: LegId::new(session_id),
+        CallCommandPayload::Transfer { target, attended } => Ok(CallCommand::Transfer {
+            leg_id: LegId::new("caller"),
             target,
-            attended: false,
+            attended: attended.unwrap_or(false),
+        }),
+
+        CallCommandPayload::Hold { leg_id } => Ok(CallCommand::Hold {
+            leg_id: LegId::new(leg_id.as_deref().unwrap_or("caller")),
+            music: None,
+        }),
+
+        CallCommandPayload::Unhold { leg_id } => Ok(CallCommand::Unhold {
+            leg_id: LegId::new(leg_id.as_deref().unwrap_or("caller")),
+        }),
+
+        CallCommandPayload::SendDtmf { digits, leg_id } => Ok(CallCommand::SendDtmf {
+            leg_id: LegId::new(leg_id.as_deref().unwrap_or("caller")),
+            digits,
         }),
 
         CallCommandPayload::Mute { track_id } => Ok(CallCommand::MuteTrack { track_id }),
@@ -88,7 +103,10 @@ pub fn console_to_call_command(
             interrupt_on_dtmf,
             loop_playback,
         } => Ok(CallCommand::Play {
-            leg_id: leg_id.map(LegId::new).or(Some(LegId::new(session_id))),
+            // Default to the caller leg when omitted. Using session_id here is a
+            // bug because handle_play only special-cases "caller"/"callee" and
+            // errors out for any other (dynamic) leg id.
+            leg_id: Some(LegId::new(leg_id.as_deref().unwrap_or("caller"))),
             source: convert_console_source(source),
             options: Some(PlayOptions {
                 interrupt_on_dtmf,
@@ -100,6 +118,19 @@ pub fn console_to_call_command(
         CallCommandPayload::StopPlayback { leg_id } => Ok(CallCommand::StopPlayback {
             leg_id: leg_id.map(LegId::new),
         }),
+
+        CallCommandPayload::StartRecording { path, format } => Ok(CallCommand::StartRecording {
+            config: RecordConfig {
+                path: path.unwrap_or_else(|| "recordings/console-recording.wav".to_string()),
+                max_duration_secs: None,
+                beep: true,
+                format,
+            },
+        }),
+
+        CallCommandPayload::StopRecording => Ok(CallCommand::StopRecording),
+        CallCommandPayload::PauseRecording => Ok(CallCommand::PauseRecording),
+        CallCommandPayload::ResumeRecording => Ok(CallCommand::ResumeRecording),
     }
 }
 
@@ -126,6 +157,7 @@ mod tests {
     fn test_transfer_conversion() {
         let payload = CallCommandPayload::Transfer {
             target: "sip:1001@example.com".to_string(),
+            attended: None,
         };
         let cmd = console_to_call_command(payload, "session-123").unwrap();
         if let CallCommand::Transfer {
@@ -134,12 +166,108 @@ mod tests {
             attended,
         } = cmd
         {
-            assert_eq!(leg_id.as_str(), "session-123");
+            assert_eq!(leg_id.as_str(), "caller");
             assert_eq!(target, "sip:1001@example.com");
             assert!(!attended);
         } else {
             panic!("Expected Transfer command");
         }
+    }
+
+    #[test]
+    fn test_transfer_attended_conversion() {
+        let payload = CallCommandPayload::Transfer {
+            target: "sip:1001@example.com".to_string(),
+            attended: Some(true),
+        };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        if let CallCommand::Transfer { attended, .. } = cmd {
+            assert!(attended);
+        } else {
+            panic!("Expected Transfer command");
+        }
+    }
+
+    #[test]
+    fn test_accept_conversion_maps_to_caller_leg() {
+        let payload = CallCommandPayload::Accept {
+            callee: None,
+            sdp: None,
+        };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        if let CallCommand::Answer { leg_id } = cmd {
+            assert_eq!(leg_id.as_str(), "caller");
+        } else {
+            panic!("Expected Answer command");
+        }
+    }
+
+    #[test]
+    fn test_hold_unhold_conversion() {
+        let hold = console_to_call_command(
+            CallCommandPayload::Hold { leg_id: None },
+            "session-123",
+        )
+        .unwrap();
+        if let CallCommand::Hold { leg_id, music } = hold {
+            assert_eq!(leg_id.as_str(), "caller");
+            assert!(music.is_none());
+        } else {
+            panic!("Expected Hold command");
+        }
+
+        let unhold = console_to_call_command(
+            CallCommandPayload::Unhold {
+                leg_id: Some("callee".to_string()),
+            },
+            "session-123",
+        )
+        .unwrap();
+        if let CallCommand::Unhold { leg_id } = unhold {
+            assert_eq!(leg_id.as_str(), "callee");
+        } else {
+            panic!("Expected Unhold command");
+        }
+    }
+
+    #[test]
+    fn test_send_dtmf_conversion() {
+        let payload = CallCommandPayload::SendDtmf {
+            digits: "123".to_string(),
+            leg_id: None,
+        };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        if let CallCommand::SendDtmf { leg_id, digits } = cmd {
+            assert_eq!(leg_id.as_str(), "caller");
+            assert_eq!(digits, "123");
+        } else {
+            panic!("Expected SendDtmf command");
+        }
+    }
+
+    #[test]
+    fn test_recording_conversion() {
+        let start = console_to_call_command(
+            CallCommandPayload::StartRecording {
+                path: Some("/tmp/a.wav".to_string()),
+                format: Some("wav".to_string()),
+            },
+            "session-123",
+        )
+        .unwrap();
+        if let CallCommand::StartRecording { config } = start {
+            assert_eq!(config.path, "/tmp/a.wav");
+            assert_eq!(config.format.as_deref(), Some("wav"));
+        } else {
+            panic!("Expected StartRecording command");
+        }
+
+        let stop = console_to_call_command(CallCommandPayload::StopRecording, "session-123").unwrap();
+        assert!(matches!(stop, CallCommand::StopRecording));
+        let pause = console_to_call_command(CallCommandPayload::PauseRecording, "session-123").unwrap();
+        assert!(matches!(pause, CallCommand::PauseRecording));
+        let resume = console_to_call_command(CallCommandPayload::ResumeRecording, "session-123").unwrap();
+        assert!(matches!(resume, CallCommand::ResumeRecording));
     }
 
     #[test]
@@ -172,7 +300,8 @@ mod tests {
             options,
         } = cmd
         {
-            assert_eq!(leg_id.as_ref().unwrap().as_str(), "session-abc");
+            // Omitted leg_id must default to "caller", never the session id.
+            assert_eq!(leg_id.as_ref().unwrap().as_str(), "caller");
             assert!(matches!(source, MediaSource::File { .. }));
             let opts = options.unwrap();
             assert!(opts.interrupt_on_dtmf);
