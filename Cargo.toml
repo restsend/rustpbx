@@ -191,7 +191,14 @@ sea-orm-migration = { version = "1.1.20", features = [
     "sqlx-postgres",
 ] }
 argon2 = { version = "0.5.3", features = ["password-hash"] }
-object_store = { version = "0.14.0", features = ["aws", "azure", "gcp"] }
+object_store = { version = "0.14.0", default-features = false, features = [
+    "fs",
+    "aws-base",
+    "azure-base",
+    "gcp-base",
+    "reqwest",
+    "ring",
+] }
 humantime = "2.3.0"
 time = "0.3.51"
 serde_with = "3.21.0"
