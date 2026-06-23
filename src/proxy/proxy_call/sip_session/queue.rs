@@ -366,7 +366,11 @@ impl SipSession {
 
                     if let Some(registry) = self.server.agent_registry.clone() {
                         let skill_group_uri = format!("skill-group:{}", skill_group_id);
-                        let agents = registry.resolve_target(&skill_group_uri).await;
+                        // Use the _with_policy variant so skill-group scheduling
+                        // webhook events are emitted for this resolution.
+                        let agents = registry
+                            .resolve_target_with_policy(&skill_group_uri, None, &self.id.0)
+                            .await;
                         if !agents.is_empty() {
                             info!(agents = ?agents, "Resolved skill group to agents");
                             let target = agents[0].clone();

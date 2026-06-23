@@ -50,6 +50,21 @@ pub enum CallCommandPayload {
     },
     Transfer {
         target: String,
+        #[serde(default)]
+        attended: Option<bool>,
+    },
+    Hold {
+        #[serde(default)]
+        leg_id: Option<String>,
+    },
+    Unhold {
+        #[serde(default)]
+        leg_id: Option<String>,
+    },
+    SendDtmf {
+        digits: String,
+        #[serde(default)]
+        leg_id: Option<String>,
     },
     Mute {
         track_id: String,
@@ -70,6 +85,15 @@ pub enum CallCommandPayload {
         #[serde(default)]
         leg_id: Option<String>,
     },
+    StartRecording {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    StopRecording,
+    PauseRecording,
+    ResumeRecording,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]

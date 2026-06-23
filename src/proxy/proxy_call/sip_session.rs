@@ -4248,7 +4248,7 @@ impl SipSession {
                         // Use the registry's resolve_target hook
                         // CC addon implements this to resolve skill-group: URIs
                         let agent_uris = registry
-                            .resolve_target_with_policy(&uri_str, acd_policy)
+                            .resolve_target_with_policy(&uri_str, acd_policy, &self.id.0)
                             .await;
 
                         if agent_uris.is_empty() {
@@ -8281,13 +8281,19 @@ impl SipSession {
     fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
             leg.state = new_state;
+            true
         } else {
-            let mut leg = crate::call::domain::Leg::new(leg_id.clone());
-            leg.state = new_state;
-            self.legs.insert(leg_id.clone(), leg);
+            // Leg does not exist — do NOT silently create a phantom leg.
+            // Returning false lets callers (e.g. the Answer command handler)
+            // surface an explicit failure instead of reporting a silent success.
+            // Callers that genuinely need a new leg must insert it explicitly first
+            // (see e.g. handle_add_leg which inserts before updating state).
+            debug!(
+                leg_id = %leg_id,
+                "update_leg_state: leg not found, refusing to create phantom leg"
+            );
+            false
         }
-
-        true
     }
 
     /// Emit a typed call lifecycle event via the new generic gateway API.

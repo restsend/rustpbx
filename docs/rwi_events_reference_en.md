@@ -657,6 +657,13 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 
 ### 6.6 Queue / ACD Events
 
+> **Event origin**: Queue-related events come in two families, produced by different subsystems and may co-occur:
+> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`), **fires regardless of whether the CC addon is enabled**. Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback.
+> - **`skill_group_*` (skill-group scheduling decisions)**: produced by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent and the ACD produces a scheduling result. **Fires only when the CC addon is active and skill routing is used.**
+>
+> Typical event sequence for a skill-group-routed call:
+> `queue_joined` → `skill_group_candidates_found` → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
+
 All queue events carry flat context fields.
 
 #### queue_joined
@@ -764,6 +771,44 @@ Dispatch: broadcast (no call_id)
 | `queue_id` | String | Queue ID |
 | `alert_type` | String | Alert type |
 | `message` | String | Alert message |
+
+#### skill_group_candidates_found
+
+Dispatch: broadcast
+
+Emitted when the ACD scheduler finds candidate agents for a skill group.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | Option\<String\> | Skill group ID (`Some` for the explicit `skill-group:{id}` path; `None` for autonomous skill routing) |
+| `candidates` | Vec\<String\> | Candidate agent ID list |
+| `trace_id` | String | Trace ID |
+
+#### skill_group_agent_assigned
+
+Dispatch: broadcast
+
+Emitted when the ACD scheduler decides to assign an agent to the call (an ACD `Assign` decision or the first agent selected by the strategy).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | Option\<String\> | Skill group ID |
+| `agent_id` | String | Assigned agent ID |
+| `trace_id` | String | Trace ID |
+
+#### skill_group_no_agent
+
+Dispatch: broadcast
+
+Emitted when the ACD scheduler cannot provide an agent for the skill group.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | Option\<String\> | Skill group ID |
+| `reason` | String | Reason (`no_candidates` no matching agent / `acd_blocked` blocked by ACD policy / `no_strategy_match` strategy picked none) |
 
 ---
 
@@ -1168,6 +1213,9 @@ Dispatch: broadcast
 | `queue_agent_rejected` | owner | yes | +ctx |
 | `queue_fallback_executed` | owner | yes | +ctx |
 | `queue_alert` | broadcast | — | — |
+| `skill_group_candidates_found` | broadcast | yes | — |
+| `skill_group_agent_assigned` | broadcast | yes | — |
+| `skill_group_no_agent` | broadcast | yes | — |
 | `agent_state_changed` | broadcast | optional | — |
 | `dn_state_changed` | broadcast | optional | — |
 | `dn_registered` | broadcast | — | — |
@@ -1325,5 +1373,5 @@ These structs are used as nested references and are not emitted as standalone ev
 ---
 
 **Document version**: v1.0  
-**Last updated**: 2026-06-05  
+**Last updated**: 2026-06-23  
 **Source code**: `src/rwi/proto.rs`
