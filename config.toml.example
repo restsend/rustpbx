@@ -158,11 +158,24 @@ type = "extension"
 #                      # Media upload is handled by [recording] (type = http/s3),
 #                      # not [sipflow.upload].
 
-[callrecord]
-type = "local"
-root = "./config/cdr"
-# Maximum concurrent post-call CDR save/upload/hook tasks. Minimum is 1.
-max_concurrent = 64
+# ── CDR (Call Detail Records) ─────────────────────────────────────────────────
+# Call records are ALWAYS persisted to the database (rustpbx_call_records table)
+# and visible in the Web Console, regardless of this section.
+#
+# [callrecord] is OPTIONAL — it adds a secondary raw-CDR sink on top of the
+# always-on database persistence. Omit this section entirely if you only need
+# database CDRs (the common case).
+#
+# Storage types:
+#   type = "local"    — write detailed CDR JSON files to a local directory
+#   type = "s3"       — upload CDR JSON to S3-compatible object storage
+#   type = "http"     — POST CDR JSON to an HTTP webhook endpoint
+#   type = "database" — write to a separate, minimal CDR table
+#
+# [callrecord]
+# type = "local"
+# root = "./config/cdr"
+# max_concurrent = 64
 
 # ── SipFlow ───────────────────────────────────────────────────────────────────
 # Unified SIP + RTP recording system (default).

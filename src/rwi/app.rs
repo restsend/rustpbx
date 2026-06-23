@@ -1,6 +1,7 @@
 use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
+use crate::models::call_record::extract_sip_username;
 use crate::rwi::RwiEventSpec;
 use crate::rwi::RwiGatewayRef;
 use crate::rwi::gateway::SessionId;
@@ -118,8 +119,8 @@ impl CallApp for RwiApp {
                     caller: Some(context.call_info.caller.clone()),
                     callee: Some(context.call_info.callee.clone()),
                     direction: Some(context.call_info.direction.clone()),
-                    caller_name: Some(context.call_info.caller.clone()),
-                    callee_name: Some(context.call_info.callee.clone()),
+                    caller_name: extract_sip_username(&context.call_info.caller),
+                    callee_name: extract_sip_username(&context.call_info.callee),
                     trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
                     app_id: None,
                     routing_target: None,

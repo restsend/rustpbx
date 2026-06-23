@@ -137,6 +137,57 @@ pub enum ProviderEvent {
     DtmfMenuTimeout,
 }
 
+/// Why an IVR session ended.
+///
+/// Sent to the external provider via `POST {url}/end` as structured JSON so
+/// the provider knows exactly how the call left the IVR.
+///
+/// # JSON wire format
+///
+/// Each variant serializes as `{"reason": "<tag>", "detail": "..."}`:
+///
+/// | Variant | `reason` | `detail` |
+/// |---------|----------|----------|
+/// | `Normal` | `"normal"` | `null` |
+/// | `Transfer("2001")` | `"transfer"` | `"2001"` |
+/// | `TransferToQueue("support")` | `"transfer_to_queue"` | `"support"` |
+/// | `TransferToIvr("main")` | `"transfer_to_ivr"` | `"main"` |
+/// | `Hangup` | `"hangup"` | `null` |
+/// | `UserHangup` | `"user_hangup"` | `null` |
+/// | `Error("...")` | `"error"` | `"..."` |
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionEndReason {
+    /// Machine-readable tag identifying the end reason.
+    pub reason: SessionEndTag,
+    /// Human-readable detail (target number, error message, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Machine-readable tag for [`SessionEndReason`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEndTag {
+    /// IVR completed normally (all steps finished, no transfer).
+    Normal,
+    /// Call transferred to an agent or extension.
+    Transfer,
+    /// Call sent to an ACD queue.
+    TransferToQueue,
+    /// Call jumped to another IVR.
+    TransferToIvr,
+    /// System (PBX) initiated hangup.
+    Hangup,
+    /// User / remote party hung up.
+    UserHangup,
+    /// Error during IVR execution.
+    Error,
+}
+
+/// Legacy enum kept for internal use and trait method signatures.
+///
+/// Use [`SessionEndReason::from_end_reason`] to convert to the serializable
+/// form when sending to an external provider.
 #[derive(Debug, Clone)]
 pub enum EndReason {
     /// IVR completed normally (played all nodes, no transfer).
@@ -155,11 +206,52 @@ pub enum EndReason {
     Error(String),
 }
 
+impl EndReason {
+    /// Convert to the serializable [`SessionEndReason`] form.
+    pub fn to_session_end_reason(&self) -> SessionEndReason {
+        match self {
+            EndReason::Normal => SessionEndReason {
+                reason: SessionEndTag::Normal,
+                detail: None,
+            },
+            EndReason::Transfer(target) => SessionEndReason {
+                reason: SessionEndTag::Transfer,
+                detail: Some(target.clone()),
+            },
+            EndReason::TransferToQueue(target) => SessionEndReason {
+                reason: SessionEndTag::TransferToQueue,
+                detail: Some(target.clone()),
+            },
+            EndReason::TransferToIvr(target) => SessionEndReason {
+                reason: SessionEndTag::TransferToIvr,
+                detail: Some(target.clone()),
+            },
+            EndReason::Hangup => SessionEndReason {
+                reason: SessionEndTag::Hangup,
+                detail: None,
+            },
+            EndReason::UserHangup => SessionEndReason {
+                reason: SessionEndTag::UserHangup,
+                detail: None,
+            },
+            EndReason::Error(msg) => SessionEndReason {
+                reason: SessionEndTag::Error,
+                detail: Some(msg.clone()),
+            },
+        }
+    }
+}
+
 impl From<&str> for EndReason {
     fn from(s: &str) -> Self {
         match s {
             "hangup" => EndReason::Hangup,
             "normal" => EndReason::Normal,
+            "user_hangup" => EndReason::UserHangup,
+            "transfer" => EndReason::Transfer(String::new()),
+            "transfer_to_queue" => EndReason::TransferToQueue(String::new()),
+            "transfer_to_ivr" => EndReason::TransferToIvr(String::new()),
+            "error" => EndReason::Error(String::new()),
             other => EndReason::Error(other.to_string()),
         }
     }
@@ -476,9 +568,11 @@ impl ActionProvider for StepProvider {
 
     async fn on_session_end(&self, reason: &EndReason, session_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/end", self.url);
+        let end_reason = reason.to_session_end_reason();
         let body = serde_json::json!({
             "session_id": session_id,
-            "reason": format!("{:?}", reason),
+            "reason": end_reason.reason,
+            "detail": end_reason.detail,
         });
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         info!(
@@ -534,5 +628,110 @@ impl ActionProvider for StepProvider {
                 "StepProvider on_local_dtmf_match response"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_normal() {
+        let r = EndReason::Normal.to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::Normal);
+        assert!(r.detail.is_none());
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_transfer() {
+        let r = EndReason::Transfer("2001".into()).to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::Transfer);
+        assert_eq!(r.detail.as_deref(), Some("2001"));
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_queue() {
+        let r = EndReason::TransferToQueue("support".into()).to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::TransferToQueue);
+        assert_eq!(r.detail.as_deref(), Some("support"));
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_ivr() {
+        let r = EndReason::TransferToIvr("main".into()).to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::TransferToIvr);
+        assert_eq!(r.detail.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_hangup() {
+        let r = EndReason::Hangup.to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::Hangup);
+        assert!(r.detail.is_none());
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_user_hangup() {
+        let r = EndReason::UserHangup.to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::UserHangup);
+        assert!(r.detail.is_none());
+    }
+
+    #[test]
+    fn test_end_reason_to_session_end_reason_error() {
+        let r = EndReason::Error("boom".into()).to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::Error);
+        assert_eq!(r.detail.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_session_end_tag_serializes_snake_case() {
+        let json = serde_json::to_string(&SessionEndTag::TransferToQueue).unwrap();
+        assert_eq!(json, "\"transfer_to_queue\"");
+
+        let json = serde_json::to_string(&SessionEndTag::UserHangup).unwrap();
+        assert_eq!(json, "\"user_hangup\"");
+    }
+
+    #[test]
+    fn test_session_end_reason_json_roundtrip() {
+        let original = EndReason::Transfer("2001".into()).to_session_end_reason();
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("\"reason\":\"transfer\""));
+        assert!(json.contains("\"detail\":\"2001\""));
+
+        let parsed: SessionEndReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reason, SessionEndTag::Transfer);
+        assert_eq!(parsed.detail.as_deref(), Some("2001"));
+    }
+
+    #[test]
+    fn test_session_end_reason_skips_none_detail() {
+        let r = EndReason::Normal.to_session_end_reason();
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("detail"));
+    }
+
+    #[test]
+    fn test_end_reason_from_str_all_variants() {
+        assert!(matches!(EndReason::from("normal"), EndReason::Normal));
+        assert!(matches!(EndReason::from("hangup"), EndReason::Hangup));
+        assert!(matches!(EndReason::from("user_hangup"), EndReason::UserHangup));
+        assert!(matches!(EndReason::from("transfer"), EndReason::Transfer(_)));
+        assert!(matches!(
+            EndReason::from("transfer_to_queue"),
+            EndReason::TransferToQueue(_)
+        ));
+        assert!(matches!(
+            EndReason::from("transfer_to_ivr"),
+            EndReason::TransferToIvr(_)
+        ));
+        assert!(matches!(EndReason::from("error"), EndReason::Error(_)));
+    }
+
+    #[test]
+    fn test_end_reason_from_str_unknown_falls_back_to_error() {
+        let r = EndReason::from("something_weird");
+        assert!(matches!(r, EndReason::Error(ref e) if e == "something_weird"));
     }
 }

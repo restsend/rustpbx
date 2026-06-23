@@ -344,10 +344,12 @@
                                 <input type="text" x-model="platformDraft.log_file" :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/var/log/rustpbx.log" />
+                                <p class="mt-1 text-xs text-sky-600">Leave empty to log to stderr. With rotation, filename becomes prefix.YYYY-MM-DD</p>
                             </div>
                         </div>
-                        <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.external_ip" | t }}</label>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.external_ip" | t }}</label>
+                                <p class="text-xs text-sky-600 mb-1">Required if behind NAT — advertises your public IP in SDP for proper media routing</p>
                             <div class="mt-1 flex gap-2">
                                 <label class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition"
                                     :class="platformDraft.external_ip_mode === 'none' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
@@ -411,6 +413,7 @@
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="42000" />
                             </div>
+                            <p class="text-xs text-sky-600 md:col-span-2 -mt-2">Recommend at least 30,000 ports (e.g. 12000–42000) for concurrent calls behind NAT</p>
                         </div>
                         <div
                             class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
@@ -847,6 +850,7 @@
                                     <input type="url" x-model="proxyDraft.http_router.url" :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="https://api.example.com/route-call">
+                                    <p class="mt-1 text-xs text-sky-600">Receives JSON POST with call data, returns action (forward/reject) and targets</p>
                                 </div>
                                 <div class="md:col-span-1">
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
@@ -1341,6 +1345,7 @@
                                     :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="16000" />
+                                <p class="mt-1 text-[11px] text-sky-600">8000 for PSTN, 16000 for wideband, 48000 for Opus</p>
                             </div>
                             <div>
                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Packet
@@ -1349,6 +1354,7 @@
                                     :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="200" />
+                                <p class="mt-1 text-[11px] text-sky-600">Duration of each recorded audio packet. 20ms recommended for PSTN</p>
                             </div>
                             <div>
                                 <label
@@ -1621,21 +1627,25 @@
                                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Max CPS per IP</label>
                                         <input type="number" min="0" x-model.number="securityDraft.dos_max_cps_per_ip" :disabled="securityProcessing"
                                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-1 text-xs text-sky-600">Max new INVITE requests per second from a single IP</p>
                                     </div>
                                     <div>
                                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Max concurrent calls per IP</label>
                                         <input type="number" min="0" x-model.number="securityDraft.dos_max_concurrent_per_ip" :disabled="securityProcessing"
                                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-1 text-xs text-sky-600">Max simultaneous active calls from a single IP</p>
                                     </div>
                                     <div>
                                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Scan probe threshold</label>
                                         <input type="number" min="0" x-model.number="securityDraft.dos_scan_probe_threshold" :disabled="securityProcessing"
                                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-1 text-xs text-sky-600">Failed requests before IP is blocked. 0 = disable scan detection</p>
                                     </div>
                                     <div>
                                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Scan block duration (seconds)</label>
                                         <input type="number" min="0" x-model.number="securityDraft.dos_scan_block_duration_secs" :disabled="securityProcessing"
                                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <p class="mt-1 text-xs text-sky-600">How long to block IP after exceeding probe threshold</p>
                                     </div>
                                 </div>
                             </div>
