@@ -22,6 +22,7 @@ use crate::call::app::{
     AppAction, ApplicationContext, CallApp, CallAppType, CallController, DtmfCollectConfig,
 };
 use crate::callrecord::CallRecordHangupReason;
+use crate::models::call_record::extract_sip_username;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -383,8 +384,8 @@ impl IvrApp {
                 node_type: "menu".to_string(),
                 app_id: self.definition.name.clone(),
                 entry_time: chrono::Utc::now().to_rfc3339(),
-                caller_name: Some(ctx.call_info.caller.clone()),
-                callee_name: Some(ctx.call_info.callee.clone()),
+                caller_name: extract_sip_username(&ctx.call_info.caller),
+                callee_name: extract_sip_username(&ctx.call_info.callee),
                 routing_target: Some(menu_key.to_string()),
                 previous_node_id: previous_node,
                 extra: None,

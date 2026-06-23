@@ -183,10 +183,6 @@ impl RecordingPolicy {
 
     pub fn uploads_recording(&self) -> bool {
         self.enabled.unwrap_or(false)
-            && matches!(
-                self.recording_type.unwrap_or_default(),
-                RecordingType::Http | RecordingType::S3
-            )
     }
 
     pub fn ensure_defaults(&mut self) -> bool {

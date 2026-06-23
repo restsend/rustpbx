@@ -153,7 +153,7 @@ default('RustPBX') }}{% endblock %}
                     <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_general" | t }}</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_trunk_name" | t }}
+                            {{ "sip_trunk_detail.field_trunk_name" | t }} <span class="text-rose-500">*</span>
                             <input type="text" x-model.trim="form.name" maxlength="120" required
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_trunk_name_placeholder" | t }}">
@@ -200,22 +200,25 @@ default('RustPBX') }}{% endblock %}
                             </select>
                         </label>
                         <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_sip_server" | t }}
+                            {{ "sip_trunk_detail.field_sip_server" | t }} <span class="text-rose-500">*</span>
                             <input type="text" x-model.trim="form.sip_server" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_sip_server_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Hostname or IP of the SIP provider, e.g. sip.provider.com:5060</p>
                         </label>
                         <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_allowed_ips" | t }}
                             <textarea rows="4" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
+                            <p class="text-xs text-sky-600">One IP, CIDR range, or hostname per line. Leave empty to allow all</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_outbound_proxy" | t }}
                             <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Optional intermediary proxy, e.g. proxy.carrier.com:5060</p>
                         </label>
                         <div class="flex flex-col gap-2">
                             <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t
@@ -254,12 +257,14 @@ default('RustPBX') }}{% endblock %}
                             <input type="text" x-model.trim="form.auth_username" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_auth_username_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Required when the SIP provider requires authentication</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_auth_password" | t }}
                             <input type="text" x-model.trim="form.auth_password" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_auth_password_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">SIP password for authenticating with the provider</p>
                         </label>
                     </div>
                 </section>
@@ -297,18 +302,21 @@ default('RustPBX') }}{% endblock %}
                             <input type="number" min="0" step="1" x-model="form.max_cps"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_max_cps_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Max new call attempts per second through this trunk</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_concurrent" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_concurrent"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Max simultaneous active calls on this trunk</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_duration" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_call_duration"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
+                            <p class="text-xs text-sky-600">Max call duration in seconds. 0 = unlimited</p>
                         </label>
                     </div>
                 </section>
@@ -322,6 +330,7 @@ default('RustPBX') }}{% endblock %}
                             <textarea rows="4" x-model="form.did_numbers"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
+                            <p class="text-xs text-sky-600">One DID number per line, e.g. +14155551234</p>
                         </label>
                     </div>
                 </section>
@@ -433,6 +442,7 @@ default('RustPBX') }}{% endblock %}
                                 <option value="none">None</option>
                                 <option value="force_transcode">Force Transcode</option>
                             </select>
+                            <p class="text-xs text-sky-600">Auto: bridge when needed. Bypass: direct media. None: signalling only</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_video_policy" | t }}

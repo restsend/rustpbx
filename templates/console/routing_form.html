@@ -135,7 +135,7 @@
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                                "routing_form.name" | t }}</label>
+                                "routing_form.name" | t }} <span class="text-rose-500">*</span></label>
                             <input type="text" name="name" x-model="route.name"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "routing_form.name_placeholder" | t }}' required>
@@ -167,6 +167,7 @@
                                 "routing_form.priority" | t }}</label>
                             <input type="number" min="0" name="priority" x-model.number="route.priority"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <p class="text-xs text-sky-600 mt-1">Higher priority routes are evaluated first</p>
                         </div>
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
@@ -597,6 +598,7 @@
                                 <input type="number" min="0" step="1" x-model.number="trunk.weight"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder='{{ "routing_form.weight_placeholder" | t }}'>
+                                <p class="text-xs text-sky-600 md:col-span-2 -mt-2">Higher weight = more traffic allocated to this trunk</p>
                                 <button type="button" @click="removeTrunkAssignment(index)"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
                                     {{ "routing_form.btn_remove" | t }}

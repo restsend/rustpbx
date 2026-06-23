@@ -304,15 +304,12 @@ impl AppStateBuilder {
         let mut callrecord_manager = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
-        } else if config.callrecord.is_some()
-            || sipflow_upload_config.is_some()
-            || recording_upload_policy.is_some()
-        {
-            // Build a CallRecordManager when either:
-            //  - [callrecord] is configured (CDR JSON files / S3), or
-            //  - [sipflow.upload] is configured (post-call WAV upload)
-            //  - [recording].type exports live recorder WAV after call completion.
-            // DatabaseHook is always included so call records reach the DB.
+        } else {
+            // Always build a CallRecordManager — DatabaseHook persists every
+            // call to the rustpbx_call_records table unconditionally.
+            // [callrecord], [sipflow.upload], and [recording] only add
+            // optional extra sinks (JSON files, S3, HTTP, WAV upload, etc.)
+            // on top of the always-on database persistence.
             let mut builder =
                 CallRecordManagerBuilder::new().with_cancel_token(token.child_token());
 
@@ -355,8 +352,6 @@ impl AppStateBuilder {
             callrecord_stats = Some(manager.stats.clone());
             callrecord_manager = Some(manager);
             Some(sender)
-        } else {
-            None
         };
 
         #[cfg(feature = "console")]

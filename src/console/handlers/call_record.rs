@@ -1266,7 +1266,7 @@ fn build_record_payload(
         "status": record.status,
         "from": record.from_number,
         "to": record.to_number,
-        "cnam": record.caller_name,
+        "caller_name": record.caller_name,
         "agent": record.agent_name,
         "agent_extension": extension_number,
         "department": department_name,

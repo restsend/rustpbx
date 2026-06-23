@@ -230,6 +230,52 @@ pub fn extract_sip_username(input: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_sip_username_full_uri() {
+        assert_eq!(
+            extract_sip_username("sip:alice@192.168.1.1:5060"),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            extract_sip_username("sips:bob@example.com"),
+            Some("bob".to_string())
+        );
+        assert_eq!(
+            extract_sip_username("sip:+8613800138000@10.0.0.1"),
+            Some("+8613800138000".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_sip_username_plain_number() {
+        assert_eq!(extract_sip_username("1001"), Some("1001".to_string()));
+        assert_eq!(extract_sip_username("+8613800138000"), Some("+8613800138000".to_string()));
+    }
+
+    #[test]
+    fn extract_sip_username_tel_uri() {
+        assert_eq!(extract_sip_username("tel:12345"), Some("12345".to_string()));
+    }
+
+    #[test]
+    fn extract_sip_username_empty_and_whitespace() {
+        assert_eq!(extract_sip_username(""), None);
+        assert_eq!(extract_sip_username("   "), None);
+    }
+
+    #[test]
+    fn extract_sip_username_with_whitespace_trim() {
+        assert_eq!(
+            extract_sip_username("  sip:alice@example.com  "),
+            Some("alice".to_string())
+        );
+    }
+}
+
 fn normalize_endpoint_uri(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

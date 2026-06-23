@@ -12,6 +12,7 @@ use crate::call::runtime::{
     MediaCapabilityCheck, SessionId,
 };
 use crate::call::{DialStrategy, Location};
+use crate::models::call_record::extract_sip_username;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 
@@ -890,8 +891,8 @@ impl SipSession {
             let meta = crate::rwi::proto::CallMeta {
                 caller: Some(original_caller.clone()),
                 callee: Some(original_callee.clone()),
-                caller_name: Some(original_caller.clone()),
-                callee_name: Some(original_callee.clone()),
+                caller_name: extract_sip_username(&original_caller),
+                callee_name: extract_sip_username(&original_callee),
                 direction: Some(context.dialplan.direction.to_string()),
                 trunk: context
                     .metadata
