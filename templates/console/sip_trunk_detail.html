@@ -437,6 +437,7 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_media_mode" | t }}
                             <select x-model="form.media_mode"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">Default</option>
                                 <option value="auto">Auto</option>
                                 <option value="bypass">Bypass</option>
                                 <option value="none">None</option>
@@ -453,18 +454,15 @@ default('RustPBX') }}{% endblock %}
                                 <option value="strip">Strip</option>
                             </select>
                         </label>
-                        <div class="flex items-center gap-2">
-                            <button type="button" @click="form.recording_enabled = !form.recording_enabled"
-                                class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
-                                :class="form.recording_enabled ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
-                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8" x-show="form.recording_enabled"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" x-show="!form.recording_enabled"></path>
-                                </svg>
-                                <span x-text="form.recording_enabled ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
-                            </button>
-                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_recording" | t }}</span>
-                        </div>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_recording" | t }}
+                            <select x-model="form.recording_enabled"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">Default</option>
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                        </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_audio_codecs" | t }}
                             <textarea rows="3" x-model="form.audio_codecs"
@@ -606,8 +604,8 @@ default('RustPBX') }}{% endblock %}
                 register_enabled: false,
                 register_expires: '',
                 register_extra_headers: '',
-                recording_enabled: false,
-                media_mode: 'auto',
+                recording_enabled: '',
+                media_mode: '',
                 video_policy: '',
                 audio_codecs: '',
                 video_codecs: '',
@@ -681,8 +679,8 @@ default('RustPBX') }}{% endblock %}
                 try {
                     const meta = typeof model.metadata === 'string' ? JSON.parse(model.metadata) : (model.metadata || {});
                     const sbc = meta.sbc || {};
-                    this.form.recording_enabled = sbc.recording_enabled === true;
-                    this.form.media_mode = sbc.media_mode || 'auto';
+                    this.form.recording_enabled = typeof sbc.recording_enabled === 'boolean' ? String(sbc.recording_enabled) : '';
+                    this.form.media_mode = typeof sbc.media_mode === 'string' ? sbc.media_mode : '';
                     this.form.video_policy = sbc.video_policy || '';
                     this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
                     this.form.video_codecs = Array.isArray(sbc.video_codecs) ? sbc.video_codecs.join('\n') : '';
@@ -891,8 +889,14 @@ default('RustPBX') }}{% endblock %}
                 try {
                     const meta = this.form.metadata.trim() ? JSON.parse(this.form.metadata.trim()) : {};
                     if (!meta.sbc) meta.sbc = {};
-                    meta.sbc.recording_enabled = this.form.recording_enabled;
-                    if (this.form.media_mode && this.form.media_mode !== 'auto') {
+                    if (this.form.recording_enabled === 'true') {
+                        meta.sbc.recording_enabled = true;
+                    } else if (this.form.recording_enabled === 'false') {
+                        meta.sbc.recording_enabled = false;
+                    } else {
+                        delete meta.sbc.recording_enabled;
+                    }
+                    if (this.form.media_mode) {
                         meta.sbc.media_mode = this.form.media_mode;
                     } else {
                         delete meta.sbc.media_mode;
