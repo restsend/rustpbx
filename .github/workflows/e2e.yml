@@ -17,8 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: install sipbot
-        run: cargo install sipbot || true
       - name: Run default E2E tests
         run: cargo test --test e2e_p2p_comprehensive_test --test e2e_p2p_demo_test --test e2e_queue_comprehensive_test --test e2e_conference_test -- --nocapture
         timeout-minutes: 10
@@ -44,8 +42,6 @@ jobs:
           git submodule sync --recursive src/addons/wholesale
           git submodule update --init --recursive --depth=1 src/addons/wholesale
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: install sipbot
-        run: cargo install sipbot || true
       - name: Run wholesale E2E tests
         run: cargo test --features wholesale --test e2e_wholesale_test -- --nocapture
         timeout-minutes: 10

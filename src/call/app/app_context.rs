@@ -149,6 +149,8 @@ pub struct PendingQueuePlan {
 impl ApplicationContext {
     /// Create a new application context.
     pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
             queue_name: Arc::new(RwLock::new(None)),
