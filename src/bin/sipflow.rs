@@ -125,6 +125,10 @@ fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let args = Args::parse();
 
     // Initialize tracing: try log file, fall back to stdout on permission error

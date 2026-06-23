@@ -5,6 +5,10 @@ use std::env;
 use std::fs;
 
 fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {

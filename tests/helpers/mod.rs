@@ -8,6 +8,13 @@
 // instead of littering individual items with attributes.
 #![allow(dead_code)]
 
+#[ctor::ctor(unsafe)]
+fn init_rustls_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider for integration tests");
+}
+
 pub mod audio_verifier;
 pub mod cdr_verifier;
 pub mod rwi_collector;
