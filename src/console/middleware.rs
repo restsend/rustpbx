@@ -154,6 +154,8 @@ mod tests {
     use chrono::Utc;
     #[cfg(feature = "addon-wholesale")]
     use sea_orm::{ActiveValue::Set, EntityTrait};
+    #[cfg(feature = "addon-wholesale")]
+    use sea_orm_migration::MigratorTrait;
 
     #[tokio::test]
     async fn superuser_has_no_agent_id() {
@@ -166,6 +168,9 @@ mod tests {
     #[cfg(feature = "addon-wholesale")]
     async fn user_with_agent_record_resolves_agent_id() {
         let state = setup_state().await;
+        crate::addons::wholesale::migration::Migrator::up(state.db(), None)
+            .await
+            .expect("wholesale migrations");
         let now = Utc::now();
         let inserted = wholesale_agent::Entity::insert(wholesale_agent::ActiveModel {
             user_id: Set(42),
