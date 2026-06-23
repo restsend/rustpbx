@@ -995,6 +995,7 @@ impl CallApp for StepIvrApp {
                 }
             }
             crate::call::app::ExitReason::Error(e) => EndReason::Error(e),
+            crate::call::app::ExitReason::Cancelled => EndReason::Hangup,
             _ => EndReason::Normal,
         };
         let session_id = self

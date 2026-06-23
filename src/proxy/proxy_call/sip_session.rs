@@ -2586,6 +2586,12 @@ impl SipSession {
                     .collect();
                 self.pending_hangup.extend(callee_ids);
                 self.cancel_token.cancel();
+                if self.app_runtime.is_running() {
+                    let _ = self
+                        .app_runtime
+                        .stop_app(Some("caller_hangup".to_string()))
+                        .await;
+                }
             }
             _ => {}
         }
@@ -7132,6 +7138,11 @@ impl SipSession {
         debug!(session_id = %self.context.session_id, "Cleaning up session");
 
         self.stop_caller_ingress_monitor().await;
+
+        // Ensure the running app (IVR/voicemail/queue) is notified of session end.
+        if self.app_runtime.is_running() {
+            let _ = self.app_runtime.stop_app(None).await;
+        }
 
         if self.media.recording_state.is_active() {
             let _ = self.stop_recording().await;

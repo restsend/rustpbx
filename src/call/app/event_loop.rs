@@ -54,7 +54,6 @@ impl AppEventLoop {
                     action = self.handle_next_event().await?;
                 }
                 AppAction::Exit => {
-                    self.app.on_exit(ExitReason::Normal).await?;
                     break;
                 }
                 AppAction::Hangup { reason, code } => {
@@ -120,14 +119,16 @@ impl AppEventLoop {
                             &self.context
                         ).await
                     }
-                    None => Ok(AppAction::Exit),
+                    None => {
+                        self.app.on_exit(ExitReason::Normal).await?;
+                        Ok(AppAction::Exit)
+                    }
                 }
             }
             Some(timer_id) = self.fired_timer_rx.recv() => {
                 self.app.on_timeout(timer_id, &mut self.controller, &self.context).await
             }
             _ = self.cancel_token.cancelled() => {
-                self.app.on_exit(ExitReason::Cancelled).await?;
                 Ok(AppAction::Exit)
             }
         }
