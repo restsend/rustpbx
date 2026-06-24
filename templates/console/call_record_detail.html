@@ -2467,6 +2467,21 @@
                     return srcIsPbx ? 'out' : 'in';
                 }
 
+                // B2BUA leg-semantic fallback: when address-based detection is
+                // ambiguous (e.g. callee and PBX share the same host/IP, so ports
+                // are stripped and both look like the PBX), fall back to the
+                // authoritative `role` + message type.  In a B2BUA each leg has a
+                // deterministic direction:
+                //   caller leg: requests come IN, responses go OUT
+                //   callee leg: requests go OUT, responses come IN
+                const legRole = this.normalizeLegRole(entry?.role);
+                if (legRole === 'caller') {
+                    return meta?.isResponse ? 'out' : 'in';
+                }
+                if (legRole === 'callee') {
+                    return meta?.isResponse ? 'in' : 'out';
+                }
+
                 if (meta?.isRequest) {
                     if (this.isPbxAlias(meta.requestUriHost)) {
                         return 'in';

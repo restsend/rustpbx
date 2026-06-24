@@ -606,6 +606,16 @@ impl EntryAction {
     pub fn is_dtmf_menu(&self) -> bool {
         matches!(self, EntryAction::DtmfMenu { .. })
     }
+
+    pub fn is_interruptible(&self) -> bool {
+        matches!(
+            self,
+            EntryAction::Prompt {
+                interruptible: true,
+                ..
+            }
+        )
+    }
 }
 
 #[cfg(test)]

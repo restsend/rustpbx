@@ -1,6 +1,6 @@
 use super::locator::{
-    Locator, RealmChecker, UNREGISTER_GRACE_SECS, choose_registered_aor, is_local_realm,
-    is_location_expired, is_webrtc_invalid_host, now_epoch_secs, sort_locations_by_recency,
+    Locator, RealmChecker, UNREGISTER_GRACE_SECS, choose_registered_aor, invalid_host_fallback,
+    is_local_realm, is_location_expired, now_epoch_secs, sort_locations_by_recency,
 };
 use crate::call::Location;
 use anyhow::Result;
@@ -534,12 +534,32 @@ impl Locator for DbLocator {
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
 
-        if models.is_empty() && is_webrtc_invalid_host(&uri.host().to_string()) {
-            if let Some(username) = uri.user() {
-                let username_key = username.trim().to_ascii_lowercase();
-                if !username_key.is_empty() {
+        if models.is_empty() {
+            if let Some(fb) = invalid_host_fallback(uri) {
+                // 1. AoR-pattern match — handles WebRTC (JsSIP) clients where
+                //    the Contact user part (e.g. "qn27nogk") differs from the
+                //    authenticated username stored in Column::Username (e.g.
+                //    "alice"), and extra params like ";ob" that break exact
+                //    AoR match.
+                models = Entity::find()
+                    .filter(Column::Aor.like(fb.aor_like_pattern()))
+                    .order_by_desc(Column::LastModified)
+                    .order_by_desc(Column::UpdatedAt)
+                    .order_by_desc(Column::Id)
+                    .all(&self.db)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Database error on lookup by aor pattern for .invalid host: {}",
+                            e
+                        )
+                    })?;
+
+                // 2. Username fallback — original behaviour, useful when the
+                //    Contact user part equals the auth username.
+                if models.is_empty() {
                     models = Entity::find()
-                        .filter(Column::Username.eq(&username_key))
+                        .filter(Column::Username.eq(&fb.user))
                         .order_by_desc(Column::LastModified)
                         .order_by_desc(Column::UpdatedAt)
                         .order_by_desc(Column::Id)
@@ -718,6 +738,150 @@ mod tests {
         assert_eq!(
             stored.destination.as_ref().and_then(|d| d.r#type),
             Some(Transport::Wss)
+        );
+    }
+
+    /// Helper: create an in-memory DbLocator and register a WebRTC binding.
+    async fn make_locator_with_webrtc_binding(
+        auth_username: &str,
+        contact_uri: &str,
+        dest_addr: &str,
+    ) -> DbLocator {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let aor: rsipstack::sip::Uri = contact_uri.try_into().expect("valid aor");
+        let destination = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: dest_addr.try_into().expect("valid destination"),
+        };
+        let location = Location {
+            aor: aor.clone(),
+            expires: 600,
+            destination: Some(destination),
+            transport: Some(Transport::Ws),
+            ..Default::default()
+        };
+        locator
+            .register(auth_username, Some("pbx.example.com"), location)
+            .await
+            .expect("register location");
+        locator
+    }
+
+    /// Regression: JsSIP generates a random Contact user part (e.g. "qn27nogk")
+    /// that differs from the authenticated username (e.g. "xwork_5g_test").
+    /// A BYE's Request-URI uses the Contact from the INVITE, so the lookup must
+    /// resolve the random user part back to the stored registration.
+    #[tokio::test]
+    async fn invalid_host_lookup_finds_binding_when_contact_user_differs_from_auth_username() {
+        let locator = make_locator_with_webrtc_binding(
+            "xwork_5g_test",
+            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws",
+            "58.40.134.154:41428",
+        )
+        .await;
+
+        // Lookup with the same Contact as the INVITE (has ";ob" — exact AoR miss,
+        // and user part "qn27nogk" ≠ stored username "xwork_5g_test").
+        let lookup_uri: rsipstack::sip::Uri =
+            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob"
+                .try_into()
+                .expect("valid lookup uri");
+
+        let locations = locator
+            .lookup(&lookup_uri)
+            .await
+            .expect("lookup location");
+
+        assert_eq!(
+            locations.len(),
+            1,
+            "AoR pattern match should find the WebRTC binding despite \
+             user-part / username mismatch and extra ;ob param"
+        );
+
+        let dest = locations[0].destination.as_ref().expect("has destination");
+        assert_eq!(dest.addr.to_string(), "58.40.134.154:41428");
+    }
+
+    /// Regression: the BYE Request-URI may carry extra params (;ob) that the
+    /// stored AoR does not have.  The AoR-pattern match must bridge this gap.
+    #[tokio::test]
+    async fn invalid_host_lookup_with_ob_param_finds_exact_aor_without_ob() {
+        let locator = make_locator_with_webrtc_binding(
+            "alice",
+            "sip:abc123@xyz.invalid;transport=ws",
+            "10.0.0.1:5060",
+        )
+        .await;
+
+        let lookup_uri: rsipstack::sip::Uri =
+            "sip:abc123@xyz.invalid;transport=ws;ob"
+                .try_into()
+                .expect("valid lookup uri");
+
+        let locations = locator
+            .lookup(&lookup_uri)
+            .await
+            .expect("lookup location");
+
+        assert_eq!(locations.len(), 1, ";ob param should not break AoR pattern match");
+    }
+
+    /// The original Username-based fallback must still work for .invalid hosts
+    /// where the Contact user part equals the auth username.
+    #[tokio::test]
+    async fn invalid_host_lookup_username_fallback_still_works() {
+        let locator = make_locator_with_webrtc_binding(
+            "agent42",
+            "sip:agent42@webrtc.invalid;transport=ws",
+            "192.168.1.100:443",
+        )
+        .await;
+
+        // Lookup with a *different* contact user part that does NOT match any AoR
+        // pattern, but shares the same .invalid host. Username fallback should kick in.
+        // (In practice this is rare — both paths exist for defence-in-depth.)
+        let lookup_uri: rsipstack::sip::Uri =
+            "sip:agent42@different.invalid;transport=ws"
+                .try_into()
+                .expect("valid lookup uri");
+
+        let locations = locator
+            .lookup(&lookup_uri)
+            .await
+            .expect("lookup location");
+
+        // The host is different so AoR LIKE won't match, but the general
+        // username/realm fallback (line 558+) should find it.
+        assert_eq!(locations.len(), 1, "username/realm fallback should still work");
+    }
+
+    /// Negative test: a completely unrelated .invalid URI must return empty.
+    #[tokio::test]
+    async fn invalid_host_lookup_returns_empty_for_unknown_contact() {
+        let locator = make_locator_with_webrtc_binding(
+            "alice",
+            "sip:abc123@xyz.invalid;transport=ws",
+            "10.0.0.1:5060",
+        )
+        .await;
+
+        let lookup_uri: rsipstack::sip::Uri =
+            "sip:nobody@noreg.invalid;transport=ws"
+                .try_into()
+                .expect("valid lookup uri");
+
+        let locations = locator
+            .lookup(&lookup_uri)
+            .await
+            .expect("lookup location");
+
+        assert!(
+            locations.is_empty(),
+            "unknown .invalid contact should return empty"
         );
     }
 }

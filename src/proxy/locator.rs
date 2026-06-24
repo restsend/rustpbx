@@ -77,8 +77,14 @@ pub trait Locator: Send + Sync {
 // -------------------------------------
 // `lookup`:
 //   1. Try exact AoR match first (`uri.to_string()`).
-//   2. If empty **and** [`is_webrtc_invalid_host`] → fall back to username-only
-//      match (JsSIP registers with a random `.invalid` contact host).
+//   2. If empty **and** [`is_webrtc_invalid_host`] → use
+//      [`invalid_host_fallback`] to obtain the Contact user and host, then:
+//        a. AoR-pattern match: query by `user@host` so that bindings whose
+//           Contact AoR has the same user and `.invalid` host are found even
+//           when params differ (e.g. `;ob` in INVITE but not in REGISTER) or
+//           when the Contact user part differs from the authenticated username.
+//        b. Username match (fallback): query by the Contact user part against
+//           the username column / key.
 //   3. Filter out expired bindings via [`is_location_expired`].
 //   4. Sort surviving results with [`sort_locations_by_recency`].
 //
@@ -122,6 +128,100 @@ pub fn is_within_unregister_grace(last_modified: i64, now_epoch: i64) -> bool {
 /// Returns `true` for WebRTC (JsSIP) `.invalid` contact hosts (RFC 7118).
 pub fn is_webrtc_invalid_host(host: &str) -> bool {
     host.ends_with(".invalid")
+}
+
+// ── WebRTC `.invalid` host fallback helpers ─────────────────────────────────
+
+/// Parameters extracted from a WebRTC `.invalid` lookup URI for fallback
+/// queries.
+///
+/// Produced by [`invalid_host_fallback`]. All Locator backends should consult
+/// these parameters when the initial exact-AoR lookup returns empty, so that
+/// in-dialog requests (BYE, re-INVITE, …) can be routed to WebRTC clients
+/// whose Contact uses a random `.invalid` hostname.
+pub struct InvalidHostFallback {
+    /// Lowercased Contact user part (e.g. `"qn27nogk"`).
+    pub user: String,
+    /// Contact host (e.g. `"2kbkhn3beiif.invalid"`).
+    pub host: String,
+}
+
+impl InvalidHostFallback {
+    /// Build a glob pattern suitable for SQL `LIKE` or Redis `SCAN MATCH`.
+    ///
+    /// Matches any stored AoR that contains `user@host`, ignoring leading
+    /// scheme and trailing parameters:
+    ///
+    /// ```text
+    /// %qn27nogk@2kbkhn3beiif.invalid%
+    /// ```
+    ///
+    /// This finds e.g. `sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws` when
+    /// the lookup URI is `sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob`.
+    pub fn aor_like_pattern(&self) -> String {
+        format!("%{}@{}%", self.user, self.host)
+    }
+
+    /// Check whether a stored AoR matches this fallback (for in-memory
+    /// backends such as [`MemoryLocator`]).
+    ///
+    /// Returns `true` when the AoR's user part (case-insensitive) and host
+    /// match the fallback parameters, regardless of URI parameters.
+    pub fn matches_aor(&self, aor: &rsipstack::sip::Uri) -> bool {
+        let aor_user = aor
+            .user()
+            .map(|u| u.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        aor_user == self.user && aor.host().to_string().eq_ignore_ascii_case(&self.host)
+    }
+}
+
+/// Determine whether a lookup URI requires the `.invalid` host fallback, and
+/// if so, return the [`InvalidHostFallback`] parameters.
+///
+/// Returns `None` when:
+/// - the host is **not** a `.invalid` domain, or
+/// - the URI has no user part or an empty one.
+///
+/// # Example (DbLocator / SQL)
+/// ```ignore
+/// if models.is_empty() {
+///     if let Some(fb) = invalid_host_fallback(uri) {
+///         models = Entity::find()
+///             .filter(Column::Aor.like(fb.aor_like_pattern()))
+///             .all(&db).await?;
+///         if models.is_empty() {
+///             models = Entity::find()
+///                 .filter(Column::Username.eq(&fb.user))
+///                 .all(&db).await?;
+///         }
+///     }
+/// }
+/// ```
+///
+/// # Example (RedisLocator / Redis)
+/// ```ignore
+/// if locations.is_empty() {
+///     if let Some(fb) = invalid_host_fallback(uri) {
+///         locations = redis.aor_scan(fb.aor_like_pattern()).await;
+///         if locations.is_empty() {
+///             locations = redis.username_lookup(&fb.user).await;
+///         }
+///     }
+/// }
+/// ```
+pub fn invalid_host_fallback(uri: &rsipstack::sip::Uri) -> Option<InvalidHostFallback> {
+    if !is_webrtc_invalid_host(&uri.host().to_string()) {
+        return None;
+    }
+    let user = uri.user()?.trim().to_ascii_lowercase();
+    if user.is_empty() {
+        return None;
+    }
+    Some(InvalidHostFallback {
+        user,
+        host: uri.host().to_string(),
+    })
 }
 
 /// Resolve the canonical registered AoR, repairing legacy records where
@@ -724,6 +824,58 @@ mod tests {
         assert!(!is_webrtc_invalid_host("rustpbx.com"));
         assert!(!is_webrtc_invalid_host("10.0.0.1"));
         assert!(!is_webrtc_invalid_host(""));
+    }
+
+    #[test]
+    fn test_invalid_host_fallback_extracts_params() {
+        let uri: rsipstack::sip::Uri =
+            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob".try_into().unwrap();
+        let fb = invalid_host_fallback(&uri).expect("should produce fallback");
+        assert_eq!(fb.user, "qn27nogk");
+        assert_eq!(fb.host, "2kbkhn3beiif.invalid");
+    }
+
+    #[test]
+    fn test_invalid_host_fallback_returns_none_for_non_invalid() {
+        let uri: rsipstack::sip::Uri = "sip:alice@pbx.example.com".try_into().unwrap();
+        assert!(invalid_host_fallback(&uri).is_none());
+    }
+
+    #[test]
+    fn test_invalid_host_fallback_returns_none_for_no_user() {
+        let uri: rsipstack::sip::Uri = "sip:@2kbkhn3beiif.invalid".try_into().unwrap();
+        assert!(invalid_host_fallback(&uri).is_none());
+    }
+
+    #[test]
+    fn test_aor_like_pattern_format() {
+        let fb = InvalidHostFallback {
+            user: "qn27nogk".into(),
+            host: "2kbkhn3beiif.invalid".into(),
+        };
+        assert_eq!(fb.aor_like_pattern(), "%qn27nogk@2kbkhn3beiif.invalid%");
+    }
+
+    #[test]
+    fn test_invalid_host_fallback_matches_aor_ignores_params() {
+        let fb = InvalidHostFallback {
+            user: "qn27nogk".into(),
+            host: "2kbkhn3beiif.invalid".into(),
+        };
+        // Same user+host, different params → match
+        let aor: rsipstack::sip::Uri =
+            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws".try_into().unwrap();
+        assert!(fb.matches_aor(&aor));
+
+        // Different user → no match
+        let aor2: rsipstack::sip::Uri =
+            "sip:other@2kbkhn3beiif.invalid;transport=ws".try_into().unwrap();
+        assert!(!fb.matches_aor(&aor2));
+
+        // Different host → no match
+        let aor3: rsipstack::sip::Uri =
+            "sip:qn27nogk@other.invalid;transport=ws".try_into().unwrap();
+        assert!(!fb.matches_aor(&aor3));
     }
 
     #[tokio::test]

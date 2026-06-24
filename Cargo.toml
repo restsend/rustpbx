@@ -141,7 +141,7 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.15"
+rsipstack = "0.5.16"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.39"
@@ -248,7 +248,7 @@ ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
-flowdb = { version = "0.7.2", default-features = false }
+flowdb = { version = "0.7.4", default-features = false }
 
 
 [dev-dependencies]

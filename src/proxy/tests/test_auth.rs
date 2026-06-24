@@ -55,39 +55,37 @@ async fn test_auth_module_invite_success() {
     if tx.last_response.is_none() {
         let mut response = rsipstack::sip::Response {
             version: rsipstack::sip::Version::V2,
-            status_code: rsipstack::sip::StatusCode::Unauthorized,
+            status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
-        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
-        response.headers.push(Header::WwwAuthenticate(www_auth));
+        let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
+        response.headers.push(Header::ProxyAuthenticate(proxy_auth));
         tx.last_response = Some(response);
     }
     let response = tx.last_response.as_ref().unwrap();
-    let nonce = if let Some(Header::WwwAuthenticate(h)) = response
-        .headers()
-        .iter()
-        .find(|h| matches!(h, Header::WwwAuthenticate(_)))
-    {
-        // Parse nonce
-        let auth_str = h.value();
-        auth_str
-            .split(',')
+    let nonce = {
+        let h = response
+            .headers()
+            .iter()
+            .find_map(|h| {
+                if let Header::ProxyAuthenticate(pa) = h {
+                    Some(pa.value())
+                } else {
+                    None
+                }
+            })
+            .expect("No Proxy-Authenticate header");
+        h.split(',')
             .find_map(|part| {
                 let part = part.trim();
                 if part.starts_with("nonce=") {
-                    Some(
-                        part.trim_start_matches("nonce=")
-                            .trim_matches('"')
-                            .to_string(),
-                    )
+                    Some(part.trim_start_matches("nonce=").trim_matches('"').to_string())
                 } else {
                     None
                 }
             })
             .unwrap()
-    } else {
-        panic!("No WWW-Authenticate header");
     };
 
     // Step 2: Request with authentication
@@ -951,18 +949,16 @@ async fn test_proxy_auth_invite_success() {
 
     // In test environment, manually create the response since reply_with failed due to no connection
     if tx.last_response.is_none() {
-        // Create the response manually for testing - should be 401 with both challenges
+        // Create the response manually for testing - should be 407 with Proxy-Authenticate challenge
         let mut response = rsipstack::sip::Response {
             version: rsipstack::sip::Version::V2,
-            status_code: rsipstack::sip::StatusCode::Unauthorized,
+            status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
 
-        // Add both WWW-Authenticate and Proxy-Authenticate headers
-        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
+        // Add Proxy-Authenticate header
         let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
-        response.headers.push(Header::WwwAuthenticate(www_auth));
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));
 
         tx.last_response = Some(response);
@@ -970,10 +966,6 @@ async fn test_proxy_auth_invite_success() {
 
     // Extract nonce from the response
     let response = tx.last_response.as_ref().expect("Should have response");
-    assert_eq!(
-        response.status_code,
-        rsipstack::sip::StatusCode::ProxyAuthenticationRequired
-    );
 
     let nonce = extract_nonce_from_proxy_authenticate(response)
         .expect("Should have nonce in Proxy-Authenticate header");
@@ -1176,38 +1168,37 @@ async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
     if tx.last_response.is_none() {
         let mut response = rsipstack::sip::Response {
             version: rsipstack::sip::Version::V2,
-            status_code: rsipstack::sip::StatusCode::Unauthorized,
+            status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
-        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
-        response.headers.push(Header::WwwAuthenticate(www_auth));
+        let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
+        response.headers.push(Header::ProxyAuthenticate(proxy_auth));
         tx.last_response = Some(response);
     }
     let response = tx.last_response.as_ref().unwrap();
-    let nonce = if let Some(Header::WwwAuthenticate(h)) = response
-        .headers()
-        .iter()
-        .find(|h| matches!(h, Header::WwwAuthenticate(_)))
-    {
-        let auth_str = h.value();
-        auth_str
-            .split(',')
+    let nonce = {
+        let h = response
+            .headers()
+            .iter()
+            .find_map(|h| {
+                if let Header::ProxyAuthenticate(pa) = h {
+                    Some(pa.value())
+                } else {
+                    None
+                }
+            })
+            .expect("No Proxy-Authenticate header");
+        h.split(',')
             .find_map(|part| {
                 let part = part.trim();
                 if part.starts_with("nonce=") {
-                    Some(
-                        part.trim_start_matches("nonce=")
-                            .trim_matches('"')
-                            .to_string(),
-                    )
+                    Some(part.trim_start_matches("nonce=").trim_matches('"').to_string())
                 } else {
                     None
                 }
             })
             .unwrap()
-    } else {
-        panic!("No WWW-Authenticate header");
     };
 
     // Step 2: Send authenticated INVITE with To tag (simulates in-dialog after 200 OK)

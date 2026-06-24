@@ -506,14 +506,10 @@ impl ProxyModule for AuthModule {
                             vec![Header::WwwAuthenticate(www_auth)],
                         )
                     } else {
-                        let www_auth = self.create_www_auth_challenge(&realm)?;
                         let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
                         (
                             rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
-                            vec![
-                                Header::WwwAuthenticate(www_auth),
-                                Header::ProxyAuthenticate(proxy_auth),
-                            ],
+                            vec![Header::ProxyAuthenticate(proxy_auth)],
                         )
                     };
 
