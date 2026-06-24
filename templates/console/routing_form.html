@@ -134,9 +134,12 @@
 
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                                "routing_form.name" | t }} <span class="text-rose-500">*</span></label>
-                            <input type="text" name="name" x-model="route.name"
+                            <label for="route-name"
+                                class="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                {{ "routing_form.name" | t }}
+                                <span class="text-rose-500" aria-hidden="true">*</span>
+                            </label>
+                            <input type="text" id="route-name" name="name" x-model="route.name"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "routing_form.name_placeholder" | t }}' required>
                         </div>
