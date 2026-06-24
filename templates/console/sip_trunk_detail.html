@@ -153,7 +153,10 @@ default('RustPBX') }}{% endblock %}
                     <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_general" | t }}</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_trunk_name" | t }} <span class="text-rose-500">*</span>
+                            <span class="inline-flex items-center gap-1">
+                                {{ "sip_trunk_detail.field_trunk_name" | t }}
+                                <span class="text-rose-500" aria-hidden="true">*</span>
+                            </span>
                             <input type="text" x-model.trim="form.name" maxlength="120" required
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_trunk_name_placeholder" | t }}">
@@ -200,7 +203,7 @@ default('RustPBX') }}{% endblock %}
                             </select>
                         </label>
                         <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_sip_server" | t }} <span class="text-rose-500">*</span>
+                            {{ "sip_trunk_detail.field_sip_server" | t }}
                             <input type="text" x-model.trim="form.sip_server" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_sip_server_placeholder" | t }}">
