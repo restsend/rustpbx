@@ -117,8 +117,11 @@ impl ClusterPresenceMessage {
         let status = match self.status.as_str() {
             "available" => PresenceStatus::Available,
             "busy" => PresenceStatus::Busy,
-            "away" => PresenceStatus::Away,
-            _ => PresenceStatus::Offline,
+            "away" => PresenceStatus::Away(String::new()),
+            "dnd" => PresenceStatus::Dnd,
+            "offline" => PresenceStatus::Offline,
+            "" => PresenceStatus::Offline,
+            other => PresenceStatus::Away(other.to_string()),
         };
         Some(PresenceState {
             status,
@@ -842,7 +845,7 @@ mod tests {
             last_updated: 0,
         };
         let state = msg.to_state().unwrap();
-        assert_eq!(state.status, PresenceStatus::Away);
+        assert_eq!(state.status, PresenceStatus::Away(String::new()));
     }
 
     #[test]
@@ -859,16 +862,16 @@ mod tests {
     }
 
     #[test]
-    fn test_presence_message_to_state_unknown_falls_to_offline() {
+    fn test_presence_message_to_state_custom_falls_to_away() {
         let msg = ClusterPresenceMessage {
             identity: "test".to_string(),
-            status: "dnd".to_string(),
+            status: "lunch".to_string(),
             note: None,
             activity: None,
             last_updated: 0,
         };
         let state = msg.to_state().unwrap();
-        assert_eq!(state.status, PresenceStatus::Offline);
+        assert_eq!(state.status, PresenceStatus::Away("lunch".to_string()));
     }
 
     // ── LocatorEvent → ClusterLocatorMessage conversion ─────────────────────
@@ -1267,7 +1270,7 @@ mod tests {
     #[test]
     fn test_presence_state_full_round_trip() {
         let original = PresenceState {
-            status: PresenceStatus::Away,
+            status: PresenceStatus::Away(String::new()),
             note: Some("Lunch".to_string()),
             activity: Some("meal".to_string()),
             last_updated: 1715000000,
@@ -1286,7 +1289,7 @@ mod tests {
         };
 
         // Assert
-        assert_eq!(reconstructed.status, PresenceStatus::Away);
+        assert_eq!(reconstructed.status, PresenceStatus::Away(String::new()));
         assert_eq!(reconstructed.note.as_deref(), Some("Lunch"));
         assert_eq!(reconstructed.activity.as_deref(), Some("meal"));
         assert_eq!(reconstructed.last_updated, 1715000000);

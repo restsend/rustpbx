@@ -136,7 +136,7 @@ pub struct RwiIdentity {
 
 impl RwiIdentity {
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|s| s == scope)
+        self.scopes.iter().any(|s| s == "*" || s == scope)
     }
 
     pub fn has_any_scope(&self, scopes: &[&str]) -> bool {

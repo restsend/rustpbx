@@ -64,12 +64,13 @@ struct RpidActivities {
 struct RpidEmpty {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[serde(untagged)]
 #[derive(Default)]
 pub enum PresenceStatus {
     Available,
     Busy,
-    Away,
+    Dnd,
+    Away(String),
     #[default]
     Offline,
 }
@@ -79,7 +80,14 @@ impl std::fmt::Display for PresenceStatus {
         match self {
             PresenceStatus::Available => write!(f, "available"),
             PresenceStatus::Busy => write!(f, "busy"),
-            PresenceStatus::Away => write!(f, "away"),
+            PresenceStatus::Dnd => write!(f, "dnd"),
+            PresenceStatus::Away(detail) => {
+                if detail.is_empty() {
+                    write!(f, "away")
+                } else {
+                    write!(f, "{}", detail)
+                }
+            }
             PresenceStatus::Offline => write!(f, "offline"),
         }
     }
@@ -179,8 +187,10 @@ impl PresenceManager {
                 let status = match s.status.as_str() {
                     "available" => PresenceStatus::Available,
                     "busy" => PresenceStatus::Busy,
-                    "away" => PresenceStatus::Away,
-                    _ => PresenceStatus::Offline,
+                    "away" => PresenceStatus::Away(String::new()),
+                    "dnd" => PresenceStatus::Dnd,
+                    "offline" => PresenceStatus::Offline,
+                    other => PresenceStatus::Away(other.to_string()),
                 };
                 map.insert(
                     s.identity,
@@ -346,18 +356,41 @@ impl PresenceManager {
                         status = %current.status,
                         "Presence: Registered"
                     );
-                    if current.status == PresenceStatus::Offline {
-                        self.update_state(
-                            &user,
-                            PresenceState {
-                                status: PresenceStatus::Available,
-                                last_updated: chrono::Utc::now().timestamp(),
-                                ..current
-                            },
-                            source,
-                        )
-                        .await;
-                    }
+
+                    // Extract X-CC-Presence from custom REGISTER headers,
+                    // sent by cc-phone's JsSIP UA to set presence via SIP.
+                    let header_status = loc.headers.as_ref().and_then(|headers| {
+                        for h in headers {
+                            if let rsipstack::sip::Header::Other(name, val) = h {
+                                if name.eq_ignore_ascii_case("X-CC-Presence") {
+                                    return Some(val.as_str());
+                                }
+                            }
+                        }
+                        None
+                    });
+
+                    let new_status = match header_status {
+                        Some("online" | "available") => PresenceStatus::Available,
+                        Some(s @ ("away" | "break" | "lunch" | "training" | "meeting" | "personal")) => PresenceStatus::Away(s.to_string()),
+                        Some("dnd") => PresenceStatus::Dnd,
+                        Some("busy" | "ringing") => PresenceStatus::Busy,
+                        Some("offline" | "closed") => PresenceStatus::Offline,
+                        Some(s) => PresenceStatus::Away(s.to_string()),
+                        None if current.status == PresenceStatus::Offline => PresenceStatus::Available,
+                        None => return,
+                    };
+
+                    self.update_state(
+                        &user,
+                        PresenceState {
+                            status: new_status,
+                            last_updated: chrono::Utc::now().timestamp(),
+                            ..current
+                        },
+                        source,
+                    )
+                    .await;
                 }
             }
             LocatorEvent::Unregistered(loc) => {
@@ -644,7 +677,7 @@ impl PresenceModule {
                         if activities.busy.is_some() || activities.on_the_phone.is_some() {
                             status = PresenceStatus::Busy;
                         } else if activities.away.is_some() {
-                            status = PresenceStatus::Away;
+                            status = PresenceStatus::Away(tuple.note.clone().unwrap_or_default());
                         }
                     }
                     if let Some(note) = &tuple.note {
@@ -659,7 +692,7 @@ impl PresenceModule {
                 if body.contains("busy") {
                     status = PresenceStatus::Busy;
                 } else if body.contains("away") {
-                    status = PresenceStatus::Away;
+                    status = PresenceStatus::Away(String::new());
                 } else if body.contains("available") || body.contains("open") {
                     status = PresenceStatus::Available;
                 }
@@ -676,7 +709,7 @@ impl PresenceModule {
             if body.contains("busy") {
                 current.status = PresenceStatus::Busy;
             } else if body.contains("away") {
-                current.status = PresenceStatus::Away;
+                current.status = PresenceStatus::Away(String::new());
             } else if body.contains("offline") {
                 current.status = PresenceStatus::Offline;
             } else {
@@ -712,7 +745,7 @@ impl PresenceModule {
         // Build PIDF-XML (RFC 3863)
         let basic_status = if matches!(
             state.status,
-            PresenceStatus::Available | PresenceStatus::Busy | PresenceStatus::Away
+            PresenceStatus::Available | PresenceStatus::Busy | PresenceStatus::Away(_) | PresenceStatus::Dnd
         ) {
             "open"
         } else {
@@ -737,11 +770,11 @@ impl PresenceModule {
                     .or_else(|| Some(state.status.to_string())),
                 contact: Some(format!("sip:{}@{}", identity, domain)),
                 activities: match state.status {
-                    PresenceStatus::Busy => Some(RpidActivities {
+                    PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
                         busy: Some(RpidEmpty {}),
                         ..Default::default()
                     }),
-                    PresenceStatus::Away => Some(RpidActivities {
+                    PresenceStatus::Away(_) => Some(RpidActivities {
                         away: Some(RpidEmpty {}),
                         ..Default::default()
                     }),

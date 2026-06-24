@@ -226,10 +226,28 @@ async fn download_call_record_sip_flow(
     // Default main call_id to "primary" if not overridden
     call_id_roles.insert(record.call_id.clone(), "primary".to_string());
 
-    let cdr_data = load_cdr_data(&state, &record).await;
-    if let Some(cdr) = &cdr_data {
-        for (cid, role) in &cdr.record.sip_leg_roles {
-            call_id_roles.insert(cid.clone(), role.clone());
+    // Load sip_leg_roles from DB metadata first (faster, no file I/O),
+    // then fall back to the CDR JSON file.
+    let mut sip_leg_roles_loaded = false;
+    if let Some(ref meta) = record.metadata {
+        if let Some(meta_map) = meta.as_object() {
+            if let Some(json_str) = meta_map.get("sip_leg_roles").and_then(|v| v.as_str()) {
+                if let Ok(roles) = serde_json::from_str::<HashMap<String, String>>(json_str) {
+                    for (cid, role) in roles {
+                        call_id_roles.insert(cid, role);
+                    }
+                    sip_leg_roles_loaded = true;
+                }
+            }
+        }
+    }
+
+    if !sip_leg_roles_loaded {
+        let cdr_data = load_cdr_data(&state, &record).await;
+        if let Some(cdr) = &cdr_data {
+            for (cid, role) in &cdr.record.sip_leg_roles {
+                call_id_roles.insert(cid.clone(), role.clone());
+            }
         }
     }
 

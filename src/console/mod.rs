@@ -183,6 +183,8 @@ impl ConsoleState {
                 serde_json::Value::String("© 2025 RustPBX. All rights reserved.".to_string())
             });
             let static_path = self.config().static_path();
+            map.entry("static_path")
+                .or_insert_with(|| serde_json::Value::String(static_path.clone()));
             map.entry("site_logo").or_insert_with(|| {
                 serde_json::Value::String(format!("{}/images/logo.png", static_path))
             });

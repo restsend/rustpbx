@@ -111,10 +111,14 @@ pub async fn persist_call_record(
         transcript_language: Set(transcript_language.clone()),
         tags: Set(tags.clone()),
         leg_timeline: Set(leg_timeline_json),
-        metadata: Set(details
-            .metadata
-            .as_ref()
-            .and_then(|m| serde_json::to_value(m).ok())),
+        metadata: Set({
+            let mut m = details.metadata.clone().unwrap_or_default();
+            if !record.sip_leg_roles.is_empty() {
+                let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
+                m.insert("sip_leg_roles".to_string(), json);
+            }
+            serde_json::to_value(&m).ok()
+        }),
         created_at: Set(record.start_time),
         updated_at: Set(record.end_time),
         archived_at: Set(None),

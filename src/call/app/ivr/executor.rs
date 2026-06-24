@@ -645,6 +645,8 @@ impl StepIvrApp {
         if let ActionResult::WaitFor(WaitEvent::AudioComplete { .. }) = &result {
             if node.action.is_dtmf_menu() {
                 self.pending_menu = Some(self.build_pending_menu(&node.action));
+            } else if node.action.is_interruptible() {
+                self.interrupt_on_dtmf = true;
             }
         }
         if matches!(&result, ActionResult::WaitFor(WaitEvent::NoAudio)) {
@@ -1787,6 +1789,62 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         stack.dtmf("1");
 
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// Regression: DTMF during an *interruptible* Prompt must be forwarded to
+    /// the provider.  The `awaiting_dtmf` / `interrupt_on_dtmf` flags should
+    /// NOT block legitimate input when the node explicitly allows interruption.
+    #[tokio::test]
+    async fn test_interruptible_prompt_forwards_dtmf_to_provider() {
+        let prompt = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: true,
+            tts_api_url: None,
+        });
+        let transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+        });
+
+        let mut stack =
+            MockCallStack::run(Box::new(mock_app(vec![prompt, transfer])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "hello.wav"
+                )
+            })
+            .await;
+
+        // While the interruptible prompt is still playing, inject a DTMF digit.
+        // It MUST be forwarded to the provider (not silently ignored).
+        let _ = stack.drain_cmds();
+        stack.dtmf("5");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The app should stop the audio first, then ask the provider for
+        // the next action (MockProvider returns Transfer("2001")).
         stack
             .assert_cmd(200, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
