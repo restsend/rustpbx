@@ -798,28 +798,30 @@ impl SipServerBuilder {
         let presence_manager = Arc::new(PresenceManager::new(database.clone()));
         presence_manager.load_from_db().await.ok();
 
-        // Create cluster event hub for inter-node sync
+        // Create cluster event hub for inter-node sync.
+        // Always provision the hub so local locator + presence events are
+        // dispatched to addon handlers (e.g. the CC registrar bridge) even on a
+        // single node — peer replication is simply a no-op without peers.
         let cluster_peer_ips: Vec<IpAddr> = self.cluster_peers.iter().map(|p| p.ip()).collect();
-        let cluster_event_hub: Option<Arc<ClusterEventHub>> = if !self.cluster_peers.is_empty() {
-            let local_cluster_ip = rtp_config
-                .external_ip
-                .as_deref()
-                .unwrap_or(&config.addr)
-                .parse::<IpAddr>()
-                .map_err(|e| anyhow!("failed to parse cluster local ip address: {}", e))?;
-            let local_cluster_port = config.udp_port.unwrap_or(5060);
-            let local_cluster_addr = SocketAddr::new(local_cluster_ip, local_cluster_port);
-            Some(Arc::new(ClusterEventHub::new(
-                locator_events.clone(),
-                presence_manager.clone(),
-                endpoint.inner.clone(),
-                local_cluster_addr,
-                self.cluster_peers.clone(),
-                cancel_token.child_token(),
-            )))
-        } else {
-            None
-        };
+        let local_cluster_ip = rtp_config
+            .external_ip
+            .as_deref()
+            .unwrap_or(&config.addr)
+            .parse::<IpAddr>()
+            .map_err(|e| anyhow!("failed to parse cluster local ip address: {}", e))?;
+        let local_cluster_port = config.udp_port.unwrap_or(5060);
+        let local_cluster_addr = SocketAddr::new(local_cluster_ip, local_cluster_port);
+        let cluster_event_hub: Arc<ClusterEventHub> = Arc::new(ClusterEventHub::new(
+            locator_events.clone(),
+            presence_manager.clone(),
+            endpoint.inner.clone(),
+            local_cluster_addr,
+            self.cluster_peers.clone(),
+            cancel_token.child_token(),
+        ));
+        // Start the local event-dispatch loop.
+        cluster_event_hub.clone().start().await;
+        let cluster_event_hub: Option<Arc<ClusterEventHub>> = Some(cluster_event_hub);
 
         let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
 
@@ -907,13 +909,20 @@ impl SipServerBuilder {
         let mut allow_methods = Vec::new();
         let mut modules = Vec::new();
 
-        // Auto-load cluster_event module when cluster peers are configured
-        if let Some(hub) = inner.cluster_event_hub.as_ref() {
-            let mut module =
-                ClusterEventModule::create(hub.clone(), &self.cluster_peers, local_addrs.clone());
-            let _ = module.on_start().await; // errors logged inside
-            allow_methods.extend(module.allow_methods());
-            modules.push(module);
+        // Auto-load cluster_event module only when cluster peers are configured.
+        // (The hub itself is always present for local event dispatch, but the
+        // cluster networking module is unnecessary on a single node.)
+        if !self.cluster_peers.is_empty() {
+            if let Some(hub) = inner.cluster_event_hub.as_ref() {
+                let mut module = ClusterEventModule::create(
+                    hub.clone(),
+                    &self.cluster_peers,
+                    local_addrs.clone(),
+                );
+                let _ = module.on_start().await; // errors logged inside
+                allow_methods.extend(module.allow_methods());
+                modules.push(module);
+            }
         }
 
         if let Some(load_modules) = self.config.modules.as_ref() {
