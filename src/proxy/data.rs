@@ -450,7 +450,17 @@ impl ProxyDataContext {
         } else {
             None
         };
-        let generated_entries = if let Some(ref info) = generated {
+        // When not regenerating from the DB (e.g. at startup), fall back to the
+        // previously generated routes file on disk if it exists. Without this,
+        // routes were not loaded on startup and an operator had to manually hit
+        // "reload routes" after every restart. Trunks and queues already do this.
+        let generated_path = if generated.is_none() {
+            resolve_generated_path(&config.routes_files, &default_dir, "routes.generated.toml")
+                .filter(|p| p.exists())
+        } else {
+            None
+        };
+        let mut generated_entries = if let Some(ref info) = generated {
             info.entries
         } else {
             0usize
@@ -483,6 +493,20 @@ impl ProxyDataContext {
             let (generated_routes, _) = load_routes_from_files(&generated_pattern)?;
             for route in generated_routes {
                 upsert_route(&mut routes, route);
+            }
+        } else if let Some(ref path) = generated_path {
+            info!(path = %path.display(), "loading previously generated routes file");
+            let generated_pattern = vec![path.to_string_lossy().to_string()];
+            match load_routes_from_files(&generated_pattern) {
+                Ok((generated_routes, _)) => {
+                    generated_entries = generated_routes.len();
+                    for route in generated_routes {
+                        upsert_route(&mut routes, route);
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to load previously generated routes file: {}", e);
+                }
             }
         }
 
