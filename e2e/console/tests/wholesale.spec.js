@@ -70,10 +70,9 @@ describeFn('Wholesale — tenant CRUD via JSON', () => {
     expect(updateBody.status).toBe('ok')
     console.log(`  ✓ tenant updated via JSON`)
 
-    // ── Delete tenant via JSON POST ────────────────────────────
-    const delResp = await context.request.post(`${API}/wholesale/tenants/${tenantId}/delete`, {
+    // ── Delete tenant via JSON DELETE ──────────────────────────
+    const delResp = await context.request.delete(`${API}/wholesale/tenants/${tenantId}/delete`, {
       headers: jsonHeaders,
-      data: {},
     })
     expect(delResp.status()).toBeLessThan(400)
     const delBody = await delResp.json()
