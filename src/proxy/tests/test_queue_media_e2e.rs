@@ -406,6 +406,61 @@ async fn test_queue_caller_answer_narrows_to_agent_codec() -> Result<()> {
     Ok(())
 }
 
+/// Bidirectional audio must also work when the caller is answered EARLY (the
+/// `accept_immediately` path, which routes the caller through the app media
+/// bridge). This guards the early-answer/app-bridge path itself.
+///
+/// NOTE: production showed ~87% caller->agent loss specifically with HOLD MUSIC
+/// (file playback through the bridge, then the stop/transition when the agent
+/// connects). This test does NOT reproduce that — the early-answer app bridge
+/// alone is clean here — so the hold-music transition is the suspect. A faithful
+/// repro needs hold-music file playback in the harness (test-infra gap).
+#[tokio::test]
+async fn test_queue_early_answer_bidirectional_rtp() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let ctx = QueueMediaTestCtx::setup_with_config(queue_proxy_config_with(Vec::new(), true)).await?;
+
+    let caller_sdp = pcmu_sdp("127.0.0.1", ctx.caller_receiver.port().unwrap());
+    let agent_sdp = pcmu_sdp("127.0.0.1", ctx.agent_receiver.port().unwrap());
+
+    let (caller_id, _agent_id, agent_offer) =
+        ctx.establish_queue_call(caller_sdp, agent_sdp).await?;
+
+    let caller_answer_sdp = ctx
+        .caller_ua
+        .get_negotiated_answer_sdp(&caller_id)
+        .await
+        .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
+    let agent_target = extract_media_endpoint(&agent_offer)
+        .ok_or_else(|| anyhow!("Failed to parse agent-side endpoint"))?;
+    let caller_target = extract_media_endpoint(&caller_answer_sdp)
+        .ok_or_else(|| anyhow!("Failed to parse caller-side endpoint"))?;
+
+    let (caller_stats, agent_stats) = ctx
+        .exchange_rtp(caller_target, agent_target, 0, 2000)
+        .await?;
+    info!(
+        caller_received = caller_stats.packets_received,
+        agent_received = agent_stats.packets_received,
+        "Early-answer queue RTP exchange complete"
+    );
+
+    assert!(
+        agent_stats.packets_received > 0,
+        "Agent should receive RTP from caller even with early-answer/app-bridge (got 0) \
+         — this is the ~87%-loss garbled-agent-audio regression"
+    );
+    assert!(
+        caller_stats.packets_received > 0,
+        "Caller should receive RTP from agent with early-answer/app-bridge (got 0)"
+    );
+
+    ctx.caller_ua.hangup(&caller_id).await?;
+    ctx.server.stop();
+    Ok(())
+}
+
 /// When the agent hangs up, the caller's call must be torn down too (the
 /// hangup must cascade through the queue bridge). The dynamic-leg path failed
 /// to propagate the agent BYE, leaving the caller stuck in a live call.
