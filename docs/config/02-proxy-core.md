@@ -11,6 +11,8 @@ addr = "0.0.0.0"
 
 # Standard SIP ports
 udp_port = 5060
+# Multiple UDP ports (e.g., for multi-tenant or port range binding)
+# udp_ports = [5060, 5062, 5064]
 tcp_port = 5060
 
 # Encrypted SIP (SIPS)
@@ -22,6 +24,9 @@ ssl_private_key = "./certs/privkey.pem"
 # WebRTC (SIP over WebSocket)
 ws_port = 8089
 ws_handler = "/ws"
+
+# RWI (RustPBX WebSocket Interface) — real-time call control WebSocket path
+rwi_path = "/rwi/v1"
 ```
 
 ## SIP Identity & Behavior
@@ -64,6 +69,8 @@ frequency_limiter = "100/60s"
 
 # SIP Session Timers (RFC 4028)
 session_timer = true
+# Keep refreshing session timer even if peer does not negotiate it
+# session_timer_always = false
 session_expires = 1800  # 30 minutes
 
 # RTP timeout — if no audio packets are received on either direction for
@@ -91,11 +98,21 @@ addons = ["wholesale", "monitor"]
 
 ```toml
 [proxy]
-# Media proxy mode: auto, all, none, nat
+# Media proxy mode: auto, all, none, nat, bypass
+#   auto:    Bridge RTP only when necessary (e.g., WebRTC ↔ UDP, or NAT detected)
+#   all:     Always bridge RTP (B2BUA style)
+#   nat:     Bridge only if private IP is detected
+#   none:    Direct media (signaling only)
+#   bypass:  Rewrite SDP but let RTP flow directly between endpoints
 media_proxy = "auto"
 
-# Preferred codec order for SDP negotiation
-codecs = ["opus", "pcmu", "pcma", "g729"]
+# Preferred audio codec order for SDP negotiation
+audio_codecs = ["opus", "pcmu", "pcma", "g729"]
+
+# Video codec allowlist for re-INVITEs sent to RTP/PSTN/IMS trunks.
+# WebRTC-only codecs (VP8, VP9, AV1, …) and all rtcp-fb feedback attributes
+# are stripped automatically. Defaults to ["H264"] when not set.
+# video_codecs = ["H264"]
 
 # Codec selection strategy for WebRTC endpoints.
 # "performance" (default): avoid transcoding, keep only caller-offered codecs.
@@ -151,6 +168,9 @@ max_registrar_expires = 50
 # When false, a generic error code is sent
 passthrough_failure = true
 
+# Use SIP REFER for blind transfers (default: false, uses re-INVITE)
+# blind_transfer_use_refer = false
+
 # Maximum items for SIP flow storage (per dialog)
 sip_flow_max_items = 1000
 ```
@@ -196,6 +216,51 @@ media_event_channel_capacity = 1024
 - **`session_state_channel_capacity`**: Max pending state-change notifications per session. Default: `256`.
 - **`media_cmd_channel_capacity`**: Max pending commands per media engine instance (e.g., play, stop, record). Default: `512`.
 - **`media_event_channel_capacity`**: Max pending media events per engine instance (e.g., DTMF, playback complete). Default: `1024`.
+
+## DoS Protection
+
+Rate-limiting and anti-scanning controls for SIP traffic.
+
+```toml
+[proxy]
+# Enable DoS protection
+dos_enabled = false
+
+# Max calls per second per source IP (default: 100)
+dos_max_cps_per_ip = 100
+
+# Max concurrent dialogs per source IP (default: 500)
+dos_max_concurrent_per_ip = 500
+
+# Number of failed probe attempts before blocking (default: 50)
+dos_scan_probe_threshold = 50
+
+# Block duration in seconds for detected scanners (default: 600)
+dos_scan_block_duration_secs = 600
+```
+
+## URI Validation
+
+```toml
+[proxy]
+# Maximum URI length accepted (default: 256)
+uri_max_length = 256
+
+# Reject malformed URIs (default: false)
+uri_reject_malformed = false
+```
+
+## Emergency Numbers
+
+Configure emergency call handling for local compliance.
+
+```toml
+[proxy]
+[proxy.emergency]
+enabled = true
+numbers = ["110", "119", "120", "122", "911", "999"]
+emergency_trunk = "pstn-trunk"
+```
 
 ## Identity & Privacy
 

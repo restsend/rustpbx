@@ -43,6 +43,13 @@ log_rotation = "daily"
 > Old rotated files are **not** deleted automatically — use `logrotate` or similar tools
 > for retention policies.
 
+## Media Cache
+Local cache directory for media files (e.g., ringback tones, IVR prompts).
+
+```toml
+media_cache_path = "./config/mediacache"
+```
+
 ## Database
 Primary database connection. Currently supports SQLite (and MySQL in some builds).
 
@@ -61,9 +68,18 @@ Crucial for audio handling. If behind NAT, `external_ip` MUST be set to your pub
 # Public IP address (advertised in SDP)
 external_ip = "203.0.113.10"
 
-# RTP Port Range (UDP)
+# Auto-detect external IP via HTTP service (mutually exclusive with external_ip)
+# At startup, a GET request is sent to this URL and the response body is parsed as IP
+# Leave empty to use the default: http://ifconfig.me
+# auto_external_ip = "http://ifconfig.me"
+
+# RTP Port Range (UDP) — used for standard SIP media
 rtp_start_port = 12000
 rtp_end_port = 42000
+
+# WebRTC Port Range (UDP) — separate range for WebRTC media
+# webrtc_port_start = 30000
+# webrtc_port_end = 40000
 
 # ICE Servers (STUN/TURN) for WebRTC Clients
 [[ice_servers]]

@@ -367,6 +367,7 @@ Dispatch: fan_out_to_context
 | `call_id` | String | Call identifier |
 | `digit` | String | DTMF digit (`0`-`9`, `*`, `#`) |
 | `leg_id` | Option\<String\> | Leg that generated the DTMF |
+| `extra` | Option\<Object\> | Extra data (extension field, defaults to `null`) |
 | *+ctx* | | Flat context fields |
 
 #### dtmf_collected / dtmf_collection_timeout

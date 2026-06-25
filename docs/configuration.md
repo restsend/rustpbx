@@ -27,3 +27,6 @@ RustPBX configuration is split into several logical sections. The application lo
 
 8. [Addons, Console & Admin](config/07-addons-admin-storage.md)  
    *Web Console, AMI, Archiving, Wholesale & Custom Addons.*
+
+9. [SipFlow](config/08-sipflow.md)  
+   *SIP signalling capture, RTP recording, Storage backends, WAV export.*
