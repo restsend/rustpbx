@@ -44,7 +44,7 @@ log_rotation = "daily"
 > for retention policies.
 
 ## Media Cache
-Local cache directory for media files (e.g., ringback tones, IVR prompts).
+Local cache directory for media files (e.g., ringback tones, IVR prompts). Managed via the Console UI; not parsed into the `Config` struct.
 
 ```toml
 media_cache_path = "./config/mediacache"
@@ -59,6 +59,15 @@ database_url = "sqlite://rustpbx.sqlite3"
 
 # MySQL
 # database_url = "mysql://user:pass@localhost:3306/rustpbx"
+```
+
+## Demo Mode
+
+```toml
+# When true, a demo superuser account is auto-created on startup
+# and some addons run in evaluation mode (e.g. ACME bypasses
+# certificate verification).
+demo_mode = false
 ```
 
 ## Network & NAT (RTP)
@@ -89,4 +98,7 @@ urls = ["stun:stun.l.google.com:19302"]
 urls = ["turn:turn.example.com:3478"]
 username = "myuser"
 credential = "mypassword"
+
+# Custom HTTP path for the ICE servers config endpoint (default: "/iceservers")
+# ice_servers_path = "/iceservers"
 ```

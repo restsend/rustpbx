@@ -8885,6 +8885,7 @@ impl SipSession {
 
         match leg_id {
             // Caller leg — P2P fast path preserved identically
+            // Caller leg — P2P fast path preserved identically
             Some(ref lid) if lid == &LegId::from("caller") => {
                 play_to_leg!(
                     "caller",
@@ -8899,6 +8900,28 @@ impl SipSession {
                     self.leg_bridge_endpoint(&LegId::from("callee")),
                     self.media.callee_offer_uses_media_bridge
                 );
+            }
+            // Both legs
+            Some(ref lid) if lid == &LegId::from("both") => {
+                if self.media.caller_answer_uses_media_bridge {
+                    play_to_leg!(
+                        "caller",
+                        self.leg_bridge_endpoint(&LegId::from("caller")),
+                        self.media.caller_answer_uses_media_bridge
+                    );
+                }
+                if self.media.callee_offer_uses_media_bridge {
+                    play_to_leg!(
+                        "callee",
+                        self.leg_bridge_endpoint(&LegId::from("callee")),
+                        self.media.callee_offer_uses_media_bridge
+                    );
+                }
+                if !self.media.caller_answer_uses_media_bridge
+                    && !self.media.callee_offer_uses_media_bridge
+                {
+                    return Err(anyhow!("No leg has media bridge for playback"));
+                }
             }
             // Dynamic leg from peers
             Some(ref lid) => {
@@ -10344,6 +10367,167 @@ mod tests {
 
         assert_eq!(caller_peer.update_track_call_count(), 0);
         assert_eq!(caller_peer.get_tracks_call_count(), 0);
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_play_both_legs_creates_two_tracks() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-both-play".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-both-play".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@microsip.net".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer,
+        );
+
+        // Set up caller offer SDP (PCMU)
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        // Set up callee offer SDP (PCMA, simulating MicroSIP)
+        session.media.callee_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=bob 1 1 IN IP4 192.0.2.20\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.20\r\n",
+                "t=0 0\r\n",
+                "m=audio 40050 RTP/AVP 8 101\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        // Register legs as WebRTC caller + RTP callee (typical browser↔MicroSIP)
+        session.legs.set_transport(
+            LegId::from("caller"),
+            rustrtc::TransportMode::WebRtc,
+        );
+        session.legs.set_transport(
+            LegId::from("callee"),
+            rustrtc::TransportMode::Rtp,
+        );
+
+        // Create media bridge via app caller path
+        let answer = session
+            .prepare_app_caller_media_bridge()
+            .await
+            .expect("app caller bridge answer should be prepared");
+        assert!(answer.contains("RTP/AVP"));
+        assert!(session.media.media_bridge.is_some());
+        assert!(session.media.caller_answer_uses_media_bridge);
+
+        // Enable callee bridge (app path leaves it false for IVR/queue)
+        session.media.callee_offer_uses_media_bridge = true;
+
+        // Open bridge gate for forwarding
+        if let Some(ref bridge) = session.media.media_bridge {
+            bridge.open_caller_gate();
+        }
+
+        let num_before = session.media.playback_tracks.len();
+
+        // Call handle_play with leg_id = "both", use audio file from config/
+        let audio_path = "config/sounds/phone-calling.wav";
+        session
+            .handle_play(
+                Some(LegId::from("both")),
+                crate::call::domain::MediaSource::File {
+                    path: audio_path.to_string(),
+                },
+                Some(crate::call::domain::PlayOptions {
+                    loop_playback: false,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("play to both legs should succeed");
+
+        // Verify two playback tracks were created (caller + callee)
+        assert_eq!(
+            session.media.playback_tracks.len(),
+            num_before + 2,
+            "playback_tracks should have 2 entries for both-leg play"
+        );
+
+        // Verify track IDs contain "caller" and "callee" suffixes
+        let track_ids: Vec<&str> = session
+            .media
+            .playback_tracks
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert!(
+            track_ids.iter().any(|id| id.ends_with("-caller")),
+            "should have a caller track, got: {:?}",
+            track_ids
+        );
+        assert!(
+            track_ids.iter().any(|id| id.ends_with("-callee")),
+            "should have a callee track, got: {:?}",
+            track_ids
+        );
 
         if let Some(bridge) = session.media.media_bridge.take() {
             bridge.stop().await;

@@ -4,6 +4,9 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[cfg(feature = "console")]
+use crate::console::ConsoleState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
     pub name: String,
@@ -181,6 +184,35 @@ pub trait Addon: Send + Sync {
     /// Addons that support export-and-reload (e.g. queues, IVR, CC) should
     /// return a handler here so the cluster reload UI can discover them.
     fn export_reload_handler(&self) -> Option<Box<dyn export_reload::ExportReloadHandler>> {
+        None
+    }
+
+    // ── Console page / API route hooks ──────────────────────────────────────
+    //
+    // Addons can contribute page routes (rendered inside the console UI) and
+    // API routes (served under the api prefix) by overriding these methods.
+    // The routes are collected by AddonRegistry and merged at runtime, so the
+    // core console code does not need compile-time feature gates.
+
+    /// Return page routes to be merged into the console page router.
+    /// These routes are rendered inside the console UI with session auth & CSRF.
+    #[cfg(feature = "console")]
+    fn console_page_routes(&self, _state: &ConsoleState) -> Option<Router<Arc<ConsoleState>>> {
+        None
+    }
+
+    /// Return API routes to be merged into the console API router.
+    /// These routes are served under the api prefix with api_auth_middleware.
+    /// Addons should apply their own middleware layers as needed.
+    #[cfg(feature = "console")]
+    fn console_api_routes(&self, _state: &ConsoleState) -> Option<Router<Arc<ConsoleState>>> {
+        None
+    }
+
+    /// Return a phone auth token validator for the API auth middleware.
+    /// Only the first non-None result across all addons is used.
+    #[cfg(feature = "console")]
+    fn phone_auth_validator(&self, _state: &ConsoleState) -> Option<crate::auth::DynTokenValidator> {
         None
     }
 

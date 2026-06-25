@@ -234,6 +234,64 @@ impl AddonRegistry {
         false
     }
 
+    // ── Console route hooks ──────────────────────────────────────────────────
+
+    /// Collect console page routes from all enabled addons.
+    #[cfg(feature = "console")]
+    pub fn get_console_page_routes(
+        &self,
+        state: &crate::console::ConsoleState,
+        config: &crate::config::Config,
+    ) -> Vec<axum::Router<Arc<crate::console::ConsoleState>>> {
+        let mut routers = Vec::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(r) = addon.console_page_routes(state) {
+                routers.push(r);
+            }
+        }
+        routers
+    }
+
+    /// Collect console API routes from all enabled addons.
+    #[cfg(feature = "console")]
+    pub fn get_console_api_routes(
+        &self,
+        state: &crate::console::ConsoleState,
+        config: &crate::config::Config,
+    ) -> Vec<axum::Router<Arc<crate::console::ConsoleState>>> {
+        let mut routers = Vec::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(r) = addon.console_api_routes(state) {
+                routers.push(r);
+            }
+        }
+        routers
+    }
+
+    /// Get the first phone auth token validator from any enabled addon.
+    #[cfg(feature = "console")]
+    pub fn get_phone_auth_validator(
+        &self,
+        state: &crate::console::ConsoleState,
+        config: &crate::config::Config,
+    ) -> Option<crate::auth::DynTokenValidator> {
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(validator) = addon.phone_auth_validator(state) {
+                return Some(validator);
+            }
+        }
+        None
+    }
+
     pub fn get_call_record_hooks(
         &self,
         config: &crate::config::Config,

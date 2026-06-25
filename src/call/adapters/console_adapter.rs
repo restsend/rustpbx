@@ -103,9 +103,6 @@ pub fn console_to_call_command(
             interrupt_on_dtmf,
             loop_playback,
         } => Ok(CallCommand::Play {
-            // Default to the caller leg when omitted. Using session_id here is a
-            // bug because handle_play only special-cases "caller"/"callee" and
-            // errors out for any other (dynamic) leg id.
             leg_id: Some(LegId::new(leg_id.as_deref().unwrap_or("caller"))),
             source: convert_console_source(source),
             options: Some(PlayOptions {
@@ -328,6 +325,33 @@ mod tests {
         {
             assert_eq!(leg_id.as_ref().unwrap().as_str(), "leg-callee");
             assert!(matches!(source, MediaSource::Silence));
+            let opts = options.unwrap();
+            assert!(opts.loop_playback);
+            assert!(!opts.interrupt_on_dtmf);
+        } else {
+            panic!("Expected Play command");
+        }
+    }
+
+    #[test]
+    fn test_play_both_legs_conversion() {
+        let payload = CallCommandPayload::Play {
+            source: ConsoleMediaSource::Url {
+                url: "http://example.com/file.wav".to_string(),
+            },
+            leg_id: Some("both".to_string()),
+            interrupt_on_dtmf: false,
+            loop_playback: true,
+        };
+        let cmd = console_to_call_command(payload, "session-abc").unwrap();
+        if let CallCommand::Play {
+            leg_id,
+            source,
+            options,
+        } = cmd
+        {
+            assert_eq!(leg_id.as_ref().unwrap().as_str(), "both");
+            assert!(matches!(source, MediaSource::Url { .. }));
             let opts = options.unwrap();
             assert!(opts.loop_playback);
             assert!(!opts.interrupt_on_dtmf);
