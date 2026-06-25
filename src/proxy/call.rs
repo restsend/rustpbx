@@ -696,18 +696,45 @@ impl CallModule {
             }
         }
 
+        let mut source_trunk_lookup = None;
+        if matches!(direction, DialDirection::Inbound)
+            && let Some(source_addr) = cookie.get_extension::<SourceAddress>()
+            && let Some(source_ip) = source_addr_ip(&source_addr.0)
+        {
+            let source_trunks = self
+                .inner
+                .server
+                .data_context
+                .find_trunks_by_ip(&source_ip)
+                .await;
+            if !source_trunks.is_empty() {
+                source_trunk_lookup = Some((source_ip, source_trunks));
+            }
+        }
+
         if callee_is_same_realm
             && !always_forwarding
             && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await
         {
             internal_lookup_empty = results.is_empty();
             if internal_lookup_empty {
-                warn!(
-                    callee_uri = %callee_uri,
-                    callee_realm = %callee_realm,
-                    caller_realm = ?caller.realm,
-                    "locator lookup returned empty results for same-realm callee"
-                );
+                if let Some((source_ip, source_trunks)) = source_trunk_lookup.as_ref() {
+                    debug!(
+                        callee_uri = %callee_uri,
+                        callee_realm = %callee_realm,
+                        caller_realm = ?caller.realm,
+                        %source_ip,
+                        source_trunks = ?source_trunks,
+                        "locator lookup returned empty results for same-realm callee; source trunk routing may handle call"
+                    );
+                } else {
+                    warn!(
+                        callee_uri = %callee_uri,
+                        callee_realm = %callee_realm,
+                        caller_realm = ?caller.realm,
+                        "locator lookup returned empty results for same-realm callee"
+                    );
+                }
             } else if !results.is_empty() {
                 // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
                 // so SipSession can route cross-node calls via remote home_proxy.
