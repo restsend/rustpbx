@@ -1,4 +1,3 @@
-use crate::call::app::PendingQueuePlan;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::domain::{
     CallCommand, HangupCascade, HangupCommand, LegId, LegState, MediaPathMode, MediaRuntimeProfile,
@@ -11,7 +10,7 @@ use crate::call::runtime::{
     AppFactory, AppRuntime, AppRuntimeConfig, CommandResult, DefaultAppRuntime, ExecutionContext,
     MediaCapabilityCheck, SessionId,
 };
-use crate::call::{DialStrategy, Location};
+use crate::call::Location;
 use crate::models::call_record::extract_sip_username;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -3313,92 +3312,21 @@ impl SipSession {
                 }
 
                 DialplanFlow::Queue { plan, next } => {
-                    // Extract agents from plan
-                    let agents = match &plan.dial_strategy {
-                        Some(DialStrategy::Sequential(l)) => l.clone(),
-                        Some(DialStrategy::Parallel(l)) => l.clone(),
-                        None => {
-                            warn!("No dial strategy in queue plan");
-                            return self.execute_flow(next, callee_state_rx).await;
-                        }
-                    };
-
-                    if agents.is_empty() {
-                        warn!("No agents configured in queue plan");
+                    if plan.dial_strategy.is_none() {
+                        warn!("No dial strategy in queue plan");
                         return self.execute_flow(next, callee_state_rx).await;
                     }
 
-                    // Resolve custom targets (skill-groups → specific agents)
-                    let resolved_agents = self
-                        .resolve_custom_targets(agents, plan.acd_policy.as_deref())
-                        .await;
-
-                    // Enrich via queue_location_enricher if configured
-                    let resolved_agents =
-                        if let Some(enricher) = &self.server.queue_location_enricher {
-                            let caller_headers: Vec<rsipstack::sip::Header> = self
-                                .server_dialog
-                                .initial_request()
-                                .headers
-                                .iter()
-                                .cloned()
-                                .collect();
-                            enricher
-                                .enrich(
-                                    resolved_agents,
-                                    &crate::proxy::call::QueueEnrichContext {
-                                        session_id: &self.context.session_id.to_string(),
-                                        queue_name: &plan.queue_name,
-                                        caller_headers: &caller_headers,
-                                    },
-                                )
-                                .await
-                        } else {
-                            resolved_agents
-                        };
-
-                    let is_parallel = matches!(plan.dial_strategy, Some(DialStrategy::Parallel(_)));
-                    let agent_uris: Vec<String> = resolved_agents
-                        .iter()
-                        .map(|l| l.contact_raw.clone().unwrap_or_else(|| l.aor.to_string()))
-                        .collect();
-
-                    // Store resolved plan in context for the queue app factory
-                    if let Some(runtime) = self
-                        .app_runtime
-                        .as_any()
-                        .downcast_ref::<DefaultAppRuntime>()
-                    {
-                        *runtime.context.pending_queue.lock().unwrap() = Some(PendingQueuePlan {
-                            plan: plan.clone(),
-                            agent_uris,
-                            parallel: is_parallel,
-                        });
-                    }
-
-                    match self
-                        .app_runtime
-                        .start_app("queue", None, plan.accept_immediately)
-                        .await
-                    {
-                        Ok(()) => {
-                            self.start_caller_ingress_monitor_if_needed().await;
-                            // Inject dial_next_agent to kick off sequential agent dialing
-                            // (parallel mode auto-dials in on_enter)
-                            if !is_parallel {
-                                let _ = self.app_runtime.inject_event(serde_json::json!({
-                                    "type": "custom",
-                                    "name": "dial_next_agent",
-                                    "data": {},
-                                }));
-                            }
-                            Ok(())
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Queue: failed to start queue app, trying next flow");
-                            self.execute_flow(next, callee_state_rx).await
-                        }
-                    }
+                    // Run the queue through the proxy/callee-leg path. Agents are
+                    // dialed as the standard `callee` leg (via `try_single_target`
+                    // / `create_callee_track`), which gives working two-way
+                    // anchored media, hangup cascade, recording and codec
+                    // negotiation for free — the same machinery as a normal
+                    // answered call. The app-runtime queue (dynamic `LegAdd`
+                    // legs) is intentionally NOT used for inbound routing because
+                    // those legs are not wired into media forwarding or the call
+                    // lifecycle. (Transfer-to-queue already uses this path.)
+                    self.execute_queue(plan, callee_state_rx).await
                 }
                 DialplanFlow::Application {
                     app_name,
