@@ -3,7 +3,7 @@
 {% block title %}{{ "dashboard.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
-<div class="min-h-[70vh] py-6">
+<div class="min-h-[70vh] py-6" x-data="dashboardPage()" x-init="init()">
     <div class="mx-auto max-w-7xl px-4">
         <!-- Time range selector -->
         <div class="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5">
@@ -592,13 +592,7 @@
             rangeSelect.addEventListener('change', async (event) => {
                 const key = event.target.value;
                 try {
-                    const resp = await fetch(`${endpoint}?range=${encodeURIComponent(key)}`, {
-                        headers: { 'Accept': 'application/json' }
-                    });
-                    if (!resp.ok) {
-                        throw new Error(`Request failed: ${resp.status}`);
-                    }
-                    const data = await resp.json();
+                    const data = await apiGet(`${endpoint}?range=${encodeURIComponent(key)}`);
                     applyPayload(data);
                 } catch (err) {
                     console.error('Failed to refresh dashboard data', err);
@@ -606,6 +600,12 @@
             });
         }
     }
+
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('dashboardPage', () => ({
+            init() { initDashboardPage(); }
+        }));
+    });
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initDashboardPage, { once: true });

@@ -20,7 +20,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Form, Path as AxumPath, State},
+    extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, put},
@@ -241,7 +241,7 @@ async fn page_sip_trunk_detail(
 async fn create_sip_trunk(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
-    Form(form): Form<SipTrunkForm>,
+    Json(form): Json<SipTrunkForm>,
 ) -> Response {
     if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
         return resp;
@@ -286,7 +286,7 @@ async fn update_sip_trunk(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
-    Form(form): Form<SipTrunkForm>,
+    Json(form): Json<SipTrunkForm>,
 ) -> Response {
     if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
         return resp;
@@ -926,7 +926,7 @@ mod tests {
         let user = unprivileged_user();
         let form = SipTrunkForm::default();
         let resp =
-            create_sip_trunk(State(state), AuthRequired(user), axum::extract::Form(form)).await;
+            create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
@@ -939,7 +939,7 @@ mod tests {
             AxumPath(999i64),
             State(state),
             AuthRequired(user),
-            axum::extract::Form(form),
+            axum::Json(form),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -961,7 +961,7 @@ mod tests {
         form.name = Some("test-trunk".into());
         form.sip_server = Some("sip.example.com".into());
         let resp =
-            create_sip_trunk(State(state), AuthRequired(user), axum::extract::Form(form)).await;
+            create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }

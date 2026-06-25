@@ -3,7 +3,7 @@
 {% block title %}{{ "archive.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
-<div class="p-6" x-data='archiveManager({{ archives | tojson }}, {{ config | tojson }}, {{ t | tojson }})'>
+<div class="p-6" x-data='archiveManager({{ archives | tojson }}, {{ config | tojson }})'>
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
@@ -212,9 +212,9 @@
 </div>
 
 <script>
-    function archiveManager(archives, config, translations) {
+    function archiveManager(archives, config) {
         return {
-            t: translations.archive || {},
+            t: (window.__i18n_t || {}).archive || {},
             archives: archives || [],
             config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_after_days: 0, archive_dir: '' },
             saving: false,

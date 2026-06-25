@@ -829,14 +829,10 @@
                     if (this.mode !== 'edit' || !extension) return;
                     this.presence.loading = true;
                     try {
-                        const response = await fetch(`${this.apiPrefix}/presence/${extension}`);
-                        if (response.ok) {
-                            const result = await response.json();
-                            const data = result.data || {};
-                            this.presence.status = data.status || 'offline';
-                            this.presence.note = data.note || '';
-                            this.presence.updated_at = data.last_updated;
-                        }
+                        const data = await apiGet(`/presence/${extension}`) || {};
+                        this.presence.status = data.status || 'offline';
+                        this.presence.note = data.note || '';
+                        this.presence.updated_at = data.last_updated;
                     } catch (err) {
                         console.error('Failed to fetch presence:', err);
                     } finally {
@@ -851,19 +847,10 @@
                     }
                     this.presence.saving_manual = true;
                     try {
-                        const response = await fetch(`${this.apiPrefix}/presence/${extension}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ status, note: this.presence.note })
-                        });
-                        if (response.ok) {
-                            await this.fetchPresence();
-                        } else {
-                            const data = await response.json();
-                            this.error = data.message || '{{ "extension_detail.failed_update_presence" | t }}';
-                        }
+                        await apiPost(`/presence/${extension}`, { status, note: this.presence.note });
+                        await this.fetchPresence();
                     } catch (err) {
-                        this.error = '{{ "extension_detail.network_error" | t }}';
+                        this.error = err.message || '{{ "extension_detail.failed_update_presence" | t }}';
                     } finally {
                         this.presence.saving_manual = false;
                     }
@@ -1042,17 +1029,11 @@
                     this.success = null;
                     try {
                         const body = this.buildPayload();
-                        const response = await fetch(this.submitUrl(), {
-                            method: this.submitMethod(),
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify(body),
-                        });
-                        const data = await response.json().catch(() => ({}));
-                        if (!response.ok) {
-                            throw new Error(data?.message || '{{ "extension_detail.failed_save" | t }}');
+                        const method = this.submitMethod().toLowerCase();
+                        if (method === 'put') {
+                            await apiPut(this.submitUrl(), body);
+                        } else {
+                            await apiPatch(this.submitUrl(), body);
                         }
 
                         this.success = this.mode === 'create'

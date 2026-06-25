@@ -56,3 +56,4 @@ screenshots/
 demo/
 *.local
 dist/
+package-lock.json

@@ -69,35 +69,9 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     #[cfg(feature = "addon-cc")]
     let page_routes = page_routes.merge(crate::addons::cc::console_handlers::page_urls());
 
-    // API routes (nested under api_prefix)
-    let api_routes = Router::new()
-        .route("/pending-reloads", get(pending_reloads_handler))
-        .merge(locales::api_urls())
-        .merge(presence::api_urls())
-        .merge(notifications::api_urls())
-        .merge(metrics::api_urls())
-        .merge(addons::api_urls());
-    #[cfg(feature = "addon-cc")]
-    let api_routes = {
-        let cc_api_routes = crate::addons::cc::console_handlers::api_urls();
-        let cc_api_routes = if let Some(app_state) = state.app_state() {
-            if let Some(cc_state) = app_state.get_addon_state::<crate::addons::cc::CcAddonState>() {
-                let auth_state = crate::addons::cc::phone_auth::PhoneAuthState {
-                    phone_auth: cc_state.phone_auth.clone(),
-                    console_state: Some(state.clone()),
-                };
-                cc_api_routes.layer(axum::middleware::from_fn_with_state(
-                    auth_state,
-                    crate::addons::cc::phone_auth::phone_auth_middleware,
-                ))
-            } else {
-                cc_api_routes
-            }
-        } else {
-            cc_api_routes
-        };
-        api_routes.merge(cc_api_routes)
-    };
+    // API routes were unified into src/api/mod.rs (single /api tree with
+    // api_auth_middleware). See `api::router`.
+    let api_routes = Router::new();
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))
@@ -107,10 +81,16 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         )
         .nest(&base_path, page_routes)
         .nest(&api_prefix, api_routes)
+        // CSRF protection on all console mutations (POST/PUT/PATCH/DELETE).
+        // Auth endpoints (login/register/reset/forgot/logout) are exempt
+        // inside csrf_guard itself; they rely on SameSite=Lax.
+        .layer(axum::middleware::from_fn(
+            crate::console::middleware::csrf_guard,
+        ))
         .with_state(state)
 }
 
-async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
+pub async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
     let targets = state.pending_reload_targets();
     Json(json!({
         "pending": {

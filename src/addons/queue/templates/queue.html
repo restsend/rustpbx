@@ -346,7 +346,7 @@
 </div>
 
 <script>
-    window._queueTranslations = {{ t | json | safe }};
+    window._queueTranslations = window.__i18n_t || {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queuePage', (options) => ({
             basePath: options.basePath || '/console',

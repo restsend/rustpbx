@@ -728,7 +728,7 @@ endblock %}
 
 <script>
     window.__consoleApiPrefix = {{ api_prefix | default('/api') | tojson }};
-    window._queueTranslations = {{ t | json | safe }};
+    window._queueTranslations = window.__i18n_t || {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',
