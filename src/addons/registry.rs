@@ -303,16 +303,12 @@ impl AddonRegistry {
         config: &crate::config::Config,
         db: &sea_orm::DatabaseConnection,
         extension: &str,
-        voicemail_disabled: bool,
     ) {
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), config) {
                 continue;
             }
-            if let Err(e) = addon
-                .on_extension_created(db, extension, voicemail_disabled)
-                .await
-            {
+            if let Err(e) = addon.on_extension_created(db, extension).await {
                 tracing::warn!(
                     addon = %addon.id(),
                     extension = %extension,
@@ -328,16 +324,12 @@ impl AddonRegistry {
         config: &crate::config::Config,
         db: &sea_orm::DatabaseConnection,
         extension: &str,
-        voicemail_disabled: bool,
     ) {
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), config) {
                 continue;
             }
-            if let Err(e) = addon
-                .on_extension_updated(db, extension, voicemail_disabled)
-                .await
-            {
+            if let Err(e) = addon.on_extension_updated(db, extension).await {
                 tracing::warn!(
                     addon = %addon.id(),
                     extension = %extension,

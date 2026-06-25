@@ -191,7 +191,6 @@ pub trait Addon: Send + Sync {
         &self,
         _db: &sea_orm::DatabaseConnection,
         _extension: &str,
-        _voicemail_disabled: bool,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -201,7 +200,6 @@ pub trait Addon: Send + Sync {
         &self,
         _db: &sea_orm::DatabaseConnection,
         _extension: &str,
-        _voicemail_disabled: bool,
     ) -> anyhow::Result<()> {
         Ok(())
     }

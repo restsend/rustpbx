@@ -465,12 +465,7 @@ async fn create_extension(
     if let Some(app_state) = state.app_state() {
         app_state
             .addon_registry
-            .on_extension_created(
-                app_state.config(),
-                db,
-                extension,
-                payload.voicemail_disabled.unwrap_or(false),
-            )
+            .on_extension_created(app_state.config(), db, extension)
             .await;
     }
 
@@ -726,12 +721,7 @@ async fn update_extension(
         if let Some(app_state) = state.app_state() {
             app_state
                 .addon_registry
-                .on_extension_updated(
-                    app_state.config(),
-                    db,
-                    &ext,
-                    payload.voicemail_disabled.unwrap_or(false),
-                )
+                .on_extension_updated(app_state.config(), db, &ext)
                 .await;
         }
     }
@@ -1034,12 +1024,7 @@ pub async fn csv_import_extensions(
                 if let Some(app_state) = state.app_state() {
                     app_state
                         .addon_registry
-                        .on_extension_created(
-                            app_state.config(),
-                            db,
-                            &ext_number,
-                            voicemail_disabled,
-                        )
+                        .on_extension_created(app_state.config(), db, &ext_number)
                         .await;
                 }
                 imported += 1;
