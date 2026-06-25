@@ -123,6 +123,8 @@ Used for short-lived, dynamic extensions (often internal).
 ```toml
 [[proxy.user_backends]]
 type = "extension"
+# Optional: separate database for extensions (defaults to main database_url)
+# database_url = "sqlite://extensions.sqlite3"
 ttl = 3600 # Cache time in seconds
 ```
 

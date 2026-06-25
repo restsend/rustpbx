@@ -552,6 +552,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
             call_id: "pushed-call".to_string(),
             digit: "7".to_string(),
             leg_id: None,
+            extra: None,
         },
         None,
     );

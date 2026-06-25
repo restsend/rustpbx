@@ -265,6 +265,7 @@ pub struct Dtmf {
     pub call_id: String,
     pub digit: String,
     pub leg_id: Option<String>,
+    pub extra: Option<serde_json::Value>,
 }
 rwi_event!(Dtmf, "dtmf");
 
@@ -795,5 +796,33 @@ mod tests {
         assert!(entered.get("extra").is_some());
         assert!(exited.get("extra").is_some());
         assert!(completed.get("extra").is_some());
+    }
+
+    #[test]
+    fn dtmf_event_serialize_extra_field() {
+        let dtmf = to_flat_payload(
+            &Dtmf {
+                call_id: "call-1".into(),
+                digit: "5".into(),
+                leg_id: None,
+                extra: None,
+            },
+            None,
+        );
+        let dtmf_with_extra = to_flat_payload(
+            &Dtmf {
+                call_id: "call-2".into(),
+                digit: "9".into(),
+                leg_id: Some("caller".into()),
+                extra: Some(serde_json::json!({"foo": "bar"})),
+            },
+            None,
+        );
+
+        assert!(dtmf.get("extra").is_some());
+        assert_eq!(dtmf["extra"], serde_json::Value::Null);
+
+        assert!(dtmf_with_extra.get("extra").is_some());
+        assert_eq!(dtmf_with_extra["extra"]["foo"], "bar");
     }
 }
