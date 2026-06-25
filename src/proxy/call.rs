@@ -1340,6 +1340,7 @@ impl CallModule {
         }?;
 
         let mut dialplan = dialplan;
+
         if dialplan.caller_contact.is_none()
             && let Some(contact_uri) = self.inner.server.default_contact_uri()
         {

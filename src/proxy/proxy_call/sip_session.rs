@@ -3167,6 +3167,34 @@ impl SipSession {
                             self.meta.hangup_reason =
                                 Some(sip_status_to_hangup_reason(code.code()));
                         }
+
+                        // If the callee extension has voicemail enabled, chain to
+                        // voicemail instead of passing the rejection to the caller.
+                        // This covers busy, no-answer, offline, decline, etc.
+                        if self.context.dialplan.voicemail_enabled
+                            && !self.server_dialog.state().is_terminated()
+                        {
+                            if let Some(ext) =
+                                extract_sip_username(&self.context.original_callee)
+                            {
+                                info!(
+                                    session_id = %self.context.session_id,
+                                    extension = %ext,
+                                    status = %code.code(),
+                                    "Voicemail enabled for callee, starting voicemail app instead of rejecting"
+                                );
+                                if self.start_voicemail_app(&ext).await.is_ok() {
+                                    // Voicemail app took over — don't reject the caller.
+                                    return Ok(());
+                                }
+                                warn!(
+                                    session_id = %self.context.session_id,
+                                    extension = %ext,
+                                    "Voicemail app failed to start, falling back to rejection"
+                                );
+                            }
+                        }
+
                         if matches!(code.code(), 408 | 480 | 486 | 487) {}
                         if let Err(e) = self
                             .reject_with_tone(
