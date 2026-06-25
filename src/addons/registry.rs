@@ -296,6 +296,79 @@ impl AddonRegistry {
         builder
     }
 
+    // ── Extension lifecycle hooks ───────────────────────────────────────────
+
+    pub async fn on_extension_created(
+        &self,
+        config: &crate::config::Config,
+        db: &sea_orm::DatabaseConnection,
+        extension: &str,
+        voicemail_disabled: bool,
+    ) {
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Err(e) = addon
+                .on_extension_created(db, extension, voicemail_disabled)
+                .await
+            {
+                tracing::warn!(
+                    addon = %addon.id(),
+                    extension = %extension,
+                    error = %e,
+                    "on_extension_created hook failed"
+                );
+            }
+        }
+    }
+
+    pub async fn on_extension_updated(
+        &self,
+        config: &crate::config::Config,
+        db: &sea_orm::DatabaseConnection,
+        extension: &str,
+        voicemail_disabled: bool,
+    ) {
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Err(e) = addon
+                .on_extension_updated(db, extension, voicemail_disabled)
+                .await
+            {
+                tracing::warn!(
+                    addon = %addon.id(),
+                    extension = %extension,
+                    error = %e,
+                    "on_extension_updated hook failed"
+                );
+            }
+        }
+    }
+
+    pub async fn on_extension_deleting(
+        &self,
+        config: &crate::config::Config,
+        db: &sea_orm::DatabaseConnection,
+        extension: &str,
+    ) {
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Err(e) = addon.on_extension_deleting(db, extension).await {
+                tracing::warn!(
+                    addon = %addon.id(),
+                    extension = %extension,
+                    error = %e,
+                    "on_extension_deleting hook failed"
+                );
+            }
+        }
+    }
+
     /// Run database migrations for all enabled addons.
     pub async fn run_migrations(&self, db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
         let manager = sea_orm_migration::SchemaManager::new(db);
