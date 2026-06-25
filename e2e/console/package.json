@@ -1,0 +1,14 @@
+{
+  "name": "console-e2e",
+  "private": true,
+  "description": "E2E + screenshot baseline tests for the main admin console (/console) — pre/post JSON+Alpine refactor regression",
+  "dependencies": {
+    "@playwright/test": "1.60.0"
+  },
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "baseline": "BASELINE=1 npx playwright test --config=playwright.config.js --output=report",
+    "report": "npx playwright show-report report"
+  }
+}

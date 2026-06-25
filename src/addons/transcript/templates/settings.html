@@ -5,7 +5,6 @@
     config: {{ config | default({}) | tojson }},
     modelReady: {{ model_ready | default(false) | tojson }},
     basePath: {{ base_path | default("/console") | tojson }},
-    translations: {{ t | tojson }}
 })'>
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Header -->
@@ -122,7 +121,7 @@
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('transcriptSettings', (initialData) => ({
-            t: (initialData.translations || {}).transcript || {},
+            t: (window.__i18n_t || {}).transcript || {},
             config: initialData.config,
             modelReady: initialData.modelReady,
             basePath: initialData.basePath,

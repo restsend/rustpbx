@@ -45,6 +45,37 @@ pub(crate) fn ok_json(data: serde_json::Value) -> Response {
     (StatusCode::OK, Json(data)).into_response()
 }
 
+// ── Unified envelope helpers (`{status, message?, data?}`) ──────────
+// Prefer these for new JSON handlers; old `ok_json`/inline `json!` callers
+// keep working unchanged and are migrated page-by-page in stage C/D.
+
+#[allow(dead_code)]
+pub(crate) fn api_ok(data: serde_json::Value) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "ok", "data": data })),
+    )
+        .into_response()
+}
+
+#[allow(dead_code)]
+pub(crate) fn api_ok_message(message: impl Into<String>) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "ok", "message": message.into() })),
+    )
+        .into_response()
+}
+
+#[allow(dead_code)]
+pub(crate) fn api_created(data: serde_json::Value) -> Response {
+    (
+        StatusCode::CREATED,
+        Json(json!({ "status": "ok", "data": data })),
+    )
+        .into_response()
+}
+
 /// Look up an entity by primary key.  Returns the model on success,
 /// `not_found(label)` on `Ok(None)`, or `internal_error(...)` on `Err`.
 #[allow(unused_macros)]

@@ -1506,17 +1506,11 @@
                     this.success = null;
                     const payload = this.buildPayload();
                     try {
-                        const response = await fetch(this.submitUrl(), {
-                            method: this.submitMethod(),
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify(payload),
-                        });
-                        const data = await response.json().catch(() => ({}));
-                        if (!response.ok) {
-                            throw new Error(data?.message || this.translations.err_failed_save);
+                        const method = this.submitMethod().toLowerCase();
+                        if (method === 'put') {
+                            await apiPut(this.submitUrl(), payload);
+                        } else {
+                            await apiPatch(this.submitUrl(), payload);
                         }
                         this.success = this.translations.saved_successfully;
                         setTimeout(() => {

@@ -15,6 +15,7 @@
     <script>
         window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');
         window.__consoleApiPrefix = {{ api_prefix | tojson }};
+        window.__consoleBasePath = {{ base_path | tojson }};
         window.hasPermission = function (perm) {
             // If current_user is missing but user reached this authenticated page,
             // default to showing items (backend has already authenticated)
@@ -24,10 +25,21 @@
             return perms.indexOf(perm) !== -1;
         };
         window.can = window.hasPermission;
+        // Client-side i18n lookup for use in JS/Alpine contexts.
+        window.t = function (key) {
+            const parts = key.split('.');
+            let val = window.__i18n_t;
+            for (const p of parts) {
+                if (val == null) return key;
+                val = val[p];
+            }
+            return val != null ? val : key;
+        };
     </script>
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
+    <script src="{{ static_path | default('/static') }}/js/api.js" defer></script>
     {% if addon_scripts %}
     {% for script in addon_scripts %}
     <script src="{{ script|safe }}" defer>
@@ -156,19 +168,19 @@
 
         Alpine.data('consoleConfirmDialog', () => ({
             open: false,
-            title: '{{ "common.confirm_title" | t }}',
+            title: t('common.confirm_title'),
             message: '',
-            confirmLabel: '{{ "common.confirm" | t }}',
-            cancelLabel: '{{ "common.cancel" | t }}',
+            confirmLabel: t('common.confirm'),
+            cancelLabel: t('common.cancel'),
             destructive: false,
             onConfirm: null,
             init() {
                 window.addEventListener('console:confirm', (event) => {
                     const detail = event.detail || {};
-                    this.title = detail.title || '{{ "common.confirm_title" | t }}';
+                    this.title = detail.title || t('common.confirm_title');
                     this.message = detail.message || detail.description || '';
-                    this.confirmLabel = detail.confirmLabel || '{{ "common.confirm" | t }}';
-                    this.cancelLabel = detail.cancelLabel || '{{ "common.cancel" | t }}';
+                    this.confirmLabel = detail.confirmLabel || t('common.confirm');
+                    this.cancelLabel = detail.cancelLabel || t('common.cancel');
                     this.destructive = Boolean(detail.destructive);
                     this.onConfirm = typeof detail.onConfirm === 'function' ? detail.onConfirm : null;
                     this.open = true;

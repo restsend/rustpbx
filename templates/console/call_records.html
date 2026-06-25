@@ -8,7 +8,7 @@
             list_url: {{ list_url | default("/console/call-records") | tojson }},
             page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }},
             translations: window.__i18n_t || {}
-        })' x-init="init()">
+        })'>
         <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "call_record.voice_analytics" | t }}</p>
@@ -744,8 +744,12 @@
                     this.currentPage = currentPageRaw;
                 }
 
+                this.syncActiveFilters();
+
                 if (!this.dateFrom) {
                     this.applyDatePreset('last_7_days');
+                } else if (!Array.isArray(data.records) || !data.records.length) {
+                    this.fetchRecords({ page: this.currentPage });
                 }
 
                 const scheduleWatcher = () => {
@@ -787,10 +791,6 @@
                     this.applyPageSize(value);
                 });
 
-                this.syncActiveFilters();
-                if (!Array.isArray(data.records) || !data.records.length) {
-                    this.fetchRecords({ page: this.currentPage });
-                }
             },
             normalizeBasePath(value) {
                 if (!value || value === '/') {
