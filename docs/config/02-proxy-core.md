@@ -27,6 +27,9 @@ ws_handler = "/ws"
 
 # RWI (RustPBX WebSocket Interface) — real-time call control WebSocket path
 rwi_path = "/rwi/v1"
+
+# AMI (Asterisk Manager Interface) HTTP path (default: "/ami/v1")
+# ami_path = "/ami/v1"
 ```
 
 ## SIP Identity & Behavior
@@ -143,9 +146,24 @@ generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 acl_files = ["config/acl/*.toml"]
+queues_files = ["config/queues/*.toml"]
+ivr_files = ["config/ivr/*.toml"]
 
 # Directory for queue-specific data files
 queue_dir = "./queues"
+```
+
+### Inline ACL Rules
+
+ACL rules can also be defined inline in `rustpbx.toml` alongside `acl_files`:
+
+```toml
+[proxy]
+# Inline rules are merged with rules loaded from acl_files
+acl_rules = [
+    "allow all",
+    "deny all",
+]
 ```
 
 ## Call Handling

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -306,7 +306,7 @@ impl Recorder {
         let prev_ssrc = *last_ssrc;
 
         if ssrc_changed || timestamp_far_ahead || timestamp_far_behind {
-            debug!(
+            trace!(
                 recorder_path = %self.path,
                 leg = ?leg,
                 base_timestamp = base,

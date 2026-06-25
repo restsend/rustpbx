@@ -37,7 +37,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
 
     // Unified home for console-internal JSON endpoints (formerly nested inside
     // the console router). They all flow through the same api_auth_middleware.
-    let api_routes = api_routes
+    let mut api_routes = api_routes
         .route("/pending-reloads", get(crate::console::handlers::pending_reloads_handler))
         .merge(crate::console::handlers::locales::api_urls())
         .merge(crate::console::handlers::presence::api_urls())
@@ -45,28 +45,17 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::metrics::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
-    // CC phone-auth API routes (feature-gated).
-    #[cfg(feature = "addon-cc")]
-    let api_routes = {
-        let cc_api_routes = crate::addons::cc::console_handlers::api_urls();
-        let cc_api_routes = if let Some(app_state) = state.app_state() {
-            if let Some(cc_state) = app_state.get_addon_state::<crate::addons::cc::CcAddonState>() {
-                let auth_state = crate::addons::cc::phone_auth::PhoneAuthState {
-                    phone_auth: cc_state.phone_auth.clone(),
-                    console_state: Some(state.clone()),
-                };
-                cc_api_routes.layer(axum::middleware::from_fn_with_state(
-                    auth_state,
-                    crate::addons::cc::phone_auth::phone_auth_middleware,
-                ))
-            } else {
-                cc_api_routes
-            }
-        } else {
-            cc_api_routes
-        };
-        api_routes.merge(cc_api_routes)
-    };
+    // Addon API routes (collected at runtime via Addon trait hooks).
+    // Each addon applies its own middleware layers (e.g. phone-auth) as needed.
+    if let Some(app_state) = state.app_state() {
+        let config = app_state.config();
+        for r in app_state
+            .addon_registry
+            .get_console_api_routes(&state, &config)
+        {
+            api_routes = api_routes.merge(r);
+        }
+    }
 
     let api_routes = api_routes
         .layer(axum::middleware::from_fn(
@@ -89,18 +78,10 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
 
 fn build_phone_auth(console: &Arc<ConsoleState>) -> Option<DynTokenValidator> {
     let app_state = console.app_state()?;
-
-    #[cfg(feature = "addon-cc")]
-    {
-        let cc_state = app_state.get_addon_state::<crate::addons::cc::CcAddonState>()?;
-        Some(Arc::new(cc_state.phone_auth.clone()) as DynTokenValidator)
-    }
-
-    #[cfg(not(feature = "addon-cc"))]
-    {
-        let _ = app_state;
-        None
-    }
+    let config = app_state.config();
+    app_state
+        .addon_registry
+        .get_phone_auth_validator(console, &config)
 }
 
 #[derive(Clone)]

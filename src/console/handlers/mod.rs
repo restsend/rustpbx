@@ -52,7 +52,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     let api_prefix = state.api_prefix().to_string();
 
     // Page routes (nested under base_path)
-    let page_routes = Router::new()
+    let mut page_routes = Router::new()
         .merge(user::urls())
         .merge(extension::urls())
         .merge(sip_trunk::urls())
@@ -66,8 +66,17 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(sipflow::urls())
         .merge(notifications::urls())
         .merge(metrics::urls());
-    #[cfg(feature = "addon-cc")]
-    let page_routes = page_routes.merge(crate::addons::cc::console_handlers::page_urls());
+
+    // Addon page routes (collected at runtime via Addon trait hooks).
+    if let Some(app_state) = state.app_state() {
+        let config = app_state.config();
+        for r in app_state
+            .addon_registry
+            .get_console_page_routes(&state, &config)
+        {
+            page_routes = page_routes.merge(r);
+        }
+    }
 
     // API routes were unified into src/api/mod.rs (single /api tree with
     // api_auth_middleware). See `api::router`.

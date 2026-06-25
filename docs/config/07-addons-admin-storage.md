@@ -172,3 +172,15 @@ no_answer_timeout_secs = 30
 # three_pcc_timeout_secs = 60
 # max_concurrent_transfers = 1000
 ```
+
+## RWI Webhook (`[rwi_webhook]`)
+
+Top-level webhook for RWI real-time events (call started, call ended, media recorded, etc.). Uses the same structure as `[proxy.locator_webhook]`.
+
+```toml
+[rwi_webhook]
+url = "https://events.example.com/rwi"
+events = ["call.started", "call.ended", "media.recorded"]
+headers = { "Authorization" = "Bearer token123" }
+timeout_ms = 5000
+```
