@@ -22,7 +22,7 @@
 
 use super::e2e_test_server::E2eTestServer;
 use super::rtp_utils::{RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
-use super::test_helpers::pcmu_sdp;
+use super::test_helpers::{build_sdp, pcma_sdp, pcmu_sdp};
 use super::test_ua::{TestUa, TestUaEvent};
 use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::proxy::routing::{
@@ -40,12 +40,21 @@ use tracing::info;
 /// Build a ProxyConfig with a single queue "support" whose only agent is the
 /// registered user `bob`, plus a route that sends calls to `support` into it.
 fn queue_proxy_config() -> ProxyConfig {
+    queue_proxy_config_with(Vec::new(), false)
+}
+
+fn queue_proxy_config_with(audio_codecs: Vec<String>, accept_immediately: bool) -> ProxyConfig {
     let mut config = ProxyConfig {
         media_proxy: MediaProxyMode::All,
         // Match the E2E media test harness: disable RTP latching so the proxy
         // sends to the SDP-advertised receiver ports (the test's RtpReceivers)
         // rather than latching onto the RtpSenders' source ports.
         enable_latching: false,
+        audio_codecs: if audio_codecs.is_empty() {
+            None
+        } else {
+            Some(audio_codecs)
+        },
         ..Default::default()
     };
 
@@ -60,10 +69,7 @@ fn queue_proxy_config() -> ProxyConfig {
             wait_timeout_secs: Some(10),
             ..Default::default()
         },
-        // Do NOT answer the caller up front — this is the production-relevant
-        // path (caller answered only when the agent connects), and the one that
-        // exercised the early-media / HaveLocalOffer bug.
-        accept_immediately: false,
+        accept_immediately,
         ..Default::default()
     };
     config.queues.insert("support".to_string(), queue_config);
@@ -99,7 +105,11 @@ struct QueueMediaTestCtx {
 
 impl QueueMediaTestCtx {
     async fn setup() -> Result<Self> {
-        let server = Arc::new(E2eTestServer::start_with_config(queue_proxy_config()).await?);
+        Self::setup_with_config(queue_proxy_config()).await
+    }
+
+    async fn setup_with_config(config: ProxyConfig) -> Result<Self> {
+        let server = Arc::new(E2eTestServer::start_with_config(config).await?);
 
         // alice = caller, bob = the queue's agent. Both register so the queue
         // can resolve bob's contact via the locator.
@@ -287,6 +297,108 @@ async fn test_queue_call_bidirectional_rtp() -> Result<()> {
         caller_stats.payload_types.contains(&0),
         "Caller should receive PCMU (PT 0) from agent, got {:?}",
         caller_stats.payload_types
+    );
+
+    ctx.caller_ua.hangup(&caller_id).await?;
+    ctx.server.stop();
+    Ok(())
+}
+
+/// Symmetric to the agent-hangup case: when the CALLER hangs up, the agent's
+/// call must be torn down too. (NOTE: this exercises the UDP path; the
+/// TLS-specific variant — where a TLS callee advertises a Contact without
+/// `transport=TLS` and the cascade BYE wrongly goes out over UDP — cannot be
+/// reproduced here because TestUa only does UDP signaling. That fix needs SIP/TLS
+/// test infra; this guards the cascade direction itself.)
+#[tokio::test]
+async fn test_queue_caller_hangup_ends_agent_call() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let ctx = QueueMediaTestCtx::setup().await?;
+    let caller_sdp = pcmu_sdp("127.0.0.1", ctx.caller_receiver.port().unwrap());
+    let agent_sdp = pcmu_sdp("127.0.0.1", ctx.agent_receiver.port().unwrap());
+
+    let (caller_id, agent_id, _agent_offer) =
+        ctx.establish_queue_call(caller_sdp, agent_sdp).await?;
+    info!(%caller_id, %agent_id, "Queue call connected; caller will hang up");
+
+    ctx.caller_ua.hangup(&caller_id).await?;
+
+    for _ in 0..50 {
+        let events = ctx.agent_ua.process_dialog_events().await?;
+        if events
+            .iter()
+            .any(|e| matches!(e, TestUaEvent::CallTerminated(id) if id == &agent_id))
+        {
+            info!("Agent call terminated after caller hangup (cascade OK)");
+            ctx.server.stop();
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(anyhow!(
+        "Agent call did not terminate after caller hung up (caller->agent hangup cascade broken)"
+    ))
+}
+
+/// When the caller offers multiple codecs but the agent negotiates a single one
+/// (PCMA), the proxy's answer to the caller MUST end up consistent with that
+/// codec. If it leaves PCMU in the caller answer, the caller may send PCMU which
+/// is then relayed to a PCMA-only agent without transcoding — producing garbled
+/// / choppy audio (observed in production with a Twilio caller offering PCMU/PCMA
+/// and a PCMA-only Yealink agent).
+///
+/// KNOWN-FAILING / documented repro: when the caller is answered EARLY (hold
+/// music, or accept_immediately) using the full allowed codec set, the answer is
+/// never narrowed/renegotiated to the codec the agent later picks. The proper
+/// fix is to either narrow the early caller answer to a single codec or
+/// renegotiate (re-INVITE) the caller once the agent's codec is known.
+/// Operational workaround in the meantime: pin `audio_codecs` to a single codec.
+/// Remove `#[ignore]` when the proxy narrows/renegotiates correctly.
+#[ignore = "documents the early-answer codec-mismatch bug; fix = narrow/renegotiate caller codec"]
+#[tokio::test]
+async fn test_queue_caller_answer_narrows_to_agent_codec() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // Reproduce the production config: multiple allowed codecs. The bug is that
+    // the caller answer is built from the allowed set instead of being narrowed
+    // to the codec the agent actually negotiated.
+    // accept_immediately=true answers the caller early (like hold music does in
+    // production) using the full allowed codec set, before the agent picks a
+    // single codec — the condition under which the caller answer fails to narrow.
+    let ctx = QueueMediaTestCtx::setup_with_config(queue_proxy_config_with(
+        vec!["pcma".to_string(), "pcmu".to_string(), "g722".to_string()],
+        true,
+    ))
+    .await?;
+
+    // Caller offers PCMU + PCMA; agent answers PCMA only.
+    let caller_sdp = build_sdp(
+        "127.0.0.1",
+        ctx.caller_receiver.port().unwrap(),
+        &[(0, "PCMU/8000"), (8, "PCMA/8000"), (101, "telephone-event/8000")],
+    );
+    let agent_sdp = pcma_sdp("127.0.0.1", ctx.agent_receiver.port().unwrap());
+
+    let (caller_id, _agent_id, _agent_offer) =
+        ctx.establish_queue_call(caller_sdp, agent_sdp).await?;
+
+    let caller_answer = ctx
+        .caller_ua
+        .get_negotiated_answer_sdp(&caller_id)
+        .await
+        .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
+    info!(%caller_answer, "Caller answer SDP");
+
+    assert!(
+        caller_answer.to_uppercase().contains("PCMA"),
+        "caller answer should offer PCMA (the agent's codec): {caller_answer}"
+    );
+    assert!(
+        !caller_answer.to_uppercase().contains("PCMU"),
+        "caller answer must NOT include PCMU when the agent negotiated PCMA-only — \
+         the caller could send PCMU and be relayed unconverted to a PCMA-only agent \
+         (garbled audio): {caller_answer}"
     );
 
     ctx.caller_ua.hangup(&caller_id).await?;
