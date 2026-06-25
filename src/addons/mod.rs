@@ -183,6 +183,39 @@ pub trait Addon: Send + Sync {
     fn export_reload_handler(&self) -> Option<Box<dyn export_reload::ExportReloadHandler>> {
         None
     }
+
+    // ── Extension lifecycle hooks ────────────────────────────────────────────
+
+    /// Called after an extension is created in the database.
+    async fn on_extension_created(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _extension: &str,
+        _voicemail_disabled: bool,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Called after an extension is updated in the database.
+    async fn on_extension_updated(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _extension: &str,
+        _voicemail_disabled: bool,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Called before an extension is deleted from the database.
+    /// Implementations should clean up related resources.
+    /// Errors are logged but do not block the deletion.
+    async fn on_extension_deleting(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _extension: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub mod export_reload;
