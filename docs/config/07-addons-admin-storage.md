@@ -12,6 +12,10 @@ The console allows administrators to monitor system health and manage core platf
 ```toml
 [console]
 base_path = "/console"
+# API prefix for REST endpoints (default: "/api")
+api_prefix = "/api"
+# Static files HTTP path prefix (default: "/static")
+static_path = "/static"
 session_secret = "change-me-random-string-must-be-long"
 
 # Allow first user to create account?
@@ -19,6 +23,18 @@ allow_registration = false
 
 # Cookie security
 secure_cookie = false # Set true behind HTTPS proxy
+
+# Default locale and available locales (i18n)
+# locale_default = "en"
+# [console.locales]
+# en = { label = "English", flag = "🇬🇧" }
+# zh = { label = "中文", flag = "🇨🇳" }
+
+# API tokens for programmatic access to console REST APIs
+# [[console.api_tokens]]
+# token = "api-token-here"
+# scopes = ["read", "write"]
+# description = "Monitoring script token"
 
 # Optional: override CDN URLs for frontend JS libraries.
 # Configuring these to local paths or a nearby CDN mirror can significantly
@@ -86,9 +102,73 @@ addons = ["wholesale"]
 [addons.wholesale]
 billing_cycle = "monthly"
 currency = "USD"
+# bills_dir = "storage/wholesale/bills"  # Override CSV output directory
+```
 
-# Separate config file often used
-# config/wholesale.toml
+## Cluster Configuration
+
+Multi-node clustering for high availability.
+
+```toml
 [cluster]
-peers = ["http://node2:8080"]
+[[cluster.peers]]
+addr = "10.0.0.1"
+sip_port = 5060
+ami_port = 8080
+
+[[cluster.peers]]
+addr = "10.0.0.2"
+sip_port = 5060
+ami_port = 8080
+```
+
+## Commercial Licenses
+
+Map commercial addons to named license keys.
+
+```toml
+[licenses]
+[licenses.addons]
+wholesale         = "enterprise"
+endpoint-manager  = "enterprise"
+voicemail         = "basic"
+ivr_editor        = "enterprise"
+
+[licenses.keys]
+enterprise = "LICENSE-KEY-XXXX-XXXX-XXXX"
+basic      = "LICENSE-KEY-YYYY-YYYY-YYYY"
+```
+
+## RWI (Real-time WebSocket Interface)
+
+Configuration for the RWI subsystem, which provides JSON-over-WebSocket call control. See [RWI Protocol](../rwi.md) for the full protocol reference.
+
+```toml
+[rwi]
+enabled = true
+max_connections = 2000
+max_calls_per_connection = 200
+orphan_hold_secs = 30
+originate_rate_limit = 10
+
+# API tokens for RWI access
+[[rwi.tokens]]
+token = "your-rwi-token"
+scopes = ["call", "session", "media", "record", "conference", "queue"]
+
+# Call contexts
+[[rwi.contexts]]
+name = "default"
+no_answer_timeout_secs = 30
+# no_answer_action = "transfer"
+# no_answer_transfer_target = "sip:voicemail@local"
+
+# Transfer behaviour
+[rwi.transfer]
+# refer_enabled = true
+# attended_enabled = true
+# three_pcc_fallback_enabled = true
+# refer_timeout_secs = 30
+# three_pcc_timeout_secs = 60
+# max_concurrent_transfers = 1000
 ```

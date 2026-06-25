@@ -21,10 +21,44 @@ direction = "any" # inbound, outbound, any
 [proxy.routes.rewrite]
 "to.host" = "127.0.0.1"
 
-# Action
-[proxy.routes.action]
-type = "local" # or "forward", "reject", "queue"
+# Action fields are flattened into the route:
+# action = "forward"
+# dest = "trunk-name"
+# select = "sequential"
 ```
+
+### Route Rule Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Route name |
+| `description` | string | `""` | Optional description |
+| `priority` | int | `0` | Evaluation order (higher = first) |
+| `source_trunks` | [string] | `[]` | Match only if call arrived via these trunk names |
+| `source_trunk_ids` | [int] | `[]` | Match only if call arrived via these trunk IDs |
+| `match` | table | required | Match conditions (regex on SIP fields) |
+| `rewrite` | table | none | Optional SIP header/user/host rewrites |
+| `codecs` | [string] | `[]` | Restrict allowed codecs for this route |
+| `disable_ice_servers` | bool | `false` | Disable ICE for this route |
+| `policy` | string | none | Billing policy reference |
+| `disabled` | bool | `false` | Disable route without removing it |
+| *flattened action fields* | — | — | See RouteAction below |
+
+### RouteAction Fields
+
+Flattened into the route (not nested under `[proxy.routes.action]`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `action` | string | `""` | `forward`, `reject`, `queue`, `app`, or omitted for local |
+| `dest` | string | none | Target trunk or SIP URI (for `forward`) |
+| `select` | string | `"rr"` | Target selection: `"rr"` (round-robin), `"sequential"`, `"parallel"` |
+| `hash_key` | string | none | Consistent hashing key for destination selection |
+| `reject` | int | `403` | SIP status code for `reject` action |
+| `queue` | string | none | Queue name for `queue` action |
+| `app` | string | none | Application name (e.g., `"ivr"`) |
+| `app_params` | table | none | Application-specific parameters (JSON) |
+| `auto_answer` | bool | `true` | Auto-answer the call before routing to app |
 
 ### Forwarding Example
 Forward specific prefix to a trunk.
@@ -37,9 +71,10 @@ priority = 10
 [proxy.routes.match]
 "to.user" = "^1[2-9][0-9]{9}$"
 
-[proxy.routes.action]
-type = "forward"
+# Route action fields are flattened:
+action = "forward"
 dest = "provider-trunk" # Name of a defined trunk
+select = "sequential"
 ```
 
 ### Queue Route
@@ -52,8 +87,8 @@ name = "Support Line"
 [proxy.routes.match]
 "to.user" = "support"
 
-[proxy.routes.action]
-type = "queue"
+# Route action fields are flattened:
+action = "queue"
 queue = "support-queue" # Name of queue config
 ```
 

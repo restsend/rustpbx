@@ -457,6 +457,7 @@ async fn test_event_sequence_monotonicity() {
                     call_id: "dtmf-call".to_string(),
                     digit: i.to_string(),
                     leg_id: None,
+                    extra: None,
                 },
                 None,
             );

@@ -378,6 +378,7 @@ async fn test_comprehensive_core_event_structs() {
                 call_id: call_id.into(),
                 digit: "1".into(),
                 leg_id: None,
+                extra: None,
             },
         );
         gw.fan_out(

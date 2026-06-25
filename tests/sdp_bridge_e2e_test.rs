@@ -35,6 +35,17 @@ fn create_rtp_callee(port_start: u16) -> Box<dyn Track> {
     )
 }
 
+/// Helper: create an SRTP (SDES-SRTP) track simulating a SIP callee with secure media.
+fn create_srtp_callee(port_start: u16) -> Box<dyn Track> {
+    Box::new(
+        RtpTrackBuilder::new(format!("srtp-callee-{}", port_start))
+            .with_mode(TransportMode::Srtp)
+            .with_rtp_range(port_start, port_start + 100)
+            .with_codec_preference(vec![CodecType::PCMU])
+            .build(),
+    )
+}
+
 /// E2E test: WebRTC caller → BridgePeer → RTP callee
 ///
 /// Mirrors the actual flow in sip_session.rs after the fix:
@@ -1152,5 +1163,249 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
         total_received >= 5,
         "Expected at least 5 audio samples to be received on RTP side, got {}",
         total_received
+    );
+}
+
+/// E2E test: SRTP (SDES) caller → BridgePeer → WebRTC callee
+///
+/// A SIP trunk with secure media (SDES-SRTP) calls through the proxy
+/// to a WebRTC endpoint. The bridge's non-WebRTC side must be configured
+/// for SRTP.
+#[tokio::test]
+async fn test_e2e_srtp_caller_to_webrtc_callee_via_bridge() {
+    use rustpbx::media::bridge::BridgePeerBuilder;
+
+    let port_base: u16 = 48000;
+
+    // 1. Create bridge with SRTP config on callee (non-WebRTC) side
+    let callee_config = rustrtc::RtcConfiguration {
+        transport_mode: TransportMode::Srtp,
+        rtp_start_port: Some(port_base),
+        rtp_end_port: Some(port_base + 100),
+        cname: Some("srtp-bridge".to_string()),
+        ..Default::default()
+    };
+    let bridge = BridgePeerBuilder::new("e2e-srtp-webrtc".to_string())
+        .with_rtp_port_range(port_base, port_base + 100)
+        .with_callee_config(callee_config)
+        .build();
+    bridge.setup_bridge().await.unwrap();
+
+    // 2. Create offer on WebRTC side (callee-facing)
+    let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
+    bridge
+        .caller_pc()
+        .set_local_description(webrtc_offer)
+        .unwrap();
+    bridge.start_bridge().await;
+
+    // 3. Simulate SRTP caller (SIP trunk with Secure Media) generating INVITE offer
+    let caller = create_srtp_callee(port_base + 200);
+    let caller_offer = caller.local_description().await.unwrap();
+    assert!(
+        caller_offer.contains("RTP/SAVP") || caller_offer.contains("a=crypto"),
+        "SRTP caller offer must contain SDES-SRTP indicators"
+    );
+
+    // 4. Bridge sends its WebRTC offer to the callee
+    let bridge_webrtc_sdp = bridge
+        .caller_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
+    assert!(
+        bridge_webrtc_sdp.contains("SAVPF"),
+        "Bridge to callee must be WebRTC"
+    );
+
+    // 5. Callee processes the WebRTC offer and creates answer
+    let callee = create_webrtc_caller(port_base + 300);
+    let callee_answer = callee.handshake(bridge_webrtc_sdp).await.unwrap();
+    assert!(
+        callee_answer.contains("SAVPF"),
+        "Callee answer must be WebRTC"
+    );
+
+    // 6. Bridge sets callee's answer on its WebRTC side
+    let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
+    bridge
+        .caller_pc()
+        .set_remote_description(callee_desc)
+        .await
+        .unwrap();
+
+    // 7. Bridge sets caller's SRTP offer on its SRTP (callee) side
+    let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
+    bridge
+        .callee_pc()
+        .set_remote_description(caller_desc)
+        .await
+        .unwrap();
+
+    let bridge_answer = bridge.callee_pc().create_answer().await.unwrap();
+    bridge
+        .callee_pc()
+        .set_local_description(bridge_answer)
+        .unwrap();
+
+    let answer_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
+
+    // 8. Verify answer is SRTP (RTP/SAVP or a=crypto)
+    assert!(
+        answer_sdp.contains("RTP/SAVP") || answer_sdp.contains("a=crypto"),
+        "Bridge answer to SRTP caller must be SRTP, got: {}",
+        answer_sdp
+    );
+
+    // 9. Caller processes the answer
+    caller.set_remote_description(&answer_sdp).await.unwrap();
+
+    // Verify full connectivity
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().local_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
+
+    bridge.stop().await;
+}
+
+/// E2E test: WebRTC caller → BridgePeer → SRTP (SDES) callee
+///
+/// A WebRTC caller connects through the proxy to a SIP trunk with
+/// secure media (SDES-SRTP). The bridge's non-WebRTC side must be
+/// configured for SRTP on the callee side.
+#[tokio::test]
+async fn test_e2e_webrtc_caller_to_srtp_callee_via_bridge() {
+    use rustpbx::media::bridge::BridgePeerBuilder;
+
+    let port_base: u16 = 49000;
+
+    // 1. Create bridge with SRTP config on callee (non-WebRTC) side
+    let callee_config = rustrtc::RtcConfiguration {
+        transport_mode: TransportMode::Srtp,
+        rtp_start_port: Some(port_base),
+        rtp_end_port: Some(port_base + 100),
+        cname: Some("srtp-bridge".to_string()),
+        ..Default::default()
+    };
+    let bridge = BridgePeerBuilder::new("e2e-webrtc-srtp".to_string())
+        .with_rtp_port_range(port_base, port_base + 100)
+        .with_callee_config(callee_config)
+        .build();
+    bridge.setup_bridge().await.unwrap();
+
+    // 2. Create offer on non-WebRTC side (SRTP, callee-facing)
+    let srtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge
+        .callee_pc()
+        .set_local_description(srtp_offer)
+        .unwrap();
+    bridge.start_bridge().await;
+
+    // 3. Simulate WebRTC caller generating INVITE offer
+    let caller = create_webrtc_caller(port_base + 200);
+    let caller_offer = caller.local_description().await.unwrap();
+    assert!(
+        caller_offer.contains("UDP/TLS/RTP/SAVPF"),
+        "Caller offer must be WebRTC"
+    );
+
+    // 4. Bridge sends its SRTP offer to the callee
+    let bridge_srtp_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
+    assert!(
+        bridge_srtp_sdp.contains("RTP/SAVP") || bridge_srtp_sdp.contains("a=crypto"),
+        "Bridge to callee must be SRTP"
+    );
+
+    // 5. Callee processes the SRTP offer and creates answer
+    let callee = create_srtp_callee(port_base + 300);
+    let callee_answer = callee.handshake(bridge_srtp_sdp).await.unwrap();
+    assert!(
+        callee_answer.contains("RTP/SAVP") || callee_answer.contains("a=crypto"),
+        "Callee answer must be SRTP"
+    );
+
+    // 6. Bridge sets callee's answer on its SRTP side
+    let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
+    bridge
+        .callee_pc()
+        .set_remote_description(callee_desc)
+        .await
+        .unwrap();
+
+    // 7. Bridge sets caller's WebRTC offer and creates real answer
+    let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
+    bridge
+        .caller_pc()
+        .set_remote_description(caller_desc)
+        .await
+        .unwrap();
+
+    let bridge_answer = bridge.caller_pc().create_answer().await.unwrap();
+    bridge
+        .caller_pc()
+        .set_local_description(bridge_answer)
+        .unwrap();
+
+    let answer_sdp = bridge
+        .caller_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
+
+    // 8. Verify answer is WebRTC
+    assert!(
+        answer_sdp.contains("UDP/TLS/RTP/SAVPF"),
+        "Bridge answer to WebRTC caller must be WebRTC"
+    );
+
+    // 9. Caller processes the answer
+    caller.set_remote_description(&answer_sdp).await.unwrap();
+
+    // Verify full connectivity
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().local_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
+
+    bridge.stop().await;
+}
+
+/// Test that an SDES-SRTP track produces SDP with RTP/SAVP profile and a=crypto.
+#[tokio::test]
+async fn test_srtp_track_creates_sdes_sdp() {
+    let port_base: u16 = 50000;
+
+    let track = create_srtp_callee(port_base);
+    let sdp = track.local_description().await.unwrap();
+
+    // Must have RTP/SAVP profile (the marker for SDES-SRTP)
+    assert!(
+        sdp.contains("RTP/SAVP"),
+        "SRTP track SDP must contain RTP/SAVP profile, got: {}",
+        sdp
+    );
+
+    // Must have a=crypto line
+    assert!(
+        sdp.contains("a=crypto"),
+        "SRTP track SDP must contain a=crypto, got: {}",
+        sdp
+    );
+
+    // Must NOT have WebRTC attributes
+    assert!(
+        !sdp.contains("a=fingerprint"),
+        "SRTP track must not have DTLS fingerprint"
+    );
+    assert!(
+        !sdp.contains("a=ice-ufrag"),
+        "SRTP track must not have ICE"
     );
 }

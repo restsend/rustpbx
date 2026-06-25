@@ -1170,6 +1170,7 @@ impl Default for ProxyConfig {
                 "auth".to_string(),
                 "registrar".to_string(),
                 "call".to_string(),
+                "presence".to_string(),
             ]),
             useragent: default_useragent(),
             callid_suffix: default_callid_suffix(),
