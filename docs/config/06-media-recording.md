@@ -59,7 +59,17 @@ filename_pattern = "{session_id}"
 
 # Fine-grained filters
 caller_allow = ["1001", "1002"]
+caller_deny = ["anonymous"]
+callee_allow = []
 callee_deny = ["911"]
+
+# Recording quality
+samplerate = 8000       # Audio sample rate (Hz)
+ptime = 20              # Packetization time (ms)
+
+# Hybrid mode: force legacy WAV recorder even when [sipflow] is active
+# When true, SipFlow captures signalling only; [recording] handles media
+# force_file = true
 
 # Or configure per-proxy
 [proxy.recording]
@@ -110,6 +120,17 @@ As long as `database_url` is set (which is always required), call records will b
 The `[callrecord]` section is **optional**. It adds a secondary raw-CDR sink on top of the always-on database persistence. Omit this section entirely if you only need database CDRs (the common case).
 
 `max_concurrent` controls how many post-call CDR save/upload/hook tasks may run at once. The default is `64`; values below `1` are clamped to `1`.
+
+### Database
+Writes CDR JSON to a separate database table (default: `call_records`).
+
+```toml
+[callrecord]
+type = "database"
+# database_url = "sqlite://cdr.sqlite3"     # Optional: separate database
+# table_name = "call_records"               # Optional: custom table name
+max_concurrent = 64
+```
 
 ### Optional storage types
 

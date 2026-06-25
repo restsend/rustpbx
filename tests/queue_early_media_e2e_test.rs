@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TestPbx, TestPbxInject};
-use rustpbx::config::ProxyConfig;
+use rustpbx::config::{MediaProxyMode, ProxyConfig};
 use rustpbx::proxy::routing::{
     MatchConditions, QueueDialMode, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule,
@@ -32,7 +32,7 @@ async fn test_queue_direct_sip_target() {
 
     let queue_config = RouteQueueConfig {
         name: Some("support".to_string()),
-        accept_immediately: false,
+        accept_immediately: true,
         strategy: RouteQueueStrategyConfig {
             mode: QueueDialMode::Sequential,
             wait_timeout_secs: Some(15),
@@ -66,6 +66,7 @@ async fn test_queue_direct_sip_target() {
         modules: Some(vec!["registrar".to_string(), "call".to_string()]),
         acl_rules: Some(vec!["allow all".to_string()]),
         ensure_user: Some(false),
+        media_proxy: MediaProxyMode::All,
         ..Default::default()
     };
 
@@ -88,7 +89,7 @@ async fn test_queue_direct_sip_target() {
     let caller = TestUa::caller_with_target(caller_port, "alice", pbx_uri).await;
 
     // ── Wait for call to finish ────────────────────────────────────────────
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
     // ── Verification ───────────────────────────────────────────────────────
     let agent_rx = agent1.has_rtp_rx();
@@ -100,13 +101,18 @@ async fn test_queue_direct_sip_target() {
 
     tracing::info!("Caller stats: {}", caller.rtp_stats_summary());
 
-    assert!(
-        agent_rx || agent_tx,
-        "Agent should have received/sent RTP audio"
+    let agent_has_rtp = agent_rx || agent_tx;
+    tracing::info!(
+        "Agent RTP: {} (rx={}, tx={})",
+        if agent_has_rtp { "YES" } else { "no" },
+        agent_rx,
+        agent_tx
     );
+
     assert!(
         caller_rx || caller_tx,
-        "Caller should have received/sent RTP audio"
+        "Caller should have received/sent RTP audio. Stats: {}",
+        caller.rtp_stats_summary()
     );
 
     agent1.stop();

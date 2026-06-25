@@ -2658,6 +2658,7 @@ impl SipSession {
                                 call_id: self.context.session_id.clone(),
                                 digit: digit.chars().next().unwrap().to_string(),
                                 leg_id: Some("caller".to_string()),
+                                extra: None,
                             });
                         }
                     }
@@ -3897,14 +3898,9 @@ impl SipSession {
 
         let caller_offer = self.media.caller_offer.clone()?;
         let caller_is_webrtc = self.is_caller_webrtc();
-        self.legs.set_transport(
-            LegId::from("caller"),
-            if caller_is_webrtc {
-                rustrtc::TransportMode::WebRtc
-            } else {
-                rustrtc::TransportMode::Rtp
-            },
-        );
+        let caller_mode = self.caller_transport_mode();
+        self.legs.set_transport(LegId::from("caller"), caller_mode);
+        // App callee always gets the opposite of caller via the bridge
         self.legs.set_transport(
             LegId::from("callee"),
             if caller_is_webrtc {
@@ -3975,6 +3971,24 @@ impl SipSession {
                 .with_enable_latching(true)
                 .with_probation_max_packets(Some(6));
             info!(session_id = %self.id, "RTP caller offered BUNDLE, using Standard SDP mode + latching for app media bridge");
+        }
+
+        // When caller uses SDES-SRTP, configure the non-WebRTC bridge side for SRTP
+        if !caller_is_webrtc
+            && Self::sdp_transport_mode(caller_offer) == rustrtc::TransportMode::Srtp
+        {
+            let callee_config = rustrtc::RtcConfiguration {
+                transport_mode: rustrtc::TransportMode::Srtp,
+                rtp_start_port: self.server.rtp_config.start_port,
+                rtp_end_port: self.server.rtp_config.end_port,
+                enable_latching: self.server.proxy_config.enable_latching,
+                probation_max_packets: self.server.proxy_config.latching_probation_max_packets,
+                external_ip: self.server.rtp_config.external_ip.clone(),
+                bind_ip: self.server.rtp_config.bind_ip.clone(),
+                cname: Some(self.server.rtc_cname.clone()),
+                ..Default::default()
+            };
+            bridge_builder = bridge_builder.with_callee_config(callee_config);
         }
 
         if let Some(ref external_ip) = self.server.rtp_config.external_ip {
@@ -5275,10 +5289,10 @@ impl SipSession {
     fn caller_transport_mode(&self) -> rustrtc::TransportMode {
         if let Some(ref offer) = self.media.caller_offer {
             Self::sdp_transport_mode(offer)
-        } else if self.legs.caller_is_webrtc() {
-            rustrtc::TransportMode::WebRtc
         } else {
-            rustrtc::TransportMode::Rtp
+            self.legs
+                .get_transport(&LegId::from("caller"))
+                .unwrap_or(rustrtc::TransportMode::Rtp)
         }
     }
 
@@ -5558,6 +5572,7 @@ impl SipSession {
                                 call_id: session_id.clone(),
                                 digit: digit.to_string(),
                                 leg_id: Some(caller_leg.clone()),
+                                extra: None,
                             };
                             let g = gw.read();
                             g.send_to_owner(&ev);
@@ -5977,29 +5992,10 @@ impl SipSession {
         let track_id = Self::CALLEE_TRACK_ID.to_string();
 
         let caller_is_webrtc = self.is_caller_webrtc();
-        self.legs.set_transport(
-            LegId::from("caller"),
-            if caller_is_webrtc {
-                rustrtc::TransportMode::WebRtc
-            } else {
-                rustrtc::TransportMode::Rtp
-            },
-        );
-        self.legs.set_transport(
-            LegId::from("callee"),
-            if callee_is_webrtc {
-                rustrtc::TransportMode::WebRtc
-            } else {
-                rustrtc::TransportMode::Rtp
-            },
-        );
-
-        debug!(
-            session_id = %self.id,
-            caller_is_webrtc = caller_is_webrtc,
-            callee_is_webrtc = callee_is_webrtc,
-            "Creating callee track"
-        );
+        let caller_mode = self.caller_transport_mode();
+        let callee_mode = self.callee_transport_mode(callee_is_webrtc);
+        self.legs.set_transport(LegId::from("caller"), caller_mode.clone());
+        self.legs.set_transport(LegId::from("callee"), callee_mode.clone());
 
         let media_proxy_enabled = self.media_profile.path == MediaPathMode::Anchored;
 
@@ -6026,6 +6022,29 @@ impl SipSession {
                 .with_enable_latching(self.server.proxy_config.enable_latching)
                 .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
                 .with_cname(self.server.rtc_cname.clone());
+
+            // Configure the non-WebRTC bridge side's transport mode to match the leg using it.
+            // bridge.caller_pc() is always WebRTC, bridge.callee_pc() handles both RTP and SRTP.
+            let non_webrtc_mode = if caller_is_webrtc {
+                callee_mode
+            } else {
+                caller_mode
+            };
+            if non_webrtc_mode == rustrtc::TransportMode::Srtp {
+                let callee_config = rustrtc::RtcConfiguration {
+                    transport_mode: rustrtc::TransportMode::Srtp,
+                    rtp_start_port: self.server.rtp_config.start_port,
+                    rtp_end_port: self.server.rtp_config.end_port,
+                    enable_latching: self.server.proxy_config.enable_latching,
+                    probation_max_packets: self.server.proxy_config.latching_probation_max_packets,
+                    external_ip: self.server.rtp_config.external_ip.clone(),
+                    bind_ip: self.server.rtp_config.bind_ip.clone(),
+                    cname: Some(self.server.rtc_cname.clone()),
+                    ..Default::default()
+                };
+                bridge_builder = bridge_builder.with_callee_config(callee_config);
+            }
+
             let mut selected_callee_offer_codecs = Vec::new();
             if let (Some(start), Some(end)) = (
                 self.server.rtp_config.start_port,

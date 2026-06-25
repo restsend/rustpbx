@@ -288,9 +288,15 @@ impl ProxyDataContext {
         } else if let Some(ref path) = generated_path {
             info!(path = %path.display(), "loading previously generated trunks file");
             let generated_pattern = vec![path.to_string_lossy().to_string()];
-            let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
-            generated_entries = generated_trunks.len();
-            trunks.extend(generated_trunks);
+            match load_trunks_from_files(&generated_pattern) {
+                Ok((generated_trunks, _)) => {
+                    generated_entries = generated_trunks.len();
+                    trunks.extend(generated_trunks);
+                }
+                Err(e) => {
+                    warn!("failed to load previously generated trunks file: {}", e);
+                }
+            }
         }
 
         let len = trunks.len();
