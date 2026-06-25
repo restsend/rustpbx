@@ -2303,11 +2303,7 @@ impl SipSession {
         let leg_id = leg_id_override.unwrap_or("callee");
         self.legs.set_transport(
             crate::call::domain::LegId::from(leg_id),
-            if callee_is_webrtc {
-                rustrtc::TransportMode::WebRtc
-            } else {
-                rustrtc::TransportMode::Rtp
-            },
+            self.callee_transport_mode(callee_is_webrtc),
         );
 
         let offer = self.prepare_callee_media_offer(target).await;
@@ -2355,9 +2351,11 @@ impl SipSession {
         &self,
         track_id: String,
         cancel_token: tokio_util::sync::CancellationToken,
-        is_webrtc: bool,
+        mode: rustrtc::TransportMode,
     ) -> crate::media::RtpTrackBuilder {
+        let is_webrtc = mode == rustrtc::TransportMode::WebRtc;
         let mut builder = crate::media::RtpTrackBuilder::new(track_id)
+            .with_mode(mode)
             .with_cancel_token(cancel_token)
             .with_enable_latching(self.server.proxy_config.enable_latching)
             .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
@@ -2370,6 +2368,8 @@ impl SipSession {
             builder = builder.with_bind_ip(bind_ip.clone());
         }
 
+        // SDES-SRTP shares the plain-RTP port range; only WebRTC uses the
+        // dedicated WebRTC range.
         let (start_port, end_port) = if is_webrtc {
             (
                 self.server.rtp_config.webrtc_start_port,
@@ -4379,13 +4379,10 @@ impl SipSession {
             .session_expires
             .unwrap_or(crate::proxy::proxy_call::session_timer::DEFAULT_SESSION_EXPIRES);
         let caller_is_webrtc = self.is_caller_webrtc();
+        let _ = caller_is_webrtc;
         self.legs.set_transport(
             crate::call::domain::LegId::from("caller"),
-            if caller_is_webrtc {
-                rustrtc::TransportMode::WebRtc
-            } else {
-                rustrtc::TransportMode::Rtp
-            },
+            self.caller_transport_mode(),
         );
 
         let (mut invite_option, callee_uri, callee_call_id) =
@@ -4883,7 +4880,7 @@ impl SipSession {
                 let mut track_builder = self.build_rtp_track_builder(
                     Self::CALLER_TRACK_ID.to_string(),
                     self.caller_peer().cancel_token(),
-                    caller_is_webrtc,
+                    self.caller_transport_mode(),
                 );
 
                 if !codec_info.is_empty() {
@@ -5255,6 +5252,47 @@ impl SipSession {
             offer.contains("a=ice-ufrag") && offer.contains("a=fingerprint")
         } else {
             self.legs.caller_is_webrtc()
+        }
+    }
+
+    /// Classify a peer's media transport from its SDP:
+    /// - `WebRtc` when it carries ICE + DTLS (`a=ice-ufrag` + `a=fingerprint`),
+    /// - `Srtp` for SDES-SRTP (`RTP/SAVP` profile or an `a=crypto` line) without DTLS,
+    /// - `Rtp` otherwise (plain `RTP/AVP`).
+    fn sdp_transport_mode(sdp: &str) -> rustrtc::TransportMode {
+        if sdp.contains("a=ice-ufrag") && sdp.contains("a=fingerprint") {
+            rustrtc::TransportMode::WebRtc
+        } else if sdp.contains("RTP/SAVP") || sdp.contains("a=crypto") {
+            rustrtc::TransportMode::Srtp
+        } else {
+            rustrtc::TransportMode::Rtp
+        }
+    }
+
+    /// Transport mode for the caller (UAS) leg, derived from the caller's offer
+    /// so we answer with a matching media profile (e.g. answer an `RTP/SAVP`
+    /// offer with `RTP/SAVP`, never downgrade SDES-SRTP to plain `RTP/AVP`).
+    fn caller_transport_mode(&self) -> rustrtc::TransportMode {
+        if let Some(ref offer) = self.media.caller_offer {
+            Self::sdp_transport_mode(offer)
+        } else if self.legs.caller_is_webrtc() {
+            rustrtc::TransportMode::WebRtc
+        } else {
+            rustrtc::TransportMode::Rtp
+        }
+    }
+
+    /// Transport mode for the callee (UAC) leg we generate an offer for. WebRTC
+    /// callees are unchanged; for SIP callees we mirror SDES-SRTP from the caller
+    /// leg ("secure in -> secure out") so anchored SIP<->SIP media stays
+    /// encrypted end to end. Plain-RTP callers keep plain `RTP/AVP`.
+    fn callee_transport_mode(&self, callee_is_webrtc: bool) -> rustrtc::TransportMode {
+        if callee_is_webrtc {
+            rustrtc::TransportMode::WebRtc
+        } else if self.caller_transport_mode() == rustrtc::TransportMode::Srtp {
+            rustrtc::TransportMode::Srtp
+        } else {
+            rustrtc::TransportMode::Rtp
         }
     }
 
@@ -6225,7 +6263,7 @@ impl SipSession {
             let mut track_builder = self.build_rtp_track_builder(
                 track_id.clone(),
                 self.callee_peer().cancel_token(),
-                callee_is_webrtc,
+                self.callee_transport_mode(callee_is_webrtc),
             );
 
             if let Some(ref caller_offer) = self.media.caller_offer {
@@ -6273,6 +6311,7 @@ impl SipSession {
         } else {
             self.media.callee_offer_uses_media_bridge = false;
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
+                .with_mode(self.callee_transport_mode(callee_is_webrtc))
                 .with_cancel_token(self.callee_peer().cancel_token())
                 .with_cname(self.server.rtc_cname.clone());
 
@@ -6331,7 +6370,7 @@ impl SipSession {
         let mut track_builder = self.build_rtp_track_builder(
             Self::CALLER_TRACK_ID.to_string(),
             self.caller_peer().cancel_token(),
-            caller_is_webrtc,
+            self.caller_transport_mode(),
         );
 
         if !codec_info.is_empty() {
@@ -9683,6 +9722,36 @@ mod tests {
     use super::*;
     use rustrtc::media::MediaStreamTrack;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_sdp_transport_mode_classification() {
+        // Plain RTP
+        assert_eq!(
+            SipSession::sdp_transport_mode("m=audio 1000 RTP/AVP 8 0\r\na=sendrecv\r\n"),
+            rustrtc::TransportMode::Rtp
+        );
+        // SDES-SRTP via RTP/SAVP profile (Twilio-style)
+        assert_eq!(
+            SipSession::sdp_transport_mode(
+                "m=audio 1000 RTP/SAVP 0 8 101\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
+            ),
+            rustrtc::TransportMode::Srtp
+        );
+        // SDES-SRTP advertised only via a=crypto
+        assert_eq!(
+            SipSession::sdp_transport_mode(
+                "m=audio 1000 RTP/AVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
+            ),
+            rustrtc::TransportMode::Srtp
+        );
+        // WebRTC (ICE + DTLS) takes precedence even if a crypto line is present
+        assert_eq!(
+            SipSession::sdp_transport_mode(
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ice-ufrag:x\r\na=fingerprint:sha-256 AA\r\n"
+            ),
+            rustrtc::TransportMode::WebRtc
+        );
+    }
 
     #[test]
     fn test_rtp_dtmf_detector_deduplicates_same_event() {
