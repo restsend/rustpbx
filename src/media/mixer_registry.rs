@@ -1,6 +1,7 @@
 use crate::media::mixer::{MediaMixer, SupervisorMixerMode};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tracing::{info, warn};
 
@@ -94,12 +95,12 @@ impl MixerRegistry {
         };
 
         {
-            let mut mixers = self.mixers.lock().unwrap();
+            let mut mixers = self.mixers.lock();
             mixers.insert(mixer_id.clone(), entry);
         }
 
         {
-            let mut participants = self.participants.lock().unwrap();
+            let mut participants = self.participants.lock();
             participants.insert(supervisor_session_id.clone(), mixer_id.clone());
             participants.insert(target_session_id.clone(), mixer_id.clone());
         }
@@ -128,7 +129,7 @@ impl MixerRegistry {
         };
 
         {
-            let mut mixers = self.mixers.lock().unwrap();
+            let mut mixers = self.mixers.lock();
             mixers.insert(room_id.clone(), entry);
         }
 
@@ -154,7 +155,7 @@ impl MixerRegistry {
         let mut success = false;
 
         {
-            let mut mixers = self.mixers.lock().unwrap();
+            let mut mixers = self.mixers.lock();
             if let Some(entry) = mixers.get_mut(mixer_id) {
                 entry.participants.push(participant);
                 success = true;
@@ -162,7 +163,7 @@ impl MixerRegistry {
         }
 
         if success {
-            let mut participants = self.participants.lock().unwrap();
+            let mut participants = self.participants.lock();
             participants.insert(session_id.clone(), mixer_id.to_string());
 
             info!(
@@ -183,7 +184,7 @@ impl MixerRegistry {
 
     pub fn remove_participant(&self, session_id: &str) -> bool {
         let mixer_id = {
-            let participants = self.participants.lock().unwrap();
+            let participants = self.participants.lock();
             participants.get(session_id).cloned()
         };
 
@@ -191,7 +192,7 @@ impl MixerRegistry {
             let mut removed = false;
 
             {
-                let mut mixers = self.mixers.lock().unwrap();
+                let mut mixers = self.mixers.lock();
                 if let Some(entry) = mixers.get_mut(&mixer_id) {
                     entry.participants.retain(|p| p.session_id != session_id);
                     removed = true;
@@ -199,7 +200,7 @@ impl MixerRegistry {
             }
 
             if removed {
-                let mut participants = self.participants.lock().unwrap();
+                let mut participants = self.participants.lock();
                 participants.remove(session_id);
 
                 info!(
@@ -216,18 +217,18 @@ impl MixerRegistry {
     }
 
     pub fn get_mixer(&self, mixer_id: &str) -> Option<Arc<MediaMixer>> {
-        let mixers = self.mixers.lock().unwrap();
+        let mixers = self.mixers.lock();
         mixers.get(mixer_id).map(|e| e.mixer.clone())
     }
 
     pub fn get_mixer_by_session(&self, session_id: &str) -> Option<Arc<MediaMixer>> {
         let mixer_id = {
-            let participants = self.participants.lock().unwrap();
+            let participants = self.participants.lock();
             participants.get(session_id).cloned()
         };
 
         if let Some(id) = mixer_id {
-            let mixers = self.mixers.lock().unwrap();
+            let mixers = self.mixers.lock();
             mixers.get(&id).map(|e| e.mixer.clone())
         } else {
             None
@@ -236,12 +237,12 @@ impl MixerRegistry {
 
     pub fn get_mixer_info(&self, session_id: &str) -> Option<MixerRegistryEntry> {
         let mixer_id = {
-            let participants = self.participants.lock().unwrap();
+            let participants = self.participants.lock();
             participants.get(session_id).cloned()
         };
 
         if let Some(id) = mixer_id {
-            let mixers = self.mixers.lock().unwrap();
+            let mixers = self.mixers.lock();
             mixers.get(&id).cloned()
         } else {
             None
@@ -254,7 +255,7 @@ impl MixerRegistry {
         }
 
         let participant_ids: Vec<String> = {
-            let mixers = self.mixers.lock().unwrap();
+            let mixers = self.mixers.lock();
             if let Some(entry) = mixers.get(mixer_id) {
                 entry
                     .participants
@@ -267,12 +268,12 @@ impl MixerRegistry {
         };
 
         let removed = {
-            let mut mixers = self.mixers.lock().unwrap();
+            let mut mixers = self.mixers.lock();
             mixers.remove(mixer_id).is_some()
         };
 
         {
-            let mut participants = self.participants.lock().unwrap();
+            let mut participants = self.participants.lock();
             for session_id in participant_ids {
                 participants.remove(&session_id);
             }
@@ -286,12 +287,12 @@ impl MixerRegistry {
     }
 
     pub fn list_mixers(&self) -> Vec<(String, MixerRegistryEntry)> {
-        let mixers = self.mixers.lock().unwrap();
+        let mixers = self.mixers.lock();
         mixers.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     pub fn participant_count(&self, mixer_id: &str) -> usize {
-        let mixers = self.mixers.lock().unwrap();
+        let mixers = self.mixers.lock();
         mixers
             .get(mixer_id)
             .map(|e| e.participants.len())
@@ -299,18 +300,18 @@ impl MixerRegistry {
     }
 
     pub fn is_in_mixer(&self, session_id: &str) -> bool {
-        let participants = self.participants.lock().unwrap();
+        let participants = self.participants.lock();
         participants.contains_key(session_id)
     }
 
     pub fn set_participant_muted(&self, session_id: &str, muted: bool) -> bool {
         let mixer_id = {
-            let participants = self.participants.lock().unwrap();
+            let participants = self.participants.lock();
             participants.get(session_id).cloned()
         };
 
         if let Some(mixer_id) = mixer_id {
-            let mut mixers = self.mixers.lock().unwrap();
+            let mut mixers = self.mixers.lock();
             if let Some(entry) = mixers.get_mut(&mixer_id)
                 && let Some(participant) = entry
                     .participants
@@ -337,12 +338,12 @@ impl MixerRegistry {
 
     pub fn is_participant_muted(&self, session_id: &str) -> Option<bool> {
         let mixer_id = {
-            let participants = self.participants.lock().unwrap();
+            let participants = self.participants.lock();
             participants.get(session_id).cloned()
         };
 
         if let Some(mixer_id) = mixer_id {
-            let mixers = self.mixers.lock().unwrap();
+            let mixers = self.mixers.lock();
             if let Some(entry) = mixers.get(&mixer_id) {
                 return entry
                     .participants

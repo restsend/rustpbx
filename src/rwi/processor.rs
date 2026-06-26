@@ -2761,8 +2761,8 @@ impl RwiCommandProcessor {
         );
 
         match overflow.action.as_deref() {
-            Some("transfer") if overflow.target_queue.is_some() => {
-                let target_queue = overflow.target_queue.unwrap();
+            Some("transfer") => match overflow.target_queue.as_ref() {
+                Some(target_queue) => {
                 info!(
                     call_id = %req.call_id,
                     from_queue = %req.queue_id,
@@ -2800,7 +2800,7 @@ impl RwiCommandProcessor {
                 let joined_event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::QueueJoined {
                         call_id: req.call_id.clone(),
-                        queue_id: target_queue,
+                        queue_id: target_queue.clone(),
                     },
                     None,
                 );
@@ -2808,7 +2808,12 @@ impl RwiCommandProcessor {
 
                 Ok(CommandResult::Success)
             }
-            Some("voicemail") => {
+            None => {
+                warn!("Queue overflow: transfer action but no target queue");
+                Ok(CommandResult::Success)
+            }
+        },
+        Some("voicemail") => {
                 info!(call_id = %req.call_id, "Redirecting to voicemail due to overflow");
                 let event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::QueueVoicemailRedirected {

@@ -191,9 +191,9 @@ impl SipSession {
             self.stop_caller_ingress_monitor().await;
         }
         let (peer, track_id) = if is_callee {
-            (self.callee_peer().clone(), Self::CALLEE_TRACK_ID)
+            (self.callee_peer().cloned().ok_or_else(|| anyhow!("Missing callee peer"))?, Self::CALLEE_TRACK_ID)
         } else {
-            (self.caller_peer().clone(), Self::CALLER_TRACK_ID)
+            (self.caller_peer().cloned().ok_or_else(|| anyhow!("Missing caller peer"))?, Self::CALLER_TRACK_ID)
         };
 
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
@@ -292,7 +292,10 @@ impl SipSession {
     pub(super) async fn create_audio_receiver(
         &self,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        let pc = Self::wait_for_peer_connection(self.caller_peer(), 100)
+        let Some(peer) = self.caller_peer() else {
+            return Err(anyhow!("No caller peer for conference input"));
+        };
+        let pc = Self::wait_for_peer_connection(peer, 100)
             .await
             .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
         self.build_audio_receiver(pc)

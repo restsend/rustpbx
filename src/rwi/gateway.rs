@@ -4,8 +4,10 @@ use crate::rwi::proto::CallMetaStore;
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Arc as StdArc, Mutex};
+use std::sync::{Arc, Arc as StdArc};
+use tracing::warn;
 use tokio::sync::{broadcast, mpsc};
 
 pub type SessionId = String;
@@ -348,8 +350,7 @@ impl RwiGateway {
     pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) -> u64 {
         let mut cache_state = self
             .event_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let max_age = self.max_cache_age_secs;
         let now = chrono::Utc::now();
         while let Some(front) = cache_state.cache.front() {
@@ -385,8 +386,7 @@ impl RwiGateway {
     pub fn get_events_since(&self, last_sequence: u64) -> Vec<EventCacheEntry> {
         let cache_state = self
             .event_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
 
         cache_state
             .cache
@@ -404,8 +404,7 @@ impl RwiGateway {
     ) -> Vec<EventCacheEntry> {
         let cache_state = self
             .event_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
 
         cache_state
             .cache
@@ -419,8 +418,7 @@ impl RwiGateway {
     pub fn is_sequence_in_cache(&self, sequence: u64) -> bool {
         let cache_state = self
             .event_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
 
         if cache_state.cache.is_empty() {
             return false;
@@ -434,8 +432,7 @@ impl RwiGateway {
     pub fn current_sequence(&self) -> u64 {
         let cache_state = self
             .event_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         cache_state.next_sequence
     }
 
@@ -468,10 +465,9 @@ impl RwiGateway {
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
             if let Some(c) = digit_char {
-                if let Ok(taps) = self.dtmf_taps.lock() {
-                    if let Some(tx) = taps.get(call_id) {
-                        let _ = tx.send((leg_id, c));
-                    }
+                let taps = self.dtmf_taps.lock();
+                if let Some(tx) = taps.get(call_id) {
+                    let _ = tx.send((leg_id, c));
                 }
             }
         }
@@ -494,16 +490,12 @@ impl RwiGateway {
         call_id: CallId,
         tx: tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>,
     ) {
-        if let Ok(mut taps) = self.dtmf_taps.lock() {
-            taps.insert(call_id, tx);
-        }
+        self.dtmf_taps.lock().insert(call_id, tx);
     }
 
     /// Remove the DTMF tap for `call_id` (called when collection completes).
     pub fn remove_dtmf_tap(&self, call_id: &CallId) {
-        if let Ok(mut taps) = self.dtmf_taps.lock() {
-            taps.remove(call_id);
-        }
+        self.dtmf_taps.lock().remove(call_id);
     }
 
     /// Fan-out an event to all sessions subscribed to a context.
@@ -564,8 +556,7 @@ impl RwiGateway {
             None => {
                 let cache_state = self
                     .event_cache
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .lock();
                 cache_state.cache.iter().cloned().collect()
             }
         };
@@ -587,8 +578,7 @@ impl RwiGateway {
             None => {
                 let cache_state = self
                     .event_cache
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .lock();
                 cache_state
                     .cache
                     .iter()
@@ -636,7 +626,7 @@ impl RwiGateway {
     }
 
     fn cache_flat_event(&self, call_id: &CallId, flat: &RwiEvent) -> u64 {
-        let mut cache_state = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache_state = self.event_cache.lock();
         let now = chrono::Utc::now();
         while let Some(front) = cache_state.cache.front() {
             if now.signed_duration_since(front.cached_at).num_seconds() as u64
@@ -661,7 +651,7 @@ impl RwiGateway {
     pub fn broadcast<E: RwiEventSpec>(&self, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
         if let Some(tx) = &self.webhook_tx {
-            let mut cs = self.event_cache.lock().unwrap_or_else(|p| p.into_inner());
+            let mut cs = self.event_cache.lock();
             let seq = cs.next_sequence;
             cs.next_sequence += 1;
             let _ = tx.send(EventCacheEntry {
@@ -675,11 +665,11 @@ impl RwiGateway {
     }
 
     pub fn send_to_owner<E: RwiEventSpec>(&self, event: &E) {
+        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
+            warn!("send_to_owner: event has no call_id, skipping");
+            return;
+        };
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event
-            .call_id()
-            .expect("send_to_owner requires event.call_id()")
-            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {
@@ -696,11 +686,11 @@ impl RwiGateway {
     }
 
     pub fn fan_out<E: RwiEventSpec>(&self, context: &str, event: &E) {
+        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
+            warn!("fan_out: event has no call_id, skipping");
+            return;
+        };
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event
-            .call_id()
-            .expect("fan_out requires event.call_id()")
-            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {
@@ -730,11 +720,11 @@ impl RwiGateway {
         event: &E,
         exclude: Option<&SessionId>,
     ) {
+        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
+            warn!("fan_out_excluding: event has no call_id, skipping");
+            return;
+        };
         let flat = RwiEvent::from_spec(event, None);
-        let cid = event
-            .call_id()
-            .expect("fan_out_excluding requires event.call_id()")
-            .to_string();
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
         if let Some(tx) = &self.webhook_tx {

@@ -44,7 +44,7 @@ pub enum Relation {}
 
 impl RelationTrait for Relation {
     fn def(&self) -> RelationDef {
-        panic!("no direct relations defined for extension");
+        unreachable!("no direct relations defined for extension")
     }
 }
 

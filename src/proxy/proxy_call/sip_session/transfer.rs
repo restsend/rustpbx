@@ -583,7 +583,8 @@ impl SipSession {
             .legs
             .get_peer(&leg_id)
             .cloned()
-            .unwrap_or_else(|| self.caller_peer().clone());
+            .or_else(|| self.caller_peer().cloned())
+            .ok_or_else(|| anyhow!("No media peer available"))?;
 
         let tracks = peer.get_tracks().await;
         let mut audio_sender = None;

@@ -7,6 +7,7 @@ use crate::call::domain::LegId;
 use crate::media::mixer::AudioMixer;
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
+use parking_lot::Mutex as ParkMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -87,7 +88,7 @@ pub struct ConferenceAudioMixer {
     /// Cancellation token for stopping
     cancel_token: CancellationToken,
     /// Mixing task handle
-    mixing_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    mixing_task: Arc<ParkMutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Per-(source, destination) gain overrides for supervisor modes.
     /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
     route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
@@ -109,7 +110,7 @@ impl std::fmt::Debug for ConferenceAudioMixer {
 impl Drop for ConferenceAudioMixer {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        if let Some(task) = self.mixing_task.lock().unwrap().take() {
+        if let Some(task) = self.mixing_task.lock().take() {
             task.abort();
         }
     }
@@ -127,7 +128,7 @@ impl ConferenceAudioMixer {
             sample_rate,
             frame_size,
             cancel_token: CancellationToken::new(),
-            mixing_task: Arc::new(std::sync::Mutex::new(None)),
+            mixing_task: Arc::new(ParkMutex::new(None)),
             route_gains: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recorder_sink: Arc::new(tokio::sync::Mutex::new(None)),
         }
@@ -297,7 +298,7 @@ impl ConferenceAudioMixer {
             .await;
         });
 
-        let mut mixing_task = self.mixing_task.lock().unwrap();
+        let mut mixing_task = self.mixing_task.lock();
         *mixing_task = Some(task);
 
         info!(conf_id = %self.conf_id, "Conference mixer started");
@@ -309,7 +310,7 @@ impl ConferenceAudioMixer {
 
         // Take the task out of the mutex before awaiting
         let task = {
-            let mut mixing_task = self.mixing_task.lock().unwrap();
+            let mut mixing_task = self.mixing_task.lock();
             mixing_task.take()
         };
 

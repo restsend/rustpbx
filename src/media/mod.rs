@@ -8,9 +8,10 @@ use rustrtc::{
     RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
     media::{AudioFrame, MediaSample, SampleStreamSource},
 };
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -48,7 +49,7 @@ pub trait StreamWriter: Send + Sync {
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
     now.duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -118,9 +119,7 @@ pub trait Track: Send + Sync {
     }
 
     /// Allow downcasting to concrete types for dynamic audio source switching
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        unimplemented!("as_any_mut not implemented for this Track type")
-    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Set muted state for this track
     /// Returns true if the operation was successful
@@ -209,7 +208,7 @@ impl MediaStream {
         let id = track.id().to_string();
         let wrapped = Arc::new(AsyncMutex::new(track));
         {
-            let mut tracks = self.tracks.lock().unwrap();
+            let mut tracks = self.tracks.lock();
             tracks.insert(id.clone(), wrapped.clone());
         }
         if let Some(play_id) = play_id {
@@ -218,13 +217,13 @@ impl MediaStream {
     }
 
     pub async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>> {
-        let tracks = self.tracks.lock().unwrap();
+        let tracks = self.tracks.lock();
         tracks.values().cloned().collect()
     }
 
     pub async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()> {
         let handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
         let Some(track) = handle else {
@@ -235,7 +234,7 @@ impl MediaStream {
     }
 
     pub async fn remove_track(&self, track_id: &str, _stop_audio_immediately: bool) {
-        let mut tracks = self.tracks.lock().unwrap();
+        let mut tracks = self.tracks.lock();
         tracks.remove(track_id);
     }
 
@@ -244,7 +243,7 @@ impl MediaStream {
     pub async fn mute_track(&self, track_id: &str) -> bool {
         // Get track handle while holding the lock, then release the lock before await
         let track_handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
 
@@ -261,7 +260,7 @@ impl MediaStream {
     pub async fn unmute_track(&self, track_id: &str) -> bool {
         // Get track handle while holding the lock, then release the lock before await
         let track_handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
 
@@ -442,6 +441,10 @@ impl Track for RtcTrack {
 
     fn get_sender(&self) -> Option<SampleStreamSource> {
         self.sender.clone()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
