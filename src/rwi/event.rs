@@ -1,4 +1,5 @@
 use serde::Serialize;
+use tracing::warn;
 
 use crate::rwi::proto::EventCallContext;
 
@@ -14,7 +15,10 @@ pub struct RwiEvent {
 impl RwiEvent {
     /// Build from a typed RwiEventSpec. If context provided, merge it into payload.
     pub fn from_spec<E: RwiEventSpec>(event: &E, ctx: Option<&EventCallContext>) -> Self {
-        let mut payload = serde_json::to_value(event).expect("RwiEventSpec must be Serialize");
+        let mut payload = serde_json::to_value(event).unwrap_or_else(|e| {
+            warn!("RwiEventSpec serialization failed: {}", e);
+            serde_json::json!({})
+        });
         payload["event_type"] = serde_json::Value::String(E::TYPE.into());
         merge_event_context(&mut payload, ctx);
         RwiEvent {

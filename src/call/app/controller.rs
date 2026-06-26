@@ -2,8 +2,9 @@ use crate::call::domain::PlayOptions;
 use crate::call::domain::{CallCommand, HangupCommand, LegId, MediaSource};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -225,14 +226,14 @@ impl CallController {
     pub fn set_timeout(&self, id: impl Into<String>, delay: Duration) {
         let id = id.into();
         // If re-registering, un-cancel any previous suppression.
-        self.cancelled_timers.lock().unwrap().remove(&id);
+            self.cancelled_timers.lock().remove(&id);
         let tx = self.fired_timer_tx.clone();
         let cancelled = self.cancelled_timers.clone();
         let id_task = id.clone();
         crate::utils::spawn(async move {
             tokio::time::sleep(delay).await;
             // Only fire if not cancelled in the meantime.
-            let was_cancelled = cancelled.lock().unwrap().remove(&id_task);
+            let was_cancelled = cancelled.lock().remove(&id_task);
             if !was_cancelled {
                 let _ = tx.send(id_task);
             }
@@ -243,7 +244,7 @@ impl CallController {
     ///
     /// If the timer has already fired, this is a no-op.
     pub fn cancel_timeout(&self, id: &str) {
-        self.cancelled_timers.lock().unwrap().insert(id.to_string());
+        self.cancelled_timers.lock().insert(id.to_string());
     }
 
     /// Start recording the call audio.

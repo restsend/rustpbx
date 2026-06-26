@@ -3,8 +3,8 @@ use super::config::{ActionNode, EntryAction};
 use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -267,7 +267,7 @@ impl ThirdPartyTreeProvider {
     }
 
     fn build_node_api_url(&self, business_node_id: &str) -> String {
-        let sess = self.sess.lock().unwrap();
+        let sess = self.sess.lock();
         let phone = sess.variables.get("caller").cloned().unwrap_or_default();
         let session_id = sess
             .variables
@@ -543,12 +543,12 @@ impl ActionProvider for ThirdPartyTreeProvider {
     }
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.step_index += 1;
 
         match ctx.event {
             Some(ProviderEvent::SessionStart) => {
-                let tree = self.tree.lock().unwrap();
+                let tree = self.tree.lock();
                 let entry = tree
                     .nodes
                     .get(&tree.entry_id)
@@ -559,9 +559,9 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
                 let node_id = first_child_id
                     .clone()
-                    .unwrap_or_else(|| self.tree.lock().unwrap().entry_id.clone());
+                    .unwrap_or_else(|| self.tree.lock().entry_id.clone());
                 let node = {
-                    let tree = self.tree.lock().unwrap();
+                    let tree = self.tree.lock();
                     tree.nodes.get(&node_id).cloned()
                 };
                 let node = node.ok_or_else(|| anyhow::anyhow!("node {} not found", node_id))?;
@@ -575,7 +575,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
                 if Self::is_menu_nodetype(&node.nodetype) {
                     state.awaiting_dtmf_menu_children = Some(node.children.clone());
-                    let tree = self.tree.lock().unwrap();
+                    let tree = self.tree.lock();
                     return Ok(Self::build_menu_action_with_entries(self, &tree, &node));
                 }
 
@@ -583,7 +583,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                     return Ok(ActionNode::new(self.convert_node(&node)));
                 }
 
-                let tree = self.tree.lock().unwrap();
+                let tree = self.tree.lock();
                 Ok(Self::build_linear_chain(&tree, &node))
             }
 
@@ -598,7 +598,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
                     if let Some(ref cid) = child_id {
                         state.current_node_id = Some(cid.clone());
-                        let tree = self.tree.lock().unwrap();
+                        let tree = self.tree.lock();
                         let child = tree.nodes.get(cid).cloned();
 
                         if let Some(child) = child {
@@ -627,7 +627,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
             }
 
             Some(ProviderEvent::ApiResponse { ref body, .. }) => {
-                let tree = self.tree.lock().unwrap();
+                let tree = self.tree.lock();
                 let current_id = state.current_node_id.clone();
                 let current = current_id
                     .as_ref()
@@ -655,10 +655,10 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         if !parsed.is_empty() {
                             drop(tree);
                             {
-                                let mut t = self.tree.lock().unwrap();
+                                let mut t = self.tree.lock();
                                 t.merge_nodes(parsed);
                             }
-                            let tree = self.tree.lock().unwrap();
+                            let tree = self.tree.lock();
                             let next_id =
                                 current.children.get("0").cloned().filter(|s| !s.is_empty());
                             if let Some(nid) = next_id {
@@ -724,7 +724,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
             Some(ProviderEvent::DtmfTimeout) => Ok(ActionNode::new(EntryAction::Repeat)),
 
             Some(ProviderEvent::AudioComplete { .. }) => {
-                let tree = self.tree.lock().unwrap();
+                let tree = self.tree.lock();
                 let current_id = state.current_node_id.clone();
                 let Some(cid) = current_id else {
                     return Ok(ActionNode::new(EntryAction::Hangup {
@@ -776,7 +776,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
     }
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
-        let mut sess = self.sess.lock().unwrap();
+        let mut sess = self.sess.lock();
         sess.variables
             .insert("session_id".into(), ctx.session_id.clone());
         sess.variables.insert("caller".into(), ctx.caller.clone());
@@ -895,7 +895,7 @@ mod tests {
     fn test_convert_api_node() {
         let tree = ThirdPartyTree::from_json(&sample_tree_json()).unwrap();
         let provider = ThirdPartyTreeProvider::new(tree, "http://localhost".into());
-        let tree = provider.tree.lock().unwrap();
+        let tree = provider.tree.lock();
         let api_node = tree.nodes.get("api_1").unwrap();
         let action = provider.convert_node(api_node);
         match action {
@@ -910,7 +910,7 @@ mod tests {
     fn test_convert_menu_tts_node() {
         let tree = ThirdPartyTree::from_json(&sample_tree_json()).unwrap();
         let provider = ThirdPartyTreeProvider::new(tree, "http://localhost".into());
-        let tree = provider.tree.lock().unwrap();
+        let tree = provider.tree.lock();
         let menu_node = tree.nodes.get("menu_1").unwrap();
         let action = provider.convert_node(menu_node);
         match action {
@@ -930,7 +930,7 @@ mod tests {
     fn test_convert_toagent_node() {
         let tree = ThirdPartyTree::from_json(&sample_tree_json()).unwrap();
         let provider = ThirdPartyTreeProvider::new(tree, "http://localhost".into());
-        let tree = provider.tree.lock().unwrap();
+        let tree = provider.tree.lock();
         let agent_node = tree.nodes.get("agent_1").unwrap();
         let action = provider.convert_node(agent_node);
         match action {

@@ -12,9 +12,10 @@ use rsipstack::{
 };
 use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -1221,7 +1222,7 @@ impl RoutingState {
             return 0;
         }
 
-        let mut counters = self.round_robin_counters.lock().unwrap();
+        let mut counters = self.round_robin_counters.lock();
         let counter = counters
             .entry(destination_key.to_string())
             .or_insert_with(|| 0);

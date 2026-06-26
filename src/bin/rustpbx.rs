@@ -179,14 +179,14 @@ impl ActiveFileRollingWriterInner {
             return candidate;
         }
 
-        for idx in 1.. {
+        for idx in 1..=4096 {
             candidate = parent.join(format!("{}.{}.{}", base_name, period, idx));
             if !candidate.exists() {
                 return candidate;
             }
         }
 
-        unreachable!("archive path selection should always terminate")
+        parent.join(format!("{}.{}.{}", base_name, period, 4097))
     }
 }
 

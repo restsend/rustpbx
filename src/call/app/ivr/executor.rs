@@ -7,6 +7,7 @@ use crate::call::app::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
+use tracing::warn;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -688,7 +689,16 @@ impl StepIvrApp {
                 max_retries: *max_retries,
                 retry_count: 0,
             },
-            _ => unreachable!(),
+            _ => {
+                warn!("build_pending_menu called with unexpected action type, returning empty menu");
+                PendingMenu {
+                    entries: HashMap::new(),
+                    timeout_action: None,
+                    invalid_action: None,
+                    max_retries: 0,
+                    retry_count: 0,
+                }
+            }
         }
     }
 

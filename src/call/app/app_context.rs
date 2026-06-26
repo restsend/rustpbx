@@ -5,9 +5,9 @@ use crate::config::Config;
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 /// Metadata about the current call, derived from the SIP INVITE.

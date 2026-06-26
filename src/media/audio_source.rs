@@ -3,7 +3,8 @@ use audio_codec::{CodecType, Decoder, Resampler, create_decoder};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
@@ -649,7 +650,7 @@ impl AudioSourceManager {
         let resampling_source =
             ResamplingAudioSource::new(Box::new(file_source), self.target_sample_rate);
 
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         *current = Some(Box::new(resampling_source));
 
         debug!(
@@ -663,14 +664,14 @@ impl AudioSourceManager {
 
     pub fn switch_to_silence(&self) {
         let silence = SilenceSource::new(self.target_sample_rate);
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         *current = Some(Box::new(silence));
 
         debug!("Switched to silence audio source");
     }
 
     pub fn read_samples(&self, buffer: &mut [i16]) -> usize {
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         if let Some(ref mut source) = *current {
             let read = source.read_samples(buffer);
             if read == 0 {
@@ -686,7 +687,7 @@ impl AudioSourceManager {
     }
 
     pub fn has_active_source(&self) -> bool {
-        let current = self.current_source.lock().unwrap();
+        let current = self.current_source.lock();
         current.is_some()
     }
 
@@ -935,7 +936,7 @@ mod tests {
                 pos: 0,
             };
             let resampled = ResamplingAudioSource::new(Box::new(src), 8000);
-            let mut current = manager.current_source.lock().unwrap();
+            let mut current = manager.current_source.lock();
             *current = Some(Box::new(resampled));
         }
 
