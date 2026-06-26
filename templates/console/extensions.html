@@ -435,12 +435,11 @@
             </div>
         </section>
     </div>
-</div>
 
-<!-- CSV Import Modal -->
-<div x-show="importModal" x-cloak class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto pt-10 pb-10"
-    @click.self="importModal = false">
-    <div class="w-full max-w-3xl rounded-xl bg-white shadow-2xl ring-1 ring-black/5">
+    <!-- CSV Import Modal -->
+    <div x-show="importModal" x-cloak class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto pt-10 pb-10"
+        @click.self="importModal = false">
+        <div class="w-full max-w-3xl rounded-xl bg-white shadow-2xl ring-1 ring-black/5">
         <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
             <h3 class="text-lg font-semibold text-slate-800">{{ "extension.csv_import_title" | t }}</h3>
             <button @click="importModal = false" class="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
@@ -468,7 +467,7 @@
             </div>
             <div>
                 <label class="block text-sm font-medium text-slate-700 mb-1">{{ "extension.csv_select_file" | t }}</label>
-                <input type="file" accept=".csv,.txt" @change="handleCsvFile($event)"
+                <input type="file" accept=".csv,.txt" x-ref="csvInput" @change="handleCsvFile()"
                     class="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-sky-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-sky-700 hover:file:bg-sky-100">
             </div>
             <p x-show="importError" class="text-xs text-red-600" x-text="importError"></p>
@@ -1122,40 +1121,52 @@
                         this.processing.delete = null;
                     }
                 },
-                handleCsvFile(event) {
-                    const file = event.target.files[0];
-                    if (!file) return;
-                    this.importError = '';
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                        this.importRawText = e.target.result;
-                        this.previewCsv();
-                    };
-                    reader.onerror = () => { this.importError = 'Failed to read file'; };
-                    reader.readAsText(file);
+                handleCsvFile() {
+                    try {
+                        const file = this.$refs.csvInput.files[0];
+                        if (!file) return;
+                        this.importError = '';
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try {
+                                this.importRawText = e.target.result;
+                                this.previewCsv();
+                            } catch (err) {
+                                this.importError = 'Parse error: ' + err.message;
+                            }
+                        };
+                        reader.onerror = () => { this.importError = 'Failed to read file'; };
+                        reader.readAsText(file);
+                    } catch (err) {
+                        this.importError = 'File error: ' + err.message;
+                    }
                 },
                 previewCsv() {
-                    const text = this.importRawText.trim();
-                    if (!text) { this.importError = 'File is empty'; return; }
-                    const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-                    if (lines.length < 2) { this.importError = 'No data rows found (only header or comments)'; return; }
-                    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-                    const extIdx = headers.indexOf('extension');
-                    if (extIdx < 0) { this.importError = 'CSV must have an \'extension\' column'; return; }
-                    const existingExts = new Set(this.extensions.map(e => e.extension));
-                    this.importPreview = [];
-                    this.importErrors = [];
-                    for (let i = 1; i < lines.length; i++) {
-                        const row = this.parseCsvLine(lines[i], headers);
-                        if (!row.extension) {
-                            row._error = 'extension is required';
-                            this.importErrors.push({ row: i, message: row._error });
-                        } else if (existingExts.has(row.extension)) {
-                            row._warn = 'extension already exists (will be skipped)';
+                    try {
+                        const text = this.importRawText.trim();
+                        if (!text) { this.importError = 'File is empty'; return; }
+                        const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+                        if (lines.length < 2) { this.importError = 'No data rows found (only header or comments)'; return; }
+                        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                        const extIdx = headers.indexOf('extension');
+                        if (extIdx < 0) { this.importError = 'CSV must have an \'extension\' column'; return; }
+                        const existingExts = new Set((this.extensions || []).map(e => e && e.extension));
+                        this.importPreview = [];
+                        this.importErrors = [];
+                        for (let i = 1; i < lines.length; i++) {
+                            const row = this.parseCsvLine(lines[i], headers);
+                            if (!row.extension) {
+                                row._error = 'extension is required';
+                                this.importErrors.push({ row: i, message: row._error });
+                            } else if (existingExts.has(row.extension)) {
+                                row._warn = 'extension already exists (will be skipped)';
+                            }
+                            this.importPreview.push(row);
                         }
-                        this.importPreview.push(row);
+                        this.importStep = 'preview';
+                    } catch (err) {
+                        this.importError = 'Preview error: ' + err.message;
                     }
-                    this.importStep = 'preview';
                 },
                 parseCsvLine(line, headers) {
                     const values = [];

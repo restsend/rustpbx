@@ -978,6 +978,16 @@ pub async fn csv_import_extensions(
                 unknown_depts.push(*name);
             }
         }
+        if !unknown_depts.is_empty() {
+            skipped += 1;
+            errors.push(format!(
+                "Row {}: extension '{}' has unknown departments: {}",
+                i + 1,
+                ext_number,
+                unknown_depts.join(", ")
+            ));
+            continue;
+        }
 
         let active = ExtensionActiveModel {
             extension: Set(ext_number.clone()),
@@ -1000,14 +1010,6 @@ pub async fn csv_import_extensions(
 
         match active.insert(db).await {
             Ok(model) => {
-                if !unknown_depts.is_empty() {
-                    errors.push(format!(
-                        "Row {}: extension '{}' imported but unknown departments: {}",
-                        i + 1,
-                        ext_number,
-                        unknown_depts.join(", ")
-                    ));
-                }
                 if !dept_ids.is_empty() {
                     if let Err(err) =
                         ExtensionEntity::replace_departments(db, model.id, &dept_ids).await
