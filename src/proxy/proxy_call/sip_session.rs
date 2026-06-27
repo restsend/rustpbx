@@ -4678,6 +4678,13 @@ impl SipSession {
             .prepare_caller_answer_from_callee_sdp(callee_sdp, false, false)
             .await;
 
+        self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
+        self.callee_dialogs.insert(dialog_id.clone(), ());
+        self.callee_guards.push(ClientDialogGuard::new(
+            self.server.dialog_layer.clone(),
+            dialog_id.clone(),
+        ));
+
         self.accept_call(
             Some(callee_uri.to_string()),
             caller_answer,
@@ -4686,8 +4693,6 @@ impl SipSession {
         .await
         .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
 
-        self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
-        self.callee_dialogs.insert(dialog_id.clone(), ());
         // Register callee dialog in unified map
         if let Some(dlg) = self.server.dialog_layer.get_dialog(&dialog_id) {
             self.legs.set_dialog(LegId::from("callee"), dlg);
@@ -4712,10 +4717,6 @@ impl SipSession {
                 self.init_callee_timer(dialog_id.clone(), response, requested_session_interval);
             }
         }
-        self.callee_guards.push(ClientDialogGuard::new(
-            self.server.dialog_layer.clone(),
-            dialog_id,
-        ));
 
         self.update_snapshot_cache();
 
