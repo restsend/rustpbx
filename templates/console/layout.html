@@ -204,6 +204,235 @@
                 this.close();
             },
         }));
+
+        // ── destinationSelector (shared transfer‑target picker) ──
+        Alpine.data('destinationSelector', (config) => ({
+            apiPrefix: config.apiPrefix || '/api',
+            queueItems: config.queueItems || [],
+            ivrItems: config.ivrItems || [],
+            initialType: config.initialType || 'uri',
+            initialValue: config.initialValue || '',
+            targetType: 'uri',
+            targetValue: '',
+            allowedTypes: [],
+            extQuery: '',
+            extItems: [],
+            extLoading: false,
+            extOpen: false,
+            extIndex: -1,
+            extSelected: null,
+            extTimer: null,
+            queueQuery: '',
+            queueOpen: false,
+            queueIndex: -1,
+            queueSelected: null,
+            ivrQuery: '',
+            ivrOpen: false,
+            ivrIndex: -1,
+            ivrSelected: null,
+            get extFiltered() {
+                var q = this.extQuery.toLowerCase();
+                if (!q) return this.extItems;
+                return this.extItems.filter(function (i) {
+                    return (i.extension || '').toLowerCase().indexOf(q) !== -1
+                        || (i.display_name || '').toLowerCase().indexOf(q) !== -1;
+                });
+            },
+            get queueFiltered() {
+                var q = this.queueQuery.toLowerCase();
+                if (!q) return this.queueItems;
+                return this.queueItems.filter(function (i) {
+                    return (i.name || '').toLowerCase().indexOf(q) !== -1;
+                });
+            },
+            get ivrFiltered() {
+                var q = this.ivrQuery.toLowerCase();
+                if (!q) return this.ivrItems;
+                return this.ivrItems.filter(function (i) {
+                    return (i.name || '').toLowerCase().indexOf(q) !== -1;
+                });
+            },
+            init() {
+                var self = this;
+                this.allowedTypes = this.computeAllowedTypes();
+                this.targetType = this.allowedTypes.indexOf(this.initialType) !== -1
+                    ? this.initialType : (this.allowedTypes[0] || 'uri');
+                this.targetValue = this.initialValue;
+                this.$nextTick(function () { self.restoreInitial(); });
+                if (!this.queueItems.length) this.fetchQueues();
+                this.$watch('targetType', function (type) {
+                    if (type === 'extension' && !self.extItems.length) self.fetchExtensions();
+                });
+                this.$el.addEventListener('set-destination', function (e) {
+                    self.targetType = e.detail.type || 'uri';
+                    self.targetValue = e.detail.value || '';
+                    self.$nextTick(function () { self.restoreInitial(); });
+                });
+            },
+            computeAllowedTypes() {
+                var types = ['uri', 'extension', 'queue', 'ivr'];
+                if (window.voicemailAddonEnabled) types.push('voicemail');
+                return types;
+            },
+            restoreInitial() {
+                if (!this.targetValue) return;
+                if (this.targetType === 'queue') {
+                    this.queueSelected = this.queueItems.find(function (i) {
+                        return i.reference === this.targetValue;
+                    }.bind(this)) || null;
+                    if (this.queueSelected) this.queueQuery = this.queueSelected.name;
+                } else if (this.targetType === 'ivr') {
+                    this.ivrSelected = this.ivrItems.find(function (i) {
+                        return i.name === this.targetValue;
+                    }.bind(this)) || null;
+                    if (this.ivrSelected) this.ivrQuery = this.ivrSelected.name;
+                } else if (this.targetType === 'extension') {
+                    if (this.targetValue) this.extQuery = this.targetValue;
+                    this.fetchExtensions();
+                }
+            },
+            setType(type) {
+                if (this.targetType === type) return;
+                this.targetType = type;
+                this.targetValue = '';
+                this.extSelected = null; this.queueSelected = null; this.ivrSelected = null;
+                this.extQuery = ''; this.queueQuery = ''; this.ivrQuery = '';
+                if (type === 'extension') this.fetchExtensions();
+                this.emitChange();
+            },
+            fetchExtensions() {
+                var self = this;
+                this.extLoading = true;
+                var body = { page: 1, per_page: 20, filters: { q: this.extQuery || '' } };
+                fetch(this.apiPrefix + '/extensions', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body), credentials: 'same-origin',
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        self.extItems = (data.items || []).map(function (item) {
+                            return item.extension || item;
+                        });
+                        if (self.targetValue && !self.extSelected) {
+                            var match = self.extItems.find(function (i) {
+                                return i.extension === self.targetValue;
+                            });
+                            if (match) {
+                                self.extSelected = match;
+                                self.extQuery = match.display_name || match.extension;
+                            }
+                        }
+                    }).catch(function (e) { console.error('ext search fail', e); })
+                    .finally(function () { self.extLoading = false; });
+            },
+
+            fetchQueues() {
+                var self = this;
+                fetch(this.apiPrefix + '/queues', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ page: 1, per_page: 100 }),
+                    credentials: 'same-origin',
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (payload) {
+                        var items = [];
+                        if (Array.isArray(payload.items)) {
+                            payload.items.forEach(function (item) {
+                                if (item && (item.id != null || item.name)) {
+                                    items.push({
+                                        reference: item.reference || 'db-' + item.id,
+                                        name: item.name || 'Queue #' + item.id,
+                                    });
+                                }
+                            });
+                        }
+                        if (Array.isArray(payload.file_queues)) {
+                            payload.file_queues.forEach(function (item) {
+                                if (item && item.name) {
+                                    items.push({
+                                        reference: item.key || item.name,
+                                        name: item.name,
+                                    });
+                                }
+                            });
+                        }
+                        self.queueItems = items.length ? items : self.queueItems;
+                        if (self.targetType === 'queue' && self.targetValue && !self.queueSelected) {
+                            var match = self.queueItems.find(function (i) {
+                                return i.reference === self.targetValue;
+                            });
+                            if (match) {
+                                self.queueSelected = match;
+                                self.queueQuery = match.name;
+                            }
+                        }
+                    }).catch(function () {});
+            },
+
+            onExtInput() {
+                var self = this;
+                if (this.extTimer) clearTimeout(this.extTimer);
+                this.extTimer = setTimeout(function () {
+                    self.fetchExtensions();
+                    self.extOpen = true;
+                }, 300);
+            },
+            selectExt(item) {
+                this.extSelected = item;
+                this.extQuery = item.display_name || item.extension;
+                this.targetValue = item.extension;
+                this.extOpen = false;
+                this.emitChange();
+            },
+            toggleQueue() { this.queueOpen = !this.queueOpen; if (this.queueOpen) this.queueIndex = -1; },
+            selectQueue(item) {
+                this.queueSelected = item;
+                this.queueQuery = item.name;
+                this.targetValue = item.reference;
+                this.queueOpen = false;
+                this.emitChange();
+            },
+            toggleIvr() { this.ivrOpen = !this.ivrOpen; if (this.ivrOpen) this.ivrIndex = -1; },
+            selectIvr(item) {
+                this.ivrSelected = item;
+                this.ivrQuery = item.name;
+                this.targetValue = item.name;
+                this.ivrOpen = false;
+                this.emitChange();
+            },
+            onTextInput() { this.targetValue = this.$el.value; this.emitChange(); },
+            dropdownUp(el) {
+                if (!el) return false;
+                var rect = el.getBoundingClientRect();
+                return rect.bottom + 220 > window.innerHeight;
+            },
+            emitChange() {
+                this.$dispatch('destination-change', {
+                    type: this.targetType,
+                    value: this.targetValue,
+                });
+            },
+            handleKeydown(e, field) {
+                var open, idx, items, selectFn;
+                if (field === 'ext') {
+                    open = 'extOpen'; idx = 'extIndex';
+                    items = this.extFiltered; selectFn = 'selectExt';
+                } else if (field === 'queue') {
+                    open = 'queueOpen'; idx = 'queueIndex';
+                    items = this.queueFiltered; selectFn = 'selectQueue';
+                } else if (field === 'ivr') {
+                    open = 'ivrOpen'; idx = 'ivrIndex';
+                    items = this.ivrFiltered; selectFn = 'selectIvr';
+                } else { return; }
+                if (!this[open]) { this[open] = true; return; }
+                if (e.key === 'ArrowDown') { e.preventDefault(); this[idx] = Math.min(this[idx] + 1, items.length - 1); }
+                else if (e.key === 'ArrowUp') { e.preventDefault(); this[idx] = Math.max(this[idx] - 1, 0); }
+                else if (e.key === 'Enter' && this[idx] >= 0 && this[idx] < items.length) {
+                    e.preventDefault();
+                    this[selectFn](items[this[idx]]);
+                } else if (e.key === 'Escape') { this[open] = false; this[idx] = -1; }
+            },
+        }));
         });
     </script>
     {% endblock %}

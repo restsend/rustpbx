@@ -124,13 +124,7 @@ async fn fetch_extension_locator_summary(
         return summary;
     }
 
-    let query_uri = if trimmed_ext.starts_with("sip:") {
-        trimmed_ext.to_string()
-    } else if trimmed_ext.contains('@') {
-        format!("sip:{}", trimmed_ext)
-    } else {
-        format!("sip:{}@{}", trimmed_ext, realm)
-    };
+    let query_uri = crate::call::build_sip_uri(trimmed_ext, realm);
     summary.query_uri = Some(query_uri.clone());
 
     let Some(server) = server else {

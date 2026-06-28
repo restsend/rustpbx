@@ -698,7 +698,7 @@ mod tests {
             .await
             .unwrap();
         agent_registry
-            .update_presence("agent-001", PresenceState::Available)
+            .update_presence("agent-001", PresenceState::Idle)
             .await
             .unwrap();
 
@@ -922,7 +922,7 @@ mod tests {
             .await
             .unwrap();
         agent_registry
-            .update_presence("agent-001", PresenceState::Available)
+            .update_presence("agent-001", PresenceState::Idle)
             .await
             .unwrap();
 
@@ -981,7 +981,7 @@ mod tests {
 
         // Verify agent state is back to available
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Available));
+        assert!(matches!(agent.presence, PresenceState::Idle));
 
         let result: anyhow::Result<()> = stack.join().await;
         result.expect("should complete successfully");
@@ -1723,7 +1723,7 @@ mod tests {
         registry
             .update_presence(
                 "agent1",
-                crate::call::app::agent_registry::PresenceState::Available,
+                crate::call::app::agent_registry::PresenceState::Idle,
             )
             .await
             .unwrap();

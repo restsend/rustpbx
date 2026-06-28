@@ -207,24 +207,6 @@ endblock %}
                             <span class="text-xs font-normal text-slate-400"
                                 x-text="tt('queue.field_ring_timeout_hint')"></span>
                         </label>
-                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            <span x-text="tt('queue.field_acd_policy')"></span>
-                            <template x-if="acdPolicies.length">
-                                <select x-model="form.spec.acd_policy"
-                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="" x-text="tt('queue.field_acd_policy_placeholder')"></option>
-                                    <template x-for="policy in acdPolicies" :key="policy.name">
-                                        <option :value="policy.name" x-text="policy.name"></option>
-                                    </template>
-                                </select>
-                            </template>
-                            <template x-if="!acdPolicies.length">
-                                <input type="text" x-model.trim="form.spec.acd_policy"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    :placeholder="tt('queue.field_acd_policy_placeholder')">
-                            </template>
-                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_acd_policy_hint')"></span>
-                        </label>
                     </div>
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
@@ -329,12 +311,13 @@ endblock %}
                             <span x-text="tt('queue.fallback_failure_opt')"></span>
                         </label>
                     </div>
-                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'redirect'" x-cloak>
+                    <div x-show="fallbackMode === 'redirect'" x-cloak
+                        @destination-change="form.spec.fallback.redirect = $event.detail.type === 'extension' ? 'sip:' + $event.detail.value : ($event.detail.type === 'uri' ? $event.detail.value : $event.detail.type + ':' + $event.detail.value)">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             <span x-text="tt('queue.fallback_redirect_label')"></span>
-                            <input type="text" x-model.trim="form.spec.fallback.redirect"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                :placeholder="tt('queue.fallback_redirect_placeholder')">
+                            {% set queue_items = forwarding_catalog.queues | default([]) %}
+                            {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                            {% include "console/_destination_selector.html" %}
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'failure'" x-cloak>
@@ -742,7 +725,6 @@ endblock %}
             pageTitle: options.mode === 'edit' ? (window._queueTranslations?.queue?.detail_subtitle_edit || 'Edit queue') : (window._queueTranslations?.queue?.new_queue || 'New queue'),
             activeTab: 'overview',
             skillGroups: [],
-            acdPolicies: [],
             pendingSkillGroup: '',
             form: {
                 name: '',
@@ -770,7 +752,6 @@ endblock %}
                         targets: [],
                         skill_groups: [],
                     },
-                    acd_policy: '',
                     voice_prompts: null,
                     // Callback
                     callback: {
@@ -831,7 +812,6 @@ endblock %}
                 this.apiPrefix = this.normalizeApiPrefix(this.apiPrefix || window.__consoleApiPrefix || '/api');
                 this.applyModel(this.model || {});
                 this.loadSkillGroups();
-                this.loadAcdPolicies();
             },
             extractSkillGroupId(value) {
                 const raw = String(value || '').trim();
@@ -903,27 +883,6 @@ endblock %}
                             this.skillGroups = [];
                         });
                 }
-            },
-            loadAcdPolicies() {
-                const loader = window.__ccAcdPoliciesLoader;
-                if (typeof loader === 'function') {
-                    loader()
-                        .then((policies) => {
-                            this.acdPolicies = Array.isArray(policies) ? policies : [];
-                        })
-                        .catch(() => {
-                            this.acdPolicies = [];
-                        });
-                    return;
-                }
-                fetch(this.apiPrefix + '/cc/acd/policies', { credentials: 'same-origin' })
-                    .then(res => res.ok ? res.json() : { data: [] })
-                    .then(payload => {
-                        this.acdPolicies = Array.isArray(payload?.data) ? payload.data : [];
-                    })
-                    .catch(() => {
-                        this.acdPolicies = [];
-                    });
             },
 
             tt(key) {
@@ -1171,7 +1130,6 @@ endblock %}
                             });
                         })(),
                     },
-                    acd_policy: raw?.acd_policy || '',
                     voice_prompts: raw?.voice_prompts || null,
                     // Callback
                     callback: {
@@ -1320,10 +1278,6 @@ endblock %}
                         wait_timeout_secs: waitTimeout,
                         targets,
                     };
-                }
-                const acdPolicy = (this.form.spec.acd_policy || '').trim();
-                if (acdPolicy) {
-                    spec.acd_policy = acdPolicy;
                 }
                 // Voice prompts
                 spec.voice_prompts = this.buildVoicePrompts();

@@ -101,6 +101,6 @@ async fn test_presence_locator_sync() {
     // Give some time for event processing
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Alice should now be Available
-    assert_eq!(manager.get_state("alice").status, PresenceStatus::Available);
+    // Alice should now be Idle
+    assert_eq!(manager.get_state("alice").status, PresenceStatus::Idle);
 }

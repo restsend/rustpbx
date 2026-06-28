@@ -48,64 +48,11 @@ pub(crate) enum TransferTarget {
 
 /// Parse a raw transfer target string into a typed `TransferTarget`.
 ///
-/// Priority: `queue:` → `ivr:` → `voicemail:` → SIP/TEL URI (default prefix `sip:` added if absent).
+/// Delegates prefix dispatch to [`TransferEndpoint::parse`] and enriches the
+/// result with transfer‑specific data (queue query params, voip_bridge options).
+/// Bare strings without a recognised prefix get `sip:` prepended.
 pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
-    if let Some(rest) = target.strip_prefix("queue:") {
-        let remainder = rest.trim();
-        let (queue_name, query_str) = match remainder.find('?') {
-            Some(pos) => (remainder[..pos].trim(), Some(&remainder[pos + 1..])),
-            None => (remainder, None),
-        };
-        if queue_name.is_empty() {
-            // empty name → fall through to Sip
-        } else {
-            let mut return_ivr = None;
-            let mut target_overrides = Vec::new();
-            if let Some(query) = query_str {
-                for pair in query.split('&') {
-                    if pair.is_empty() {
-                        continue;
-                    }
-                    let mut parts = pair.splitn(2, '=');
-                    let key = parts.next().unwrap_or("");
-                    let value = parts.next().unwrap_or("");
-                    let decoded = super::pct_decode_query(value);
-                    match key {
-                        "return_ivr" => return_ivr = Some(decoded),
-                        "target" => target_overrides.push(decoded),
-                        _ => {}
-                    }
-                }
-            }
-            return TransferTarget::Queue {
-                name: queue_name.to_string(),
-                return_ivr,
-                target_overrides,
-            };
-        }
-    }
-    if let Some(rest) = target.strip_prefix("ivr:") {
-        let ivr_name = rest.trim();
-        if !ivr_name.is_empty() {
-            return TransferTarget::Ivr {
-                name: ivr_name.to_string(),
-            };
-        }
-    }
-    if let Some(rest) = target.strip_prefix("voicemail:") {
-        let ext = rest.trim();
-        if !ext.is_empty() {
-            return TransferTarget::Voicemail {
-                extension: ext.to_string(),
-            };
-        }
-    }
-    if let Some(rest) = target.strip_prefix("conference:") {
-        let id = rest.trim();
-        if !id.is_empty() {
-            return TransferTarget::Conference { id: id.to_string() };
-        }
-    }
+    // 1. `voip_bridge:` is too complex for TransferEndpoint – parse inline.
     if let Some(rest) = target.strip_prefix("voip_bridge:") {
         let raw = rest.trim();
         if !raw.is_empty() {
@@ -115,7 +62,6 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             let mut headers = HashMap::new();
             let mut passthrough_params = Vec::new();
 
-            // Parse URI to extract query params
             if let Ok(uri) = raw.parse::<http::Uri>() {
                 if let Some(query) = uri.query() {
                     for pair in query.split('&') {
@@ -144,7 +90,6 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                         }
                     }
                 }
-                // Rebuild clean URL: scheme + authority + path + passthrough params
                 let mut ep = String::new();
                 if let Some(scheme) = uri.scheme_str() {
                     ep.push_str(scheme);
@@ -168,12 +113,65 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             }
         }
     }
-    let sip = if target.starts_with("sip:") || target.starts_with("tel:") {
-        target.to_string()
-    } else {
-        format!("sip:{}", target)
-    };
-    TransferTarget::Sip(sip)
+
+    // 2. Delegate to the canonical prefix parser.
+    if let Some(ep) = crate::call::TransferEndpoint::parse(target) {
+        return match ep {
+            // Queue: also extract query params (return_ivr, target overrides).
+            crate::call::TransferEndpoint::Queue(mut raw_name) => {
+                let query_str = raw_name.find('?').map(|pos| {
+                    let qs = raw_name[pos + 1..].to_string();
+                    raw_name.truncate(pos);
+                    qs
+                });
+                let queue_name = raw_name.trim().to_string();
+                if queue_name.is_empty() {
+                    TransferTarget::Sip(format!("sip:{}", target))
+                } else {
+                    let mut return_ivr = None;
+                    let mut target_overrides = Vec::new();
+                    if let Some(ref query) = query_str {
+                        for pair in query.split('&') {
+                            if pair.is_empty() {
+                                continue;
+                            }
+                            let mut parts = pair.splitn(2, '=');
+                            let key = parts.next().unwrap_or("");
+                            let value = parts.next().unwrap_or("");
+                            let decoded = super::pct_decode_query(value);
+                            match key {
+                                "return_ivr" => return_ivr = Some(decoded),
+                                "target" => target_overrides.push(decoded),
+                                _ => {}
+                            }
+                        }
+                    }
+                    TransferTarget::Queue {
+                        name: queue_name,
+                        return_ivr,
+                        target_overrides,
+                    }
+                }
+            }
+            crate::call::TransferEndpoint::Ivr(name) => TransferTarget::Ivr { name },
+            crate::call::TransferEndpoint::Voicemail(extension) => {
+                TransferTarget::Voicemail { extension }
+            }
+            crate::call::TransferEndpoint::Conference(id) => TransferTarget::Conference { id },
+            // Plain SIP/TEL URI – ensure at least the `sip:` scheme.
+            crate::call::TransferEndpoint::Uri(uri) => {
+                let sip = if uri.starts_with("sip:") || uri.starts_with("tel:") {
+                    uri
+                } else {
+                    format!("sip:{}", uri)
+                };
+                TransferTarget::Sip(sip)
+            }
+        };
+    }
+
+    // 3. Fallback (should not normally happen).
+    TransferTarget::Sip(format!("sip:{}", target))
 }
 
 impl SipSession {
@@ -266,7 +264,9 @@ impl SipSession {
                 .await
             }
             TransferTarget::Sip(refer_to_str) => {
-                let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
+                let realm = self.server.proxy_config.select_realm("");
+                let normalized = crate::call::build_sip_uri(&refer_to_str, &realm);
+                let refer_to_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
                     .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
                 if !self.server.proxy_config.blind_transfer_use_refer {

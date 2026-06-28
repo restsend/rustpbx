@@ -3329,9 +3329,7 @@ impl SipSession {
                     }
 
                     // Resolve custom targets (skill-groups → specific agents)
-                    let resolved_agents = self
-                        .resolve_custom_targets(agents, plan.acd_policy.as_deref())
-                        .await;
+                    let resolved_agents = self.resolve_custom_targets(agents).await;
 
                     // Enrich via queue_location_enricher if configured
                     let resolved_agents =
@@ -4269,7 +4267,6 @@ impl SipSession {
     async fn resolve_custom_targets(
         &self,
         locations: Vec<crate::call::Location>,
-        acd_policy: Option<&str>,
     ) -> Vec<crate::call::Location> {
         let mut expanded = Vec::new();
         let agent_registry = self.server.agent_registry.clone();
@@ -4290,7 +4287,7 @@ impl SipSession {
                         // Use the registry's resolve_target hook
                         // CC addon implements this to resolve skill-group: URIs
                         let agent_uris = registry
-                            .resolve_target_with_policy(&uri_str, acd_policy, &self.id.0)
+                            .resolve_target_with_policy(&uri_str, None, &self.id.0)
                             .await;
 
                         if agent_uris.is_empty() {
