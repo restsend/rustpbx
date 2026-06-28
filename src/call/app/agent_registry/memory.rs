@@ -69,7 +69,7 @@ impl AgentRegistry for MemoryRegistry {
             skills,
             max_concurrency,
             current_calls: 0,
-            presence: PresenceState::Available,
+            presence: PresenceState::Idle,
             last_state_change: Instant::now(),
             total_calls_handled: 0,
             total_talk_time_secs: 0,

@@ -16,7 +16,7 @@
         assignedDepartments: {{ departments | default([]) | tojson }},
     locator: {{ registration_info | default({}) | tojson }},
     forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }}
-    })' x-init="init()">
+    })' x-init="init()" @destination-change="onDestinationChange($event.detail)">
     <div class="mx-auto max-w-5xl space-y-6">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div class="space-y-3">
@@ -219,10 +219,10 @@
                                 <button type="button" @click="form.public_call_allowed = !form.public_call_allowed"
                                     :class="form.public_call_allowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
                                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                         stroke-width="1.8">
                                         <path stroke-linecap="round" stroke-linejoin="round"
-                                            d="M4.75 3.75h2.5l1 3-1.5.75a7 7 0 0 0 4.5 4.5l.75-1.5 3 1v2.5a1 1 0 0 1-1 1c-6.351 0-11.5-5.149-11.5-11.5a1 1 0 0 1 1-1Z" />
+                                            d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z" />
                                     </svg>
                                     <span x-text="form.public_call_allowed ? '{{ "extension_detail.allowed" | t }}' : '{{ "extension_detail.restricted" | t }}'"></span>
                                 </button>
@@ -262,107 +262,9 @@
                         </template>
                         <div class="grid gap-5 md:grid-cols-2" x-show="form.call_forwarding_mode !== 'none'" x-cloak>
                             <div class="space-y-3 text-sm font-medium text-slate-700">
-                                <div class="flex flex-col gap-2">
-                                    <span>{{ "extension_detail.destination_type" | t }}</span>
-                                    <div class="flex flex-wrap gap-2 text-xs font-semibold">
-                                        <label
-                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
-                                            :class="forwardingTargetType === 'uri' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
-                                                :checked="forwardingTargetType === 'uri'"
-                                                @change="setForwardingTargetType('uri')">
-                                            <span>{{ "extension_detail.standard_uri" | t }}</span>
-                                        </label>
-                                        <label x-show="queueEnabled"
-                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
-                                            :class="forwardingTargetType === 'queue' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
-                                                :checked="forwardingTargetType === 'queue'"
-                                                @change="setForwardingTargetType('queue')">
-                                            <span>{{ "extension_detail.queue" | t }}</span>
-                                        </label>
-                                        <label x-show="ivrTargets.length > 0"
-                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
-                                            :class="forwardingTargetType === 'ivr' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
-                                                :checked="forwardingTargetType === 'ivr'"
-                                                @change="setForwardingTargetType('ivr')">
-                                            <span>{{ "extension_detail.ivr" | t }}</span>
-                                        </label>
-                                        <label x-show="voicemailAddonEnabled"
-                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
-                                            :class="forwardingTargetType === 'voicemail' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
-                                                :checked="forwardingTargetType === 'voicemail'"
-                                                @change="setForwardingTargetType('voicemail')">
-                                            <span>{{ "extension_detail.voicemail" | t }}</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div x-show="forwardingTargetType === 'uri'" x-cloak>
-                                    <label class="flex flex-col gap-2">
-                                        {{ "extension_detail.forward_destination" | t }}
-                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
-                                            @input="syncForwardingDestination()"
-                                            :disabled="form.call_forwarding_mode === 'none'"
-                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            placeholder="{{ "extension_detail.forward_destination_placeholder" | t }}">
-                                        <span class="text-xs font-normal text-slate-400">{{ "extension_detail.forward_destination_hint" | t }}</span>
-                                    </label>
-                                </div>
-                                <div x-show="forwardingTargetType === 'queue'" x-cloak class="space-y-3">
-                                    <template x-if="queueTargets.length">
-                                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                            {{ "extension_detail.select_queue_label" | t }}
-                                            <select
-                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                :disabled="form.call_forwarding_mode === 'none'"
-                                                x-model="forwardingTargetValue" @change="syncForwardingDestination()">
-                                                <option value="">{{ "extension_detail.select_queue" | t }}</option>
-                                                <template x-for="queue in queueTargets" :key="queue.reference">
-                                                    <option :value="queue.reference" x-text="queue.name"></option>
-                                                </template>
-                                            </select>
-                                            <span class="text-xs font-normal text-slate-400">{{ "extension_detail.saved_as" | t }} <code
-                                                    class="font-mono text-[11px]">{{ "extension_detail.queue_id" | t }}</code>.</span>
-                                        </label>
-                                    </template>
-                                    <template x-if="!queueTargets.length">
-                                        <div
-                                            class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
-                                            {{ "extension_detail.no_queues" | t }}
-                                        </div>
-                                    </template>
-                                </div>
-                                <div x-show="forwardingTargetType === 'ivr'" x-cloak class="space-y-3">
-                                    <template x-if="ivrTargets.length">
-                                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                            {{ "extension_detail.select_ivr_label" | t }}
-                                            <select
-                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                :disabled="form.call_forwarding_mode === 'none'"
-                                                x-model="forwardingTargetValue" @change="syncForwardingDestination()">
-                                                <option value="">{{ "extension_detail.select_ivr" | t }}</option>
-                                                <template x-for="ivr in ivrTargets" :key="ivr.name">
-                                                    <option :value="ivr.name" x-text="ivr.name"></option>
-                                                </template>
-                                            </select>
-                                        </label>
-                                    </template>
-                                </div>
-                                <div x-show="forwardingTargetType === 'voicemail'" x-cloak class="space-y-2">
-                                    <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                        {{ "extension_detail.voicemail_extension" | t }}
-                                        <input type="text" maxlength="50" x-model.trim="forwardingTargetValue"
-                                            @input="syncForwardingDestination()"
-                                            :disabled="form.call_forwarding_mode === 'none'"
-                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            :placeholder="form.extension || '1001'">
-                                        <span class="text-xs font-normal text-slate-400">{{ "extension_detail.voicemail_extension_hint" | t }}</span>
-                                    </label>
-                                </div>
+                                {% set queue_items = forwarding_catalog.queues | default([]) %}
+                                {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                                {% include "console/_destination_selector.html" %}
                             </div>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                                 {{ "extension_detail.ring_timeout" | t }}
@@ -805,11 +707,15 @@
                     return this.mode === 'edit' ? 'PATCH' : 'PUT';
                 },
                 init() {
+                    var self = this;
                     this.selectedDepartments = (this.assignedDepartmentsRaw || [])
                         .map((dept) => String(dept.id))
                         .filter(Boolean);
                     this.form.call_forwarding_timeout = this.clampTimeout(this.form.call_forwarding_timeout);
                     this.initializeForwardingTargetUI();
+                    this.$nextTick(function () {
+                        self.syncDestinationSelector();
+                    });
                     if (this.mode === 'edit' && !this.tabs.some((tab) => tab.id === 'registrations')) {
                         this.tabs.push({
                             id: 'registrations',
@@ -823,6 +729,39 @@
                         });
                         this.fetchPresence();
                     }
+                },
+
+                onDestinationChange(detail) {
+                    var type = detail.type;
+                    var value = detail.value;
+                    if (type === 'extension') {
+                        this.forwardingTargetType = 'extension';
+                        this.forwardingTargetValue = value;
+                    } else if (type === 'queue') {
+                        this.forwardingTargetType = 'queue';
+                        this.forwardingTargetValue = value;
+                    } else if (type === 'ivr') {
+                        this.forwardingTargetType = 'ivr';
+                        this.forwardingTargetValue = value;
+                    } else if (type === 'voicemail') {
+                        this.forwardingTargetType = 'voicemail';
+                        this.forwardingTargetValue = value;
+                    } else {
+                        this.forwardingTargetType = 'uri';
+                        this.forwardingTargetValue = value;
+                    }
+                    this.syncForwardingDestination();
+                },
+
+                syncDestinationSelector() {
+                    var child = this.$el.querySelector('[x-data^="destinationSelector"]');
+                    if (!child) return;
+                    child.dispatchEvent(new CustomEvent('set-destination', {
+                        detail: {
+                            type: this.forwardingTargetType,
+                            value: this.forwardingTargetValue,
+                        }
+                    }));
                 },
                 async fetchPresence() {
                     const extension = this.form.extension || this.model?.extension;
@@ -1112,7 +1051,6 @@
                     const lower = destination.toLowerCase();
                     if (lower.startsWith('queue:')) {
                         this.forwardingTargetType = 'queue';
-                        // Use $nextTick so x-if + x-for options render before x-model syncs
                         this.$nextTick(() => {
                             this.forwardingTargetValue = destination.slice(6);
                         });
@@ -1124,6 +1062,9 @@
                     } else if (lower.startsWith('voicemail:')) {
                         this.forwardingTargetType = 'voicemail';
                         this.forwardingTargetValue = destination.slice(10);
+                    } else if (lower.startsWith('sip:') && /^\d+$/.test(destination.slice(4))) {
+                        this.forwardingTargetType = 'extension';
+                        this.forwardingTargetValue = destination.slice(4);
                     } else {
                         this.forwardingTargetType = 'uri';
                         this.forwardingTargetValue = destination;
@@ -1155,7 +1096,9 @@
                 },
                 syncForwardingDestination() {
                     const value = this.forwardingTargetValue.trim();
-                    if (this.forwardingTargetType === 'queue') {
+                    if (this.forwardingTargetType === 'extension') {
+                        this.form.call_forwarding_destination = value ? `sip:${value}` : '';
+                    } else if (this.forwardingTargetType === 'queue') {
                         this.form.call_forwarding_destination = value ? `queue:${value}` : '';
                     } else if (this.forwardingTargetType === 'ivr') {
                         this.form.call_forwarding_destination = value ? `ivr:${value}` : '';
@@ -1171,5 +1114,4 @@
         });
     });
 </script>
-
 {% endblock %}

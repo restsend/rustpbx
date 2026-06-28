@@ -115,8 +115,10 @@ struct ClusterPresenceMessage {
 impl ClusterPresenceMessage {
     fn to_state(&self) -> Option<PresenceState> {
         let status = match self.status.as_str() {
-            "available" => PresenceStatus::Available,
+            "idle" | "available" => PresenceStatus::Idle,
             "busy" => PresenceStatus::Busy,
+            "ringing" => PresenceStatus::Ringing,
+            "wrapup" => PresenceStatus::Wrapup,
             "away" => PresenceStatus::Away(String::new()),
             "dnd" => PresenceStatus::Dnd,
             "offline" => PresenceStatus::Offline,
@@ -808,18 +810,53 @@ mod tests {
     // ── ClusterPresenceMessage → PresenceState conversion ───────────────────
 
     #[test]
-    fn test_presence_message_to_state_available() {
+    fn test_presence_message_to_state_idle() {
         let msg = ClusterPresenceMessage {
             identity: "1001".to_string(),
-            status: "available".to_string(),
+            status: "idle".to_string(),
             note: Some("hello".to_string()),
             activity: None,
             last_updated: 100,
         };
         let state = msg.to_state().unwrap();
-        assert_eq!(state.status, PresenceStatus::Available);
+        assert_eq!(state.status, PresenceStatus::Idle);
         assert_eq!(state.note.as_deref(), Some("hello"));
         assert_eq!(state.last_updated, 100);
+    }
+
+    #[test]
+    fn test_presence_message_to_state_available_backcompat() {
+        // Legacy "available" string must still map to Idle.
+        let msg = ClusterPresenceMessage {
+            identity: "1001".to_string(),
+            status: "available".to_string(),
+            note: None,
+            activity: None,
+            last_updated: 0,
+        };
+        let state = msg.to_state().unwrap();
+        assert_eq!(state.status, PresenceStatus::Idle);
+    }
+
+    #[test]
+    fn test_presence_message_to_state_ringing_wrapup() {
+        let ringing = ClusterPresenceMessage {
+            identity: "1001".to_string(),
+            status: "ringing".to_string(),
+            note: None,
+            activity: None,
+            last_updated: 0,
+        };
+        assert_eq!(ringing.to_state().unwrap().status, PresenceStatus::Ringing);
+
+        let wrapup = ClusterPresenceMessage {
+            identity: "1001".to_string(),
+            status: "wrapup".to_string(),
+            note: None,
+            activity: None,
+            last_updated: 0,
+        };
+        assert_eq!(wrapup.to_state().unwrap().status, PresenceStatus::Wrapup);
     }
 
     #[test]
@@ -939,14 +976,14 @@ mod tests {
     #[test]
     fn test_presence_state_to_message() {
         let state = PresenceState {
-            status: PresenceStatus::Available,
+            status: PresenceStatus::Idle,
             note: Some("online".to_string()),
             activity: Some("idle".to_string()),
             last_updated: 1714001000,
         };
         let msg = ClusterPresenceMessage::from(("1001", &state));
         assert_eq!(msg.identity, "1001");
-        assert_eq!(msg.status, "available");
+        assert_eq!(msg.status, "idle");
         assert_eq!(msg.note.as_deref(), Some("online"));
         assert_eq!(msg.activity.as_deref(), Some("idle"));
         assert_eq!(msg.last_updated, 1714001000);
@@ -1068,7 +1105,7 @@ mod tests {
         hub.register_handler(handler.clone());
 
         let state = PresenceState {
-            status: PresenceStatus::Available,
+            status: PresenceStatus::Idle,
             ..Default::default()
         };
         hub.emit_presence_change("1001", &state).await;
@@ -1097,7 +1134,7 @@ mod tests {
         let hub = make_test_hub();
         let identity = "1001";
         let state = PresenceState {
-            status: PresenceStatus::Available,
+            status: PresenceStatus::Idle,
             note: Some("remote-test".to_string()),
             ..Default::default()
         };
@@ -1112,7 +1149,7 @@ mod tests {
 
         // Memory state should be updated
         let stored = hub.presence_manager.get_state(identity);
-        assert_eq!(stored.status, PresenceStatus::Available);
+        assert_eq!(stored.status, PresenceStatus::Idle);
         assert_eq!(stored.note.as_deref(), Some("remote-test"));
     }
 
@@ -1133,9 +1170,9 @@ mod tests {
         ));
         hub.on_remote_locator_event(event, remote_source).await;
 
-        // After receipt, presence should be Available (Registered from peer)
+        // After receipt, presence should be Idle (Registered from peer)
         let stored = hub.presence_manager.get_state("3001");
-        assert_eq!(stored.status, PresenceStatus::Available);
+        assert_eq!(stored.status, PresenceStatus::Idle);
     }
 
     #[tokio::test]

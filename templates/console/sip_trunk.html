@@ -329,15 +329,25 @@
                                     x-text="formatDate(trunk.updated_at)"></td>
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="flex items-center gap-2">
-                                        <a :href="detailUrl(trunk.id)"
-                                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                                            View
+                                        <a :href="detailUrl(trunk.id)" title="View"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
+                                            <span class="sr-only">View</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
+                                            </svg>
                                         </a>
-                                        <button type="button"
-                                            class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1 text-xs font-semibold transition"
-                                            :class="processingDelete === trunk.id ? 'text-rose-300 cursor-not-allowed' : 'text-rose-600 hover:bg-rose-50'"
+                                        <button type="button" title="Delete"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
+                                            :class="processingDelete === trunk.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-rose-300 hover:text-rose-600'"
                                             :disabled="processingDelete === trunk.id" @click="confirmDelete(trunk)">
-                                            Delete
+                                            <span class="sr-only">Delete</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6" />
+                                            </svg>
                                         </button>
                                     </div>
                                 </td>

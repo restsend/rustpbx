@@ -616,8 +616,10 @@ impl CallModule {
         {
             match &config.endpoint {
                 crate::call::TransferEndpoint::Uri(uri) => {
+                    let realm = self.inner.config.select_realm("");
+                    let normalized = crate::call::build_sip_uri(uri, &realm);
                     let forwarded_uri =
-                        rsipstack::sip::Uri::try_from(uri.as_str()).map_err(|e| {
+                        rsipstack::sip::Uri::try_from(normalized.as_str()).map_err(|e| {
                             RouteError::from((
                                 anyhow!("invalid always-forwarding target '{}': {}", uri, e),
                                 Some(rsipstack::sip::StatusCode::ServerInternalError),
@@ -690,6 +692,34 @@ impl CallModule {
                     forced_pending_app = Some((
                         "ivr".to_string(),
                         Some(serde_json::json!({ "file": ivr_file })),
+                        true,
+                    ));
+                }
+                crate::call::TransferEndpoint::Voicemail(ext) => {
+                    let extension = ext.trim();
+                    if extension.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding voicemail extension is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    forced_pending_app = Some((
+                        "voicemail".to_string(),
+                        Some(serde_json::json!({ "extension": extension })),
+                        true,
+                    ));
+                }
+                crate::call::TransferEndpoint::Conference(id) => {
+                    let conf_id = id.trim();
+                    if conf_id.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding conference id is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    forced_pending_app = Some((
+                        "conference".to_string(),
+                        Some(serde_json::json!({ "id": conf_id })),
                         true,
                     ));
                 }

@@ -48,7 +48,7 @@ impl TestAgentRegistry {
             display_name: name.to_string(),
             uri: uri.to_string(),
             skills: skills.iter().map(|s| s.to_string()).collect(),
-            presence: PresenceState::Available,
+            presence: PresenceState::Idle,
         });
     }
 
@@ -85,7 +85,7 @@ impl AgentRegistry for TestAgentRegistry {
             display_name,
             uri,
             skills,
-            presence: PresenceState::Available,
+            presence: PresenceState::Idle,
         });
         Ok(())
     }
@@ -162,7 +162,7 @@ impl AgentRegistry for TestAgentRegistry {
             .await
             .iter()
             .filter(|a| {
-                matches!(a.presence, PresenceState::Available)
+                matches!(a.presence, PresenceState::Idle)
                     && required_skills.iter().all(|s| a.skills.contains(s))
             })
             .map(Self::to_record)
