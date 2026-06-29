@@ -190,12 +190,14 @@ impl MixerRegistry {
 
         if let Some(mixer_id) = mixer_id {
             let mut removed = false;
+            let mut mixer_now_empty = false;
 
             {
                 let mut mixers = self.mixers.lock();
                 if let Some(entry) = mixers.get_mut(&mixer_id) {
                     entry.participants.retain(|p| p.session_id != session_id);
                     removed = true;
+                    mixer_now_empty = entry.participants.is_empty();
                 }
             }
 
@@ -203,11 +205,30 @@ impl MixerRegistry {
                 let mut participants = self.participants.lock();
                 participants.remove(session_id);
 
-                info!(
-                    mixer_id = %mixer_id,
-                    session_id = %session_id,
-                    "Removed participant from mixer"
-                );
+                // Auto-reap mixers that have no participants left, so the
+                // MediaMixer (and its background task) is stopped and dropped
+                // instead of accumulating for the process lifetime. This guards
+                // against supervisor sessions that hang up without issuing an
+                // explicit supervisor_stop.
+                if mixer_now_empty {
+                    let entry_to_stop = {
+                        let mut mixers = self.mixers.lock();
+                        mixers.remove(&mixer_id)
+                    };
+                    if let Some(entry) = entry_to_stop {
+                        info!(
+                            mixer_id = %mixer_id,
+                            "Auto-removed empty mixer from registry"
+                        );
+                        entry.mixer.stop();
+                    }
+                } else {
+                    info!(
+                        mixer_id = %mixer_id,
+                        session_id = %session_id,
+                        "Removed participant from mixer"
+                    );
+                }
             }
 
             removed

@@ -253,6 +253,7 @@ impl RouteInvite for DefaultRouteInvite {
                     app_name: app_name.clone(),
                     app_params: app_params.clone(),
                     auto_answer: true,
+                    hints: None,
                 });
             }
         }
@@ -298,6 +299,7 @@ impl RouteInvite for DefaultRouteInvite {
                     app_name: app_name.clone(),
                     app_params: app_params.clone(),
                     auto_answer: true,
+                    hints: None,
                 });
             }
         }
@@ -822,10 +824,10 @@ impl CallModule {
                     app_name,
                     app_params,
                     auto_answer,
-                    ..
+                    hints,
                 } => {
                     routed_headers = option.headers;
-                    (None, None, Some((app_name, app_params, auto_answer)), None)
+                    (None, None, Some((app_name, app_params, auto_answer)), hints)
                 }
             }
         };
@@ -934,6 +936,7 @@ impl CallModule {
                 dialplan.audio_profile = Some(ringback);
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
+            *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }
@@ -2435,6 +2438,7 @@ mod tests {
                 app_name: "ivr".to_string(),
                 app_params: None,
                 auto_answer: true,
+                hints: None,
             })
         }
     }

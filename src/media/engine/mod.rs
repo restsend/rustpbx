@@ -223,6 +223,11 @@ impl EngineCore {
                         }
                         *guard = None;
                     }
+                    // Abort any SipFlow capture task so it doesn't outlive the
+                    // session (dropping the JoinHandle alone does not abort it).
+                    if let Some(handle) = sess.sipflow_task.take() {
+                        handle.abort();
+                    }
                     sess.bridge = None;
                 }
                 info!(session_id = %session_id, "MediaEngine session destroyed");
@@ -303,13 +308,21 @@ impl EngineCore {
                 backend,
                 receiver,
             } => {
-                if !self.sessions.read().contains_key(&session_id) {
+                let mut sessions = self.sessions.write();
+                let Some(sess) = sessions.get_mut(&session_id) else {
                     debug!(session_id = %session_id, "SipFlow capture skipped for missing session");
                     return Ok(());
+                };
+
+                // Always abort any previously-running capture task first, so a
+                // stop (backend=None) or a restart actually halts the old task
+                // instead of letting it (and the backend it captured) run forever.
+                if let Some(handle) = sess.sipflow_task.take() {
+                    handle.abort();
                 }
 
                 if let (Some(backend), Some(mut rx)) = (backend, receiver) {
-                    crate::utils::spawn(async move {
+                    let handle = crate::utils::spawn(async move {
                         use crate::sipflow::{SipFlowItem, SipFlowMsgType};
                         while let Some((leg, sample, received_at_micros)) = rx.recv().await {
                             // `sample` is `Arc<MediaSample>`; deref to read.
@@ -337,6 +350,7 @@ impl EngineCore {
                             }
                         }
                     });
+                    sess.sipflow_task = Some(handle);
                     debug!(session_id = %session_id, "SipFlow capture started");
                 } else {
                     debug!(session_id = %session_id, "SipFlow capture stopped");
