@@ -837,6 +837,18 @@ endblock %}
                     if (!target || typeof target !== 'object') {
                         return;
                     }
+                    // Only reconcile targets that are ACTUALLY skill groups.
+                    // `extractSkillGroupId` returns its input unchanged when there is no
+                    // `skill-group:` prefix, so without this guard a plain SIP target
+                    // (e.g. `sip:1000@localhost`) would be coerced into
+                    // `skill-group:sip:1000@localhost` and rendered as a skill-group
+                    // dropdown every time the form is (re)loaded.
+                    const isSkillGroup =
+                        (typeof target.uri === 'string' && /^skill(?:-|_)?group:/i.test(target.uri)) ||
+                        !!target.skill_group_id;
+                    if (!isSkillGroup) {
+                        return;
+                    }
                     const groupId = this.extractSkillGroupId(target.skill_group_id || target.uri);
                     if (!groupId) {
                         return;
