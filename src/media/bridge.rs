@@ -1421,11 +1421,20 @@ impl BridgePeer {
                                                 let dests_for_forward = route_dests.clone();
                                                 let pid_clone = pid.clone();
                                                 let bid_clone = bid.clone();
+                                                // Child token so this forwarder stops when the
+                                                // bridge / peer task is cancelled. Without it the
+                                                // task would loop on track.recv() forever and pin
+                                                // the peers map (and every extra-peer PC) in memory.
+                                                let forward_cancel = cancel.child_token();
                                                 crate::utils::spawn(async move {
                                                     loop {
-                                                        let sample = match track.recv().await {
-                                                            Ok(s) => s,
-                                                            Err(_) => break,
+                                                        let sample = tokio::select! {
+                                                            biased;
+                                                            _ = forward_cancel.cancelled() => break,
+                                                            res = track.recv() => match res {
+                                                                Ok(s) => s,
+                                                                Err(_) => break,
+                                                            },
                                                         };
                                                         let guard = peers_for_forward.lock().await;
                                                         for dest in &dests_for_forward {
@@ -1562,6 +1571,7 @@ impl BridgePeer {
                                                     cancel_token.clone(),
                                                     "Callee PLI -> Caller source",
                                                 );
+                                                Self::prune_sub_tasks(&sub_tasks).await;
                                                 sub_tasks.lock().await.push(h);
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
@@ -1607,9 +1617,8 @@ impl BridgePeer {
                                         Some(Arc::clone(&caller_to_callee_dtmf_mapping)),
                                         Some(Arc::clone(&caller_gate)),
                                     );
-                                    if let Ok(mut st) = sub_tasks.try_lock() {
-                                        st.push(h);
-                                    }
+                                    Self::prune_sub_tasks(&sub_tasks).await;
+                                    sub_tasks.lock().await.push(h);
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
@@ -1687,6 +1696,7 @@ impl BridgePeer {
                                                     cancel_token.clone(),
                                                     "Caller PLI -> Callee source",
                                                 );
+                                                Self::prune_sub_tasks(&sub_tasks).await;
                                                 sub_tasks.lock().await.push(h);
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
@@ -1732,9 +1742,8 @@ impl BridgePeer {
                                         Some(Arc::clone(&callee_to_caller_dtmf_mapping)),
                                         None, // Callee→Caller is always allowed
                                     );
-                                    if let Ok(mut st) = sub_tasks.try_lock() {
-                                        st.push(h);
-                                    }
+                                    Self::prune_sub_tasks(&sub_tasks).await;
+                                    sub_tasks.lock().await.push(h);
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
@@ -2152,6 +2161,26 @@ impl BridgePeer {
 
     /// Spawn a task that subscribes to PLI/FIR RTCP on `sender` and forwards them as
     /// `request_key_frame()` calls on `source_track`.
+    /// Remove finished sub-tasks and cap the total so that repeated
+    /// renegotiations (each spawning fresh forwarder / PLI tasks) do not grow
+    /// `sub_tasks` without bound. Stale tasks for superseded tracks are aborted.
+    async fn prune_sub_tasks(sub_tasks: &Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>) {
+        let mut st = sub_tasks.lock().await;
+        // Drop handles for tasks that have already finished.
+        st.retain(|h| !h.is_finished());
+        // If there are still many live tasks (typical of repeated re-INVITEs
+        // where old forwarders keep draining superseded tracks), abort the
+        // oldest ones. Each forwarder/PLI task holds strong Arc clones of the
+        // source track and target sender, so retaining them wastes memory.
+        const MAX_LIVE_SUB_TASKS: usize = 16;
+        while st.len() > MAX_LIVE_SUB_TASKS {
+            if let Some(h) = st.first() {
+                h.abort();
+            }
+            st.remove(0);
+        }
+    }
+
     fn spawn_pli_forwarder(
         bridge_id: String,
         sender: Arc<RtpSender>,

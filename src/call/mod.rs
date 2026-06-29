@@ -913,6 +913,11 @@ pub struct Dialplan {
     /// When present, these take priority over the original SIP request headers
     /// when building CallInfo for application flows (IVR, voicemail, etc.).
     pub routed_headers: Option<Vec<rsipstack::sip::Header>>,
+
+    /// Concurrency slots acquired by routing policy checks. Released by the
+    /// session on hangup/teardown. Held in an `Arc<Mutex<..>>` so the shared
+    /// `Arc<Dialplan>` (inside `CallContext`) can still drain them on cleanup.
+    pub concurrency_holds: Arc<Mutex<Vec<crate::call::policy::ConcurrencyHold>>>,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -973,6 +978,7 @@ impl Dialplan {
             passthrough_failure: false,
             audio_profile: None,
             routed_headers: None,
+            concurrency_holds: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

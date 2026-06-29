@@ -7290,6 +7290,20 @@ impl SipSession {
             mixer.stop();
         }
 
+        // Release any concurrency slots acquired by routing policy checks so
+        // they don't permanently exhaust the configured budget. Uses
+        // best-effort release (errors are logged inside the helper).
+        let acquired_holds = std::mem::take(&mut *self.context.dialplan.concurrency_holds.lock());
+        if !acquired_holds.is_empty() {
+            if let Some(limiter) = self.server.frequency_limiter.as_ref() {
+                crate::call::policy::PolicyGuard::release_concurrency_holds(
+                    &acquired_holds,
+                    limiter.as_ref(),
+                )
+                .await;
+            }
+        }
+
         self.callee_guards.clear();
 
         self.callee_event_tx = None;
@@ -9661,6 +9675,22 @@ impl Drop for SipSession {
         self.server
             .active_call_registry
             .remove(&self.context.session_id);
+
+        // Safety net: release any concurrency slots still held (cleanup() takes
+        // them on the happy path, so this is empty in that case). Drop can't
+        // await, so spawn a best-effort release task.
+        let remaining_holds = std::mem::take(&mut *self.context.dialplan.concurrency_holds.lock());
+        if !remaining_holds.is_empty() {
+            if let Some(limiter) = self.server.frequency_limiter.clone() {
+                crate::utils::spawn(async move {
+                    crate::call::policy::PolicyGuard::release_concurrency_holds(
+                        &remaining_holds,
+                        limiter.as_ref(),
+                    )
+                    .await;
+                });
+            }
+        }
 
         // Safety net: ensure the engine session is destroyed even if
         // cleanup() was never called (e.g. tokio task cancellation).

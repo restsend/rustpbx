@@ -973,6 +973,9 @@ pub struct DialplanHints {
     pub video_policy: Option<crate::proxy::routing::VideoPolicy>,
     /// Per-trunk ringback/early-media audio configuration
     pub ringback: Option<crate::proxy::routing::RingbackAudio>,
+    /// Concurrency slots acquired during routing policy enforcement. The
+    /// session releases them on hangup to avoid leaking the concurrency budget.
+    pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
 }
 
 impl std::fmt::Debug for DialplanHints {
@@ -1003,6 +1006,7 @@ pub enum RouteResult {
         app_name: String,
         app_params: Option<serde_json::Value>,
         auto_answer: bool,
+        hints: Option<DialplanHints>,
     },
     NotHandled(InviteOption, Option<DialplanHints>),
     Abort(StatusCode, Option<String>),

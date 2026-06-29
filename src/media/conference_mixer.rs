@@ -194,14 +194,35 @@ impl ConferenceAudioMixer {
 
     /// Remove a participant from the conference
     pub async fn remove_participant(&self, leg_id: &LegId) -> Result<()> {
-        {
+        let was_present = {
             let mut participants = self.participants.lock().await;
-            participants.remove(leg_id);
-        }
+            participants.remove(leg_id).is_some()
+        };
 
-        // Update cached count
-        self.participant_count
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // Only adjust the count if the participant actually existed, to avoid
+        // underflowing to usize::MAX on duplicate/erroneous remove calls (which
+        // would break every participant_count-based decision downstream).
+        if was_present {
+            self.participant_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Prune any route gains that referenced the leaving leg (as source
+            // or destination), so the routing table does not grow monotonically
+            // as participants churn through a long-running conference.
+            let mut gains = self.route_gains.lock().await;
+            let before = gains.len();
+            gains.retain(|(src, dst), _| src != leg_id && dst != leg_id);
+            let pruned = before - gains.len();
+            if pruned > 0 {
+                drop(gains);
+                debug!(
+                    conf_id = %self.conf_id,
+                    leg_id = %leg_id,
+                    pruned,
+                    "Pruned route gains for removed participant"
+                );
+            }
+        }
 
         // Update mixing routes
         self.update_routing().await?;

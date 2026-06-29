@@ -150,6 +150,10 @@ async fn match_invite_impl(
 ) -> Result<RouteResult> {
     let mut option = option;
     let mut source_hints = None;
+    // Concurrency slots acquired by policy checks for this match attempt. They
+    // are attached to the successful RouteResult (so the session can release
+    // them on hangup) and released inline if the match aborts after acquisition.
+    let mut concurrency_holds: Vec<crate::call::policy::ConcurrencyHold> = Vec::new();
     if let Some(trunk) =
         source_trunk.and_then(|source| trunks.and_then(|trunks| trunks.get(&source.name)))
     {
@@ -254,7 +258,7 @@ async fn match_invite_impl(
             let current_caller = option.caller.user().unwrap_or_default();
             let current_callee = option.callee.user().unwrap_or_default();
 
-            if let PolicyCheckStatus::Rejected(rejection) = guard
+            let outcome = guard
                 .check_policy(
                     &rule.name,
                     policy,
@@ -262,8 +266,9 @@ async fn match_invite_impl(
                     current_callee,
                     origin_country,
                 )
-                .await?
-            {
+                .await?;
+            concurrency_holds.extend(outcome.concurrency_holds);
+            if let PolicyCheckStatus::Rejected(rejection) = outcome.status {
                 let reason = rejection.to_string();
                 info!(
                     "Call rejected by route policy: {} reason: {}",
@@ -275,6 +280,9 @@ async fn match_invite_impl(
                         reason: Some(reason.clone()),
                     });
                 }
+                // Rule policy rejection never acquires a slot, but release any
+                // holds defensively (none expected at this point).
+                release_holds(&routing_state, &mut concurrency_holds).await;
                 return Ok(RouteResult::Abort(
                     rsipstack::sip::StatusCode::Forbidden,
                     Some(reason),
@@ -357,7 +365,7 @@ async fn match_invite_impl(
                             let current_caller = option.caller.user().unwrap_or_default();
                             let current_callee = option.callee.user().unwrap_or_default();
 
-                            if let PolicyCheckStatus::Rejected(rejection) = guard
+                            let outcome = guard
                                 .check_policy(
                                     &format!("trunk:{}", selected_trunk),
                                     policy,
@@ -365,8 +373,9 @@ async fn match_invite_impl(
                                     current_callee,
                                     origin_country,
                                 )
-                                .await?
-                            {
+                                .await?;
+                            concurrency_holds.extend(outcome.concurrency_holds);
+                            if let PolicyCheckStatus::Rejected(rejection) = outcome.status {
                                 let reason = rejection.to_string();
                                 info!(
                                     "Call rejected by trunk policy: {} reason: {}",
@@ -378,6 +387,9 @@ async fn match_invite_impl(
                                         reason: Some(reason.clone()),
                                     });
                                 }
+                                // Trunk policy rejected AFTER rule policy may
+                                // have acquired a slot: release everything.
+                                release_holds(&routing_state, &mut concurrency_holds).await;
                                 return Ok(RouteResult::Abort(
                                     rsipstack::sip::StatusCode::Forbidden,
                                     Some(reason),
@@ -400,6 +412,7 @@ async fn match_invite_impl(
                         .get_or_insert_with(DialplanHints::default)
                         .allow_codecs = Some(rule.codecs.clone());
                 }
+                attach_holds(&mut hints, std::mem::take(&mut concurrency_holds));
                 return Ok(RouteResult::Forward(option, hints));
             }
             ActionType::Queue => {
@@ -470,7 +483,7 @@ async fn match_invite_impl(
                                 let current_caller = option.caller.user().unwrap_or_default();
                                 let current_callee = option.callee.user().unwrap_or_default();
 
-                                if let PolicyCheckStatus::Rejected(rejection) = guard
+                                let outcome = guard
                                     .check_policy(
                                         &format!("trunk:{}", selected_trunk),
                                         policy,
@@ -478,8 +491,9 @@ async fn match_invite_impl(
                                         current_callee,
                                         origin_country,
                                     )
-                                    .await?
-                                {
+                                    .await?;
+                                concurrency_holds.extend(outcome.concurrency_holds);
+                                if let PolicyCheckStatus::Rejected(rejection) = outcome.status {
                                     let reason = rejection.to_string();
                                     info!(
                                         "Call rejected by trunk policy: {} reason: {}",
@@ -491,6 +505,7 @@ async fn match_invite_impl(
                                             reason: Some(reason.clone()),
                                         });
                                     }
+                                    release_holds(&routing_state, &mut concurrency_holds).await;
                                     return Ok(RouteResult::Abort(
                                         rsipstack::sip::StatusCode::Forbidden,
                                         Some(reason),
@@ -508,6 +523,7 @@ async fn match_invite_impl(
                         .get_or_insert_with(DialplanHints::default)
                         .allow_codecs = Some(rule.codecs.clone());
                 }
+                attach_holds(&mut hints, std::mem::take(&mut concurrency_holds));
                 return Ok(RouteResult::Queue {
                     option,
                     queue: queue_plan,
@@ -521,17 +537,57 @@ async fn match_invite_impl(
                     .as_ref()
                     .ok_or_else(|| anyhow!("application action requires 'app' field"))?;
 
+                let mut app_hints = None;
+                attach_holds(&mut app_hints, std::mem::take(&mut concurrency_holds));
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
                     app_params: rule.action.app_params.clone(),
                     auto_answer: rule.action.auto_answer,
+                    hints: app_hints,
                 });
             }
         }
     }
 
+    attach_holds(&mut source_hints, std::mem::take(&mut concurrency_holds));
     Ok(RouteResult::NotHandled(option, source_hints))
+}
+
+/// Release all accumulated concurrency holds against the routing state's
+/// limiter. Used when a match aborts after acquiring slots.
+async fn release_holds(
+    routing_state: &Arc<RoutingState>,
+    holds: &mut Vec<crate::call::policy::ConcurrencyHold>,
+) {
+    if holds.is_empty() {
+        return;
+    }
+    if let Some(guard) = routing_state.policy_guard.as_ref() {
+        let snapshot = std::mem::take(holds);
+        let limiter = guard.limiter().clone();
+        for hold in &snapshot {
+            let _ = limiter
+                .release_concurrency(&hold.policy_id, &hold.scope, &hold.scope_value)
+                .await;
+        }
+    } else {
+        holds.clear();
+    }
+}
+
+/// Attach concurrency holds to dialplan hints so they flow into the session
+/// and can be released on call teardown.
+fn attach_holds(
+    hints: &mut Option<DialplanHints>,
+    holds: Vec<crate::call::policy::ConcurrencyHold>,
+) {
+    if holds.is_empty() {
+        return;
+    }
+    hints
+        .get_or_insert_with(DialplanHints::default)
+        .concurrency_holds = holds;
 }
 
 /// Context for rule matching to reduce function arguments

@@ -97,6 +97,25 @@ pub enum PolicyCheckStatus {
     Rejected(PolicyRejection),
 }
 
+/// A concurrency slot acquired by a call via policy enforcement. The slot must
+/// be released when the call ends (regardless of how it ends) to avoid
+/// permanently exhausting the configured `max_total` concurrency budget.
+#[derive(Debug, Clone)]
+pub struct ConcurrencyHold {
+    pub policy_id: String,
+    pub scope: String,
+    pub scope_value: String,
+}
+
+/// Outcome of [`PolicyGuard::check_policy`]. Carries the decision plus any
+/// concurrency slots that were acquired during the check (only present when the
+/// call was allowed AND a concurrency limit was enforced).
+#[derive(Debug)]
+pub struct PolicyCheckOutcome {
+    pub status: PolicyCheckStatus,
+    pub concurrency_holds: Vec<ConcurrencyHold>,
+}
+
 pub struct PolicyGuard {
     limiter: Arc<dyn FrequencyLimiter>,
 }
@@ -112,6 +131,28 @@ impl PolicyGuard {
         Self { limiter }
     }
 
+    /// Access the underlying limiter (used to release concurrency slots).
+    pub fn limiter(&self) -> &Arc<dyn FrequencyLimiter> {
+        &self.limiter
+    }
+
+    /// Best-effort release of all concurrency slots held by a call. Called from
+    /// the session cleanup path. Errors are logged and swallowed because a
+    /// failed release must not abort call teardown.
+    pub async fn release_concurrency_holds(holds: &[ConcurrencyHold], limiter: &dyn FrequencyLimiter) {
+        for hold in holds {
+            if let Err(e) = limiter
+                .release_concurrency(&hold.policy_id, &hold.scope, &hold.scope_value)
+                .await
+            {
+                error!(
+                    "failed to release concurrency slot for policy={} scope={}: {}",
+                    hold.policy_id, hold.scope, e
+                );
+            }
+        }
+    }
+
     pub async fn check_policy(
         &self,
         policy_id: &str,
@@ -119,6 +160,32 @@ impl PolicyGuard {
         caller: &str,
         callee: &str,
         origin_country: Option<&str>,
+    ) -> Result<PolicyCheckOutcome> {
+        let mut holds: Vec<ConcurrencyHold> = Vec::new();
+        let status = self
+            .check_policy_inner(policy_id, policy, caller, callee, origin_country, &mut holds)
+            .await?;
+        // Only carry holds forward when the call was allowed. On rejection the
+        // concurrency check returned false, so nothing was acquired.
+        let concurrency_holds = if status == PolicyCheckStatus::Allowed {
+            holds
+        } else {
+            Vec::new()
+        };
+        Ok(PolicyCheckOutcome {
+            status,
+            concurrency_holds,
+        })
+    }
+
+    async fn check_policy_inner(
+        &self,
+        policy_id: &str,
+        policy: &PolicySpec,
+        caller: &str,
+        callee: &str,
+        origin_country: Option<&str>,
+        holds: &mut Vec<ConcurrencyHold>,
     ) -> Result<PolicyCheckStatus> {
         // 1. Static Checks
         if let Some(prefix) = &policy.called_prefix
@@ -318,17 +385,26 @@ impl PolicyGuard {
             ));
         }
 
-        if let Some(limit) = &policy.concurrency
-            && !self
+        if let Some(limit) = &policy.concurrency {
+            let allowed = self
                 .limiter
                 .check_concurrency(policy_id, "caller", caller, limit.max_total)
-                .await?
-        {
-            let reason = format!("Concurrency limit reached for caller {}", caller);
-            warn!("{}", reason);
-            return Ok(PolicyCheckStatus::Rejected(
-                PolicyRejection::ConcurrencyLimitExceeded(reason),
-            ));
+                .await?;
+            if !allowed {
+                let reason = format!("Concurrency limit reached for caller {}", caller);
+                warn!("{}", reason);
+                return Ok(PolicyCheckStatus::Rejected(
+                    PolicyRejection::ConcurrencyLimitExceeded(reason),
+                ));
+            }
+            // Record the acquired slot so the caller can release it when the
+            // call ends. This is the only limit type that needs explicit release
+            // (frequency/daily limits are window-based and self-expire).
+            holds.push(ConcurrencyHold {
+                policy_id: policy_id.to_string(),
+                scope: "caller".to_string(),
+                scope_value: caller.to_string(),
+            });
         }
 
         Ok(PolicyCheckStatus::Allowed)
@@ -1150,6 +1226,46 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PolicyCheckStatus::Allowed);
+        assert_eq!(result.unwrap().status, PolicyCheckStatus::Allowed);
+    }
+
+    #[tokio::test]
+    async fn test_check_policy_records_concurrency_hold() {
+        let limiter = InMemoryFrequencyLimiter::new();
+        let guard = PolicyGuard::new(limiter.clone());
+
+        let policy = PolicySpec {
+            concurrency: Some(ConcurrencyLimit {
+                max_total: 5,
+                max_per_account: HashMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = guard
+            .check_policy("hold-policy", &policy, "caller9", "callee9", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, PolicyCheckStatus::Allowed);
+        assert_eq!(outcome.concurrency_holds.len(), 1);
+        let hold = &outcome.concurrency_holds[0];
+        assert_eq!(hold.policy_id, "hold-policy");
+        assert_eq!(hold.scope, "caller");
+        assert_eq!(hold.scope_value, "caller9");
+
+        // Releasing must decrement the counter so subsequent calls are allowed.
+        limiter
+            .release_concurrency(&hold.policy_id, &hold.scope, &hold.scope_value)
+            .await
+            .unwrap();
+
+        // Now a second check for the same caller should still be allowed (slot
+        // was released), proving the release path works.
+        let outcome2 = guard
+            .check_policy("hold-policy", &policy, "caller9", "callee9", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome2.status, PolicyCheckStatus::Allowed);
     }
 }
