@@ -112,6 +112,12 @@
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "call_record.search_call_records" | t }}'>
                         </label>
+                        <input type="search" x-model.trim="callerFilter" @input.debounce.400ms="scheduleFetch()"
+                            class="w-40 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            :placeholder="t.filter_caller || 'Caller'">
+                        <input type="search" x-model.trim="calleeFilter" @input.debounce.400ms="scheduleFetch()"
+                            class="w-40 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            :placeholder="t.filter_callee || 'Callee'">
                         <div class="flex flex-wrap items-center gap-2">
                             <select aria-label="{{ "call_record.add_filter" | t }}"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -491,7 +497,11 @@
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
                                 :disabled="currentPage === 1" @click="prevPage" x-text="t.page_prev || 'Prev'">
                             </button>
-                            <span class="px-2" x-text="`${currentPage} / ${totalPages}`"></span>
+                            <input type="number" min="1" :max="totalPages" :value="currentPage"
+                                @change="goToPage($event)"
+                                @keydown.enter="goToPage($event); $event.target.blur()"
+                                class="w-14 rounded-full border border-slate-200 bg-white px-2 py-1 text-center text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <span class="px-1 text-slate-400">/ <span x-text="totalPages"></span></span>
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
                                 :disabled="currentPage === totalPages" @click="nextPage" x-text="t.page_next || 'Next'">
                             </button>
@@ -537,6 +547,8 @@
                 billing_status: ['any'],
             },
             search: '',
+            callerFilter: '',
+            calleeFilter: '',
             statusFilter: 'any',
             directionFilter: 'any',
             dateRangePreset: 'custom',
@@ -864,6 +876,16 @@
                     filters.q = query;
                 }
 
+                const caller = (this.callerFilter || '').trim();
+                if (caller) {
+                    filters.caller = caller;
+                }
+
+                const callee = (this.calleeFilter || '').trim();
+                if (callee) {
+                    filters.callee = callee;
+                }
+
                 const status = (this.statusFilter || '').toLowerCase();
                 if (status && status !== 'any') {
                     filters.status = status;
@@ -1030,6 +1052,20 @@
                     this.setPage(this.currentPage + 1);
                 }
             },
+            goToPage(event) {
+                const input = event?.target;
+                if (!input) {
+                    return;
+                }
+                const raw = parseInt(input.value, 10);
+                if (!Number.isFinite(raw)) {
+                    input.value = this.currentPage;
+                    return;
+                }
+                const target = Math.min(Math.max(raw, 1), Math.max(this.totalPages || 1, 1));
+                input.value = target;
+                this.setPage(target);
+            },
             get filteredRecords() {
                 return Array.isArray(this.records) ? this.records : [];
             },
@@ -1055,6 +1091,8 @@
                 }
                 this._sync.filters = true;
                 this.search = '';
+                this.callerFilter = '';
+                this.calleeFilter = '';
                 this.statusFilter = 'any';
                 this.directionFilter = 'any';
                 this.billingStatusFilter = 'any';

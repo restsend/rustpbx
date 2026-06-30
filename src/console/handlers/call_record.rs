@@ -63,6 +63,10 @@ struct QueryCallRecordFilters {
     sip_trunk_ids: Option<Vec<i64>>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    caller: Option<String>,
+    #[serde(default)]
+    callee: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1058,6 +1062,22 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
             if !direction_trimmed.is_empty() && !equals_ignore_ascii_case(direction_trimmed, "any")
             {
                 condition = condition.add(CallRecordColumn::Direction.eq(direction_trimmed));
+            }
+        }
+
+        if let Some(caller_raw) = filters.caller.as_ref() {
+            let caller_trimmed = caller_raw.trim();
+            if !caller_trimmed.is_empty() {
+                let pattern = format!("%{}%", caller_trimmed);
+                condition = condition.add(CallRecordColumn::FromNumber.like(pattern));
+            }
+        }
+
+        if let Some(callee_raw) = filters.callee.as_ref() {
+            let callee_trimmed = callee_raw.trim();
+            if !callee_trimmed.is_empty() {
+                let pattern = format!("%{}%", callee_trimmed);
+                condition = condition.add(CallRecordColumn::ToNumber.like(pattern));
             }
         }
 

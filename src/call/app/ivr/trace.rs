@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::rwi::TriggerInfo;
+
 /// A single step trace entry for IVR step mode execution.
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrTraceEntry {
@@ -11,8 +13,7 @@ pub struct IvrTraceEntry {
     pub caller: String,
     pub callee: String,
     pub step_index: u32,
-    pub event_type: String,
-    pub event_detail: Option<String>,
+    pub trigger: TriggerInfo,
     pub provider_url: Option<String>,
     pub action_type: String,
     pub action_json: Option<String>,
@@ -134,8 +135,7 @@ mod tests {
             caller: "1001".to_string(),
             callee: "2000".to_string(),
             step_index: step,
-            event_type: "test".to_string(),
-            event_detail: None,
+            trigger: TriggerInfo::new("test"),
             provider_url: None,
             action_type: "Transfer".to_string(),
             action_json: None,

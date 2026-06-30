@@ -705,16 +705,21 @@ pub(crate) struct FileTrackPlaybackSource {
     sequence_number: u16,
     on_end: Option<PlaybackEndCallback>,
     loop_playback: bool,
+    /// Reusable PCM read buffer — avoids a heap allocation on every 20 ms
+    /// tick (50 allocations/s).  Allocated once in `create_playback_source`.
+    pcm_buf: Vec<i16>,
 }
 
 impl FileTrackPlaybackSource {
     pub(crate) fn next_audio_sample(&mut self) -> Option<MediaSample> {
-        let mut pcm_buf = vec![0i16; self.samples_per_frame];
-        let mut read = self.audio_source_manager.read_samples(&mut pcm_buf);
-
-        if read == 0 && self.loop_playback {
-            read = self.audio_source_manager.read_samples(&mut pcm_buf);
-        }
+        let read = {
+            let buf = &mut self.pcm_buf;
+            let mut read = self.audio_source_manager.read_samples(buf);
+            if read == 0 && self.loop_playback {
+                read = self.audio_source_manager.read_samples(buf);
+            }
+            read
+        };
 
         if read == 0 {
             debug!("FileTrack playback completed (source exhausted)");
@@ -724,7 +729,7 @@ impl FileTrackPlaybackSource {
             return None;
         }
 
-        let encoded = self.encoder.encode(&pcm_buf[..read]);
+        let encoded = self.encoder.encode(&self.pcm_buf[..read]);
         let frame = AudioFrame {
             rtp_timestamp: self.rtp_timestamp,
             clock_rate: self.codec_info.clock_rate,
@@ -964,6 +969,7 @@ impl FileTrack {
             sequence_number: rand::random(),
             on_end: self.on_end.clone(),
             loop_playback: self.loop_playback,
+            pcm_buf: vec![0i16; frame_timing.pcm_samples_per_frame],
         })
     }
 
@@ -1070,6 +1076,9 @@ impl FileTrack {
             let interval_ms = 20u64;
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Allocate the PCM read buffer once and reuse it on every tick.
+            let mut pcm_buf: Vec<i16> = vec![0i16; samples_per_frame];
 
             loop {
                 tokio::select! {
@@ -1082,7 +1091,6 @@ impl FileTrack {
                     }
                     _ = interval.tick() => {
                         // Read one frame of PCM samples from the source.
-                        let mut pcm_buf = vec![0i16; samples_per_frame];
                         let read = audio_source_manager.read_samples(&mut pcm_buf);
 
                         if read == 0 {

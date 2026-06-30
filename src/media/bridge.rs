@@ -86,6 +86,11 @@ struct OutputState {
     next_sequence_number: Option<u16>,
     active_rtp_offset: Option<u32>,
     active_seq_offset: Option<u16>,
+    /// When true, the next audio frame sent on this output must carry the RTP
+    /// marker bit (RFC 3550 §5.1) so the receiver resets its jitter buffer.
+    /// Set by `replace_output_with_file` / `replace_output_with_silence`
+    /// and cleared after the first frame is emitted.
+    marker_pending: bool,
 }
 
 /// One peer's media endpoint within an N-peer bridge.
@@ -429,6 +434,7 @@ impl BridgePeer {
                 next_sequence_number: None,
                 active_rtp_offset: None,
                 active_seq_offset: None,
+                marker_pending: false,
             })),
             callee_output_state: Arc::new(AsyncMutex::new(OutputState {
                 mode: BRIDGE_OUTPUT_PEER,
@@ -437,6 +443,7 @@ impl BridgePeer {
                 next_sequence_number: None,
                 active_rtp_offset: None,
                 active_seq_offset: None,
+                marker_pending: false,
             })),
             caller_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
             callee_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
@@ -893,6 +900,7 @@ impl BridgePeer {
         state.mode = BRIDGE_OUTPUT_FILE;
         state.active_rtp_offset = None;
         state.active_seq_offset = None;
+        state.marker_pending = true;
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
         drop(state);
@@ -926,6 +934,7 @@ impl BridgePeer {
         state.mode = BRIDGE_OUTPUT_FILE;
         state.active_rtp_offset = None;
         state.active_seq_offset = None;
+        state.marker_pending = true;
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
         drop(state);
@@ -1247,7 +1256,11 @@ impl BridgePeer {
 
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip: keep the absolute timeline.  Delay/Burst would accumulate
+            // drift (each late tick shifts the schedule forward), eventually
+            // causing the receiver's jitter buffer to underflow — audible as
+            // periodic clicks every ~200 ms.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {
@@ -1283,6 +1296,17 @@ impl BridgePeer {
 
                         if let MediaSample::Audio(frame) = &mut sample {
                             let mut guard = output_state.lock().await;
+
+                            // RFC 3550 §5.1: set marker bit on the first frame
+                            // after a source switch so the receiver resets its
+                            // jitter buffer.  Without this the receiver sees a
+                            // timestamp discontinuity (file source starts at a
+                            // random RTP timestamp) and gradually accumulates
+                            // drift, producing an audible pop ~2 s later.
+                            if guard.marker_pending {
+                                frame.marker = true;
+                                guard.marker_pending = false;
+                            }
 
                             let src_seq = frame.sequence_number.unwrap_or_default();
                             let src_ts = frame.rtp_timestamp;
@@ -2879,6 +2903,75 @@ mod tests {
         assert!(
             frame_count >= 3,
             "bridge should poll the FileTrack source and send audio without a FileTrack-owned task"
+        );
+    }
+
+    /// Verify that the first audio frame after `replace_output_with_file`
+    /// carries the RTP marker bit (RFC 3550 §5.1), and subsequent frames do not.
+    #[tokio::test]
+    async fn test_bridge_file_output_sets_marker_on_first_frame() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_bridge_marker.wav");
+        create_test_wav_file(test_file.to_str().unwrap(), 800).unwrap();
+
+        let bridge = BridgePeerBuilder::new("test-bridge-marker".to_string())
+            .with_rtp_port_range(25300, 25400)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+
+        let track = FileTrack::new("bridge-marker-test".to_string())
+            .with_path(test_file.to_string_lossy().to_string())
+            .with_loop(true)
+            .with_codec_info(crate::media::negotiate::CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            });
+
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Callee, &track)
+            .await
+            .unwrap();
+        drop(track);
+
+        let rtp_track = bridge
+            .get_callee_track()
+            .await
+            .expect("bridge RTP output track should exist");
+
+        // Collect first two audio frames.
+        let mut markers = Vec::new();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        while tokio::time::Instant::now() < deadline && markers.len() < 2 {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                rtp_track.recv(),
+            )
+            .await
+            {
+                Ok(Ok(MediaSample::Audio(f))) => markers.push(f.marker),
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+
+        bridge.stop().await;
+        let _ = std::fs::remove_file(&test_file);
+
+        assert!(
+            markers.len() >= 2,
+            "expected at least 2 frames, got {}",
+            markers.len()
+        );
+        assert!(
+            markers[0],
+            "first frame after source switch must have marker=true (RFC 3550 §5.1)"
+        );
+        assert!(
+            !markers[1],
+            "second frame must have marker=false, only the first frame of a talkspurt is marked"
         );
     }
 
