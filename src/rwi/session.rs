@@ -337,6 +337,10 @@ pub struct ParallelOriginateRequest {
     pub hold_music: Option<MediaSource>,
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// Optional explicit carrier-trunk override applied to every leg (see
+    /// OriginateRequest.trunk).
+    #[serde(default)]
+    pub trunk: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -360,6 +364,16 @@ pub struct OriginateRequest {
     pub ringback_target: Option<String>,
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// Optional explicit carrier-trunk override. When set, the originate is routed
+    /// out the named trunk directly: the trunk's next-hop destination, transport,
+    /// digest credential, host rewrite, and P-Asserted-Identity header are stamped
+    /// onto the outbound INVITE (so it goes straight to the carrier). When absent,
+    /// no route table is consulted and the legacy direct-to-callee behavior is
+    /// preserved (a registered/reachable SIP URI). The API caller selects the trunk
+    /// by name; the named trunk's config is applied here. See originate_call /
+    /// apply_explicit_originate_trunk for the security/admission caveats.
+    #[serde(default)]
+    pub trunk: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

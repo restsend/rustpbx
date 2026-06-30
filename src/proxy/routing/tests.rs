@@ -2483,6 +2483,72 @@ fn test_apply_trunk_config_adds_p_asserted_identity() {
 // rewrite_hostport tests
 // ============================================================================
 
+// The originate direct-to-trunk path (rwi::processor::apply_explicit_originate_trunk)
+// relies on apply_trunk_config to stamp an otherwise-unrouted originate InviteOption
+// (destination/credential unset) with the trunk's next-hop + credential. These two
+// tests pin that contract.
+#[tokio::test]
+async fn test_apply_trunk_config_originate_auth_trunk_stamps_dest_and_credential() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    // Mirrors the RWI originate's base InviteOption: destination/credential unset.
+    let mut option = create_invite_option(
+        "sip:rwi@pbx.invalid",
+        "sip:18005551234@example.invalid",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    assert!(option.destination.is_none());
+    assert!(option.credential.is_none());
+
+    let trunk = TrunkConfig {
+        dest: "sip:1.2.3.4:5060".to_string(),
+        username: Some("user1".to_string()),
+        password: Some("pass1".to_string()),
+        transport: Some("udp".to_string()),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    let dest = option.destination.expect("destination stamped");
+    assert!(
+        dest.addr.to_string().contains("1.2.3.4:5060"),
+        "dest={}",
+        dest.addr
+    );
+    let cred = option.credential.expect("credential stamped");
+    assert_eq!(cred.username, "user1");
+    assert_eq!(cred.password, "pass1");
+    // rewrite_hostport defaults true -> callee host becomes the trunk dest host.
+    assert!(option.callee.host().to_string().contains("1.2.3.4"));
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_originate_ip_auth_trunk_sets_no_credential() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    // An IP-auth trunk (no username/password) still gets a destination, but no
+    // credential — correct, and not a regression of the no-auth case.
+    let mut option = create_invite_option(
+        "sip:rwi@pbx.invalid",
+        "sip:18005551234@example.invalid",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let trunk = TrunkConfig {
+        dest: "sip:5.6.7.8:5060".to_string(),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    assert!(option.destination.is_some());
+    assert!(option.credential.is_none());
+}
+
 #[tokio::test]
 async fn test_apply_trunk_config_rewrite_hostport_true() {
     use crate::proxy::routing::matcher::apply_trunk_config;
