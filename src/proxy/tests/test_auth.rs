@@ -524,6 +524,9 @@ async fn test_guest_call_allowed_extension() {
             let _ = engine.spawn(handle);
             engine
         },
+        trunk_rate_limiter: Arc::new(
+            crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
+        ),
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 

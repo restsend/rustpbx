@@ -976,6 +976,11 @@ pub struct DialplanHints {
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
+    /// Trunk names whose per-trunk concurrent-call slot was acquired by the
+    /// [`crate::proxy::trunk_rate_limiter::TrunkRateLimiter`] during routing.
+    /// Each entry must be released exactly once when the call ends so the
+    /// trunk's `max_concurrent` budget is not leaked.
+    pub trunk_concurrency_holds: Vec<String>,
 }
 
 impl std::fmt::Debug for DialplanHints {

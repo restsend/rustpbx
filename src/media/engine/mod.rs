@@ -259,6 +259,7 @@ impl EngineCore {
                 bridge,
                 caller_is_webrtc,
                 caller_codec_info,
+                callee_codec_info,
             } => {
                 let old_bridge = {
                     let mut sessions = self.sessions.write();
@@ -269,6 +270,7 @@ impl EngineCore {
                     sess.bridge = Some(bridge);
                     sess.caller_is_webrtc = caller_is_webrtc;
                     sess.caller_codec_info = caller_codec_info;
+                    sess.callee_codec_info = callee_codec_info;
                     old
                 };
                 if let Some(old) = old_bridge {
@@ -398,7 +400,7 @@ impl EngineCore {
                     }
                 };
 
-                let (bridge, endpoint, codec_info_first) = {
+                let (bridge, endpoint, codec_info) = {
                     let sessions = self.sessions.read();
                     let sess = sessions
                         .get(&session_id)
@@ -411,21 +413,28 @@ impl EngineCore {
                         Some(id) => sess.endpoint_for_leg(id),
                         None => sess.caller_endpoint(),
                     };
-                    let codec = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
-                        crate::media::negotiate::CodecInfo {
-                            payload_type: 0,
-                            codec: audio_codec::CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        }
-                    });
+                    // Select the codec for the TARGET endpoint, not just the caller.
+                    // When caller=Opus and callee=G.729, playing to the callee must
+                    // use G.729 encoding so the callee can actually decode it.
+                    let endpoint_codecs = if endpoint == sess.caller_endpoint() {
+                        &sess.caller_codec_info
+                    } else {
+                        &sess.callee_codec_info
+                    };
+                    let fallback = crate::media::negotiate::CodecInfo {
+                        payload_type: 0,
+                        codec: audio_codec::CodecType::PCMU,
+                        clock_rate: 8000,
+                        channels: 1,
+                    };
+                    let codec = endpoint_codecs.first().cloned().unwrap_or(fallback);
                     (bridge, endpoint, codec)
                 };
 
                 let track = crate::media::FileTrack::new(play_id.clone())
                     .with_path(resolved_path)
                     .with_loop(options.loop_playback)
-                    .with_codec_info(codec_info_first);
+                    .with_codec_info(codec_info);
 
                 match bridge.replace_output_with_file(endpoint, &track).await {
                     Ok(()) => {
@@ -729,7 +738,7 @@ impl EngineCore {
                     }
                 };
 
-                let (bridge, codec_info_first) = {
+                let (bridge, caller_codec, callee_codec) = {
                     let sessions = self.sessions.read();
                     let sess = sessions
                         .get(&session_id)
@@ -737,28 +746,43 @@ impl EngineCore {
                     let bridge = sess.bridge.clone().ok_or_else(|| {
                         anyhow!("No bridge for InjectAudio in session {}", session_id)
                     })?;
-                    let codec = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
-                        crate::media::negotiate::CodecInfo {
-                            payload_type: 0,
-                            codec: audio_codec::CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        }
+                    let fallback = crate::media::negotiate::CodecInfo {
+                        payload_type: 0,
+                        codec: audio_codec::CodecType::PCMU,
+                        clock_rate: 8000,
+                        channels: 1,
+                    };
+                    let cc = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
+                        fallback.clone()
                     });
-                    (bridge, codec)
+                    let ce = sess.callee_codec_info.first().cloned().unwrap_or_else(|| {
+                        fallback
+                    });
+                    (bridge, cc, ce)
                 };
 
                 // Each endpoint needs its own FileTrack so each bridge
                 // forwarding loop reads from an independent
                 // AudioSourceManager (they run concurrently).
+                // Use the codec that matches the target endpoint so the
+                // receiver can actually decode the audio.
+                let caller_ep = {
+                    let sessions = self.sessions.read();
+                    sessions.get(&session_id).map(|s| s.caller_endpoint())
+                };
                 let mut tracks: Vec<(
                     crate::media::bridge::BridgeEndpoint,
                     crate::media::FileTrack,
                 )> = Vec::new();
                 for ep in &endpoints {
+                    let codec = if Some(*ep) == caller_ep {
+                        caller_codec.clone()
+                    } else {
+                        callee_codec.clone()
+                    };
                     let t = crate::media::FileTrack::new(play_id.clone())
                         .with_path(resolved_path.clone())
-                        .with_codec_info(codec_info_first.clone());
+                        .with_codec_info(codec);
                     tracks.push((*ep, t));
                 }
 
@@ -1166,6 +1190,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
 
@@ -1245,6 +1270,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
 
@@ -1457,6 +1483,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -1560,6 +1587,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1625,6 +1653,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1855,6 +1884,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1983,6 +2013,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -2072,6 +2103,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -2230,6 +2262,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -2354,6 +2387,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: false, // caller is RTP → endpoint_for_leg("callee") == Caller
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync

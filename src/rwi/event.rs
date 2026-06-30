@@ -723,6 +723,38 @@ pub struct IvrFlowCompleted {
 }
 rwi_event!(IvrFlowCompleted, "ivr_flow_completed");
 
+/// Structured trigger info describing what caused an IVR step to execute.
+///
+/// Serialized as a nested object: `{"type": "dtmf", "detail": {"digit": "2"}}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TriggerInfo {
+    /// Trigger source type, e.g. `dtmf`, `dtmf_menu`, `audio_complete`,
+    /// `session_start`, `action_execute`, `chained`, `dtmf_menu_timeout`, ...
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Structured detail for the trigger. For DTMF this is `{"digit": "2"}`,
+    /// for an API response `{"status": 200}`, for phone collection
+    /// `{"number": "..."}`. `None` when the trigger carries no detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+impl TriggerInfo {
+    pub fn new(r#type: impl Into<String>) -> Self {
+        Self {
+            r#type: r#type.into(),
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(r#type: impl Into<String>, detail: serde_json::Value) -> Self {
+        Self {
+            r#type: r#type.into(),
+            detail: Some(detail),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrStepTrace {
     pub call_id: String,
@@ -730,8 +762,7 @@ pub struct IvrStepTrace {
     pub caller: String,
     pub callee: String,
     pub step_index: u32,
-    pub event_type: String,
-    pub event_detail: Option<String>,
+    pub trigger: TriggerInfo,
     pub action_type: String,
     pub action_json: Option<String>,
     pub result_kind: String,

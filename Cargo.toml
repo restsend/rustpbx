@@ -144,8 +144,8 @@ chrono-tz = "0.10.4"
 rsipstack = "0.5.16"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
-audio-codec = "0.3.39"
-#udio-codec = { path = "../audio-codec", default-features = false }
+audio-codec = { path = "../audio-codec" }
+#audio-codec = "0.3.39"
 #rustrtc = { path = "../rustrtc" }
 rustrtc = "0.3.86"
 reqwest = { version = "0.13.4", default-features = false, features = [

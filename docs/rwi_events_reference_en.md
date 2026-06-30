@@ -635,7 +635,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `caller` | String | Caller |
 | `callee` | String | Callee |
 | `step_index` | u32 | Step index |
-| `event_type` | String | Event type (e.g., `session_start`, `dtmf`, `audio_complete`, `action_execute`) |
+| `trigger` | Object | Structured trigger info for this step, see below |
 | `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |
 | `result_kind` | String | Result type (`terminal`, `continue`, `error`) |
@@ -647,6 +647,19 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `step_end_time` | Option\<String\> | Current step end time (ISO UTC). Only present when step execution completes (terminal/error); null during WaitFor (waiting for user input) |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
 
+> **`trigger` field**:
+>
+> Describes what caused the current step to execute, as an object:
+>
+> ```json
+> { "type": "dtmf", "detail": { "digit": "2" } }
+> ```
+>
+> | Sub-field | Type | Description |
+> |-----------|------|-------------|
+> | `type` | String | Trigger source type: `session_start`, `dtmf`, `dtmf_menu`, `dtmf_menu_timeout`, `audio_complete`, `action_execute`, `chained`, `api_response`, `phone_collected`, `recording_complete`, `input_voice`, `error`, `dtmf_menu_invalid`, `unknown` |
+> | `detail` | Option\<JSON Object\> | Structured trigger detail, omitted when none. Common values: DTMF → `{"digit":"2"}`; API response → `{"status":200}`; phone collection → `{"number":"13800138000"}` |
+>
 > **Timing fields**:
 > - `step_start_time` — when the current step started (previous step end or session start)
 > - `step_end_time` — when the step ended (only on completion)

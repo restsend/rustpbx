@@ -62,10 +62,8 @@ pub struct StepIvrApp {
     /// Current step provider response metadata.
     current_step_id: Option<String>,
     current_step_name: Option<String>,
-    /// Event type that triggered the current step (e.g. "dtmf", "session_start").
-    current_trigger_event_type: Option<String>,
-    /// Event detail for the current trigger (e.g. "digit=5").
-    current_trigger_event_detail: Option<String>,
+    /// Structured trigger that caused the current step (e.g. dtmf with digit detail).
+    current_trigger: Option<crate::rwi::TriggerInfo>,
 }
 
 #[derive(Clone)]
@@ -107,8 +105,7 @@ impl StepIvrApp {
             pending_trace: None,
             current_step_id: None,
             current_step_name: None,
-            current_trigger_event_type: None,
-            current_trigger_event_detail: None,
+            current_trigger: None,
         }
     }
 
@@ -140,8 +137,7 @@ impl StepIvrApp {
             pending_trace: None,
             current_step_id: None,
             current_step_name: None,
-            current_trigger_event_type: None,
-            current_trigger_event_detail: None,
+            current_trigger: None,
         }
     }
 
@@ -210,8 +206,7 @@ impl StepIvrApp {
                 caller: entry.caller.clone(),
                 callee: entry.callee.clone(),
                 step_index: entry.step_index,
-                event_type: entry.event_type.clone(),
-                event_detail: entry.event_detail.clone(),
+                trigger: entry.trigger.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
                 result_kind: entry.result_kind.clone(),
@@ -340,14 +335,12 @@ impl StepIvrApp {
             .clone()
             .or_else(|| self.current_step_name.clone());
 
-        let trigger_event_type = self
-            .current_trigger_event_type
+        let trigger = self
+            .current_trigger
             .clone()
-            .unwrap_or_else(|| "action_execute".to_string());
-        let trigger_event_detail = self.current_trigger_event_detail.clone();
+            .unwrap_or_else(|| crate::rwi::TriggerInfo::new("action_execute"));
 
-        self.current_trigger_event_type = None;
-        self.current_trigger_event_detail = None;
+        self.current_trigger = None;
 
         let session_id = self
             .sess
@@ -394,8 +387,7 @@ impl StepIvrApp {
                             caller: caller.clone(),
                             callee: callee.clone(),
                             step_index: self.step_index,
-                            event_type: trigger_event_type.clone(),
-                            event_detail: trigger_event_detail.clone(),
+                            trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
@@ -420,8 +412,7 @@ impl StepIvrApp {
                         }
                     }
                     ActionResult::ChainedTo(next) => {
-                        self.current_trigger_event_type = Some("chained".to_string());
-                        self.current_trigger_event_detail = None;
+                        self.current_trigger = Some(crate::rwi::TriggerInfo::new("chained"));
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
@@ -434,8 +425,7 @@ impl StepIvrApp {
                             caller: caller.clone(),
                             callee: callee.clone(),
                             step_index: self.step_index,
-                            event_type: trigger_event_type.clone(),
-                            event_detail: trigger_event_detail.clone(),
+                            trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
@@ -459,8 +449,7 @@ impl StepIvrApp {
                     caller,
                     callee,
                     step_index: self.step_index,
-                    event_type: trigger_event_type,
-                    event_detail: trigger_event_detail,
+                    trigger,
                     provider_url: None,
                     action_type: node_type_str,
                     action_json,
@@ -579,31 +568,45 @@ impl StepIvrApp {
         self.step_start_instant = Some(std::time::Instant::now());
 
         // Store trigger event info for __exec_node to use when recording trace after node execution
-        self.current_trigger_event_type = Some(
-            ctx.event
-                .as_ref()
-                .map(|e| match e {
-                    ProviderEvent::SessionStart => "session_start",
-                    ProviderEvent::AudioComplete { .. } => "audio_complete",
-                    ProviderEvent::Dtmf { .. } => "dtmf",
-                    ProviderEvent::DtmfTimeout => "dtmf_timeout",
-                    ProviderEvent::ApiResponse { .. } => "api_response",
-                    ProviderEvent::PhoneCollected { .. } => "phone_collected",
-                    ProviderEvent::RecordingComplete { .. } => "recording_complete",
-                    ProviderEvent::InputVoice { .. } => "input_voice",
-                    ProviderEvent::Error { .. } => "error",
-                    ProviderEvent::DtmfMenuInvalid { .. } => "dtmf_menu_invalid",
-                    ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
-                })
-                .unwrap_or("unknown")
-                .to_string(),
-        );
-        self.current_trigger_event_detail = match &ctx.event {
-            Some(ProviderEvent::Dtmf { digit }) => Some(format!("digit={}", digit)),
-            Some(ProviderEvent::ApiResponse { status, .. }) => Some(format!("status={}", status)),
-            Some(ProviderEvent::PhoneCollected { number }) => Some(format!("number={}", number)),
-            _ => None,
-        };
+        self.current_trigger = Some(match &ctx.event {
+            Some(ProviderEvent::SessionStart) => crate::rwi::TriggerInfo::new("session_start"),
+            Some(ProviderEvent::AudioComplete { .. }) => crate::rwi::TriggerInfo::new("audio_complete"),
+            Some(ProviderEvent::Dtmf { digit }) => crate::rwi::TriggerInfo::with_detail(
+                "dtmf",
+                serde_json::json!({ "digit": digit }),
+            ),
+            Some(ProviderEvent::DtmfTimeout) => crate::rwi::TriggerInfo::new("dtmf_timeout"),
+            Some(ProviderEvent::ApiResponse { status, .. }) => crate::rwi::TriggerInfo::with_detail(
+                "api_response",
+                serde_json::json!({ "status": status }),
+            ),
+            Some(ProviderEvent::PhoneCollected { number }) => crate::rwi::TriggerInfo::with_detail(
+                "phone_collected",
+                serde_json::json!({ "number": number }),
+            ),
+            Some(ProviderEvent::RecordingComplete { url, duration_secs }) => {
+                crate::rwi::TriggerInfo::with_detail(
+                    "recording_complete",
+                    serde_json::json!({ "url": url, "duration_secs": duration_secs }),
+                )
+            }
+            Some(ProviderEvent::InputVoice { text, confidence }) => {
+                crate::rwi::TriggerInfo::with_detail(
+                    "input_voice",
+                    serde_json::json!({ "text": text, "confidence": confidence }),
+                )
+            }
+            Some(ProviderEvent::Error { reason }) => crate::rwi::TriggerInfo::with_detail(
+                "error",
+                serde_json::json!({ "reason": reason }),
+            ),
+            Some(ProviderEvent::DtmfMenuInvalid { digit }) => crate::rwi::TriggerInfo::with_detail(
+                "dtmf_menu_invalid",
+                serde_json::json!({ "digit": digit }),
+            ),
+            Some(ProviderEvent::DtmfMenuTimeout) => crate::rwi::TriggerInfo::new("dtmf_menu_timeout"),
+            None => crate::rwi::TriggerInfo::new("unknown"),
+        });
 
         // Fallback on provider error instead of propagating
         match result {
@@ -864,8 +867,10 @@ impl CallApp for StepIvrApp {
 
             if let Some(next) = self.handle_menu_dtmf(&digit) {
                 self.provider.on_local_dtmf_match(&digit, &next).await;
-                self.current_trigger_event_type = Some("dtmf_menu".to_string());
-                self.current_trigger_event_detail = Some(format!("digit={}", digit));
+                self.current_trigger = Some(crate::rwi::TriggerInfo::with_detail(
+                    "dtmf_menu",
+                    serde_json::json!({ "digit": digit }),
+                ));
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
@@ -907,8 +912,7 @@ impl CallApp for StepIvrApp {
 
         if let Some(ref node) = self.current_node {
             if let Some(ref next) = node.next {
-                self.current_trigger_event_type = Some("audio_complete".to_string());
-                self.current_trigger_event_detail = None;
+                self.current_trigger = Some(crate::rwi::TriggerInfo::new("audio_complete"));
                 self.current_node = Some(*next.clone());
                 return self.__exec_node(ctrl, context).await;
             }
@@ -960,8 +964,7 @@ impl CallApp for StepIvrApp {
 
         if self.pending_menu.is_some() {
             if let Some(next) = self.handle_menu_timeout() {
-                self.current_trigger_event_type = Some("dtmf_menu_timeout".to_string());
-                self.current_trigger_event_detail = None;
+                self.current_trigger = Some(crate::rwi::TriggerInfo::new("dtmf_menu_timeout"));
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }

@@ -284,8 +284,10 @@ async fn test_comprehensive_core_event_structs() {
                 caller: "alice".into(),
                 callee: "bob".into(),
                 step_index: 1,
-                event_type: "step".into(),
-                event_detail: Some("menu".into()),
+                trigger: rustpbx::rwi::TriggerInfo::with_detail(
+                    "dtmf",
+                    serde_json::json!({ "digit": "1" }),
+                ),
                 action_type: "prompt".into(),
                 action_json: None,
                 result_kind: "ok".into(),

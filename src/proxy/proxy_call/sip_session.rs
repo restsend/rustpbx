@@ -4098,15 +4098,20 @@ impl SipSession {
         // Notify the media engine so it can route Play/Record commands to this bridge.
         if let Some(bridge) = self.media.media_bridge.clone() {
             use crate::media::engine::MediaCommand;
-            let codec_info = self
+            let caller_ci = self
                 .caller_answer_codec_info()
+                .map(|c| vec![c])
+                .unwrap_or_default();
+            let callee_ci = self
+                .callee_answer_codec_info()
                 .map(|c| vec![c])
                 .unwrap_or_default();
             self.engine_send(MediaCommand::AttachBridge {
                 session_id: self.context.session_id.clone(),
                 bridge,
                 caller_is_webrtc,
-                caller_codec_info: codec_info,
+                caller_codec_info: caller_ci,
+                callee_codec_info: callee_ci,
             });
         }
 
@@ -4151,6 +4156,14 @@ impl SipSession {
     fn caller_answer_codec_info(&self) -> Option<CodecInfo> {
         self.media
             .answer
+            .as_ref()
+            .map(|answer_sdp| MediaNegotiator::extract_codec_params(answer_sdp).audio)
+            .and_then(|codecs| codecs.first().cloned())
+    }
+
+    fn callee_answer_codec_info(&self) -> Option<CodecInfo> {
+        self.media
+            .callee_answer_sdp
             .as_ref()
             .map(|answer_sdp| MediaNegotiator::extract_codec_params(answer_sdp).audio)
             .and_then(|codecs| codecs.first().cloned())
@@ -6291,15 +6304,20 @@ impl SipSession {
             // Notify the media engine so Play/Record commands route to this bridge.
             {
                 use crate::media::engine::MediaCommand;
-                let codec_info = self
+                let caller_ci = self
                     .caller_answer_codec_info()
+                    .map(|c| vec![c])
+                    .unwrap_or_default();
+                let callee_ci = self
+                    .callee_answer_codec_info()
                     .map(|c| vec![c])
                     .unwrap_or_default();
                 self.engine_send(MediaCommand::AttachBridge {
                     session_id: self.context.session_id.clone(),
                     bridge: bridge.clone(),
                     caller_is_webrtc,
-                    caller_codec_info: codec_info,
+                    caller_codec_info: caller_ci,
+                    callee_codec_info: callee_ci,
                 });
             }
 
@@ -7302,6 +7320,14 @@ impl SipSession {
                 )
                 .await;
             }
+        }
+
+        // Release per-trunk concurrent-call slots acquired during routing
+        // (source inbound trunk and/or destination outbound trunk).
+        let trunk_holds =
+            std::mem::take(&mut *self.context.dialplan.trunk_concurrency_holds.lock());
+        for trunk in &trunk_holds {
+            self.server.trunk_rate_limiter.release_concurrent(trunk);
         }
 
         self.callee_guards.clear();
@@ -9690,6 +9716,18 @@ impl Drop for SipSession {
                     .await;
                 });
             }
+        }
+
+        // Safety net: release any per-trunk concurrent-call slots still held.
+        let remaining_trunk_holds =
+            std::mem::take(&mut *self.context.dialplan.trunk_concurrency_holds.lock());
+        if !remaining_trunk_holds.is_empty() {
+            let limiter = self.server.trunk_rate_limiter.clone();
+            crate::utils::spawn(async move {
+                for trunk in &remaining_trunk_holds {
+                    limiter.release_concurrent(trunk);
+                }
+            });
         }
 
         // Safety net: ensure the engine session is destroyed even if

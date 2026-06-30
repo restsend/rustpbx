@@ -455,7 +455,12 @@ impl CallModule {
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
         let dialog_layer = server.dialog_layer.clone();
-        let mut routing_state = RoutingState::new();
+        // Share the trunk rate limiter between RoutingState (acquire during
+        // routing) and SipSession (release on teardown) by taking the Arc from
+        // the server inner.
+        let mut routing_state = RoutingState::with_trunk_rate_limiter(
+            server.trunk_rate_limiter.clone(),
+        );
         let limiter = server
             .frequency_limiter
             .clone()
@@ -937,6 +942,8 @@ impl CallModule {
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
+            *dialplan.trunk_concurrency_holds.lock() =
+                std::mem::take(&mut hints.trunk_concurrency_holds);
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }

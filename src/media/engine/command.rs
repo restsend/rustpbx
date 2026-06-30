@@ -318,6 +318,8 @@ pub enum MediaCommand {
         caller_is_webrtc: bool,
         /// Codec info from the caller-facing SDP answer (for FileTrack playback).
         caller_codec_info: Vec<crate::media::negotiate::CodecInfo>,
+        /// Codec info from the callee-facing SDP answer.
+        callee_codec_info: Vec<crate::media::negotiate::CodecInfo>,
     },
 
     /// Remove and stop the current bridge for a session.

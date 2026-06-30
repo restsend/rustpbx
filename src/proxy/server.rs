@@ -114,6 +114,10 @@ pub struct SipServerInner {
     pub rtc_cname: String,
     /// In-process media engine: handles bridge/playback/recording/MCU for all sessions.
     pub media_engine: crate::media::engine::MediaEngine,
+    /// Per-trunk CPS / concurrent-call rate limiter. Enforces the `max_cps` and
+    /// `max_concurrent` columns configured on each SIP trunk. Shared between
+    /// the routing layer (acquire) and the session teardown path (release).
+    pub trunk_rate_limiter: Arc<crate::proxy::trunk_rate_limiter::TrunkRateLimiter>,
 }
 
 fn random_hex() -> String {
@@ -891,6 +895,9 @@ impl SipServerBuilder {
                 let _task = engine.spawn(handle);
                 engine
             },
+            trunk_rate_limiter: Arc::new(
+                crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
+            ),
         });
 
         let inner_weak = Arc::downgrade(&inner);
