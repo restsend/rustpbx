@@ -333,7 +333,7 @@ async fn match_invite_impl(
             }
         }
 
-        let mut hints = source_hints.clone();
+        let mut hints = source_hints.take();
         if rule.disable_ice_servers.is_some() {
             let hints = hints.get_or_insert_with(DialplanHints::default);
             hints.disable_ice_servers = rule.disable_ice_servers;

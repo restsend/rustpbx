@@ -944,6 +944,11 @@ impl CallModule {
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             *dialplan.trunk_concurrency_holds.lock() =
                 std::mem::take(&mut hints.trunk_concurrency_holds);
+            #[cfg(feature = "addon-wholesale")]
+            {
+                dialplan.wholesale_tenant_concurrency_hold =
+                    hints.wholesale_tenant_concurrency_hold.take();
+            }
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }

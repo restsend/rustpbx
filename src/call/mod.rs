@@ -923,6 +923,10 @@ pub struct Dialplan {
     /// Released by the session on teardown against the shared
     /// `TrunkRateLimiter`.
     pub trunk_concurrency_holds: Arc<Mutex<Vec<String>>>,
+    /// Wholesale tenant concurrent-call slot acquired during routing.
+    /// The permit releases when the last holder drops.
+    #[cfg(feature = "addon-wholesale")]
+    pub wholesale_tenant_concurrency_hold: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -985,6 +989,8 @@ impl Dialplan {
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
             trunk_concurrency_holds: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "addon-wholesale")]
+            wholesale_tenant_concurrency_hold: None,
         }
     }
 

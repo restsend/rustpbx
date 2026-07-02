@@ -59,7 +59,11 @@ impl CallSessionBuilder {
         server: SipServerRef,
         tx: &mut rsipstack::transaction::transaction::Transaction,
     ) -> Result<()> {
-        let dialplan = Arc::new(self.dialplan);
+        let mut dialplan = self.dialplan;
+        #[cfg(feature = "addon-wholesale")]
+        let wholesale_tenant_concurrency_hold =
+            dialplan.wholesale_tenant_concurrency_hold.take();
+        let dialplan = Arc::new(dialplan);
         let cancel_token = self.cancel_token.unwrap_or_default();
         let session_id = dialplan
             .session_id
@@ -115,7 +119,11 @@ impl CallSessionBuilder {
                 }),
         };
 
-        SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
+        let result =
+            SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await;
+        #[cfg(feature = "addon-wholesale")]
+        drop(wholesale_tenant_concurrency_hold);
+        result
     }
 
     pub fn report_failure(

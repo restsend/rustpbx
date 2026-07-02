@@ -981,6 +981,11 @@ pub struct DialplanHints {
     /// Each entry must be released exactly once when the call ends so the
     /// trunk's `max_concurrent` budget is not leaked.
     pub trunk_concurrency_holds: Vec<String>,
+    /// Wholesale tenant concurrent-call slot acquired during routing.
+    /// The permit releases when the last holder drops.
+    #[cfg(feature = "addon-wholesale")]
+    pub wholesale_tenant_concurrency_hold:
+        Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl std::fmt::Debug for DialplanHints {
