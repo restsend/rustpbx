@@ -79,9 +79,10 @@ impl RemoteBackend {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .build()?;
+        let client = crate::http_util::build_keepalive_client(
+            Some(std::time::Duration::from_secs(timeout_secs)),
+            None,
+        )?;
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         let cancel_token = CancellationToken::new();

@@ -12,7 +12,9 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     // ── shared helpers ────────────────────────────────────────────────────────
 
@@ -197,6 +199,72 @@ mod tests {
             .join()
             .await
             .expect("loop should exit without error after remote hangup");
+    }
+
+    struct BlockingApp {
+        entered: Arc<Notify>,
+        releases: Arc<Notify>,
+        exit_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CallApp for BlockingApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Custom
+        }
+
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            self.entered.notify_one();
+            self.releases.notified().await;
+            Ok(AppAction::Continue)
+        }
+
+        async fn on_exit(&mut self, _reason: crate::call::app::ExitReason) -> Result<()> {
+            self.exit_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_interrupts_inflight_on_enter() {
+        let entered = Arc::new(Notify::new());
+        let releases = Arc::new(Notify::new());
+        let exit_count = Arc::new(AtomicUsize::new(0));
+
+        let app = BlockingApp {
+            entered: entered.clone(),
+            releases: releases.clone(),
+            exit_count: exit_count.clone(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "9000");
+        stack
+            .assert_cmd(100, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("app should enter before cancellation");
+
+        stack.cancel();
+        stack
+            .join()
+            .await
+            .expect("loop should exit without waiting for blocked on_enter");
+
+        assert_eq!(exit_count.load(Ordering::SeqCst), 1);
+
+        // Unblock the abandoned future in case the runtime still polls it during shutdown.
+        releases.notify_waiters();
     }
 
     // ── 4. AppAction::Chain ───────────────────────────────────────────────────

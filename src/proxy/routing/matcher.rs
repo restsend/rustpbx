@@ -20,6 +20,9 @@ use crate::{
     },
 };
 
+const OUTBOUND_TRUNK_NAME_KEY: &str = "outbound_trunk_name";
+const OUTBOUND_TRUNK_DEST_KEY: &str = "outbound_trunk_dest";
+
 // Debug routes are now stored in ProxyDataContext.debug_routes
 // and checked upstream in call.rs before calling match_invite.
 
@@ -478,6 +481,7 @@ async fn match_invite_impl(
 
                         apply_trunk_config(&mut option, trunk_config)?;
                         merge_trunk_media_hints(&mut hints, trunk_config);
+                        attach_outbound_trunk_metadata(&mut hints, &selected_trunk, trunk_config);
                         info!(
                             "Selected trunk: {} for destination: {}",
                             selected_trunk, trunk_config.dest
@@ -623,6 +627,11 @@ async fn match_invite_impl(
                             }
                             apply_trunk_config(&mut option, trunk_config)?;
                             merge_trunk_media_hints(&mut hints, trunk_config);
+                            attach_outbound_trunk_metadata(
+                                &mut hints,
+                                &selected_trunk,
+                                trunk_config,
+                            );
                         }
                     }
                 }
@@ -1342,6 +1351,21 @@ fn select_trunk_weighted(
 
     // Fallback to last trunk (shouldn't reach here)
     Ok(trunks[trunks.len() - 1].clone())
+}
+
+fn attach_outbound_trunk_metadata(
+    hints: &mut Option<DialplanHints>,
+    trunk_name: &str,
+    trunk: &TrunkConfig,
+) {
+    let hints = hints.get_or_insert_with(DialplanHints::default);
+    let mut metadata = hints
+        .extensions
+        .remove::<HashMap<String, String>>()
+        .unwrap_or_default();
+    metadata.insert(OUTBOUND_TRUNK_NAME_KEY.to_string(), trunk_name.to_string());
+    metadata.insert(OUTBOUND_TRUNK_DEST_KEY.to_string(), trunk.dest.clone());
+    hints.extensions.insert(metadata);
 }
 
 /// Apply trunk configuration

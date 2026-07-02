@@ -923,11 +923,7 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         let start = Instant::now();
         let opts = crate::http_util::HttpFetchOptions::new()
             .with_timeout(std::time::Duration::from_secs(5));
-        match crate::http_util::execute_request(
-            reqwest::Client::new().get(&url),
-            &opts.headers,
-            opts.timeout,
-        )
+        match crate::http_util::execute_request(state.http_client().get(&url), &opts.headers, opts.timeout)
         .await
         {
             Ok(resp) => {
@@ -1081,7 +1077,7 @@ async fn cluster_reload_config_handler(
                 .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            let req = reqwest::Client::new().post(&url).json(&payload);
+            let req = state.http_client().post(&url).json(&payload);
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;

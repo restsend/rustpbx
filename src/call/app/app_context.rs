@@ -153,7 +153,8 @@ impl ApplicationContext {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
             queue_name: Arc::new(RwLock::new(None)),
             db,
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_util::build_keepalive_client(None, None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
             call_info,
             config,
             rwi_gateway: None,

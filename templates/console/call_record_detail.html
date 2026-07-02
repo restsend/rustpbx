@@ -110,6 +110,16 @@
                         </svg>
                         <span x-text="record.sip_gateway || '—'"></span>
                     </span>
+                    <template x-if="record.outbound_trunk">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700"
+                            :title="record.outbound_trunk_dest || ''">
+                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5l5 5-5 5" />
+                            </svg>
+                            <span x-text="record.outbound_trunk"></span>
+                        </span>
+                    </template>
                 </div>
                 <template x-if="record.hangup_messages && record.hangup_messages.length">
                     <div class="mt-2 space-y-1 text-xs text-slate-500">

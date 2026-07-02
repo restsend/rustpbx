@@ -107,7 +107,8 @@ impl TtsService {
     pub fn new(config: TtsConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: crate::http_util::build_keepalive_client(None, None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 

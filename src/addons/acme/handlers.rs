@@ -290,7 +290,7 @@ async fn process_acme(
                         // Manual check if status is Pending, as instant-acme might be caching or stale
                         if status == AuthorizationStatus::Pending {
                             info!("Manual check for auth url: {}", url);
-                            match reqwest::get(url.clone()).await {
+                            match app_state.http_client().get(url.clone()).send().await {
                                 Ok(resp) => {
                                     if let Ok(json) = resp.json::<serde_json::Value>().await
                                         && let Some(s) = json.get("status").and_then(|s| s.as_str())

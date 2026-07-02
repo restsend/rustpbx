@@ -53,6 +53,7 @@ pub struct ConsoleState {
     db: DatabaseConnection,
     config: ConsoleConfig,
     session_key: Vec<u8>,
+    http_client: reqwest::Client,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     i18n: Arc<I18n>,
@@ -82,6 +83,7 @@ impl ConsoleState {
             db,
             config,
             session_key,
+            http_client: crate::http_util::build_keepalive_client(None, None)?,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
             i18n,
@@ -493,6 +495,10 @@ impl ConsoleState {
         self.app_state()
             .map(|s| s.config().clone())
             .unwrap_or_else(|| Arc::new(crate::config::Config::default()))
+    }
+
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 
     pub fn get_injected_scripts(&self, path: &str) -> Option<Vec<String>> {

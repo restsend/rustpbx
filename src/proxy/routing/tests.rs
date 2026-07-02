@@ -3007,6 +3007,11 @@ async fn test_trunk_holds_attached_to_forward_hints() {
             );
             assert!(hints.trunk_concurrency_holds.contains(&"in".to_string()));
             assert!(hints.trunk_concurrency_holds.contains(&"out".to_string()));
+            let metadata = hints
+                .extensions
+                .get::<std::collections::HashMap<String, String>>()
+                .expect("forward hints should include metadata");
+            assert_eq!(metadata.get("outbound_trunk_name"), Some(&"out".to_string()));
         }
         _ => panic!("expected Forward with hints, got unexpected RouteResult variant"),
     }

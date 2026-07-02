@@ -149,7 +149,7 @@ mod inner {
         let body = serde_json::json!({ "license_key": key });
         let opts = crate::http_util::HttpFetchOptions::new()
             .with_timeout(std::time::Duration::from_secs(5));
-        let req = reqwest::Client::new()
+        let req = crate::http_util::shared_keepalive_client()
             .post("https://miuda.ai/api/verify")
             .json(&body);
         match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {

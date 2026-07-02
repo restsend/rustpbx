@@ -97,6 +97,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             if *engine == SipFlowEngine::FlowDb {
                 FlowDbBackend::new(
                     root.clone(),
+                    subdirs.clone(),
                     *ttl_secs,
                     *memtable_size_mb,
                     *block_cache_capacity_mb,

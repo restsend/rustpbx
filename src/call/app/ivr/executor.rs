@@ -7,9 +7,15 @@ use crate::call::app::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tracing::warn;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
+use tracing::warn;
+
+const IVR_STATUS_KEY: &str = "ivr_status";
+const IVR_NAME_KEY: &str = "ivr_name";
+const IVR_END_REASON_KEY: &str = "ivr_end_reason";
+const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
 
 pub struct StepIvrApp {
     provider: Box<dyn ActionProvider>,
@@ -64,6 +70,7 @@ pub struct StepIvrApp {
     current_step_name: Option<String>,
     /// Structured trigger that caused the current step (e.g. dtmf with digit detail).
     current_trigger: Option<crate::rwi::TriggerInfo>,
+    runtime_vars: Option<Arc<RwLock<HashMap<String, String>>>>,
 }
 
 #[derive(Clone)]
@@ -106,6 +113,7 @@ impl StepIvrApp {
             current_step_id: None,
             current_step_name: None,
             current_trigger: None,
+            runtime_vars: None,
         }
     }
 
@@ -138,6 +146,7 @@ impl StepIvrApp {
             current_step_id: None,
             current_step_name: None,
             current_trigger: None,
+            runtime_vars: None,
         }
     }
 
@@ -279,6 +288,60 @@ impl StepIvrApp {
             crate::utils::spawn(async move {
                 t.update_session_end(&sid, chrono::Utc::now(), &st).await;
             });
+        }
+    }
+
+    async fn set_runtime_status(&self, ctx: &ApplicationContext, status: &str) {
+        ctx.set_var(IVR_STATUS_KEY, status).await;
+        if let Some(name) = &self.ivr_name {
+            ctx.set_var(IVR_NAME_KEY, name).await;
+        }
+    }
+
+    async fn set_runtime_error(&self, ctx: &ApplicationContext, error: &str) {
+        ctx.set_var(IVR_LAST_ERROR_KEY, error).await;
+    }
+
+    async fn set_runtime_error_shared(&self, error: &str) {
+        if let Some(vars) = &self.runtime_vars {
+            let mut vars = vars.write().await;
+            vars.insert(IVR_LAST_ERROR_KEY.to_string(), error.to_string());
+            if let Some(name) = &self.ivr_name {
+                vars.insert(IVR_NAME_KEY.to_string(), name.clone());
+            }
+        }
+    }
+
+    async fn set_runtime_status_shared(&self, status: &str) {
+        if let Some(vars) = &self.runtime_vars {
+            let mut vars = vars.write().await;
+            vars.insert(IVR_STATUS_KEY.to_string(), status.to_string());
+            if let Some(name) = &self.ivr_name {
+                vars.insert(IVR_NAME_KEY.to_string(), name.clone());
+            }
+        }
+    }
+
+    async fn set_runtime_end_reason_shared(&self, reason: &str) {
+        if let Some(vars) = &self.runtime_vars {
+            let mut vars = vars.write().await;
+            vars.insert(IVR_END_REASON_KEY.to_string(), reason.to_string());
+            vars.insert(IVR_STATUS_KEY.to_string(), reason.to_string());
+            if let Some(name) = &self.ivr_name {
+                vars.insert(IVR_NAME_KEY.to_string(), name.clone());
+            }
+        }
+    }
+
+    fn end_reason_label(reason: &crate::call::app::ExitReason) -> &'static str {
+        match reason {
+            crate::call::app::ExitReason::Normal => "normal",
+            crate::call::app::ExitReason::Hangup => "hangup",
+            crate::call::app::ExitReason::RemoteHangup(_) => "remote_hangup",
+            crate::call::app::ExitReason::Transferred => "transferred",
+            crate::call::app::ExitReason::Error(_) => "error",
+            crate::call::app::ExitReason::Cancelled => "cancelled",
+            crate::call::app::ExitReason::Chained => "chained",
         }
     }
 
@@ -613,6 +676,13 @@ impl StepIvrApp {
             Ok(node) => Ok(node),
             Err(e) => {
                 tracing::warn!(error = %e, "StepIvrApp: provider request failed, using fallback");
+                let error_text = e.to_string();
+                if self.step_index <= 1 {
+                    self.set_runtime_status_shared("startup_error").await;
+                } else {
+                    self.set_runtime_status_shared("provider_error").await;
+                }
+                self.set_runtime_error_shared(&error_text).await;
                 Ok(ActionNode::with_next(
                     EntryAction::Prompt {
                         file: Some("sounds/error.wav".into()),
@@ -785,6 +855,8 @@ impl CallApp for StepIvrApp {
         ctrl: &mut CallController,
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
+        self.runtime_vars = Some(context.session_vars.clone());
+        self.set_runtime_status(context, "starting").await;
         ctrl.answer().await?;
 
         self.sess
@@ -824,6 +896,7 @@ impl CallApp for StepIvrApp {
             custom_data: self.custom_data.clone(),
             transferred_from: self.transferred_from.clone(),
         };
+        self.set_runtime_status(context, "provider_start").await;
         self.provider.on_session_start(&sess_ctx).await.ok();
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
@@ -836,7 +909,17 @@ impl CallApp for StepIvrApp {
         )
         .await;
 
-        self.current_node = Some(self.request_next(Some(ProviderEvent::SessionStart)).await?);
+        self.set_runtime_status(context, "awaiting_first_step").await;
+        let first_node = match self.request_next(Some(ProviderEvent::SessionStart)).await {
+            Ok(node) => node,
+            Err(err) => {
+                self.set_runtime_status(context, "startup_error").await;
+                self.set_runtime_error(context, &err.to_string()).await;
+                return Err(err);
+            }
+        };
+        self.current_node = Some(first_node);
+        self.set_runtime_status(context, "active").await;
         self.__exec_node(ctrl, context).await
     }
 
@@ -994,6 +1077,12 @@ impl CallApp for StepIvrApp {
             });
         }
 
+        let end_reason_label = Self::end_reason_label(&reason).to_string();
+        let skip_provider_end = matches!(
+            reason,
+            crate::call::app::ExitReason::RemoteHangup(_)
+                | crate::call::app::ExitReason::Cancelled
+        );
         let end_reason = match reason {
             crate::call::app::ExitReason::Normal => EndReason::Normal,
             crate::call::app::ExitReason::Hangup => EndReason::Hangup,
@@ -1019,16 +1108,28 @@ impl CallApp for StepIvrApp {
             .get("session_id")
             .cloned()
             .unwrap_or_default();
-        self.provider
-            .on_session_end(&end_reason, &session_id)
-            .await
-            .ok();
+        if !skip_provider_end {
+            self.provider
+                .on_session_end(&end_reason, &session_id)
+                .await
+                .ok();
+        }
         let end_tag = end_reason.to_session_end_reason();
         let status = serde_json::to_string(&end_tag.reason)
             .unwrap_or_else(|_| "\"unknown\"".to_string())
             .trim_matches('"')
             .to_string();
         self.record_session_end(&status).await;
+        if let Some(name) = &self.ivr_name {
+            self.sess.variables.insert(IVR_NAME_KEY.into(), name.clone());
+        }
+        self.sess
+            .variables
+            .insert(IVR_STATUS_KEY.into(), end_reason_label.clone());
+        self.sess
+            .variables
+            .insert(IVR_END_REASON_KEY.into(), end_reason_label.clone());
+        self.set_runtime_end_reason_shared(&end_reason_label).await;
         // Clean up local state
         if self.current_track_id.is_some() {
             // Audio track will be cleaned up by media layer
@@ -1042,10 +1143,18 @@ impl CallApp for StepIvrApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call::app::{ApplicationContext, CallInfo};
+    use crate::call::app::ivr::{RetryConfig, StepProvider};
     use crate::call::app::testing::MockCallStack;
     use crate::call::domain::CallCommand;
+    use crate::config::Config;
     use async_trait::async_trait;
+    use chrono::Utc;
+    use sea_orm::DatabaseConnection;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     /// A mock provider that returns pre-defined nodes in sequence
     struct MockProvider {
@@ -1065,6 +1174,8 @@ mod tests {
             }
         }
     }
+
+    struct MockProviderHandle(Arc<MockProvider>);
 
     #[async_trait]
     impl ActionProvider for MockProvider {
@@ -1094,8 +1205,78 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ActionProvider for MockProviderHandle {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.0.next_action(ctx).await
+        }
+
+        async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
+            self.0.on_session_start(ctx).await
+        }
+
+        async fn on_session_end(
+            &self,
+            reason: &EndReason,
+            session_id: &str,
+        ) -> anyhow::Result<()> {
+            self.0.on_session_end(reason, session_id).await
+        }
+    }
+
     fn mock_app(nodes: Vec<ActionNode>) -> StepIvrApp {
         StepIvrApp::with_provider(Box::new(MockProvider::new(nodes)))
+    }
+
+    fn make_test_context() -> ApplicationContext {
+        ApplicationContext::new(
+            DatabaseConnection::Disconnected,
+            CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "2000".into(),
+                direction: "inbound".into(),
+                started_at: Utc::now(),
+                sip_headers: HashMap::new(),
+                route_name: None,
+            },
+            Arc::new(Config::default()),
+        )
+    }
+
+    struct BlockingProvider {
+        entered_next: Arc<Notify>,
+        release_next: Arc<Notify>,
+        end_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ActionProvider for BlockingProvider {
+        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.entered_next.notify_one();
+            self.release_next.notified().await;
+            Ok(ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }))
+        }
+
+        async fn on_session_end(
+            &self,
+            _reason: &EndReason,
+            _session_id: &str,
+        ) -> anyhow::Result<()> {
+            self.end_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct FailingProvider;
+
+    #[async_trait]
+    impl ActionProvider for FailingProvider {
+        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            Err(anyhow::anyhow!("provider bootstrap failed"))
+        }
     }
 
     #[tokio::test]
@@ -1870,6 +2051,195 @@ mod tests {
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn test_remote_hangup_skips_provider_session_end() {
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+        })]));
+        let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+        app.ivr_name = Some("test-ivr".to_string());
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+
+        app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
+            .await
+            .expect("remote hangup exit should succeed");
+
+        assert!(
+            !*provider.end_called.lock().unwrap(),
+            "remote hangup must skip provider session end"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_during_provider_next_skips_session_end() {
+        let entered_next = Arc::new(Notify::new());
+        let release_next = Arc::new(Notify::new());
+        let end_called = Arc::new(AtomicBool::new(false));
+
+        let provider = BlockingProvider {
+            entered_next: entered_next.clone(),
+            release_next: release_next.clone(),
+            end_called: end_called.clone(),
+        };
+        let ctx = make_test_context();
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(
+                StepIvrApp::with_provider(Box::new(provider)).with_name("blocking-step-ivr"),
+            ),
+            ctx.clone(),
+        );
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), entered_next.notified())
+            .await
+            .expect("provider next_action should start");
+
+        stack.cancel();
+        stack.join().await.expect("cancel should stop app");
+
+        assert!(!end_called.load(Ordering::SeqCst), "cancel must skip /end");
+        assert_eq!(ctx.get_var(IVR_STATUS_KEY).await.as_deref(), Some("cancelled"));
+        assert_eq!(
+            ctx.get_var(IVR_END_REASON_KEY).await.as_deref(),
+            Some("cancelled")
+        );
+
+        release_next.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn test_startup_failure_sets_runtime_status() {
+        let ctx = make_test_context();
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(StepIvrApp::with_provider(Box::new(FailingProvider)).with_name("failing-ivr")),
+            ctx.clone(),
+        );
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        stack
+            .assert_cmd(500, "play fallback", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        assert_eq!(
+            ctx.get_var(IVR_LAST_ERROR_KEY).await.as_deref(),
+            Some("provider bootstrap failed")
+        );
+        let status_before_exit = ctx.get_var(IVR_STATUS_KEY).await;
+        assert!(
+            matches!(status_before_exit.as_deref(), Some("startup_error") | Some("active")),
+            "unexpected startup status before fallback exit: {status_before_exit:?}"
+        );
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "hangup fallback", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+        stack.join().await.expect("fallback path should exit cleanly");
+
+        assert_eq!(ctx.get_var(IVR_STATUS_KEY).await.as_deref(), Some("hangup"));
+        assert_eq!(ctx.get_var(IVR_NAME_KEY).await.as_deref(), Some("failing-ivr"));
+        assert_eq!(
+            ctx.get_var(IVR_END_REASON_KEY).await.as_deref(),
+            Some("hangup")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_provider_remote_hangup_skips_end_webhook() {
+        use axum::{Json, Router, extract::State, routing::post};
+
+        #[derive(Default)]
+        struct ProviderState {
+            start_calls: tokio::sync::Mutex<Vec<serde_json::Value>>,
+            step_calls: tokio::sync::Mutex<Vec<serde_json::Value>>,
+            end_calls: tokio::sync::Mutex<Vec<serde_json::Value>>,
+            step_entered: Notify,
+            release_step: Notify,
+        }
+
+        async fn start_handler(
+            State(state): State<Arc<ProviderState>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            state.start_calls.lock().await.push(body);
+            Json(serde_json::json!({ "ok": true }))
+        }
+
+        async fn step_handler(
+            State(state): State<Arc<ProviderState>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            state.step_calls.lock().await.push(body);
+            state.step_entered.notify_waiters();
+            state.release_step.notified().await;
+            Json(serde_json::to_value(ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }))
+            .unwrap())
+        }
+
+        async fn end_handler(
+            State(state): State<Arc<ProviderState>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            state.end_calls.lock().await.push(body);
+            Json(serde_json::json!({ "ok": true }))
+        }
+
+        let state = Arc::new(ProviderState::default());
+        let app = Router::new()
+            .route("/ivr/step/start", post(start_handler))
+            .route("/ivr/step", post(step_handler))
+            .route("/ivr/step/end", post(end_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let provider = StepProvider::new(format!("http://{addr}/ivr/step")).with_retry(
+            RetryConfig {
+                max_retries: 1,
+                timeout_ms: 15_000,
+                fallback_action: None,
+            },
+        );
+        let ctx = make_test_context();
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(StepIvrApp::with_provider(Box::new(provider)).with_name("http-ivr")),
+            ctx,
+        );
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), state.step_entered.notified())
+            .await
+            .expect("step provider should receive first /step request");
+
+        stack.remote_hangup();
+        stack.join().await.expect("remote hangup should stop app");
+
+        assert_eq!(state.start_calls.lock().await.len(), 1);
+        assert_eq!(state.step_calls.lock().await.len(), 1);
+        assert_eq!(state.end_calls.lock().await.len(), 0);
+
+        state.release_step.notify_waiters();
     }
 
     // ── True E2E: HTTP → Python provider ─────────────────────────────────

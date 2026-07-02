@@ -721,7 +721,7 @@ pub async fn reload_queues_handler(
 }
 
 pub async fn download_audio_handler(
-    State(_state): State<Arc<ConsoleState>>,
+    State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
@@ -762,8 +762,7 @@ pub async fn download_audio_handler(
     // Download
     let opts =
         crate::http_util::HttpFetchOptions::new().with_timeout(std::time::Duration::from_secs(30));
-    match crate::http_util::fetch_bytes(&reqwest::Client::new(), reqwest::Method::GET, &url, &opts)
-        .await
+    match crate::http_util::fetch_bytes(state.http_client(), reqwest::Method::GET, &url, &opts).await
     {
         Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {

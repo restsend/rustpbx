@@ -242,7 +242,16 @@ impl TestUa {
 
     /// Create and start an outbound caller UA that will place calls to `target_uri`.
     pub async fn caller_with_target(sip_port: u16, username: &str, target_uri: String) -> Self {
-        Self::caller_with_options(sip_port, username, target_uri, None).await
+        Self::caller_with_options(sip_port, username, target_uri, None, None).await
+    }
+
+    pub async fn caller_with_target_and_hangup(
+        sip_port: u16,
+        username: &str,
+        target_uri: String,
+        after_secs: u64,
+    ) -> Self {
+        Self::caller_with_options(sip_port, username, target_uri, None, Some(after_secs)).await
     }
 
     /// Create and start an outbound caller UA that sends DTMF after answer.
@@ -253,7 +262,13 @@ impl TestUa {
         target_uri: String,
         dtmf_flows: &str,
     ) -> Self {
-        Self::caller_with_options(sip_port, username, target_uri, Some(dtmf_flows.to_string()))
+        Self::caller_with_options(
+            sip_port,
+            username,
+            target_uri,
+            Some(dtmf_flows.to_string()),
+            None,
+        )
             .await
     }
 
@@ -262,6 +277,7 @@ impl TestUa {
         username: &str,
         target_uri: String,
         dtmf_flows: Option<String>,
+        hangup_after_secs: Option<u64>,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
@@ -273,6 +289,10 @@ impl TestUa {
             register: Some(false),
             target: Some(target_uri),
             dtmf_flows,
+            hangup: hangup_after_secs.map(|after| HangupConfig {
+                code: 200,
+                after_secs: Some(after),
+            }),
             audio_quality: Some(AudioQualityConfig {
                 enabled: true,
                 ..Default::default()

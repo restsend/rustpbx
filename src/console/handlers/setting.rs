@@ -2455,7 +2455,7 @@ async fn cluster_reload_sse_handler(
                 .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            let req = reqwest::Client::new().post(&url).json(&payload);
+            let req = state.http_client().post(&url).json(&payload);
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -2968,7 +2968,7 @@ pub(crate) async fn test_locator_webhook(
         "message": "RustPBX locator webhook test"
     });
 
-    let req = reqwest::Client::new().post(&payload.url).json(&test_event);
+    let req = state.http_client().post(&payload.url).json(&test_event);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(resp) => Json(json!({
             "status": "ok",
@@ -3025,7 +3025,8 @@ pub(crate) async fn test_http_router(
         "direction": "internal"
     });
 
-    let req = reqwest::Client::new()
+    let req = state
+        .http_client()
         .post(&payload.url)
         .json(&test_request);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
@@ -3083,7 +3084,7 @@ pub(crate) async fn test_user_backend(
                 .with_timeout(std::time::Duration::from_secs(5));
 
             match crate::http_util::execute_request(
-                reqwest::Client::new().get(&url),
+                state.http_client().get(&url),
                 &opts.headers,
                 opts.timeout,
             )

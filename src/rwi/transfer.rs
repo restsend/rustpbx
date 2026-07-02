@@ -256,6 +256,7 @@ impl TransferController {
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::CallTransferAccepted {
                 call_id: call_id.clone(),
+                transfer_target: Some(target.clone()),
             },
             None,
         );
@@ -301,6 +302,7 @@ impl TransferController {
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::CallTransferAccepted {
                 call_id: call_id.clone(),
+                transfer_target: Some(target.clone()),
             },
             None,
         );
@@ -459,6 +461,7 @@ impl TransferController {
                     call_id: failed_tx.call_id.clone(),
                     sip_status,
                     reason: Some(reason.as_str().to_string()),
+                    transfer_target: Some(failed_tx.target.clone()),
                 },
                 None,
             );
@@ -512,6 +515,7 @@ impl TransferController {
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::CallTransferAccepted {
                 call_id: call_id.clone(),
+                transfer_target: Some(target.clone()),
             },
             None,
         );
@@ -556,6 +560,7 @@ impl TransferController {
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::CallTransferred {
                 call_id: call_id.clone(),
+                transfer_target: Some(transaction.target.clone()),
             },
             None,
         );
@@ -604,6 +609,7 @@ impl TransferController {
                     call_id: original_call_id.clone(),
                     sip_status: Some(487),
                     reason: Some("cancelled".to_string()),
+                    transfer_target: Some(transaction.target.clone()),
                 },
                 None,
             );
@@ -678,6 +684,7 @@ impl TransferController {
                 let event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::CallTransferAccepted {
                         call_id: call_id.clone(),
+                        transfer_target: Some(tx_clone.target.clone()),
                     },
                     None,
                 );
@@ -694,6 +701,7 @@ impl TransferController {
                         call_id: call_id.clone(),
                         sip_status: Some(sip_status),
                         reason: Some(reason.as_str().to_string()),
+                        transfer_target: Some(tx_clone.target.clone()),
                     },
                     None,
                 );
@@ -752,6 +760,7 @@ impl TransferController {
                         let event = crate::rwi::event::to_legacy_event(
                             &crate::rwi::CallTransferred {
                                 call_id: completed_tx.call_id.clone(),
+                                transfer_target: Some(completed_tx.target.clone()),
                             },
                             None,
                         );
@@ -790,6 +799,7 @@ impl TransferController {
                         call_id: failed_tx.call_id.clone(),
                         sip_status: Some(notify_status),
                         reason: Some(reason.as_str().to_string()),
+                        transfer_target: Some(failed_tx.target.clone()),
                     },
                     None,
                 );
@@ -845,6 +855,7 @@ impl TransferController {
                     call_id: failed_tx.call_id.clone(),
                     sip_status: failed_tx.sip_status,
                     reason: Some(reason.as_str().to_string()),
+                    transfer_target: Some(failed_tx.target.clone()),
                 },
                 None,
             );
@@ -945,6 +956,7 @@ impl TransferController {
                 let event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::CallTransferred {
                         call_id: call_id.clone(),
+                        transfer_target: Some(target.clone()),
                     },
                     None,
                 );
@@ -983,6 +995,7 @@ impl TransferController {
                         call_id: call_id.clone(),
                         sip_status: None,
                         reason: Some(format!("3pcc_originate_failed: {}", e)),
+                        transfer_target: Some(target.clone()),
                     },
                     None,
                 );
@@ -1071,6 +1084,7 @@ impl TransferController {
         let transfer_id_for_spawn = transfer_id.to_string();
         let target_for_log = target.to_string();
         let orig_call_id_spawn = original_call_id.to_string(); // Clone for spawned task
+        let target_owned = target.to_string();
 
         // Spawn originate task
         crate::utils::spawn(async move {
@@ -1166,6 +1180,7 @@ impl TransferController {
                     let gateway_clone = gateway.clone();
                     let new_call_id = call_id_for_spawn.clone();
                     let orig_call_id = orig_call_id_spawn.clone();
+                    let target_clone = target_owned.clone();
 
                     crate::utils::spawn(async move {
                         // Wait for media to stabilize
@@ -1191,6 +1206,7 @@ impl TransferController {
                                         &crate::rwi::event::to_legacy_event(
                                             &crate::rwi::CallTransferred {
                                                 call_id: orig_call_id.clone(),
+                                                transfer_target: Some(target_clone.clone()),
                                             },
                                             None,
                                         ),
@@ -1208,6 +1224,7 @@ impl TransferController {
                                                 call_id: orig_call_id.clone(),
                                                 sip_status: None,
                                                 reason: Some(format!("bridge_failed: {}", e)),
+                                                transfer_target: Some(target_clone.clone()),
                                             },
                                             None,
                                         ),
@@ -1300,6 +1317,7 @@ impl TransferController {
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::CallTransferred {
                 call_id: call_id.clone(),
+                transfer_target: Some(tx.target.clone()),
             },
             None,
         );
@@ -1358,6 +1376,7 @@ impl TransferController {
                 call_id: call_id.clone(),
                 sip_status: None,
                 reason: Some(format!("3pcc_failed: {}", reason)),
+                transfer_target: Some(tx.target.clone()),
             },
             None,
         );

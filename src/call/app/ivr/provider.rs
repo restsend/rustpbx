@@ -448,7 +448,8 @@ impl StepProvider {
         Self {
             url: url.into(),
             headers: HashMap::new(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_util::build_keepalive_client(None, None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
             retry: RetryConfig::default(),
         }
     }
@@ -472,6 +473,25 @@ impl StepProvider {
     pub fn add_header(&mut self, key: &str, value: &str) {
         self.headers.insert(key.to_string(), value.to_string());
     }
+
+    fn endpoint_url(&self, suffix: Option<&str>) -> String {
+        let base = self.url.trim().trim_end_matches('/');
+        match suffix {
+            Some(suffix) if !suffix.is_empty() => {
+                if let Ok(mut url) = reqwest::Url::parse(base) {
+                    let path = match url.path().trim_end_matches('/') {
+                        "" => format!("/{suffix}"),
+                        path => format!("{path}/{suffix}"),
+                    };
+                    url.set_path(&path);
+                    url.to_string()
+                } else {
+                    format!("{base}/{suffix}")
+                }
+            }
+            _ => base.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -483,17 +503,18 @@ impl ActionProvider for StepProvider {
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
         let body_str = serde_json::to_string(&ctx).unwrap_or_default();
+        let url = self.endpoint_url(None);
         for attempt in 0..self.retry.max_retries {
             let start = std::time::Instant::now();
             info!(
-                url = %self.url,
+                url = %url,
                 method = "POST",
                 headers = ?self.headers,
                 body = %body_str,
                 attempt = attempt,
                 "StepProvider next_action request"
             );
-            let req = self.http_client.post(&self.url).json(&ctx);
+            let req = self.http_client.post(&url).json(&ctx);
             match crate::http_util::execute_request(
                 req,
                 &self.headers,
@@ -506,7 +527,7 @@ impl ActionProvider for StepProvider {
                     let elapsed = start.elapsed();
                     let body = resp.text().await.unwrap_or_default();
                     info!(
-                        url = %self.url,
+                        url = %url,
                         status = %status,
                         duration_ms = %elapsed.as_millis(),
                         response_body = %body,
@@ -519,7 +540,7 @@ impl ActionProvider for StepProvider {
                     let elapsed = start.elapsed();
                     last_err = e;
                     info!(
-                        url = %self.url,
+                        url = %url,
                         error = %last_err,
                         duration_ms = %elapsed.as_millis(),
                         "StepProvider next_action error"
@@ -538,7 +559,7 @@ impl ActionProvider for StepProvider {
     }
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
-        let url = format!("{}/start", self.url);
+        let url = self.endpoint_url(Some("start"));
         let body_str = serde_json::to_string(ctx).unwrap_or_default();
         info!(
             url = %url,
@@ -567,7 +588,7 @@ impl ActionProvider for StepProvider {
     }
 
     async fn on_session_end(&self, reason: &EndReason, session_id: &str) -> anyhow::Result<()> {
-        let url = format!("{}/end", self.url);
+        let url = self.endpoint_url(Some("end"));
         let end_reason = reason.to_session_end_reason();
         let body = serde_json::json!({
             "session_id": session_id,
@@ -602,7 +623,7 @@ impl ActionProvider for StepProvider {
     }
 
     async fn on_local_dtmf_match(&self, digit: &str, action: &ActionNode) {
-        let url = format!("{}/dtmf-match", self.url);
+        let url = self.endpoint_url(Some("dtmf-match"));
         let body = serde_json::json!({ "digit": digit, "action": action });
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         info!(
@@ -634,6 +655,21 @@ impl ActionProvider for StepProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_step_provider_endpoint_url_trims_whitespace_and_slash() {
+        let provider = StepProvider::new(" http://127.0.0.1:28080/ivr/step/ ");
+
+        assert_eq!(provider.endpoint_url(None), "http://127.0.0.1:28080/ivr/step");
+        assert_eq!(
+            provider.endpoint_url(Some("start")),
+            "http://127.0.0.1:28080/ivr/step/start"
+        );
+        assert_eq!(
+            provider.endpoint_url(Some("end")),
+            "http://127.0.0.1:28080/ivr/step/end"
+        );
+    }
 
     #[test]
     fn test_end_reason_to_session_end_reason_normal() {

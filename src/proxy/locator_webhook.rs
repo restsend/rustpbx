@@ -4,6 +4,36 @@ use crate::proxy::locator::{LocatorEvent, LocatorEventReceiver};
 use serde::Serialize;
 use tracing::{debug, warn};
 
+struct LocatorWebhookSender {
+    url: String,
+    headers: std::collections::HashMap<String, String>,
+    allowed_events: Vec<String>,
+    client: reqwest::Client,
+}
+
+impl LocatorWebhookSender {
+    fn new(config: LocatorWebhookConfig) -> Self {
+        let timeout = std::time::Duration::from_millis(config.timeout_ms.unwrap_or(5000));
+        Self {
+            url: config.url.trim().to_string(),
+            headers: config.headers.unwrap_or_default(),
+            allowed_events: config.events,
+            client: crate::http_util::build_keepalive_client(Some(timeout), None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    fn accepts_event(&self, event_name: &str) -> bool {
+        self.allowed_events.is_empty() || self.allowed_events.iter().any(|e| e == event_name)
+    }
+
+    async fn send_payload(&self, payload: &LocatorEventDto) -> Result<(), anyhow::Error> {
+        let req = self.client.post(&self.url).json(payload);
+        crate::http_util::execute_request(req, &self.headers, None).await?;
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 pub struct LocationDto {
     pub aor: String,
@@ -38,15 +68,8 @@ pub struct LocatorEventDto {
 }
 
 pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: LocatorEventReceiver) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(
-            config.timeout_ms.unwrap_or(5000),
-        ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let url = config.url.trim().to_string();
-    debug!("locator webhook handler started for {}", url);
+    let sender = LocatorWebhookSender::new(config);
+    debug!("locator webhook handler started for {}", sender.url);
 
     loop {
         let event = match rx.recv().await {
@@ -99,14 +122,12 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
             ),
         };
 
-        if !config.events.is_empty() && !config.events.contains(&event_name.to_string()) {
+        if !sender.accepts_event(event_name) {
             continue;
         }
 
-        let header_map = config.headers.clone().unwrap_or_default();
-        let req = client.post(&url).json(&dto);
-        if let Err(e) = crate::http_util::execute_request(req, &header_map, None).await {
-            warn!("locator webhook send failed for {}: {}", url, e);
+        if let Err(e) = sender.send_payload(&dto).await {
+            warn!("locator webhook send failed for {}: {}", sender.url, e);
         }
     }
 }

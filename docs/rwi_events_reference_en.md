@@ -315,6 +315,7 @@ Dispatch: call_owner
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
+| `transfer_target` | Option\<String\> | Original transfer target string (e.g. `queue:queue-name?target=skillgroup:tech-support_G`). `None` when the target is unavailable (e.g. SIP REFER Replaces takeover). |
 | *+ctx* | | Flat context fields |
 
 #### call_transfer_failed
@@ -326,6 +327,7 @@ Dispatch: call_owner
 | `call_id` | String | Call identifier |
 | `sip_status` | Option\<u16\> | SIP status code |
 | `reason` | Option\<String\> | Failure reason |
+| `transfer_target` | Option\<String\> | Original transfer target string (see above) |
 | *+ctx* | | Flat context fields |
 
 ### 6.3 Media Events

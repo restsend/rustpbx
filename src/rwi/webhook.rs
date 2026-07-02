@@ -10,6 +10,36 @@ const WEBHOOK_CHANNEL_SIZE: usize = 512;
 /// Max number of recent event (call_id, sequence) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
+struct RwiWebhookSender {
+    url: String,
+    headers: std::collections::HashMap<String, String>,
+    allowed_events: Vec<String>,
+    client: reqwest::Client,
+}
+
+impl RwiWebhookSender {
+    fn new(config: LocatorWebhookConfig) -> Self {
+        let timeout = std::time::Duration::from_millis(config.timeout_ms.unwrap_or(5000));
+        Self {
+            url: config.url.trim().to_string(),
+            headers: config.headers.unwrap_or_default(),
+            allowed_events: config.events,
+            client: crate::http_util::build_keepalive_client(Some(timeout), None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    fn accepts_event(&self, event_type: &str) -> bool {
+        self.allowed_events.is_empty() || self.allowed_events.iter().any(|e| e == event_type)
+    }
+
+    async fn send_payload(&self, payload: &serde_json::Value) -> Result<(), anyhow::Error> {
+        let req = self.client.post(&self.url).json(payload);
+        crate::http_util::execute_request(req, &self.headers, None).await?;
+        Ok(())
+    }
+}
+
 /// Start the RWI webhook handler background task.
 ///
 /// Returns a `broadcast::Sender` that the gateway can use to send events.
@@ -25,15 +55,8 @@ async fn run_rwi_webhook_handler(
     config: LocatorWebhookConfig,
     mut rx: broadcast::Receiver<EventCacheEntry>,
 ) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(
-            config.timeout_ms.unwrap_or(5000),
-        ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let url = config.url.trim().to_string();
-    debug!("RWI webhook handler started for {}", url);
+    let sender = RwiWebhookSender::new(config);
+    debug!("RWI webhook handler started for {}", sender.url);
 
     // Dedup cache: ring buffer of (call_id, sequence) to skip duplicates
     // when the same event is forwarded from multiple call owners.
@@ -75,7 +98,7 @@ async fn run_rwi_webhook_handler(
         let event_type = entry.event.event_type;
 
         // Apply event type filter if configured.
-        if !config.events.is_empty() && !config.events.iter().any(|e| e == event_type) {
+        if !sender.accepts_event(event_type) {
             continue;
         }
 
@@ -88,12 +111,10 @@ async fn run_rwi_webhook_handler(
             "event": event_value,
         });
 
-        let header_map = config.headers.clone().unwrap_or_default();
-        let req = client.post(&url).json(&payload);
-        if let Err(e) = crate::http_util::execute_request(req, &header_map, None).await {
+        if let Err(e) = sender.send_payload(&payload).await {
             warn!(
                 "RWI webhook send failed for {} (event: {}): {}",
-                url, event_type, e
+                sender.url, event_type, e
             );
         }
     }
@@ -104,6 +125,12 @@ pub async fn send_test_event(
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), anyhow::Error> {
+    let sender = RwiWebhookSender::new(LocatorWebhookConfig {
+        url: url.to_string(),
+        events: Vec::new(),
+        headers: headers.cloned(),
+        timeout_ms: Some(5000),
+    });
     let test_payload = json!({
         "rwi": "1.0",
         "sequence": 0,
@@ -117,13 +144,7 @@ pub async fn send_test_event(
         }
     });
 
-    let opts = crate::http_util::HttpFetchOptions::new()
-        .with_timeout(std::time::Duration::from_secs(5))
-        .with_headers(headers.cloned().unwrap_or_default());
-
-    let req = reqwest::Client::new().post(url).json(&test_payload);
-    crate::http_util::execute_request(req, &opts.headers, opts.timeout).await?;
-    Ok(())
+    sender.send_payload(&test_payload).await
 }
 
 #[cfg(test)]

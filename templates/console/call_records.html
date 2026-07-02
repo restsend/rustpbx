@@ -327,6 +327,16 @@
                                                     <span x-text="record.sip_gateway || '—'"></span>
                                                 </div>
                                             </template>
+                                            <template x-if="record.outbound_trunk">
+                                                <div class="inline-flex items-center gap-1 text-emerald-700">
+                                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.6">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10h10M10 5l5 5-5 5" />
+                                                    </svg>
+                                                    <span x-text="record.outbound_trunk"></span>
+                                                </div>
+                                            </template>
                                         </div>
                                     </div>
                                     <div class="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">

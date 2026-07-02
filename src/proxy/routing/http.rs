@@ -28,6 +28,10 @@ impl HttpCallRouter {
         default_media_proxy_mode: MediaProxyMode,
     ) -> Self {
         let mut builder = reqwest::Client::builder();
+        builder = builder
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(8);
         if let Some(timeout) = config.timeout_ms {
             builder = builder.timeout(Duration::from_millis(timeout));
         } else {

@@ -1737,6 +1737,7 @@ impl CallModule {
                                     let g = gw.read();
                                     g.broadcast(&crate::rwi::CallTransferred {
                                         call_id: old_session_id.clone(),
+                                        transfer_target: None,
                                     });
                                 }
                             }
@@ -1944,6 +1945,7 @@ impl CallModule {
                 let g = gw.read();
                 g.send_to_owner(&crate::rwi::CallTransferred {
                     call_id: original_session_id.clone(),
+                    transfer_target: Some(refer_to_clone.clone()),
                 });
             }
         });

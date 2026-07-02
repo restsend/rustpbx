@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local, Timelike};
 use flowdb::{Config as FlowDbConfig, Engine, Record, ScanRange};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::config::SipFlowSubdirs;
 use crate::sipflow::flowdb_codec::{
     SIP_PREFIX, decode_rtp_value, decode_sip_value, encode_rtp_value, encode_sip_value,
     make_rtp_key, make_sip_key, rtp_call_leg_prefix, rtp_call_prefix, sip_call_prefix,
@@ -20,11 +21,39 @@ use crate::sipflow::wav_utils::{
 };
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
-pub struct FlowDbBackend {
+/// Upper bound on simultaneously open FlowDB engines.
+///
+/// Each `Engine` owns file descriptors and spawns a background maintenance
+/// thread, so we cannot keep every bucket's engine open forever. When this
+/// limit is exceeded the least-recently-used engine is flushed and closed.
+/// Engines still referenced by an in-flight query (via the cloned `Arc`)
+/// survive until the query completes — only the cache entry is dropped.
+const MAX_OPEN_ENGINES: usize = 24;
+
+/// A cached engine entry, tagged with the last time it was touched so the LRU
+/// evictor can pick the oldest victim.
+struct CachedEngine {
     engine: Arc<Engine>,
-    counter: AtomicU64,
+    last_used: Instant,
+}
+
+pub struct FlowDbBackend {
+    /// Root directory that all bucket sub-directories live under.
+    base_dir: PathBuf,
+    subdirs: SipFlowSubdirs,
+
+    ttl_secs: Option<u64>,
     ttl_micros: Option<i64>,
-    batch: Mutex<Vec<Record>>,
+    memtable_size_mb: usize,
+    block_cache_capacity_mb: usize,
+
+    /// LRU cache of open engines, keyed by absolute data directory.
+    engines: Mutex<HashMap<PathBuf, CachedEngine>>,
+
+    counter: AtomicU64,
+    /// Per-bucket pending batches. The key matches the key used in `engines`,
+    /// i.e. the absolute data directory of the bucket.
+    batches: Mutex<HashMap<PathBuf, Vec<Record>>>,
     flush_count: usize,
     flush_interval: std::time::Duration,
     last_flush: Mutex<Instant>,
@@ -32,59 +61,199 @@ pub struct FlowDbBackend {
 
 impl FlowDbBackend {
     pub fn new(
-        data_dir: impl Into<PathBuf>,
+        base_dir: impl Into<PathBuf>,
+        subdirs: SipFlowSubdirs,
         ttl_secs: Option<u64>,
         memtable_size_mb: usize,
         block_cache_capacity_mb: usize,
         flush_count: usize,
         flush_interval_secs: u64,
     ) -> Result<Self> {
-        let config = FlowDbConfig {
-            data_dir: data_dir.into(),
-            default_ttl_secs: ttl_secs,
-            memtable_size_mb,
-            block_cache_capacity_mb,
-            auto_background: true,
-            ..Default::default()
-        };
+        let base_dir = base_dir.into();
+        std::fs::create_dir_all(&base_dir)?;
 
-        let engine = Engine::open(config)?;
-
-        let engine = Arc::new(engine);
         let ttl_micros = ttl_secs.map(|s| s as i64 * 1_000_000);
 
         Ok(Self {
-            engine,
-            counter: AtomicU64::new(0),
+            base_dir,
+            subdirs,
+            ttl_secs,
             ttl_micros,
-            batch: Mutex::new(Vec::with_capacity(flush_count)),
+            memtable_size_mb,
+            block_cache_capacity_mb,
+            engines: Mutex::new(HashMap::new()),
+            counter: AtomicU64::new(0),
+            batches: Mutex::new(HashMap::new()),
             flush_count,
             flush_interval: std::time::Duration::from_secs(flush_interval_secs),
             last_flush: Mutex::new(Instant::now()),
         })
     }
 
-    fn should_flush(&self) -> bool {
-        let batch_len = self.batch.lock().unwrap().len();
-        if batch_len >= self.flush_count {
-            return true;
+    /// Sub-directory name (relative to `base_dir`) for the given local time.
+    /// Returns an empty string for `SipFlowSubdirs::None`, meaning data lives
+    /// directly in `base_dir`.
+    fn subdir_name_for_dt(&self, dt: DateTime<Local>) -> String {
+        match self.subdirs {
+            SipFlowSubdirs::None => String::new(),
+            SipFlowSubdirs::Daily => format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
+            SipFlowSubdirs::Hourly => format!(
+                "{:04}{:02}{:02}/{:02}",
+                dt.year(),
+                dt.month(),
+                dt.day(),
+                dt.hour()
+            ),
         }
-        if batch_len > 0 && self.last_flush.lock().unwrap().elapsed() >= self.flush_interval {
-            return true;
-        }
-        false
     }
 
-    fn flush_batch(&self) -> Result<()> {
-        let mut batch = self.batch.lock().unwrap();
-        if batch.is_empty() {
-            return Ok(());
+    /// Absolute data directory for the bucket containing `dt`.
+    fn bucket_path_for_dt(&self, dt: DateTime<Local>) -> PathBuf {
+        let subdir = self.subdir_name_for_dt(dt);
+        if subdir.is_empty() {
+            self.base_dir.clone()
+        } else {
+            self.base_dir.join(subdir)
         }
-        let records = std::mem::take(&mut *batch);
-        drop(batch);
-        self.engine.write_batch_sync(records)?;
-        *self.last_flush.lock().unwrap() = Instant::now();
-        Ok(())
+    }
+
+    /// All bucket directories that could contain data in `[start, end]`.
+    ///
+    /// This only computes paths — it does not check whether they exist on
+    /// disk. Callers should skip non-existent directories.
+    fn bucket_paths_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        match self.subdirs {
+            SipFlowSubdirs::None => {
+                paths.push(self.base_dir.clone());
+            }
+            SipFlowSubdirs::Daily => {
+                let mut curr = start.date_naive();
+                let end_date = end.date_naive();
+                while curr <= end_date {
+                    let subdir = format!("{:04}{:02}{:02}", curr.year(), curr.month(), curr.day());
+                    paths.push(self.base_dir.join(subdir));
+                    curr += chrono::Duration::days(1);
+                }
+            }
+            SipFlowSubdirs::Hourly => {
+                let start_h = start
+                    .with_minute(0)
+                    .unwrap_or(start)
+                    .with_second(0)
+                    .unwrap_or(start)
+                    .with_nanosecond(0)
+                    .unwrap_or(start);
+                let end_h = end
+                    .with_minute(0)
+                    .unwrap_or(end)
+                    .with_second(0)
+                    .unwrap_or(end)
+                    .with_nanosecond(0)
+                    .unwrap_or(end);
+                let mut curr = start_h;
+                while curr <= end_h {
+                    let subdir = format!(
+                        "{:04}{:02}{:02}/{:02}",
+                        curr.year(),
+                        curr.month(),
+                        curr.day(),
+                        curr.hour()
+                    );
+                    paths.push(self.base_dir.join(subdir));
+                    curr += chrono::Duration::hours(1);
+                }
+            }
+        }
+        paths
+    }
+
+    /// Open a brand-new Engine at `path`. Caller must ensure the parent
+    /// directory exists (this function creates `path` itself).
+    fn open_engine_at(path: &PathBuf, subdirs_cfg: &SubdirsTuning) -> Result<Arc<Engine>> {
+        std::fs::create_dir_all(path)?;
+        let config = FlowDbConfig {
+            data_dir: path.clone(),
+            default_ttl_secs: subdirs_cfg.ttl_secs,
+            memtable_size_mb: subdirs_cfg.memtable_size_mb,
+            block_cache_capacity_mb: subdirs_cfg.block_cache_capacity_mb,
+            auto_background: true,
+            ..Default::default()
+        };
+        let engine = Engine::open(config)?;
+        Ok(Arc::new(engine))
+    }
+
+    /// Get-or-open the engine for `path`, updating its LRU stamp.
+    ///
+    /// When the cache exceeds [`MAX_OPEN_ENGINES`], the least-recently-used
+    /// engine is flushed (so its batch is durable) and removed from the
+    /// cache. If the bucket still has a pending batch the engine is kept
+    /// alive — we never evict an engine that has unflushed data.
+    fn engine_for_bucket(&self, path: &PathBuf) -> Result<Arc<Engine>> {
+        // Fast path: cache hit.
+        {
+            let mut engines = self.engines.lock().unwrap();
+            if let Some(entry) = engines.get_mut(path) {
+                entry.last_used = Instant::now();
+                return Ok(entry.engine.clone());
+            }
+        }
+
+        // Slow path: open a new engine outside the lock to avoid blocking
+        // other callers on directory creation / WAL replay.
+        let tuning = SubdirsTuning {
+            ttl_secs: self.ttl_secs,
+            memtable_size_mb: self.memtable_size_mb,
+            block_cache_capacity_mb: self.block_cache_capacity_mb,
+        };
+        let new_engine = Self::open_engine_at(path, &tuning)?;
+
+        let evicted = {
+            let mut engines = self.engines.lock().unwrap();
+            // Re-check: another thread may have raced us.
+            if let Some(entry) = engines.get_mut(path) {
+                entry.last_used = Instant::now();
+                return Ok(entry.engine.clone());
+            }
+            engines.insert(
+                path.clone(),
+                CachedEngine {
+                    engine: new_engine.clone(),
+                    last_used: Instant::now(),
+                },
+            );
+
+            // Evict if over capacity.
+            if engines.len() > MAX_OPEN_ENGINES {
+                let batches = self.batches.lock().unwrap();
+                // Pick the LRU engine whose bucket has no pending batch.
+                let victim = engines
+                    .iter()
+                    .filter(|(p, _)| p.as_path() != path.as_path() && !batches.contains_key(*p))
+                    .min_by_key(|(_, e)| e.last_used)
+                    .map(|(p, _)| p.clone());
+                drop(batches);
+                if let Some(victim_path) = victim {
+                    if let Some(entry) = engines.remove(&victim_path) {
+                        drop(engines);
+                        // Close outside the lock; ignore errors — data is
+                        // still recoverable from the WAL on next open.
+                        let _ = entry.engine.close();
+                        Some(entry)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let _ = evicted; // already closed above
+        Ok(new_engine)
     }
 
     fn next_counter(&self) -> u64 {
@@ -98,16 +267,99 @@ impl FlowDbBackend {
         }
     }
 
-    fn scan_sip_flow_in_range(&self, start_ts: i64, end_ts: i64) -> Result<Vec<SipFlowItem>> {
-        let iter = self
-            .engine
-            .scan(ScanRange::prefix_time_range(SIP_PREFIX, start_ts, end_ts))?;
+    /// Total number of records waiting across all buckets.
+    fn total_pending(&self) -> usize {
+        self.batches
+            .lock()
+            .unwrap()
+            .values()
+            .map(|v| v.len())
+            .sum()
+    }
 
-        let mut items: Vec<SipFlowItem> = iter
-            .filter_map(|result| {
-                let rec = result.ok()?;
-                let (src, dst, payload) = decode_sip_value(&rec.value).ok()?;
-                Some(SipFlowItem {
+    fn should_flush(&self) -> bool {
+        let pending = self.total_pending();
+        if pending >= self.flush_count {
+            return true;
+        }
+        if pending > 0 && self.last_flush.lock().unwrap().elapsed() >= self.flush_interval {
+            return true;
+        }
+        false
+    }
+
+    /// Flush every pending batch to its bucket's engine.
+    ///
+    /// Lock order: `batches` is drained and released *before* we touch the
+    /// `engines` cache, so there is no risk of deadlock with
+    /// [`engine_for_bucket`].
+    fn flush_all_batches(&self) -> Result<()> {
+        let drained: HashMap<PathBuf, Vec<Record>> = {
+            let mut batches = self.batches.lock().unwrap();
+            if batches.is_empty() {
+                return Ok(());
+            }
+            std::mem::take(&mut *batches)
+        };
+
+        for (path, mut records) in drained {
+            if records.is_empty() {
+                continue;
+            }
+            // Flush even if the bucket directory has been removed from disk
+            // — engine_for_bucket recreates it. If the engine cannot be
+            // opened, re-queue the records so they are not lost.
+            match self.engine_for_bucket(&path) {
+                Ok(engine) => {
+                    if let Err(e) = engine.write_batch_sync(records) {
+                        tracing::warn!("flowdb write_batch_sync failed for {}: {e}", path.display());
+                        self.batches.lock().unwrap().insert(path, vec![]);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "flowdb engine open failed for {}: {e}; re-queueing batch",
+                        path.display()
+                    );
+                    records.clear();
+                    self.batches.lock().unwrap().insert(path, records);
+                }
+            }
+        }
+        *self.last_flush.lock().unwrap() = Instant::now();
+        Ok(())
+    }
+
+    fn scan_sip_flow_in_range(&self, start_ts: i64, end_ts: i64) -> Result<Vec<SipFlowItem>> {
+        let buckets = self.bucket_paths_in_range(
+            datetime_from_micros(start_ts),
+            datetime_from_micros(end_ts),
+        );
+
+        let mut items = Vec::new();
+        for path in buckets {
+            if !path.exists() {
+                continue;
+            }
+            let engine = match self.engine_for_bucket(&path) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        "flowdb: skipping bucket {} during sip scan: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let iter = engine.scan(ScanRange::prefix_time_range(SIP_PREFIX, start_ts, end_ts))?;
+            for result in iter {
+                let Ok(rec) = result else {
+                    continue;
+                };
+                let Ok((src, dst, payload)) = decode_sip_value(&rec.value) else {
+                    continue;
+                };
+                items.push(SipFlowItem {
                     timestamp: rec.ts as u64,
                     seq: 0,
                     leg: None,
@@ -115,9 +367,9 @@ impl FlowDbBackend {
                     src_addr: src,
                     dst_addr: dst,
                     payload: Bytes::from(payload),
-                })
-            })
-            .collect();
+                });
+            }
+        }
 
         items.sort_by_key(|i| i.timestamp);
         Ok(items)
@@ -134,18 +386,37 @@ impl FlowDbBackend {
             Some(leg) => rtp_call_leg_prefix(call_id, leg),
             None => rtp_call_prefix(call_id),
         };
+        let buckets = self.bucket_paths_in_range(
+            datetime_from_micros(start_ts),
+            datetime_from_micros(end_ts),
+        );
 
-        let iter = self
-            .engine
-            .scan_prefix_time_range(&prefix, start_ts, end_ts)?;
-
-        let mut packets: Vec<(i32, u64, Vec<u8>)> = iter
-            .filter_map(|result| {
-                let rec = result.ok()?;
-                let (leg, _src, payload) = decode_rtp_value(&rec.value).ok()?;
-                Some((leg, rec.ts as u64, payload))
-            })
-            .collect();
+        let mut packets = Vec::new();
+        for path in buckets {
+            if !path.exists() {
+                continue;
+            }
+            let engine = match self.engine_for_bucket(&path) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        "flowdb: skipping bucket {} during rtp scan: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let iter = engine.scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+            for result in iter {
+                let Ok(rec) = result else {
+                    continue;
+                };
+                let Ok((leg, _src, payload)) = decode_rtp_value(&rec.value) else {
+                    continue;
+                };
+                packets.push((leg, rec.ts as u64, payload));
+            }
+        }
 
         packets.sort_by_key(|p| p.1);
         Ok(packets)
@@ -162,21 +433,33 @@ impl FlowDbBackend {
             Some(leg) => rtp_call_leg_prefix(call_id, leg),
             None => rtp_call_prefix(call_id),
         };
-
-        let iter = self
-            .engine
-            .scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+        let buckets = self.bucket_paths_in_range(
+            datetime_from_micros(start_ts),
+            datetime_from_micros(end_ts),
+        );
 
         let mut leg_sources: HashMap<i32, Vec<String>> = HashMap::new();
         let mut seen: std::collections::HashSet<(i32, String)> = std::collections::HashSet::new();
 
-        for result in iter {
-            let Ok(rec) = result else { continue };
-            let Ok((leg, src, _payload)) = decode_rtp_value(&rec.value) else {
+        for path in buckets {
+            if !path.exists() {
                 continue;
+            }
+            let engine = match self.engine_for_bucket(&path) {
+                Ok(e) => e,
+                Err(_) => continue,
             };
-            if seen.insert((leg, src.clone())) {
-                leg_sources.entry(leg).or_default().push(src);
+            let iter = engine.scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+            for result in iter {
+                let Ok(rec) = result else {
+                    continue;
+                };
+                let Ok((leg, src, _payload)) = decode_rtp_value(&rec.value) else {
+                    continue;
+                };
+                if seen.insert((leg, src.clone())) {
+                    leg_sources.entry(leg).or_default().push(src);
+                }
             }
         }
 
@@ -218,6 +501,41 @@ impl FlowDbBackend {
         generate_wav_to_writer(&packets, &payload_map, &leg_payload_map, true, &mut cursor)?;
         Ok(cursor.into_inner())
     }
+
+    /// Flush every cached engine and clear the cache on drop.
+    fn shutdown_cached_engines(&self) {
+        let engines = std::mem::take(&mut *self.engines.lock().unwrap());
+        for (_, entry) in engines {
+            let _ = entry.engine.close();
+        }
+    }
+}
+
+/// Configuration bundle passed to `Engine::open` for a new bucket.
+struct SubdirsTuning {
+    ttl_secs: Option<u64>,
+    memtable_size_mb: usize,
+    block_cache_capacity_mb: usize,
+}
+
+/// Convert a microsecond timestamp into a `DateTime<Local>`.
+///
+/// Used to derive bucket directories from absolute packet timestamps during
+/// range queries. Falls back to "now" if the timestamp is invalid for the
+/// local time zone (extremely unlikely in practice).
+fn datetime_from_micros(ts: i64) -> DateTime<Local> {
+    chrono::TimeZone::timestamp_micros(&Local, ts)
+        .single()
+        .unwrap_or_else(Local::now)
+}
+
+impl Drop for FlowDbBackend {
+    fn drop(&mut self) {
+        // Best-effort: flush anything pending, then close all engines so
+        // background maintenance threads exit and file handles are released.
+        let _ = self.flush_all_batches();
+        self.shutdown_cached_engines();
+    }
 }
 
 #[async_trait]
@@ -255,16 +573,34 @@ impl SipFlowBackend for FlowDbBackend {
             }
         };
 
-        self.batch.lock().unwrap().push(record);
+        let bucket_path = self.bucket_path_for_dt(Local::now());
+        self.batches
+            .lock()
+            .unwrap()
+            .entry(bucket_path)
+            .or_default()
+            .push(record);
+
         if self.should_flush() {
-            self.flush_batch()?;
+            self.flush_all_batches()?;
         }
         Ok(())
     }
 
     async fn flush(&self) -> Result<()> {
-        self.flush_batch()?;
-        self.engine.flush().map_err(|e| anyhow::anyhow!(e))
+        self.flush_all_batches()?;
+        // Also flush each open engine's memtable so SSTs are durable.
+        let engines: Vec<Arc<Engine>> = self
+            .engines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.engine.clone())
+            .collect();
+        for engine in engines {
+            let _ = engine.flush();
+        }
+        Ok(())
     }
 
     async fn query_flow(
@@ -276,16 +612,32 @@ impl SipFlowBackend for FlowDbBackend {
         let start_ts = start_time.timestamp_micros();
         let end_ts = end_time.timestamp_micros();
         let prefix = sip_call_prefix(call_id);
+        let buckets = self.bucket_paths_in_range(start_time, end_time);
 
-        let iter = self
-            .engine
-            .scan_prefix_time_range(&prefix, start_ts, end_ts)?;
-
-        let mut items: Vec<SipFlowItem> = iter
-            .filter_map(|result| {
-                let rec = result.ok()?;
-                let (src, dst, payload) = decode_sip_value(&rec.value).ok()?;
-                Some(SipFlowItem {
+        let mut items = Vec::new();
+        for path in buckets {
+            if !path.exists() {
+                continue;
+            }
+            let engine = match self.engine_for_bucket(&path) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        "flowdb: skipping bucket {} during query_flow: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let iter = engine.scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+            for result in iter {
+                let Ok(rec) = result else {
+                    continue;
+                };
+                let Ok((src, dst, payload)) = decode_sip_value(&rec.value) else {
+                    continue;
+                };
+                items.push(SipFlowItem {
                     timestamp: rec.ts as u64,
                     seq: 0,
                     leg: None,
@@ -293,9 +645,9 @@ impl SipFlowBackend for FlowDbBackend {
                     src_addr: src,
                     dst_addr: dst,
                     payload: Bytes::from(payload),
-                })
-            })
-            .collect();
+                });
+            }
+        }
 
         items.sort_by_key(|i| i.timestamp);
         Ok(items)
@@ -310,32 +662,41 @@ impl SipFlowBackend for FlowDbBackend {
         let start_ts = start_time.timestamp_micros();
         let end_ts = end_time.timestamp_micros();
         let prefix = rtp_call_prefix(call_id);
-
-        let iter = self
-            .engine
-            .scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+        let buckets = self.bucket_paths_in_range(start_time, end_time);
 
         let mut accumulators: HashMap<(i32, String, Option<u32>), MediaStatsAccumulator> =
             HashMap::new();
 
-        for result in iter {
-            let Ok(rec) = result else { continue };
-            let Ok((leg, src, payload)) = decode_rtp_value(&rec.value) else {
+        for path in buckets {
+            if !path.exists() {
                 continue;
+            }
+            let engine = match self.engine_for_bucket(&path) {
+                Ok(e) => e,
+                Err(_) => continue,
             };
-            let header = parse_rtp_stats_header(&payload);
-            let ssrc = header.map(|h| h.ssrc);
-            let key = (leg, src.clone(), ssrc);
+            let iter = engine.scan_prefix_time_range(&prefix, start_ts, end_ts)?;
+            for result in iter {
+                let Ok(rec) = result else {
+                    continue;
+                };
+                let Ok((leg, src, payload)) = decode_rtp_value(&rec.value) else {
+                    continue;
+                };
+                let header = parse_rtp_stats_header(&payload);
+                let ssrc = header.map(|h| h.ssrc);
+                let key = (leg, src.clone(), ssrc);
 
-            accumulators
-                .entry(key)
-                .or_insert_with(|| MediaStatsAccumulator::new(leg, src, ssrc))
-                .observe(rec.ts as u64, header);
+                accumulators
+                    .entry(key)
+                    .or_insert_with(|| MediaStatsAccumulator::new(leg, src, ssrc))
+                    .observe(rec.ts as u64, header);
+            }
         }
 
         Ok(accumulators
-            .into_iter()
-            .map(|(_, acc)| acc.into_stats())
+            .into_values()
+            .map(|acc| acc.into_stats())
             .collect())
     }
 
@@ -454,7 +815,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_record_and_query_flow() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-flow-1";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
@@ -485,7 +855,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_flow_time_range() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-flow-range";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
@@ -513,7 +892,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_record_rtp_and_query_media() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-rtp-1";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -541,7 +929,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_media_stats() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-stats-1";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -572,7 +969,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_media_stats_with_loss() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-stats-loss";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -602,7 +1008,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_media_stream_leg_filter() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let call_id = "test-leg-filter";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -636,7 +1051,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_empty_query() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         let items = backend
@@ -665,7 +1089,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_isolation_between_calls() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         backend
@@ -702,7 +1135,16 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_flush_no_error() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
         backend.flush().await.unwrap();
     }
 
@@ -714,7 +1156,16 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         {
-            let backend = FlowDbBackend::new(&path, None, 1, 16, 1000, 5).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::None,
+                None,
+                1,
+                16,
+                1000,
+                5,
+            )
+            .unwrap();
             backend
                 .record(call_id, make_sip_item(base as u64, call_id))
                 .unwrap();
@@ -722,7 +1173,16 @@ mod tests {
         }
 
         {
-            let backend = FlowDbBackend::new(&path, None, 1, 16, 1000, 5).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::None,
+                None,
+                1,
+                16,
+                1000,
+                5,
+            )
+            .unwrap();
             let items = backend
                 .query_flow(
                     call_id,
@@ -738,10 +1198,229 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_skip_empty_call_id() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = FlowDbBackend::new(dir.path(), None, 1, 16, 1000, 5).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
 
         // Empty call_id should be silently skipped
         backend.record("", make_sip_item(1000, "")).unwrap();
         backend.flush().await.unwrap();
+    }
+
+    /// Records routed by `Local::now()` should land in the bucket matching
+    /// the current local hour when `subdirs = Hourly`.
+    #[tokio::test]
+    async fn test_flowdb_subdirs_hourly_writes_to_current_hour_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Hourly,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
+
+        let now = Local::now();
+        let call_id = "subdirs-hourly";
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        backend
+            .record(call_id, make_sip_item(ts, call_id))
+            .unwrap();
+        backend.flush().await.unwrap();
+
+        let expected_subdir = format!(
+            "{:04}{:02}{:02}/{:02}",
+            now.year(),
+            now.month(),
+            now.day(),
+            now.hour()
+        );
+        let bucket = dir.path().join(&expected_subdir);
+        assert!(
+            bucket.exists(),
+            "expected hourly bucket {} to exist",
+            bucket.display()
+        );
+        // Engine creates WAL/SST/INDEX subdirs.
+        assert!(bucket.join("WAL").exists());
+        assert!(bucket.join("SST").exists());
+    }
+
+    /// A query spanning multiple hourly buckets should aggregate results from
+    /// all of them. We simulate this by writing to "now" and querying a wide
+    /// time window that mathematically covers several hourly buckets.
+    #[tokio::test]
+    async fn test_flowdb_subdirs_hourly_query_aggregates_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Hourly,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
+
+        let call_id = "subdirs-hourly-multi";
+        let base = chrono::Utc::now().timestamp_micros();
+        // Write several SIP messages "now".
+        for i in 0..3u64 {
+            let ts = (base + i as i64) as u64;
+            backend
+                .record(call_id, make_sip_item(ts, call_id))
+                .unwrap();
+        }
+        backend.flush().await.unwrap();
+
+        // Query a wide range that covers the last 25 hours — even though
+        // only the current hour bucket exists, the query must still return
+        // the items we wrote.
+        let items = backend
+            .query_flow(
+                call_id,
+                local_dt_from_micros(base - 25 * 3_600_000_000),
+                local_dt_from_micros(base + 3_600_000_000),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(items.len(), 3, "all three SIP messages must be found");
+    }
+
+    /// `subdirs = Daily` should keep buckets separated by day, but a single
+    /// day's query still returns everything recorded that day.
+    #[tokio::test]
+    async fn test_flowdb_subdirs_daily_query_same_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Daily,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
+
+        let call_id = "subdirs-daily";
+        let base = chrono::Utc::now().timestamp_micros();
+        backend
+            .record(call_id, make_sip_item(base as u64, call_id))
+            .unwrap();
+        backend.flush().await.unwrap();
+
+        let items = backend
+            .query_flow(
+                call_id,
+                local_dt_from_micros(base - 1),
+                local_dt_from_micros(base + 1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].payload.starts_with(b"INVITE"));
+    }
+
+    /// When `subdirs = Daily`, queries for a different day must not return
+    /// data written today (no leakage across buckets).
+    #[tokio::test]
+    async fn test_flowdb_subdirs_daily_no_leakage_into_other_day_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Daily,
+            None,
+            1,
+            16,
+            1000,
+            5,
+        )
+        .unwrap();
+
+        let call_id = "subdirs-daily-no-leak";
+        let now = Local::now();
+        let base = chrono::Utc::now().timestamp_micros();
+        backend
+            .record(call_id, make_sip_item(base as u64, call_id))
+            .unwrap();
+        backend.flush().await.unwrap();
+
+        // Query a day far in the past — its bucket does not exist, so we
+        // should get nothing back even though the call_id matches.
+        let far_past = now
+            .checked_sub_signed(chrono::Duration::days(365))
+            .unwrap_or(now);
+        let far_past_end = far_past
+            .checked_add_signed(chrono::Duration::hours(1))
+            .unwrap_or(far_past);
+        let items = backend
+            .query_flow(call_id, far_past, far_past_end)
+            .await
+            .unwrap();
+
+        assert!(items.is_empty(), "no leakage from today into past bucket");
+    }
+
+    /// Reopening the same backend should recover data written previously,
+    /// even with `subdirs = Daily`.
+    #[tokio::test]
+    async fn test_flowdb_subdirs_daily_recovery_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let call_id = "subdirs-daily-recovery";
+        let base = chrono::Utc::now().timestamp_micros();
+
+        {
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::Daily,
+                None,
+                1,
+                16,
+                1000,
+                5,
+            )
+            .unwrap();
+            backend
+                .record(call_id, make_sip_item(base as u64, call_id))
+                .unwrap();
+            backend.flush().await.unwrap();
+        }
+
+        {
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::Daily,
+                None,
+                1,
+                16,
+                1000,
+                5,
+            )
+            .unwrap();
+            let items = backend
+                .query_flow(
+                    call_id,
+                    local_dt_from_micros(base - 1),
+                    local_dt_from_micros(base + 1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(items.len(), 1);
+        }
     }
 }

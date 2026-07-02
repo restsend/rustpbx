@@ -150,12 +150,14 @@ rwi_event!(CallBusy, "call_busy");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferred {
     pub call_id: String,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferred, "call_transferred");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferAccepted {
     pub call_id: String,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferAccepted, "call_transfer_accepted");
 
@@ -164,6 +166,7 @@ pub struct CallTransferFailed {
     pub call_id: String,
     pub sip_status: Option<u16>,
     pub reason: Option<String>,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferFailed, "call_transfer_failed");
 

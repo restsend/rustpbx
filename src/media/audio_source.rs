@@ -286,7 +286,9 @@ impl FileAudioSource {
 
         debug!("Downloading to temporary file: {:?}", temp_path);
 
-        let response = reqwest::get(url)
+        let response = crate::http_util::shared_keepalive_client()
+            .get(url)
+            .send()
             .await
             .map_err(|e| anyhow!("Failed to download audio file: {}", e))?;
 
