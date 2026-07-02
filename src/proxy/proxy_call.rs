@@ -135,7 +135,23 @@ impl CallSessionBuilder {
         code: rsipstack::sip::StatusCode,
         reason: Option<String>,
     ) -> Result<()> {
-        let dialplan = Arc::new(self.dialplan);
+        let CallSessionBuilder {
+            cookie,
+            mut dialplan,
+            call_record_sender,
+            ..
+        } = self;
+
+        #[cfg(feature = "addon-wholesale")]
+        {
+            if let Some(ctx) = cookie
+                .get_extension::<crate::addons::wholesale::route::WholesaleBillingContext>()
+            {
+                dialplan.extensions.insert(ctx);
+            }
+        }
+
+        let dialplan = Arc::new(dialplan);
         let session_id = dialplan
             .session_id
             .clone()
@@ -158,7 +174,7 @@ impl CallSessionBuilder {
         let context = CallContext {
             session_id,
             dialplan: dialplan.clone(),
-            cookie: self.cookie,
+            cookie,
             start_time: Instant::now(),
             original_caller: original_caller.clone(),
             original_callee: original_callee.clone(),
@@ -170,7 +186,7 @@ impl CallSessionBuilder {
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {
             server,
             context,
-            call_record_sender: self.call_record_sender,
+            call_record_sender,
         };
 
         let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
@@ -199,5 +215,54 @@ impl CallSessionBuilder {
 
         reporter.report(snapshot);
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "addon-wholesale"))]
+mod tests {
+    use super::*;
+    use crate::call::DialDirection;
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+    #[tokio::test]
+    async fn report_failure_copies_wholesale_context_to_record_extensions() {
+        use crate::addons::wholesale::route::WholesaleBillingContext;
+
+        let (server, _) = create_test_server().await;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let dialplan = crate::call::Dialplan::new(
+            "report-failure-tenant".to_string(),
+            request,
+            DialDirection::Inbound,
+        );
+        let cookie = crate::call::TransactionCookie::default();
+        cookie.insert_extension(WholesaleBillingContext {
+            tenant_id: 42,
+            ..Default::default()
+        });
+
+        CallSessionBuilder::new(cookie, dialplan, 70)
+            .with_call_record_sender(Some(sender))
+            .report_failure(
+                server,
+                rsipstack::sip::StatusCode::ServiceUnavailable,
+                Some("route failed".to_string()),
+            )
+            .expect("report failure");
+
+        let record = receiver.recv().await.expect("call record");
+        let ctx = record
+            .extensions
+            .get::<WholesaleBillingContext>()
+            .expect("wholesale context");
+        assert_eq!(ctx.tenant_id, 42);
+        assert_eq!(ctx.carrier_id, None);
     }
 }
