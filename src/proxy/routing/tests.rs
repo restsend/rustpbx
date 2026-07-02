@@ -2761,7 +2761,7 @@ async fn test_source_trunk_cps_limit_rejects() {
         RouteResult::Abort(code, _) => {
             assert_eq!(code, StatusCode::ServiceUnavailable);
         }
-        other => panic!("expected 503 abort, got unexpected RouteResult variant"),
+        _ => panic!("expected 503 abort, got unexpected RouteResult variant"),
     }
 }
 
@@ -2809,7 +2809,7 @@ async fn test_source_trunk_concurrent_limit_rejects() {
         RouteResult::Abort(code, _) => {
             assert_eq!(code, StatusCode::BusyHere);
         }
-        other => panic!("expected 486 abort, got unexpected RouteResult variant"),
+        _ => panic!("expected 486 abort, got unexpected RouteResult variant"),
     }
 }
 
@@ -2928,7 +2928,7 @@ async fn test_dest_trunk_concurrent_limit_rejects() {
         RouteResult::Abort(code, _) => {
             assert_eq!(code, StatusCode::BusyHere);
         }
-        other => panic!("expected 486 abort for dest trunk, got unexpected RouteResult variant"),
+        _ => panic!("expected 486 abort for dest trunk, got unexpected RouteResult variant"),
     }
 }
 
@@ -3008,7 +3008,7 @@ async fn test_trunk_holds_attached_to_forward_hints() {
             assert!(hints.trunk_concurrency_holds.contains(&"in".to_string()));
             assert!(hints.trunk_concurrency_holds.contains(&"out".to_string()));
         }
-        other => panic!("expected Forward with hints, got unexpected RouteResult variant"),
+        _ => panic!("expected Forward with hints, got unexpected RouteResult variant"),
     }
 }
 

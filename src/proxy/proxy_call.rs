@@ -59,7 +59,10 @@ impl CallSessionBuilder {
         server: SipServerRef,
         tx: &mut rsipstack::transaction::transaction::Transaction,
     ) -> Result<()> {
+        #[cfg(feature = "addon-wholesale")]
         let mut dialplan = self.dialplan;
+        #[cfg(not(feature = "addon-wholesale"))]
+        let dialplan = self.dialplan;
         #[cfg(feature = "addon-wholesale")]
         let wholesale_tenant_concurrency_hold =
             dialplan.wholesale_tenant_concurrency_hold.take();
