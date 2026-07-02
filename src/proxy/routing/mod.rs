@@ -294,6 +294,22 @@ impl Default for TrunkConfig {
 }
 
 impl TrunkConfig {
+    pub async fn matches_inbound_source_ip(&self, addr: &IpAddr) -> bool {
+        if let Some(trunk_direction) = self.direction
+            && !trunk_direction.allows(&DialDirection::Inbound)
+        {
+            return false;
+        }
+
+        for host in &self.inbound_hosts {
+            if candidate_matches(host, addr).await {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub async fn matches_inbound_ip(&self, addr: &IpAddr) -> bool {
         for host in &self.inbound_hosts {
             if candidate_matches(host, addr).await {

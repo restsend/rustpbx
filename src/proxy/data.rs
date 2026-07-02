@@ -16,13 +16,12 @@ use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
-    call::DialDirection,
     config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
-        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy, candidate_matches_ip,
+        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -214,17 +213,8 @@ impl ProxyDataContext {
         let trunks = self.trunks_snapshot();
         let mut matches = Vec::new();
         for (name, trunk) in trunks.iter() {
-            if let Some(trunk_direction) = trunk.direction
-                && !trunk_direction.allows(&DialDirection::Inbound)
-            {
-                continue;
-            }
-
-            for host in &trunk.inbound_hosts {
-                if candidate_matches_ip(host, addr).await {
-                    matches.push(name.clone());
-                    break;
-                }
+            if trunk.matches_inbound_source_ip(addr).await {
+                matches.push(name.clone());
             }
         }
         matches
