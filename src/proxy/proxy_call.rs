@@ -137,7 +137,10 @@ impl CallSessionBuilder {
     ) -> Result<()> {
         let CallSessionBuilder {
             cookie,
+            #[cfg(feature = "addon-wholesale")]
             mut dialplan,
+            #[cfg(not(feature = "addon-wholesale"))]
+            dialplan,
             call_record_sender,
             ..
         } = self;
