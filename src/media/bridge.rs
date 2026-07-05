@@ -520,6 +520,7 @@ impl BridgePeer {
             BridgeEndpoint::Caller,
             self.caller_send.lock().await.clone(),
             Arc::clone(&self.caller_output_state),
+            Arc::clone(&self.caller_output_mode),
             self.cancel_token.clone(),
             self.recorder.clone(),
             self.recording_paused.clone(),
@@ -529,6 +530,7 @@ impl BridgePeer {
             BridgeEndpoint::Callee,
             self.callee_send.lock().await.clone(),
             Arc::clone(&self.callee_output_state),
+            Arc::clone(&self.callee_output_mode),
             self.cancel_token.clone(),
             self.recorder.clone(),
             self.recording_paused.clone(),
@@ -984,6 +986,11 @@ impl BridgePeer {
         &self.caller_output_mode
     }
 
+    #[cfg(test)]
+    pub fn output_mode_atomic(&self, endpoint: BridgeEndpoint) -> &Arc<AtomicU8> {
+        self.output_mode(endpoint)
+    }
+
     /// Send RFC 4733 telephone-event DTMF packets to `endpoint`.
     ///
     /// For each digit in `digits` the method injects three telephone-event RTP
@@ -1245,6 +1252,7 @@ impl BridgePeer {
         endpoint: BridgeEndpoint,
         sender: Option<MediaSender>,
         output_state: Arc<AsyncMutex<OutputState>>,
+        output_mode_atomic: Arc<AtomicU8>,
         cancel_token: CancellationToken,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recording_paused: Arc<AtomicBool>,
@@ -1274,7 +1282,10 @@ impl BridgePeer {
                                 continue;
                             }
                             let Some(source) = guard.file_source.as_mut() else {
-                                guard.mode = BRIDGE_OUTPUT_MUTED;
+                                // File source disappeared unexpectedly — restore normal
+                                // peer forwarding so the leg is not left muted.
+                                guard.mode = BRIDGE_OUTPUT_PEER;
+                                output_mode_atomic.store(BRIDGE_OUTPUT_PEER, Ordering::Release);
                                 continue;
                             };
                             source.next_audio_sample()
@@ -1282,14 +1293,17 @@ impl BridgePeer {
 
                         let Some(mut sample) = sample else {
                             let mut guard = output_state.lock().await;
-                            guard.mode = BRIDGE_OUTPUT_MUTED;
+                            // Natural EOF: restore normal peer forwarding so both
+                            // parties hear each other again after the announcement.
+                            guard.mode = BRIDGE_OUTPUT_PEER;
+                            output_mode_atomic.store(BRIDGE_OUTPUT_PEER, Ordering::Release);
                             guard.file_source.take();
                             guard.active_rtp_offset = None;
                             guard.active_seq_offset = None;
                             debug!(
                                 bridge_id = %bridge_id,
                                 endpoint = ?endpoint,
-                                "Bridge file output completed"
+                                "Bridge file output completed, restored peer output"
                             );
                             continue;
                         };
@@ -1879,28 +1893,38 @@ impl BridgePeer {
                                     }).unwrap_or(8000);
                                     (dtmf_pt, dtmf_clock_rate)
                                 };
-                                if let (Some(rec), Some(leg)) = (&recorder, recorder_leg)
-                                    && !recording_paused.load(std::sync::atomic::Ordering::Relaxed)
-                                    && let Some(mut guard) = rec.try_write()
-                                    && let Some(r) = guard.as_mut()
-                                {
-                                    let _ = r.write_sample(
-                                        leg,
-                                        &sample,
-                                        dtmf_pt,
-                                        Some(dtmf_clock_rate),
-                                        None::<AudioCodecType>,
-                                    );
-                                }
+                                // Only record the peer's mic when this leg is in
+                                // normal peer-forwarding mode. When the output is
+                                // replaced by a file (announcement broadcast),
+                                // the file-output clock writes the announcement
+                                // into the recorder for this leg instead — writing
+                                // the mic here would mix party voices into a
+                                // broadcast-only take.
+                                let record_peer_mic = output_mode.load(Ordering::Acquire) == BRIDGE_OUTPUT_PEER;
+                                if record_peer_mic {
+                                    if let (Some(rec), Some(leg)) = (&recorder, recorder_leg)
+                                        && !recording_paused.load(std::sync::atomic::Ordering::Relaxed)
+                                        && let Some(mut guard) = rec.try_write()
+                                        && let Some(r) = guard.as_mut()
+                                    {
+                                        let _ = r.write_sample(
+                                            leg,
+                                            &sample,
+                                            dtmf_pt,
+                                            Some(dtmf_clock_rate),
+                                            None::<AudioCodecType>,
+                                        );
+                                    }
 
-                                if let (Some(tx), Some(leg)) = (&sipflow_tx, recorder_leg) {
-                                    // Share the sample via Arc instead of deep-cloning
-                                    // the `raw_packet.payload` Vec<u8> per packet.
-                                    let _ = tx.try_send((
-                                        leg,
-                                        Arc::new(sample.clone()),
-                                        received_at_micros,
-                                    ));
+                                    if let (Some(tx), Some(leg)) = (&sipflow_tx, recorder_leg) {
+                                        // Share the sample via Arc instead of deep-cloning
+                                        // the `raw_packet.payload` Vec<u8> per packet.
+                                        let _ = tx.try_send((
+                                            leg,
+                                            Arc::new(sample.clone()),
+                                            received_at_micros,
+                                        ));
+                                    }
                                 }
                             }
                             if !is_video {
@@ -2903,6 +2927,142 @@ mod tests {
         assert!(
             frame_count >= 3,
             "bridge should poll the FileTrack source and send audio without a FileTrack-owned task"
+        );
+    }
+
+    /// After a file finishes playing (natural EOF), the endpoint must return to
+    /// `BRIDGE_OUTPUT_PEER` so the two parties can hear each other again.
+    /// Regression: previously the clock set `BRIDGE_OUTPUT_MUTED` on EOF, leaving
+    /// the leg silent until an explicit `media.stop` arrived.
+    #[tokio::test]
+    async fn test_bridge_file_output_restores_peer_on_eof() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_bridge_eof_restore.wav");
+        // 160 samples @ 8 kHz = 20 ms = one frame; EOF on the second tick.
+        create_test_wav_file(test_file.to_str().unwrap(), 160).unwrap();
+
+        let bridge = BridgePeerBuilder::new("test-bridge-eof-restore".to_string())
+            .with_rtp_port_range(25300, 25400)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+
+        let track = FileTrack::new("bridge-eof-restore".to_string())
+            .with_path(test_file.to_string_lossy().to_string())
+            .with_loop(false)
+            .with_codec_info(crate::media::negotiate::CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            });
+
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Callee, &track)
+            .await
+            .unwrap();
+        drop(track);
+
+        use std::sync::atomic::Ordering;
+        let callee_mode = bridge.output_mode_atomic(BridgeEndpoint::Callee);
+        assert_eq!(
+            callee_mode.load(Ordering::Acquire),
+            BRIDGE_OUTPUT_FILE,
+            "callee must be in FILE mode right after replace_output_with_file"
+        );
+
+        // Wait for the 20 ms file-output clock to drain the short file and hit EOF.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(800);
+        loop {
+            if callee_mode.load(Ordering::Acquire) == BRIDGE_OUTPUT_PEER {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+
+        bridge.stop().await;
+        let _ = std::fs::remove_file(&test_file);
+
+        assert_eq!(
+            callee_mode.load(Ordering::Acquire),
+            BRIDGE_OUTPUT_PEER,
+            "callee output mode must restore to PEER after file EOF (regression: was left MUTED)"
+        );
+    }
+
+    /// When both endpoints play a file (the `leg_id:"both"` announcement case),
+    /// both must return to `BRIDGE_OUTPUT_PEER` after their files finish so the
+    /// call resumes bidirectionally.
+    #[tokio::test]
+    async fn test_bridge_file_output_restores_peer_on_eof_both_legs() {
+        let temp_dir = std::env::temp_dir();
+        let caller_file = temp_dir.join("test_bridge_eof_both_caller.wav");
+        let callee_file = temp_dir.join("test_bridge_eof_both_callee.wav");
+        create_test_wav_file(caller_file.to_str().unwrap(), 160).unwrap();
+        create_test_wav_file(callee_file.to_str().unwrap(), 160).unwrap();
+
+        let bridge = BridgePeerBuilder::new("test-bridge-eof-both".to_string())
+            .with_rtp_port_range(25500, 25600)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+
+        let codec_info = crate::media::negotiate::CodecInfo {
+            payload_type: 0,
+            codec: CodecType::PCMU,
+            clock_rate: 8000,
+            channels: 1,
+        };
+        let caller_track = FileTrack::new("bridge-eof-both-caller".to_string())
+            .with_path(caller_file.to_string_lossy().to_string())
+            .with_loop(false)
+            .with_codec_info(codec_info.clone());
+        let callee_track = FileTrack::new("bridge-eof-both-callee".to_string())
+            .with_path(callee_file.to_string_lossy().to_string())
+            .with_loop(false)
+            .with_codec_info(codec_info.clone());
+
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Caller, &caller_track)
+            .await
+            .unwrap();
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Callee, &callee_track)
+            .await
+            .unwrap();
+        drop(caller_track);
+        drop(callee_track);
+
+        use std::sync::atomic::Ordering;
+        let caller_mode = bridge.output_mode_atomic(BridgeEndpoint::Caller);
+        let callee_mode = bridge.output_mode_atomic(BridgeEndpoint::Callee);
+        assert_eq!(caller_mode.load(Ordering::Acquire), BRIDGE_OUTPUT_FILE);
+        assert_eq!(callee_mode.load(Ordering::Acquire), BRIDGE_OUTPUT_FILE);
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(800);
+        loop {
+            let caller_done = caller_mode.load(Ordering::Acquire) == BRIDGE_OUTPUT_PEER;
+            let callee_done = callee_mode.load(Ordering::Acquire) == BRIDGE_OUTPUT_PEER;
+            if (caller_done && callee_done) || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+
+        bridge.stop().await;
+        let _ = std::fs::remove_file(&caller_file);
+        let _ = std::fs::remove_file(&callee_file);
+
+        assert_eq!(
+            caller_mode.load(Ordering::Acquire),
+            BRIDGE_OUTPUT_PEER,
+            "caller must restore to PEER after both-leg announcement EOF"
+        );
+        assert_eq!(
+            callee_mode.load(Ordering::Acquire),
+            BRIDGE_OUTPUT_PEER,
+            "callee must restore to PEER after both-leg announcement EOF"
         );
     }
 

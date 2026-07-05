@@ -235,6 +235,24 @@
                                         </template>
                                     </div>
                                 </template>
+                                <template x-if="filter === 'outbound_sip_trunks'">
+                                    <div class="flex max-h-48 flex-col gap-2 overflow-y-auto pr-1">
+                                        <template x-if="!filterOptions.sip_trunks.length">
+                                            <span
+                                                class="rounded-full border border-dashed border-slate-200 px-3 py-1 text-xs text-slate-400">No
+                                                trunks</span>
+                                        </template>
+                                        <template x-for="trunk in filterOptions.sip_trunks" :key="trunk.id">
+                                            <label
+                                                class="inline-flex items-center gap-2 rounded border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                                <input type="checkbox"
+                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                                    :value="String(trunk.id)" x-model="selectedOutboundSipTrunks">
+                                                <span x-text="trunk.display_name || trunk.name"></span>
+                                            </label>
+                                        </template>
+                                    </div>
+                                </template>
                                 <template x-if="filter === 'billing_status'">
                                     <select x-model="billingStatusFilter"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -576,6 +594,7 @@
             onlyTranscribed: false,
             selectedDepartments: [],
             selectedSipTrunks: [],
+            selectedOutboundSipTrunks: [],
             selectedTags: [],
             billingStatusFilter: 'any',
             exportedAt: null,
@@ -609,6 +628,7 @@
                 { key: 'only_transcribed', labelKey: 'filter_only_transcribed' },
                 { key: 'departments', labelKey: 'filter_departments' },
                 { key: 'sip_trunks', labelKey: 'filter_sip_trunks' },
+                { key: 'outbound_sip_trunks', labelKey: 'filter_outbound_sip_trunks' },
             ],
             activeFilters: [],
             persistentFilters: [],
@@ -792,6 +812,7 @@
                 this.$watch('onlyTranscribed', immediateWatcher);
                 this.$watch('selectedDepartments', immediateWatcher);
                 this.$watch('selectedSipTrunks', immediateWatcher);
+                this.$watch('selectedOutboundSipTrunks', immediateWatcher);
                 this.$watch('selectedTags', immediateWatcher);
                 this.$watch('dateFrom', () => {
                     if (!this._updatingPreset) {
@@ -935,6 +956,13 @@
                     .filter((value) => Number.isInteger(value));
                 if (sipIds.length) {
                     filters.sipTrunkIds = sipIds;
+                }
+
+                const outboundSipIds = (Array.isArray(this.selectedOutboundSipTrunks) ? this.selectedOutboundSipTrunks : [])
+                    .map((value) => parseInt(value, 10))
+                    .filter((value) => Number.isInteger(value));
+                if (outboundSipIds.length) {
+                    filters.outboundSipTrunkIds = outboundSipIds;
                 }
 
                 const tags = (Array.isArray(this.selectedTags) ? this.selectedTags : [])
@@ -1112,6 +1140,7 @@
                 this.onlyTranscribed = false;
                 this.selectedDepartments = [];
                 this.selectedSipTrunks = [];
+                this.selectedOutboundSipTrunks = [];
                 this.selectedTags = [];
                 this.sortOrder = this.defaultSort();
                 this.activeFilters = [];
@@ -1375,6 +1404,8 @@
                         return this.t.filter_departments || 'Departments';
                     case 'sip_trunks':
                         return this.t.filter_sip_trunks || 'SIP trunks';
+                    case 'outbound_sip_trunks':
+                        return this.t.filter_outbound_sip_trunks || 'Outbound trunks';
                     case 'billing_status':
                         return this.t.filter_billing_status || 'Billing status';
                     default:
@@ -1446,6 +1477,28 @@
                             .filter(Boolean);
                         return names.length ? names.join(', ') : '';
                     }
+                    case 'outbound_sip_trunks': {
+                        const options = Array.isArray(this.filterOptions.sip_trunks)
+                            ? this.filterOptions.sip_trunks
+                            : [];
+                        const selected = Array.isArray(this.selectedOutboundSipTrunks)
+                            ? this.selectedOutboundSipTrunks
+                            : [];
+                        if (!selected.length) {
+                            return '';
+                        }
+                        const names = selected
+                            .map((id) => {
+                                const numeric = Number(id);
+                                const match = options.find((trunk) => Number(trunk.id) === numeric);
+                                if (!match) {
+                                    return Number.isFinite(numeric) ? `#${numeric}` : String(id);
+                                }
+                                return match.display_name || match.name || `#${numeric}`;
+                            })
+                            .filter(Boolean);
+                        return names.length ? names.join(', ') : '';
+                    }
                     case 'billing_status':
                         return this.billingStatusFilter && this.billingStatusFilter !== 'any'
                             ? this.billingStatusLabel(this.billingStatusFilter)
@@ -1500,6 +1553,9 @@
                     case 'sip_trunks':
                         this.selectedSipTrunks = [];
                         break;
+                    case 'outbound_sip_trunks':
+                        this.selectedOutboundSipTrunks = [];
+                        break;
                     case 'billing_status':
                         this.billingStatusFilter = 'any';
                         break;
@@ -1517,7 +1573,7 @@
                 });
             },
             shouldPersistFilter(key) {
-                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks'].includes(key);
+                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks', 'outbound_sip_trunks'].includes(key);
             },
             syncActiveFilters() {
                 const manualFilters = Array.isArray(this.activeFilters)
@@ -1529,6 +1585,7 @@
                 const hasDate = Boolean(this.dateFrom) || Boolean(this.dateTo);
                 const departmentsSelected = Array.isArray(this.selectedDepartments) && this.selectedDepartments.length;
                 const sipSelected = Array.isArray(this.selectedSipTrunks) && this.selectedSipTrunks.length;
+                const outboundSipSelected = Array.isArray(this.selectedOutboundSipTrunks) && this.selectedOutboundSipTrunks.length;
                 const next = [];
                 const addUnique = (key) => {
                     if (!next.includes(key)) {
@@ -1558,6 +1615,9 @@
                 }
                 if (sipSelected || this.persistentFilters.includes('sip_trunks')) {
                     addUnique('sip_trunks');
+                }
+                if (outboundSipSelected || this.persistentFilters.includes('outbound_sip_trunks')) {
+                    addUnique('outbound_sip_trunks');
                 }
 
                 this.activeFilters = next;

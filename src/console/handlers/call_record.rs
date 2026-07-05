@@ -65,6 +65,8 @@ struct QueryCallRecordFilters {
     #[serde(default)]
     sip_trunk_ids: Option<Vec<i64>>,
     #[serde(default)]
+    outbound_sip_trunk_ids: Option<Vec<i64>>,
+    #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
     caller: Option<String>,
@@ -1113,6 +1115,11 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
             condition = condition.add(CallRecordColumn::SipTrunkId.is_in(sip_trunk_ids));
         }
 
+        let outbound_sip_trunk_ids = normalize_i64_list(filters.outbound_sip_trunk_ids.as_ref());
+        if !outbound_sip_trunk_ids.is_empty() {
+            condition = condition.add(CallRecordColumn::OutboundSipTrunkId.is_in(outbound_sip_trunk_ids));
+        }
+
         let tags = normalize_string_list(filters.tags.as_ref());
         if !tags.is_empty() {
             let mut any_tag = Condition::any();
@@ -1180,6 +1187,9 @@ async fn load_related_context(
         }
         if let Some(id) = record.sip_trunk_id {
             sip_trunk_ids.insert(id);
+        }
+        if let Some(id) = record.outbound_sip_trunk_id {
+            sip_trunk_ids.insert(id); // Using the same sip_trunk_ids pool for query
         }
     }
 
@@ -1281,7 +1291,12 @@ fn build_record_payload(
         .sip_gateway
         .clone()
         .or_else(|| sip_trunk_name.clone());
-    let outbound_trunk_name = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_NAME_KEY);
+    let outbound_trunk_name = record
+        .outbound_sip_trunk_id
+        .and_then(|id| related.sip_trunks.get(&id))
+        .map(|trunk| trunk.display_name.clone().unwrap_or(trunk.name.clone()))
+        .or_else(|| metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_NAME_KEY));
+        
     let outbound_trunk_dest = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_DEST_KEY);
 
     let caller_uri = record.caller_uri.clone();
@@ -1319,6 +1334,7 @@ fn build_record_payload(
         "sip_gateway": sip_gateway,
         "sip_trunk": sip_trunk_name,
         "outbound_trunk": outbound_trunk_name,
+        "outbound_trunk_id": record.outbound_sip_trunk_id,
         "outbound_trunk_dest": outbound_trunk_dest,
         "tags": tags,
         "has_transcript": record.has_transcript,

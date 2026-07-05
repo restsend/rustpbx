@@ -20,9 +20,6 @@ use crate::{
     },
 };
 
-const OUTBOUND_TRUNK_NAME_KEY: &str = "outbound_trunk_name";
-const OUTBOUND_TRUNK_DEST_KEY: &str = "outbound_trunk_dest";
-
 // Debug routes are now stored in ProxyDataContext.debug_routes
 // and checked upstream in call.rs before calling match_invite.
 
@@ -1359,13 +1356,12 @@ fn attach_outbound_trunk_metadata(
     trunk: &TrunkConfig,
 ) {
     let hints = hints.get_or_insert_with(DialplanHints::default);
-    let mut metadata = hints
-        .extensions
-        .remove::<HashMap<String, String>>()
-        .unwrap_or_default();
-    metadata.insert(OUTBOUND_TRUNK_NAME_KEY.to_string(), trunk_name.to_string());
-    metadata.insert(OUTBOUND_TRUNK_DEST_KEY.to_string(), trunk.dest.clone());
-    hints.extensions.insert(metadata);
+    hints.extensions.insert(crate::call::OutboundTrunkContext {
+        id: trunk.id,
+        name: trunk_name.to_string(),
+        dest: Some(trunk.dest.clone()),
+        tenant_id: None,
+    });
 }
 
 /// Apply trunk configuration

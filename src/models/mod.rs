@@ -122,3 +122,4 @@ pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     }
     Ok(db)
 }
+pub mod add_outbound_sip_trunk_id;

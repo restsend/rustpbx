@@ -94,6 +94,7 @@ pub struct CallDetails {
     pub department_id: Option<i64>,
     pub extension_id: Option<i64>,
     pub sip_trunk_id: Option<i64>,
+    pub outbound_sip_trunk_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
     pub recording_url: Option<String>,

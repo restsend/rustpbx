@@ -350,7 +350,7 @@ mod tests {
                 queue: None,
                 department_id: None,
                 extension_id: None,
-                sip_trunk_id: None,
+                sip_trunk_id: None, outbound_sip_trunk_id: None,
                 route_id: None,
                 sip_gateway: None,
                 recording_url: None,

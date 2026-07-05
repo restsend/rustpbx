@@ -1337,6 +1337,24 @@ impl CallModule {
             .unwrap_or(70)
     }
 
+    /// Build a session cancel token linked to both the SIP server (for global
+    /// shutdown) and the incoming transport connection (so that a WebSocket
+    /// disconnect immediately cancels the session).
+    fn build_session_token(&self, tx: &Transaction) -> CancellationToken {
+        let session_token = self.inner.server.cancel_token.child_token();
+        if let Some(ref conn) = tx.connection {
+            if let Some(transport_token) = conn.cancel_token() {
+                let watch = session_token.clone();
+                crate::utils::spawn(async move {
+                    transport_token.cancelled().await;
+                    info!("Transport disconnected, cancelling call session");
+                    watch.cancel();
+                });
+            }
+        }
+        session_token
+    }
+
     async fn build_and_serve_dialplan(
         &self,
         tx: &mut Transaction,
@@ -1357,7 +1375,7 @@ impl CallModule {
         }
         let builder = CallSessionBuilder::new(cookie, dialplan, max_forwards - 1)
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_cancel_token(self.inner.server.cancel_token.child_token());
+            .with_cancel_token(self.build_session_token(tx));
         builder.build_and_serve(self.inner.server.clone(), tx).await
     }
 
@@ -1599,7 +1617,7 @@ impl CallModule {
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-                            .with_cancel_token(self.inner.server.cancel_token.child_token());
+                            .with_cancel_token(self.build_session_token(tx));
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
@@ -1674,7 +1692,7 @@ impl CallModule {
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-                            .with_cancel_token(self.inner.server.cancel_token.child_token());
+                            .with_cancel_token(self.build_session_token(tx));
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform conference merge once new call answers

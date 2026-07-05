@@ -728,6 +728,11 @@ pub struct JwtAuthConfig {
     pub check_local_user: bool,
     #[serde(default = "default_jwt_ws_token_param")]
     pub ws_token_param: String,
+    /// Enable dev-console JWT/PhoneAuth token mint endpoints
+    /// (`POST /cc/dev/jwt-preview`, `POST /cc/dev/phone-token`).
+    /// Defaults to false — production should keep this off.
+    #[serde(default)]
+    pub dev_mint_enabled: bool,
 }
 
 fn default_jwt_user_id_claim() -> String {

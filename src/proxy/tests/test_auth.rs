@@ -1407,6 +1407,7 @@ fn make_jwt_config() -> JwtAuthConfig {
         sip_header_name: "X-Auth-Token".to_string(),
         check_local_user: false,
         ws_token_param: "token".to_string(),
+        dev_mint_enabled: false,
     }
 }
 

@@ -19,7 +19,7 @@ use crate::{
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
         cluster_event::{ClusterEventHub, ClusterEventModule},
-        locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
+        locator::{DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator},
         pre_auth_registry::PreAuthRegistry,
         presence::PresenceManager,
     },
@@ -826,6 +826,60 @@ impl SipServerBuilder {
         // Start the local event-dispatch loop.
         cluster_event_hub.clone().start().await;
         let cluster_event_hub: Option<Arc<ClusterEventHub>> = Some(cluster_event_hub);
+
+        // Background sweeper for expired SIP REGISTER bindings.
+        //
+        // Why we need this:
+        //   Transport-layer cleanup (TransportInspectorLocator::handle on
+        //   TransportEvent::Closed) only fires when the TCP/WS connection is
+        //   politely closed. When a client vanishes without sending a SIP
+        //   REGISTER expires=0 AND without emitting a WebSocket Close frame
+        //   (e.g. browser tab closed, network loss, laptop sleep), the only
+        //   signal we have is the REGISTER expiry itself. `MemoryLocator`'s
+        //   opportunistic GC only runs during `lookup`/`register`, so a
+        //   binding that nobody looks up would linger forever, leaving the
+        //   CC agent stuck in `idle`. This task periodically sweeps expired
+        //   bindings and broadcasts `LocatorEvent::Offline` so the registrar
+        //   bridge can move the agent back to `offline`.
+        {
+            let locator_for_sweep = locator.clone();
+            let locator_events_for_sweep = locator_events.clone();
+            let sweep_token = cancel_token.child_token();
+            tokio::spawn(async move {
+                // Run roughly every quarter of the shortest typical registrar
+                // expiry (the server caps Contact expiry at ~50s, see
+                // registrar.rs `max_registrar_expires`). 15s gives us <1 expiry
+                // interval of latency between the binding technically expiring
+                // and the agent being marked offline.
+                const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+                let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Skip the immediate first tick — there is nothing to sweep
+                // right after boot and we don't want to log a noisy "swept 0"
+                // line during startup.
+                ticker.tick().await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = sweep_token.cancelled() => break,
+                        _ = ticker.tick() => {
+                            match locator_for_sweep.sweep_expired().await {
+                                Ok(removed) if !removed.is_empty() => {
+                                    info!(
+                                        count = removed.len(),
+                                        "locator swept expired registrations"
+                                    );
+                                    let _ = locator_events_for_sweep
+                                        .send(LocatorEvent::Offline(removed));
+                                }
+                                Ok(_) => {}
+                                Err(e) => warn!(error = %e, "locator sweep failed"),
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
 

@@ -30,6 +30,7 @@ pub mod sip;
 pub mod user;
 pub use cookie::{
     CalleeDisplayName, CalleeOfflineMarker, SourceAddress, TenantId, TransactionCookie,
+    OutboundTrunkContext,
     TrunkContext,
 };
 pub use user::SipUser;

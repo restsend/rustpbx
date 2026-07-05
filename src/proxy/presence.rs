@@ -799,7 +799,10 @@ impl PresenceModule {
                 note: state
                     .note
                     .clone()
-                    .or_else(|| Some(state.status.to_string())),
+                    .or_else(|| match &state.status {
+                        PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
+                        _ => Some(state.status.to_string()),
+                    }),
                 contact: Some(format!("sip:{}@{}", identity, domain)),
                 activities: match state.status {
                     PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {

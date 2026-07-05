@@ -3807,7 +3807,10 @@ impl SipSession {
             {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to play progress audio");
             }
-            self.media.bridge_playback_track_id = Some("progress-media".to_string());
+            self.media.bridge_playback_track_ids.insert(
+                "caller".to_string(),
+                "progress-media".to_string(),
+            );
             self.media
                 .playback_tracks
                 .insert("progress-media".to_string(), track);
@@ -4679,7 +4682,13 @@ impl SipSession {
 
         // Stop playback (if any) before transitioning to confirmed call.
         if self.media.early_media_sent {
-            if let Some(track_id) = self.media.bridge_playback_track_id.clone() {
+            let early_track_ids: Vec<String> = self
+                .media
+                .bridge_playback_track_ids
+                .values()
+                .cloned()
+                .collect();
+            for track_id in early_track_ids {
                 self.stop_playback_track(&track_id, false).await;
             }
         }
@@ -6998,10 +7007,15 @@ impl SipSession {
 
         // Restore bridge output if this was a bridge-track
         if let Some(ref bridge) = self.media.media_bridge {
-            let is_bridge_track = self.media.bridge_playback_track_id.as_deref() == Some(track_id);
+            let is_bridge_track = self
+                .media
+                .bridge_playback_track_ids
+                .get(leg_label)
+                .map(String::as_str)
+                == Some(track_id);
             match leg_label {
                 "caller" if is_bridge_track && self.media.caller_answer_uses_media_bridge => {
-                    self.media.bridge_playback_track_id = None;
+                    self.media.bridge_playback_track_ids.remove("caller");
                     if self.media.media_bridge_started {
                         bridge
                             .replace_output_with_peer(
@@ -7015,7 +7029,7 @@ impl SipSession {
                     }
                 }
                 "callee" if is_bridge_track && self.media.callee_offer_uses_media_bridge => {
-                    self.media.bridge_playback_track_id = None;
+                    self.media.bridge_playback_track_ids.remove("callee");
                     if self.media.media_bridge_started {
                         bridge
                             .replace_output_with_peer(
@@ -7279,7 +7293,7 @@ impl SipSession {
             debug!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
             bridge.stop().await;
             self.media.media_bridge_started = false;
-            self.media.bridge_playback_track_id = None;
+            self.media.bridge_playback_track_ids.clear();
         }
 
         // Abort all leg-specific spawned tasks
@@ -7334,7 +7348,12 @@ impl SipSession {
 
         self.callee_event_tx = None;
 
-        let dialogs_to_hangup = self.pending_hangup.clone();
+        // Collect ALL active dialog IDs to hang up: pending set + caller dialog + callee dialogs.
+        let mut dialogs_to_hangup = self.pending_hangup.clone();
+        dialogs_to_hangup.insert(self.server_dialog.id());
+        for dialog_id in self.callee_dialogs.iter().map(|e| e.key().clone()) {
+            dialogs_to_hangup.insert(dialog_id);
+        }
 
         if !dialogs_to_hangup.is_empty() {
             let hangup_dialogs = dialogs_to_hangup
@@ -8941,9 +8960,9 @@ impl SipSession {
                 bridge
                     .replace_output_with_file($bridge_endpoint, &leg_track)
                     .await?;
-                if $leg_str == "caller" {
-                    self.media.bridge_playback_track_id = Some(target_tid.clone());
-                }
+                self.media
+                    .bridge_playback_track_ids
+                    .insert($leg_str.to_string(), target_tid.clone());
                 self.media.playback_tracks
                     .insert(target_tid.clone(), leg_track);
             }};

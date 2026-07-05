@@ -130,6 +130,14 @@ pub struct CalleeOfflineMarker;
 pub struct TenantId(pub i64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundTrunkContext {
+    pub id: Option<i64>,
+    pub name: String,
+    pub dest: Option<String>,
+    pub tenant_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrunkContext {
     pub id: Option<i64>,
     pub name: String,
