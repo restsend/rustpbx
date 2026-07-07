@@ -780,12 +780,14 @@ pub struct MediaConfig {
     /// Media proxy mode
     pub proxy_mode: MediaProxyMode,
     pub external_ip: Option<String>,
+    pub bind_ip: Option<String>,
     pub rtp_start_port: Option<u16>,
     pub rtp_end_port: Option<u16>,
     pub webrtc_port_start: Option<u16>,
     pub webrtc_port_end: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub enable_latching: bool,
+    pub probation_max_packets: Option<u8>,
     /// Video policy: pass-through or strip video from SDP
     pub video_policy: Option<VideoPolicy>,
 }
@@ -801,12 +803,14 @@ impl MediaConfig {
         Self {
             proxy_mode: MediaProxyMode::Auto,
             external_ip: None,
+            bind_ip: None,
             rtp_start_port: None,
             rtp_end_port: None,
             webrtc_port_start: None,
             webrtc_port_end: None,
             ice_servers: None,
             enable_latching: true,
+            probation_max_packets: None,
             video_policy: None,
         }
     }
@@ -823,6 +827,21 @@ impl MediaConfig {
 
     pub fn with_external_ip(mut self, ip: Option<String>) -> Self {
         self.external_ip = ip;
+        self
+    }
+
+    pub fn with_bind_ip(mut self, ip: Option<String>) -> Self {
+        self.bind_ip = ip;
+        self
+    }
+
+    pub fn with_enable_latching(mut self, enable: bool) -> Self {
+        self.enable_latching = enable;
+        self
+    }
+
+    pub fn with_probation_max_packets(mut self, packets: Option<u8>) -> Self {
+        self.probation_max_packets = packets;
         self
     }
 

@@ -650,7 +650,8 @@ impl RtpTrackBuilder {
 ///
 /// Used for playing audio files (e.g., ringback tones, hold music, announcements).
 pub struct FileTrack {
-    track_id: String,
+    pub(crate) track_id: String,
+    pub(crate) session_id: Option<String>,
     file_path: Option<String>,
     loop_playback: bool,
     cancel_token: CancellationToken,
@@ -673,6 +674,7 @@ impl Clone for FileTrack {
     fn clone(&self) -> Self {
         Self {
             track_id: self.track_id.clone(),
+            session_id: self.session_id.clone(),
             file_path: self.file_path.clone(),
             loop_playback: self.loop_playback,
             cancel_token: self.cancel_token.clone(),
@@ -775,6 +777,7 @@ impl FileTrack {
         pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
 
         Self {
+            session_id: None,
             track_id,
             file_path: None,
             loop_playback: false,
@@ -853,6 +856,15 @@ impl FileTrack {
     pub fn with_cname(mut self, cname: String) -> Self {
         self.cname = Some(cname);
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn codec_info(&self) -> Option<&negotiate::CodecInfo> {
+        self.codec_info.as_ref()
     }
 
     fn recreate_pc(&mut self) {
@@ -949,6 +961,8 @@ impl FileTrack {
         };
 
         debug!(
+            track_id = %self.track_id,
+            session_id = ?self.session_id,
             file = %file_path.unwrap_or("<silence>"),
             loop_playback = self.loop_playback,
             codec = ?selected.codec,
@@ -1006,6 +1020,8 @@ impl FileTrack {
         let pc = target_pc.unwrap_or_else(|| self.pc.clone());
 
         debug!(
+            track_id = %self.track_id,
+            session_id = ?self.session_id,
             file = %file_path,
             loop_playback = self.loop_playback,
             ?codec,

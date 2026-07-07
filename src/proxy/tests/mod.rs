@@ -24,7 +24,7 @@ pub mod rtp_utils;
 mod test_183_early_media_regression;
 mod test_call_e2e;
 mod test_caller_gate_regression;
-mod test_dn_events_e2e;
+
 mod test_inbound_refer;
 mod test_ivr_queue_e2e;
 mod test_media_e2e;

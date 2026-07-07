@@ -44,7 +44,7 @@ impl FileAudioSource {
     pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
         let (actual_path, temp_file_path) =
             if file_path.starts_with("http://") || file_path.starts_with("https://") {
-                debug!("Downloading audio file from URL: {}", file_path);
+                debug!(file = %file_path, "Downloading audio file");
                 let temp_path = Self::download_file(&file_path).await?;
                 (temp_path.clone(), Some(temp_path))
             } else {
@@ -284,7 +284,7 @@ impl FileAudioSource {
             .unwrap_or("audio_file");
         let temp_path = temp_dir.join(format!("rustpbx_audio_{}", file_name));
 
-        debug!("Downloading to temporary file: {:?}", temp_path);
+        debug!(temp = %temp_path.display(), "Downloading to temporary file");
 
         let response = crate::http_util::shared_keepalive_client()
             .get(url)
@@ -306,7 +306,11 @@ impl FileAudioSource {
         file.write_all(&bytes)
             .map_err(|e| anyhow!("Failed to write temporary file: {}", e))?;
 
-        debug!("Downloaded {} bytes to {:?}", bytes.len(), temp_path);
+        debug!(
+            bytes = bytes.len(),
+            temp = %temp_path.display(),
+            "Downloaded audio file"
+        );
 
         Ok(temp_path.to_string_lossy().to_string())
     }
@@ -324,7 +328,7 @@ impl FileAudioSource {
                     "u" | "ulaw" => Ok(CodecType::PCMU),
                     "a" | "alaw" => Ok(CodecType::PCMA),
                     _ => {
-                        warn!("Unknown file extension '{}', assuming PCMU", ext);
+                        warn!(extension = %ext, "Unknown file extension, assuming PCMU");
                         Ok(CodecType::PCMU)
                     }
                 },
@@ -520,9 +524,9 @@ impl Drop for FileAudioSource {
     fn drop(&mut self) {
         if let Some(ref temp_path) = self.temp_file_path {
             if let Err(e) = std::fs::remove_file(temp_path) {
-                warn!("Failed to remove temporary file {}: {}", temp_path, e);
+                warn!(temp = %temp_path, error = %e, "Failed to remove temporary file");
             } else {
-                debug!("Cleaned up temporary file: {}", temp_path);
+                debug!(temp = %temp_path, "Cleaned up temporary file");
             }
         }
     }

@@ -327,7 +327,8 @@ pub enum BridgeSide {
 }
 
 pub struct BridgePeer {
-    id: String,
+    pub(crate) id: String,
+    pub(crate) session_id: Option<String>,
     /// Caller-side PeerConnection — fast-path alias for peers["caller"]
     caller_pc: PeerConnection,
     /// Callee-side PeerConnection (plain RTP) — fast-path alias for peers["callee"]
@@ -412,6 +413,7 @@ impl BridgePeer {
     /// Create a new bridge peer with given WebRTC and RTP PeerConnections
     pub fn new(id: String, caller_pc: PeerConnection, callee_pc: PeerConnection) -> Self {
         Self {
+            session_id: None,
             id,
             caller_pc,
             callee_pc,
@@ -481,7 +483,11 @@ impl BridgePeer {
     /// endpoint that may not be ready to receive it yet.
     pub fn open_caller_gate(&self) {
         self.caller_gate.store(true, Ordering::Release);
-        debug!(bridge_id = %self.id, "Caller gate opened — WebRTC→RTP forwarding enabled");
+        debug!(
+            bridge_id = %self.id,
+            session_id = ?self.session_id,
+            "Caller gate opened — WebRTC→RTP forwarding enabled"
+        );
     }
 
     /// Returns whether the caller gate has been opened.
@@ -789,14 +795,14 @@ impl BridgePeer {
 
                             debug!(
                                 bridge_id = %bridge_id,
-                                caller_to_callee_pps   = dw_pkts,
-                                caller_to_callee_kbps  = dw_bytes * 8 / 5 / 1000,
-                                caller_to_callee_loss  = format!("{:.2}%", w_loss_pct),
-                                caller_to_callee_drop  = w_drop,
-                                callee_to_caller_pps   = dr_pkts,
-                                callee_to_caller_kbps  = dr_bytes * 8 / 5 / 1000,
-                                callee_to_caller_loss  = format!("{:.2}%", r_loss_pct),
-                                callee_to_caller_drop  = r_drop,
+                                caller_to_callee_pkts_5s = dw_pkts,
+                                caller_to_callee_kbps    = dw_bytes * 8 / 5 / 1000,
+                                caller_to_callee_loss    = format!("{:.2}%", w_loss_pct),
+                                caller_to_callee_drop    = w_drop,
+                                callee_to_caller_pkts_5s = dr_pkts,
+                                callee_to_caller_kbps    = dr_bytes * 8 / 5 / 1000,
+                                callee_to_caller_loss    = format!("{:.2}%", r_loss_pct),
+                                callee_to_caller_drop    = r_drop,
                                 "Bridge leg stats [5s]"
                             );
 
@@ -910,6 +916,7 @@ impl BridgePeer {
 
         info!(
             bridge_id = %self.id,
+            session_id = ?self.session_id,
             endpoint = ?endpoint,
             "Bridge output replaced with file source"
         );
@@ -2194,7 +2201,7 @@ impl BridgePeer {
             return;
         }
 
-        debug!(
+        trace!(
             rtp_ts = frame.rtp_timestamp,
             data_len = frame.data.len(),
             first_byte = frame.data.first().copied().unwrap_or(0),
@@ -2354,6 +2361,7 @@ impl Drop for BridgePeer {
 /// Builder for creating BridgePeer instances
 pub struct BridgePeerBuilder {
     bridge_id: String,
+    session_id: Option<String>,
     caller_config: Option<rustrtc::RtcConfiguration>,
     callee_config: Option<rustrtc::RtcConfiguration>,
     rtp_port_range: (u16, u16),
@@ -2381,6 +2389,7 @@ impl BridgePeerBuilder {
     pub fn new(bridge_id: String) -> Self {
         Self {
             bridge_id,
+            session_id: None,
             caller_config: None,
             callee_config: None,
             rtp_port_range: (20000, 30000),
@@ -2535,6 +2544,11 @@ impl BridgePeerBuilder {
         self
     }
 
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
     pub fn with_rtp_timeout_notify(
         mut self,
         tx: mpsc::Sender<String>,
@@ -2639,6 +2653,7 @@ impl BridgePeerBuilder {
         let callee_pc = PeerConnection::new(callee_config);
 
         let mut bridge = BridgePeer::new(self.bridge_id, caller_pc, callee_pc);
+        bridge.session_id = self.session_id;
         bridge.caller_sender_codec = self.caller_sender_codec;
         bridge.callee_sender_codec = self.callee_sender_codec;
         bridge.recorder = self.recorder;
@@ -4574,5 +4589,18 @@ mod tests {
             }
             other => panic!("Expected passthrough PCMU Audio frame, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_session_id_propagated_from_builder() {
+        let bridge = BridgePeerBuilder::new("sid-bridge".to_string())
+            .with_session_id("test-session-abc".to_string())
+            .build();
+
+        assert_eq!(
+            bridge.session_id.as_deref(),
+            Some("test-session-abc"),
+            "bridge should have session_id from builder"
+        );
     }
 }

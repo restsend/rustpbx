@@ -7,7 +7,7 @@ use super::{
 use crate::{
     auth::{jwt_auth_backend::JwtAuthBackend, jwt_validator::JwtValidator},
     auto_external_ip,
-    call::{TransactionCookie, policy::FrequencyLimiter},
+    call::{MediaConfig, TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder},
@@ -769,6 +769,8 @@ impl SipServerBuilder {
                 http_router_config.clone(),
                 rtp_config.clone(),
                 self.config.media_proxy,
+                self.config.enable_latching,
+                self.config.latching_probation_max_packets,
             )));
         }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
@@ -1347,6 +1349,20 @@ impl SipServerInner {
             params,
             ..Default::default()
         })
+    }
+
+    pub fn default_media_config(&self) -> MediaConfig {
+        MediaConfig::new()
+            .with_proxy_mode(self.proxy_config.media_proxy)
+            .with_external_ip(self.rtp_config.external_ip.clone())
+            .with_bind_ip(self.rtp_config.bind_ip.clone())
+            .with_rtp_start_port(self.rtp_config.start_port)
+            .with_rtp_end_port(self.rtp_config.end_port)
+            .with_webrtc_start_port(self.rtp_config.webrtc_start_port)
+            .with_webrtc_end_port(self.rtp_config.webrtc_end_port)
+            .with_ice_servers(self.rtp_config.ice_servers.clone())
+            .with_enable_latching(self.proxy_config.enable_latching)
+            .with_probation_max_packets(self.proxy_config.latching_probation_max_packets)
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {

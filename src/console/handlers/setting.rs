@@ -132,6 +132,28 @@ pub(crate) struct ProxySettingsPayload {
     pub rwi_webhook: Option<LocatorWebhookConfig>,
     pub user_backends: Option<Vec<UserBackendConfig>>,
     pub http_router: Option<HttpRouterConfig>,
+    pub jwt_auth: Option<Option<JwtAuthPayload>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JwtAuthPayload {
+    pub enabled: bool,
+    #[serde(default)]
+    pub secret: String,
+    #[serde(default)]
+    pub user_id_claim: Option<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default)]
+    pub sip_header_name: Option<String>,
+    #[serde(default)]
+    pub check_local_user: Option<bool>,
+    #[serde(default)]
+    pub ws_token_param: Option<String>,
+    #[serde(default)]
+    pub dev_mint_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -500,6 +522,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "uri_max_length": config.proxy.uri_max_length,
             "uri_reject_malformed": config.proxy.uri_reject_malformed,
             "emergency": config.proxy.emergency.clone(),
+            "jwt_auth": config.proxy.jwt_auth.clone(),
             "session_cmd_channel_capacity": config.proxy.session_cmd_channel_capacity,
             "session_state_channel_capacity": config.proxy.session_state_channel_capacity,
             "media_cmd_channel_capacity": config.proxy.media_cmd_channel_capacity,
@@ -1543,6 +1566,15 @@ enum CallRecordStoragePayload {
         #[serde(default)]
         keep_media_copy: Option<bool>,
     },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+        #[serde(default)]
+        with_media: Option<bool>,
+        #[serde(default)]
+        keep_media_copy: Option<bool>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1839,6 +1871,21 @@ pub(crate) async fn update_proxy_settings(
             }
             modified = true;
         }
+    }
+
+    if let Some(jwt_opt) = payload.jwt_auth {
+        match jwt_opt {
+            Some(jwt) if jwt.enabled && !jwt.secret.is_empty() => {
+                match serialize_to_item(&jwt, "jwt_auth") {
+                    Ok(item) => table["jwt_auth"] = item,
+                    Err(resp) => return resp,
+                }
+            }
+            _ => {
+                table.remove("jwt_auth");
+            }
+        }
+        modified = true;
     }
 
     // Write rwi_webhook at root level (after table borrow is done)

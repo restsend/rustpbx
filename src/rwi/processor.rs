@@ -1138,8 +1138,8 @@ impl RwiCommandProcessor {
             headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
         }
 
-        let external_ip = server
-            .rtp_config
+        let media = server.default_media_config();
+        let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -1147,9 +1147,11 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
+                .with_enable_latching(media.enable_latching)
+                .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip.clone())
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
@@ -2170,8 +2172,8 @@ impl RwiCommandProcessor {
 
         let dialog_layer = server.dialog_layer.clone();
 
-        let external_ip = server
-            .rtp_config
+        let media = server.default_media_config();
+        let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -2179,9 +2181,11 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("parallel-{}-{}", operation_id, call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
+                .with_enable_latching(media.enable_latching)
+                .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip.clone())
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
