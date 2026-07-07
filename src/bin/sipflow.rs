@@ -11,7 +11,7 @@ use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
     perf::{PerfCounters, PerfDumper},
-    protocol::{MsgType, Packet, parse_packet},
+    protocol::{MsgType, Packet, parse_datagram},
     storage::extract_callid,
 };
 use std::collections::HashMap;
@@ -200,9 +200,20 @@ async fn main() -> Result<()> {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((size, _)) => {
-                    if let Ok(packet) = parse_packet(&buf[..size]) {
-                        perf_rx.packets_received.fetch_add(1, Ordering::Relaxed);
-                        let _ = tx.try_send(packet);
+                    // `parse_datagram` handles both legacy single-packet
+                    // datagrams and the new batched format transparently.
+                    match parse_datagram(&buf[..size]) {
+                        Ok(packets) => {
+                            perf_rx
+                                .packets_received
+                                .fetch_add(packets.len() as u64, Ordering::Relaxed);
+                            for packet in packets {
+                                let _ = tx.try_send(packet);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("malformed datagram dropped: {}", e);
+                        }
                     }
                 }
                 Err(e) => {

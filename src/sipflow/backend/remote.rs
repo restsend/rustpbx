@@ -5,12 +5,15 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SipFlowClusterNode;
 use crate::http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::sipflow::backend::SipFlowBackend;
-use crate::sipflow::protocol::{MsgType, Packet, encode_packet};
+use crate::sipflow::protocol::{
+    MAX_BATCH_COUNT, MsgType, Packet, encode_batch_into, encode_packet_into,
+};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 /// Jump Consistent Hash
@@ -46,6 +49,19 @@ struct ClusterNode {
     http_addr: String,
 }
 
+/// Minimum (and default) flush interval. Values below this in config are
+/// silently raised to it, because flushing more often than once per RTP
+/// frame interval (~20ms) defeats the purpose of batching and risks
+/// tight-loop sending under low load.
+const MIN_BATCH_FLUSH_MS: u64 = 20;
+
+/// Default ingest channel capacity when the config value is 0.
+const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
+
+/// Lower bound on channel capacity. A capacity of 0 would make `record()`
+/// always fail, so any sub-1 value is raised to this.
+const MIN_CHANNEL_CAPACITY: usize = 1;
+
 enum Command {
     RecordItem { call_id: String, item: SipFlowItem },
 }
@@ -53,15 +69,34 @@ enum Command {
 /// Remote backend that sends data to one of several remote sipflow servers
 /// via UDP (write) and HTTP (read). The target node is selected by
 /// consistent hashing on the call_id.
+///
+/// Writes are coalesced per destination node: items are accumulated into a
+/// per-node buffer and sent as a single batched UDP datagram when either
+/// `batch_size` packets are pending or `batch_flush_ms` elapses since the
+/// last flush. This amortizes syscall and allocation cost across many
+/// packets, dramatically reducing CPU under load compared to a
+/// one-datagram-per-item sender.
+///
+/// Setting `batch_size = 0` disables batching entirely: each record is
+/// sent immediately as a single-packet (legacy format) UDP datagram. This
+/// is the safe escape hatch if a receiver is too old to understand the
+/// batch wire format.
 pub struct RemoteBackend {
-    sender: mpsc::UnboundedSender<Command>,
+    sender: mpsc::Sender<Command>,
     nodes: Vec<ClusterNode>,
     client: reqwest::Client,
     cancel_token: CancellationToken,
 }
 
 impl RemoteBackend {
-    pub fn new(config_nodes: Vec<SipFlowClusterNode>, timeout_secs: u64) -> Result<Self> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config_nodes: Vec<SipFlowClusterNode>,
+        timeout_secs: u64,
+        batch_size_cfg: usize,
+        batch_flush_ms_cfg: u64,
+        channel_capacity_cfg: usize,
+    ) -> Result<Self> {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
         socket.set_nonblocking(true)?;
         let udp_socket = Arc::new(UdpSocket::from_std(socket)?);
@@ -84,75 +119,45 @@ impl RemoteBackend {
             None,
         )?;
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
+        // Ingest channel capacity: 0 → default, otherwise clamp to >= 1.
+        let channel_capacity = if channel_capacity_cfg == 0 {
+            DEFAULT_CHANNEL_CAPACITY
+        } else {
+            channel_capacity_cfg.max(MIN_CHANNEL_CAPACITY)
+        };
+        let (tx, rx) = mpsc::channel::<Command>(channel_capacity);
         let cancel_token = CancellationToken::new();
-        let cancel_token_clone = cancel_token.clone();
+
+        // `batch_size = 0` disables batching entirely (each record is sent
+        // as a legacy single-packet datagram). Otherwise clamp to a sane
+        // range. We keep a separate `batch_enabled` flag so the flush path
+        // can choose the right wire format (single vs batch).
+        //
+        // `clamp(1, MAX_BATCH_COUNT)` maps 0 → 1 (so the per-node push/flush
+        // logic still works when disabled) and caps pathological large
+        // values at the protocol maximum.
+        let batch_enabled = batch_size_cfg != 0;
+        let batch_size = batch_size_cfg.clamp(1, MAX_BATCH_COUNT);
+        // Clamp flush interval to at least MIN_BATCH_FLUSH_MS. Anything
+        // tighter would defeat batching and risk spin-flushing under low
+        // load.
+        let flush_duration =
+            Duration::from_millis(batch_flush_ms_cfg.max(MIN_BATCH_FLUSH_MS));
+
+        let cancel_clone = cancel_token.clone();
         let nodes_clone = nodes.clone();
 
         crate::utils::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token_clone.cancelled() => {
-                        break;
-                    }
-                    Some(cmd) = rx.recv() => {
-                        match cmd {
-                            Command::RecordItem { call_id, item } => {
-                                let idx = jump_consistent_hash(&call_id, nodes_clone.len());
-                                let target_addr = nodes_clone[idx].udp_addr;
-
-                                let default_port = if matches!(&item.msg_type, SipFlowMsgType::Sip)
-                                {
-                                    5060
-                                } else {
-                                    0
-                                };
-                                let parse_addr = |s: &str| -> (IpAddr, u16) {
-                                    let parts: Vec<&str> = s.split(':').collect();
-                                    let ip = parts[0].parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
-                                    let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(default_port);
-                                    (ip, port)
-                                };
-
-                                let (src_ip, src_port) = if !item.src_addr.is_empty() {
-                                    parse_addr(&item.src_addr)
-                                } else {
-                                    (IpAddr::from([127, 0, 0, 1]), default_port)
-                                };
-
-                                let (dst_ip, dst_port) = if !item.dst_addr.is_empty() {
-                                    parse_addr(&item.dst_addr)
-                                } else {
-                                    (IpAddr::from([127, 0, 0, 1]), default_port)
-                                };
-
-                                let msg_type = match item.msg_type {
-                                    SipFlowMsgType::Sip => MsgType::Sip,
-                                    SipFlowMsgType::Rtp => MsgType::Rtp,
-                                };
-                                let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
-                                    (Some(call_id), item.leg)
-                                } else {
-                                    (None, None)
-                                };
-
-                                let packet = Packet {
-                                    msg_type,
-                                    src: (src_ip, src_port),
-                                    dst: (dst_ip, dst_port),
-                                    timestamp: item.timestamp,
-                                    call_id: packet_call_id,
-                                    leg: packet_leg,
-                                    payload: item.payload,
-                                };
-
-                                let data = encode_packet(&packet);
-                                let _ = udp_socket.send_to(&data, target_addr).await;
-                            }
-                        }
-                    }
-                }
-            }
+            worker_loop(
+                rx,
+                udp_socket,
+                nodes_clone,
+                batch_size,
+                batch_enabled,
+                flush_duration,
+                cancel_clone,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -169,14 +174,220 @@ impl RemoteBackend {
     }
 }
 
+/// Build a wire [`Packet`] from a recorded item, consuming `call_id` to
+/// avoid an extra clone on the RTP path (where the call id travels in the
+/// packet metadata).
+///
+/// Address parsing uses `split_once` instead of `split(':').collect()` to
+/// avoid heap allocations on every packet.
+fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
+    let default_port = if matches!(item.msg_type, SipFlowMsgType::Sip) {
+        5060
+    } else {
+        0
+    };
+
+    let parse_addr = |s: &str| -> (IpAddr, u16) {
+        match s.split_once(':') {
+            Some((ip_str, port_str)) => {
+                let ip = ip_str.parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
+                let port = port_str.parse().unwrap_or(default_port);
+                (ip, port)
+            }
+            None => {
+                let ip = s.parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
+                (ip, default_port)
+            }
+        }
+    };
+
+    let (src_ip, src_port) = if !item.src_addr.is_empty() {
+        parse_addr(&item.src_addr)
+    } else {
+        (IpAddr::from([127, 0, 0, 1]), default_port)
+    };
+    let (dst_ip, dst_port) = if !item.dst_addr.is_empty() {
+        parse_addr(&item.dst_addr)
+    } else {
+        (IpAddr::from([127, 0, 0, 1]), default_port)
+    };
+
+    let msg_type = match item.msg_type {
+        SipFlowMsgType::Sip => MsgType::Sip,
+        SipFlowMsgType::Rtp => MsgType::Rtp,
+    };
+    // For RTP the call_id is embedded in the packet metadata; for SIP it is
+    // recovered from the payload on the receiver side (`extract_callid`),
+    // so we move `call_id` only for RTP and let it drop for SIP.
+    let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
+        (Some(call_id), item.leg)
+    } else {
+        (None, None)
+    };
+
+    Packet {
+        msg_type,
+        src: (src_ip, src_port),
+        dst: (dst_ip, dst_port),
+        timestamp: item.timestamp,
+        call_id: packet_call_id,
+        leg: packet_leg,
+        payload: item.payload,
+    }
+}
+
+/// Background worker that drains the ingest channel, groups packets by
+/// destination node, and flushes each node's buffer.
+///
+/// When `batch_enabled` is true, each flush encodes the node's pending
+/// packets as a single batched UDP datagram (one syscall for many
+/// packets). When false (config `batch_size = 0`), each packet is sent
+/// immediately as a legacy single-packet datagram — the worker still
+/// threads everything through the same per-node buffers for uniformity,
+/// but the buffers never accumulate (every push triggers a flush).
+///
+/// Flush triggers:
+///   1. A node's buffer reaches `batch_size` → immediate flush of that node.
+///   2. `flush_duration` elapses since the last periodic flush → flush all
+///      non-empty buffers (bounds latency under low load).
+///   3. Channel closed or cancellation → final flush of all buffers.
+async fn worker_loop(
+    mut rx: mpsc::Receiver<Command>,
+    udp_socket: Arc<UdpSocket>,
+    nodes: Vec<ClusterNode>,
+    batch_size: usize,
+    batch_enabled: bool,
+    flush_duration: Duration,
+    cancel: CancellationToken,
+) {
+    // One pending-packet buffer per destination node.
+    let mut per_node: Vec<Vec<Packet>> = (0..nodes.len()).map(|_| Vec::new()).collect();
+    // Scratch buffer reused across `recv_many` calls to avoid allocation.
+    // Sized to `batch_size` so a single call can pull up to one full batch.
+    let mut scratch: Vec<Command> = Vec::with_capacity(batch_size);
+    // Reusable wire-encoding buffer, kept across flushes for zero-alloc sends.
+    let mut send_buf: Vec<u8> = Vec::new();
+
+    let mut deadline = Instant::now() + flush_duration;
+    // Cache the recv limit outside the select! arm to avoid simultaneous
+    // mutable+immutable borrows of `scratch`.
+    let recv_limit = scratch.capacity().max(1);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
+                break;
+            }
+            // `recv_many` returns 0 only when the channel is closed.
+            n = rx.recv_many(&mut scratch, recv_limit) => {
+                if n == 0 {
+                    flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
+                    break;
+                }
+                for cmd in scratch.drain(..) {
+                    let Command::RecordItem { call_id, item } = cmd;
+                    let idx = jump_consistent_hash(&call_id, nodes.len());
+                    let packet = build_packet(call_id, item);
+                    let node_buf = &mut per_node[idx];
+                    node_buf.push(packet);
+                    if node_buf.len() >= batch_size {
+                        flush_one(node_buf, &udp_socket, nodes[idx].udp_addr, &mut send_buf, batch_enabled).await;
+                    }
+                }
+            }
+            // Periodic flush: bounds latency to ~flush_duration for low-rate
+            // streams (e.g. trickled RTP at 50pps). With batching disabled
+            // this is effectively a no-op (buffers are always empty).
+            _ = tokio::time::sleep_until(deadline) => {
+                flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
+                deadline = Instant::now() + flush_duration;
+            }
+        }
+    }
+}
+
+/// Encode and send a single node's pending buffer.
+///
+/// When `batch_enabled` is true the buffer is sent as one batched datagram.
+/// When false each packet is sent as its own legacy single-packet datagram
+/// (used when the user sets `batch_size = 0` to opt out of batching).
+///
+/// `send_buf` is cleared and reused across calls to avoid per-flush
+/// allocation. The packet buffer is cleared after a successful send.
+async fn flush_one(
+    buf: &mut Vec<Packet>,
+    udp_socket: &UdpSocket,
+    target_addr: SocketAddr,
+    send_buf: &mut Vec<u8>,
+    batch_enabled: bool,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    if batch_enabled {
+        send_buf.clear();
+        if encode_batch_into(send_buf, buf).is_ok() {
+            let _ = udp_socket.send_to(send_buf, target_addr).await;
+        } else {
+            // Encoding can only fail on >MAX_BATCH_COUNT, which we prevent
+            // via clamping in `new()`. Fall back to per-packet sends
+            // defensively.
+            for packet in buf.iter() {
+                send_buf.clear();
+                encode_packet_into(send_buf, packet);
+                let _ = udp_socket.send_to(send_buf, target_addr).await;
+            }
+        }
+    } else {
+        // Batching disabled (`batch_size = 0`): legacy single-packet
+        // datagrams. Buffer should normally contain exactly 1 packet here
+        // (every push triggers a flush), but loop anyway for safety.
+        for packet in buf.iter() {
+            send_buf.clear();
+            encode_packet_into(send_buf, packet);
+            let _ = udp_socket.send_to(send_buf, target_addr).await;
+        }
+    }
+    buf.clear();
+}
+
+/// Flush every node's pending buffer. Iterates in node order so the same
+/// `send_buf` can be reused safely (each `flush_one` completes before the
+/// next begins).
+async fn flush_all(
+    per_node: &mut [Vec<Packet>],
+    udp_socket: &UdpSocket,
+    nodes: &[ClusterNode],
+    send_buf: &mut Vec<u8>,
+    batch_enabled: bool,
+) {
+    for (i, node) in nodes.iter().enumerate() {
+        flush_one(
+            &mut per_node[i],
+            udp_socket,
+            node.udp_addr,
+            send_buf,
+            batch_enabled,
+        )
+        .await;
+    }
+}
+
 #[async_trait]
 impl SipFlowBackend for RemoteBackend {
     fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
-        self.sender.send(Command::RecordItem {
-            call_id: call_id.to_string(),
-            item,
-        })?;
-        Ok(())
+        // `try_send` (not `send().await`) because this is a sync function:
+        // never blocks, never suspends the caller. On a full bounded channel
+        // (sustained overload) this returns `TrySendError::Full`, which
+        // upstream callers already swallow — preferable to unbounded memory
+        // growth under backpressure.
+        self.sender
+            .try_send(Command::RecordItem {
+                call_id: call_id.to_string(),
+                item,
+            })
+            .map_err(anyhow::Error::from)
     }
 
     async fn query_flow(

@@ -290,7 +290,6 @@ async fn test_comprehensive_core_event_structs() {
                 ),
                 action_type: "prompt".into(),
                 action_json: None,
-                result_kind: "ok".into(),
                 duration_ms: 12,
                 error: None,
                 step_id: Some("step-1".into()),
@@ -299,6 +298,8 @@ async fn test_comprehensive_core_event_structs() {
                 step_end_time: Some(now.clone()),
                 extra: None,
                 sip_headers: None,
+                end_reason: None,
+                end_detail: None,
             },
         );
         gw.fan_out(

@@ -768,7 +768,6 @@ pub struct IvrStepTrace {
     pub trigger: TriggerInfo,
     pub action_type: String,
     pub action_json: Option<String>,
-    pub result_kind: String,
     pub duration_ms: u64,
     pub error: Option<String>,
     pub step_id: Option<String>,
@@ -777,6 +776,13 @@ pub struct IvrStepTrace {
     pub step_end_time: Option<String>,
     pub extra: Option<serde_json::Value>,
     pub sip_headers: Option<std::collections::HashMap<String, String>>,
+    /// Filled only on the session-end trace entry that records how the whole
+    /// IVR session ended. `None` for ordinary step entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<crate::call::app::ivr::provider::SessionEndTag>,
+    /// Companion detail for [`end_reason`](Self::end_reason) (e.g. transfer target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_detail: Option<String>,
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
 

@@ -218,7 +218,6 @@ impl StepIvrApp {
                 trigger: entry.trigger.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
-                result_kind: entry.result_kind.clone(),
                 error: entry.error.clone(),
                 step_id: entry.step_id,
                 step_name: entry.step_name,
@@ -227,6 +226,8 @@ impl StepIvrApp {
                 duration_ms: entry.duration_ms,
                 extra: entry.extra,
                 sip_headers: Some(self.sess.sip_headers.clone()),
+                end_reason: entry.end_reason,
+                end_detail: entry.end_detail,
             };
             let gw = gw.clone();
             crate::utils::spawn(async move {
@@ -345,20 +346,8 @@ impl StepIvrApp {
         }
     }
 
-    async fn __exec_node(
-        &mut self,
-        ctrl: &mut CallController,
-        ctx: &ApplicationContext,
-    ) -> anyhow::Result<AppAction> {
-        let node = self.current_node.as_ref().unwrap().clone();
-
-        // Reset the awaiting_dtmf flag unless this node is a DtmfMenu (which
-        // will re-arm it via execute_node once the greeting finishes).
-        if !node.action.is_dtmf_menu() {
-            self.awaiting_dtmf = false;
-        }
-
-        let node_type_str = match &node.action {
+    fn action_type_label(action: &EntryAction) -> &'static str {
+        match action {
             EntryAction::Transfer { .. } => "Transfer",
             EntryAction::Queue { .. } => "Queue",
             EntryAction::Menu { .. } => "Menu",
@@ -382,7 +371,22 @@ impl StepIvrApp {
             EntryAction::RouteToAgent { .. } => "RouteToAgent",
             EntryAction::VoipBridge { .. } => "VoipBridge",
         }
-        .to_string();
+    }
+
+    async fn __exec_node(
+        &mut self,
+        ctrl: &mut CallController,
+        ctx: &ApplicationContext,
+    ) -> anyhow::Result<AppAction> {
+        let node = self.current_node.as_ref().unwrap().clone();
+
+        // Reset the awaiting_dtmf flag unless this node is a DtmfMenu (which
+        // will re-arm it via execute_node once the greeting finishes).
+        if !node.action.is_dtmf_menu() {
+            self.awaiting_dtmf = false;
+        }
+
+        let node_type_str = Self::action_type_label(&node.action).to_string();
         let action_json = serde_json::to_string(&node).ok();
         let start = std::time::Instant::now();
         let result = self.execute_node(&node, ctrl, ctx).await;
@@ -441,7 +445,7 @@ impl StepIvrApp {
                         ..pending
                     });
                 }
-                let (app_action, _result_kind) = match action_result {
+                let app_action = match action_result {
                     ActionResult::Terminal(terminal) => {
                         self.step_index += 1;
                         self.increment_total_steps();
@@ -454,7 +458,6 @@ impl StepIvrApp {
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
-                            result_kind: "terminal".to_string(),
                             error: None,
                             step_id: step_id.clone(),
                             step_name: step_name.clone(),
@@ -462,16 +465,18 @@ impl StepIvrApp {
                             step_end_time: Some(step_end),
                             duration_ms: elapsed_ms,
                             extra: self.extra.clone(),
+                            end_reason: None,
+                            end_detail: None,
                         });
                         match terminal {
                             TerminalAction::Transfer(target) => {
                                 self.last_transfer_target = Some(target.clone());
-                                (AppAction::Transfer(target), "terminal")
+                                AppAction::Transfer(target)
                             }
                             TerminalAction::Hangup { reason, code } => {
-                                (AppAction::Hangup { reason, code }, "terminal")
+                                AppAction::Hangup { reason, code }
                             }
-                            TerminalAction::Exit => (AppAction::Exit, "terminal"),
+                            TerminalAction::Exit => AppAction::Exit,
                         }
                     }
                     ActionResult::ChainedTo(next) => {
@@ -492,7 +497,6 @@ impl StepIvrApp {
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
-                            result_kind: "continue".to_string(),
                             error: None,
                             step_id: step_id.clone(),
                             step_name: step_name.clone(),
@@ -500,8 +504,10 @@ impl StepIvrApp {
                             step_end_time: None,
                             duration_ms: 0,
                             extra: self.extra.clone(),
+                            end_reason: None,
+                            end_detail: None,
                         });
-                        (AppAction::Continue, "continue")
+                        AppAction::Continue
                     }
                 };
                 Ok(app_action)
@@ -516,7 +522,6 @@ impl StepIvrApp {
                     provider_url: None,
                     action_type: node_type_str,
                     action_json,
-                    result_kind: "error".to_string(),
                     error: Some(e.to_string()),
                     step_id,
                     step_name,
@@ -524,6 +529,8 @@ impl StepIvrApp {
                     step_end_time: Some(step_end),
                     duration_ms: elapsed_ms,
                     extra: self.extra.clone(),
+                    end_reason: None,
+                    end_detail: None,
                 });
                 return Err(e);
             }
@@ -1070,7 +1077,6 @@ impl CallApp for StepIvrApp {
             self.pending_start_instant = None;
             let step_end = chrono::Utc::now().to_rfc3339();
             self.record_trace(IvrTraceEntry {
-                result_kind: "interrupted".to_string(),
                 step_end_time: Some(step_end),
                 duration_ms: duration,
                 ..pending
@@ -1108,14 +1114,58 @@ impl CallApp for StepIvrApp {
             .get("session_id")
             .cloned()
             .unwrap_or_default();
+        let end_sr = end_reason.to_session_end_reason();
         if !skip_provider_end {
+            let (last_action_type, last_step_id, last_step_name) = match &self.current_node {
+                Some(node) => (
+                    Self::action_type_label(&node.action).to_string(),
+                    node.step_id.clone().or_else(|| self.current_step_id.clone()),
+                    node.step_name.clone().or_else(|| self.current_step_name.clone()),
+                ),
+                None => (
+                    "session_end".to_string(),
+                    self.current_step_id.clone(),
+                    self.current_step_name.clone(),
+                ),
+            };
+            let caller = self
+                .sess
+                .variables
+                .get("caller")
+                .cloned()
+                .unwrap_or_default();
+            let callee = self
+                .sess
+                .variables
+                .get("callee")
+                .cloned()
+                .unwrap_or_default();
+            self.record_trace(IvrTraceEntry {
+                session_id: session_id.clone(),
+                caller,
+                callee,
+                step_index: self.step_index,
+                trigger: crate::rwi::TriggerInfo::new("session_end"),
+                provider_url: None,
+                action_type: last_action_type,
+                action_json: None,
+                error: None,
+                step_id: last_step_id,
+                step_name: last_step_name,
+                step_start_time: None,
+                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+                duration_ms: 0,
+                extra: None,
+                end_reason: Some(end_sr.reason.clone()),
+                end_detail: end_sr.detail.clone(),
+            });
+
             self.provider
                 .on_session_end(&end_reason, &session_id)
                 .await
                 .ok();
         }
-        let end_tag = end_reason.to_session_end_reason();
-        let status = serde_json::to_string(&end_tag.reason)
+        let status = serde_json::to_string(&end_sr.reason)
             .unwrap_or_else(|_| "\"unknown\"".to_string())
             .trim_matches('"')
             .to_string();
@@ -1548,8 +1598,25 @@ mod tests {
         // Verify trace entries exist
         let entries = trace.query_by_session(&sess.session_id).await;
         assert!(!entries.is_empty(), "expected at least one trace entry");
-        // action_type uses discriminant which varies, just check result_kind
-        assert_eq!(entries[0].result_kind, "terminal");
+        assert!(
+            entries.iter().any(|e| e.action_type == "Transfer"),
+            "expected a Transfer step entry"
+        );
+        // The session_end entry should carry the transfer end reason + detail.
+        let session_end = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "session_end")
+            .expect("expected a session_end trace entry");
+        assert_eq!(
+            session_end.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::Transfer)
+        );
+        assert_eq!(session_end.end_detail.as_deref(), Some("2001"));
+        assert_eq!(
+            session_end.action_type,
+            "Transfer",
+            "session_end entry should reuse the last node's action_type"
+        );
     }
 
     #[tokio::test]
@@ -2073,6 +2140,39 @@ mod tests {
             .await
             .expect("remote hangup exit should succeed");
 
+        assert!(
+            !*provider.end_called.lock().unwrap(),
+            "remote hangup must skip provider session end"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_end_trace_skipped_on_remote_hangup() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+        })]));
+        let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+        app.trace = Some(trace.clone());
+        app.ivr_name = Some("test-ivr".to_string());
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+
+        app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
+            .await
+            .expect("remote hangup exit should succeed");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let entries = trace.query_by_session("test-session").await;
+        let has_session_end = entries.iter().any(|e| e.trigger.r#type == "session_end");
+        assert!(
+            !has_session_end,
+            "remote hangup must not record a session_end trace entry"
+        );
         assert!(
             !*provider.end_called.lock().unwrap(),
             "remote hangup must skip provider session end"
