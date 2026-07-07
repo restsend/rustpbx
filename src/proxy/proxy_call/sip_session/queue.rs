@@ -117,10 +117,15 @@ impl SipSession {
         };
 
         let result = match &plan.dial_strategy {
-            Some(DialStrategy::Sequential(_)) => {
-                self.dial_queue_sequential(&resolved_agents, plan.ring_timeout, callee_state_rx)
-                    .await
-            }
+            Some(DialStrategy::Sequential(_)) => self
+                .dial_queue_sequential(
+                    &resolved_agents,
+                    plan.ring_timeout,
+                    callee_state_rx,
+                    plan.no_trying_timeout,
+                    plan.retry_codes.as_deref(),
+                )
+                .await,
             Some(DialStrategy::Parallel(_)) => {
                 self.dial_queue_parallel(&resolved_agents, plan.ring_timeout, callee_state_rx)
                     .await
@@ -156,6 +161,8 @@ impl SipSession {
         agents: &[crate::call::Location],
         _ring_timeout: Option<Duration>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        no_trying_timeout: Option<Duration>,
+        retry_codes: Option<&[u16]>,
     ) -> Result<(), CalleeError> {
         let mut last_error = into_callee_err(
             &StatusCode::TemporarilyUnavailable,
@@ -171,7 +178,12 @@ impl SipSession {
             info!(index = idx, agent = %agent.aor, "Queue: trying agent");
 
             match self
-                .try_single_target(agent, callee_state_rx, Some(Self::QUEUE_HOLD_TRACK_ID))
+                .try_single_target(
+                    agent,
+                    callee_state_rx,
+                    Some(Self::QUEUE_HOLD_TRACK_ID),
+                    no_trying_timeout,
+                )
                 .await
             {
                 Ok(()) => {
@@ -180,6 +192,19 @@ impl SipSession {
                 }
                 Err(e) => {
                     warn!(index = idx, error = ?e, "Queue: agent failed");
+                    // When retry_codes is configured, only those codes trigger failover
+                    // to the next agent; other failures abort the queue immediately.
+                    // When retry_codes is None, preserve legacy behaviour (try all agents).
+                    if let Some(codes) = retry_codes
+                        && !codes.contains(&e.0)
+                    {
+                        info!(
+                            index = idx,
+                            code = e.0,
+                            "Queue: failure code not in retry_codes, aborting queue"
+                        );
+                        return Err(e);
+                    }
                     last_error = e;
                 }
             }

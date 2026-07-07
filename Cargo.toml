@@ -128,6 +128,7 @@ thiserror = "2"
 tokio = { version = "1.52.2", features = ["full", "tracing", "test-util"] }
 parking_lot = "0.12"
 dashmap = "6"
+moka = { version = "0.12", features = ["sync"] }
 tokio-util = "0.7.18"
 tokio-tungstenite = { version = "0.29.0", features = [
     "rustls-tls-native-roots",

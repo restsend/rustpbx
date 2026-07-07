@@ -1566,6 +1566,12 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
+        // Immediately acknowledge the INVITE with 100 Trying BEFORE any routing work.
+        // Routing (esp. wholesale route_wholesale) may block on CPS locks, DB lookups or
+        // semaphores; without an early 100 the upstream retransmits (Timer A: 500ms..16s)
+        // and may give up, inflating observed 408s under load.
+        tx.send_trying().await.ok();
+
         // Check for incoming INVITE with Replaces header (seat replacement scenario)
         if let Some((replaces_call_id, replaces_to_tag, replaces_from_tag)) =
             Self::parse_replaces_header(&tx.original)

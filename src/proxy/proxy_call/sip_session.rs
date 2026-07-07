@@ -3459,7 +3459,10 @@ impl SipSession {
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
-            match self.try_single_target(target, callee_state_rx, None).await {
+            match self
+                .try_single_target(target, callee_state_rx, None, None)
+                .await
+            {
                 Ok(()) => {
                     info!(index = idx, "Sequential target succeeded");
                     return Ok(());
@@ -4418,6 +4421,7 @@ impl SipSession {
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
+        no_trying_timeout: Option<Duration>,
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
 
@@ -4470,6 +4474,14 @@ impl SipSession {
             .boxed();
         let mut caller_end_check = tokio::time::interval(Duration::from_millis(100));
 
+        // No-trying timeout: if the downstream trunk fails to return ANY response
+        // (provisional or final) within this window, give up early instead of waiting
+        // the full rsipstack Timer B (32s). This prevents a single stuck trunk from
+        // tying up a worker task and inflating observed 408s under load.
+        let invite_sent_at = Instant::now();
+        let no_trying_deadline = no_trying_timeout.map(|d| invite_sent_at + d);
+        let mut no_trying_dismissed = no_trying_timeout.is_none();
+
         let result = loop {
             tokio::select! {
                 _ = caller_end_check.tick() => {
@@ -4482,6 +4494,24 @@ impl SipSession {
                         break Err(into_callee_err(
                             &StatusCode::RequestTerminated,
                             Some("Caller cancelled".to_string()),
+                        ));
+                    }
+                    // Check no-trying timeout (100ms granularity is sufficient for
+                    // multi-second timeouts; avoids pin gymnastics with sleep futures
+                    // across select! iterations).
+                    if !no_trying_dismissed
+                        && let Some(deadline) = no_trying_deadline
+                        && Instant::now() >= deadline
+                    {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            %callee_uri,
+                            "No-trying timeout reached, abandoning callee INVITE"
+                        );
+                        self.cancel_token.cancel();
+                        break Err(into_callee_err(
+                            &StatusCode::RequestTimeout,
+                            Some("No-trying timeout".to_string()),
                         ));
                     }
                 }
@@ -4577,6 +4607,10 @@ impl SipSession {
 
                 state = callee_state_rx.recv() => {
                     if let Some(DialogState::Early(_, ref response)) = state {
+                        // Any provisional response (100/180/183) proves the downstream
+                        // trunk is alive; dismiss the no-trying timer from now on.
+                        no_trying_dismissed = true;
+
                         if self.meta.ring_time.is_none() {
                             self.meta.ring_time = Some(Instant::now());
                         }
