@@ -57,3 +57,4 @@ demo/
 *.local
 dist/
 package-lock.json
+tests/bench/

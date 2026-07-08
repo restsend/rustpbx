@@ -57,7 +57,7 @@ DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 15061
 DEFAULT_HTTP_BASE = "http://127.0.0.1:8083"
 DEFAULT_RUSTPBX_BIN = "target/release/rustpbx"
-DEFAULT_RUSTPBX_CONFIG = "config.toml.dev"
+DEFAULT_RUSTPBX_CONFIG = "tests/bench/config_bench.toml"
 DEFAULT_RUSTPBX_CWD = "."
 
 DEFAULT_UAS_BASE_PORT = 5090
@@ -196,19 +196,34 @@ class ResourceMonitor:
 
     def _sample(self) -> dict[str, float] | None:
         try:
-            result = subprocess.run(
-                ["ps", "-C", self.process_name, "-o", "pid,pcpu,rss", "--no-headers"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            import platform
+            if platform.system() == "Darwin":
+                # macOS: pgrep to find PIDs, then ps to get stats
+                pgrep = subprocess.run(
+                    ["pgrep", "-f", self.process_name],
+                    capture_output=True, text=True, timeout=5,
+                )
+                pids = [p.strip() for p in pgrep.stdout.strip().split("\n") if p.strip()]
+                if not pids:
+                    return None
+                pid_arg = ",".join(pids)
+                result = subprocess.run(
+                    ["ps", "-o", "pid,%cpu,rss", "-p", pid_arg],
+                    capture_output=True, text=True, timeout=5,
+                )
+            else:
+                result = subprocess.run(
+                    ["ps", "-C", self.process_name, "-o", "pid,pcpu,rss", "--no-headers"],
+                    capture_output=True, text=True, timeout=5,
+                )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
             total_cpu = 0.0
             total_mem_kb = 0.0
             for line in result.stdout.strip().split("\n"):
                 parts = line.split()
-                if len(parts) >= 3:
+                # Skip header lines (PID, %CPU, RSS)
+                if len(parts) >= 3 and parts[0].isdigit():
                     total_cpu += float(parts[1])
                     total_mem_kb += float(parts[2])
             if total_cpu == 0.0 and total_mem_kb == 0.0:
@@ -417,12 +432,68 @@ class P2PBenchmark:
         self.uac_process: SipProcess | None = None
         self.monitor: ResourceMonitor | None = None
         self.results: list[BenchmarkResult] = []
+        # SipFlow remote server management
+        self.sipflow_process: subprocess.Popen[str] | None = None
+        self.sipflow_udp_port = 3000
+        self.sipflow_http_port = 3001
 
         os.makedirs(log_dir, exist_ok=True)
 
     # -----------------------------------------------------------------------
     # Server management
     # -----------------------------------------------------------------------
+
+    def start_sipflow_server(self) -> bool:
+        """Start the sipflow standalone server (flowdb engine) as a separate process."""
+        import portpicker
+        self.sipflow_udp_port = portpicker.pick_unused_port() or 3000
+        self.sipflow_http_port = portpicker.pick_unused_port() or 3001
+
+        sipflow_bin = os.path.join(os.path.dirname(self.rustpbx_bin), "sipflow")
+        if not os.path.exists(sipflow_bin):
+            sipflow_bin = "sipflow"  # fallback to PATH
+
+        log_file = os.path.join(self.log_dir, f"sipflow_server_{int(time.time())}.log")
+        sipflow_data = os.path.join(self.log_dir, "sipflow_data")
+
+        cmd = [
+            sipflow_bin,
+            "-a", "127.0.0.1",
+            "-p", str(self.sipflow_udp_port),
+            "--http-port", str(self.sipflow_http_port),
+            "-r", sipflow_data,
+            "--engine", "flowdb",
+            "--log-level", "info",
+            "--log-file", log_file,
+        ]
+        try:
+            with open(log_file, "w") as lf:
+                self.sipflow_process = subprocess.Popen(
+                    cmd, stdout=lf, stderr=subprocess.STDOUT,
+                )
+            time.sleep(2)
+            if self.sipflow_process.poll() is not None:
+                print(f"[sipflow] Server failed to start — check {log_file}")
+                self.sipflow_process = None
+                return False
+            print(f"[sipflow] Server started (PID: {self.sipflow_process.pid}, "
+                  f"UDP:{self.sipflow_udp_port}, HTTP:{self.sipflow_http_port})")
+            print(f"[sipflow] Log: {log_file}")
+            return True
+        except Exception as e:
+            print(f"[sipflow] Failed to start server: {e}")
+            self.sipflow_process = None
+            return False
+
+    def stop_sipflow_server(self) -> None:
+        if self.sipflow_process:
+            self.sipflow_process.terminate()
+            try:
+                self.sipflow_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.sipflow_process.kill()
+                self.sipflow_process.wait()
+            self.sipflow_process = None
 
     def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False) -> bool:
         """Start rustpbx with specified configuration."""
@@ -432,7 +503,14 @@ class P2PBenchmark:
 
         self._kill_rustpbx()
 
-        config_path = self._create_config(mediaproxy, sipflow)
+        self._ensure_mysql_proxy()
+
+        # Start standalone sipflow server for remote mode
+        if sipflow:
+            self.start_sipflow_server()
+
+        db_suffix = self._create_database()
+        config_path = self._create_config(mediaproxy, sipflow, db_suffix)
         if not config_path:
             return False
 
@@ -460,11 +538,135 @@ class P2PBenchmark:
             print(f"[rustpbx] Failed to start: {e}")
             return False
 
-    def _create_config(self, mediaproxy: str, sipflow: bool) -> str | None:
+    # -----------------------------------------------------------------------
+    # Database management
+    # -----------------------------------------------------------------------
+
+    _mysql_proxy_process: subprocess.Popen[str] | None = None
+
+    def _ensure_mysql_proxy(self) -> None:
+        """Start mysql_proxy.py if the config database_url points to 127.0.0.1:13307.
+
+        macOS Tahoe blocks locally-compiled binaries (Rust/C) from accessing
+        LAN hosts.  Python framework binaries are exempt, so we run a small
+        TCP forwarder in Python to bridge Rustpbx → MySQL.
+        """
+        import platform
+        if platform.system() != "Darwin":
+            return
+
+        # Check if the config uses the proxy port
+        try:
+            with open(self.rustpbx_config, "r") as f:
+                content = f.read()
+            if ":13307" not in content:
+                return  # Not using the proxy, skip
+        except Exception:
+            return
+
+        # Check if proxy is already running
+        try:
+            import socket as _sock
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+            s.settimeout(1)
+            if s.connect_ex(("127.0.0.1", 13307)) == 0:
+                s.close()
+                print("[mysql-proxy] Already running on 127.0.0.1:13307")
+                return
+            s.close()
+        except Exception:
+            pass
+
+        # Start the proxy
+        proxy_script = os.path.join(os.path.dirname(__file__), "mysql_proxy.py")
+        if not os.path.exists(proxy_script):
+            print(f"[mysql-proxy] Script not found: {proxy_script}")
+            return
+
+        log_file = os.path.join(self.log_dir, f"mysql_proxy_{int(time.time())}.log")
+        with open(log_file, "w") as log_f:
+            self._mysql_proxy_process = subprocess.Popen(
+                ["python3", proxy_script],
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+            )
+        time.sleep(1)
+        if self._mysql_proxy_process.poll() is None:
+            print(f"[mysql-proxy] Started (PID: {self._mysql_proxy_process.pid}, log: {log_file})")
+        else:
+            print(f"[mysql-proxy] Failed to start — check {log_file}")
+            self._mysql_proxy_process = None
+
+    def _create_database(self) -> str:
+        """Create a fresh MySQL database for this scenario run.
+
+        Returns a suffix string (e.g. '_s1234567890') appended to the base
+        database name in the config.  If the config uses SQLite or the MySQL
+        connection fails, returns an empty string (reuse existing DB).
+        """
+        try:
+            import pymysql
+        except ImportError:
+            # pymysql not installed — skip DB creation, use whatever's in config
+            return ""
+
+        # Parse the database_url from the base config to get MySQL credentials
+        try:
+            with open(self.rustpbx_config, "r") as f:
+                for line in f:
+                    if line.strip().startswith("database_url"):
+                        url = line.split("=", 1)[1].strip().strip('"')
+                        break
+                else:
+                    return ""
+        except Exception:
+            return ""
+
+        # mysql://user:pass@host:port/dbname
+        m = re.match(r"mysql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", url)
+        if not m:
+            return ""
+
+        user, password, host, port, base_db = m.groups()
+
+        # If using the local proxy (127.0.0.1:13307), connect to the real
+        # MySQL host directly (Python is not affected by macOS Local Network
+        # Privacy, but Rust is — so the proxy is only for the Rust binary).
+        if host == "127.0.0.1" and port == "13307":
+            host = "192.168.3.152"
+            port = "13306"
+
+        suffix = f"_s{int(time.time())}"
+        new_db = f"{base_db}{suffix}"
+
+        try:
+            conn = pymysql.connect(
+                host=host, port=int(port), user=user, password=password,
+                autocommit=True,
+            )
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{new_db}` "
+                            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+            conn.close()
+            print(f"[mysql] Created database: {new_db}")
+            return suffix
+        except Exception as e:
+            print(f"[mysql] Failed to create database ({e}), using base config")
+            return ""
+
+    def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "") -> str | None:
         """Create a temporary config file with specified settings."""
         try:
             with open(self.rustpbx_config, "r") as f:
                 config_content = f.read()
+
+            # Inject fresh database name if a suffix was provided
+            if db_suffix:
+                config_content = re.sub(
+                    r'(database_url\s*=\s*"mysql://)([^"]+)(/)([^"]+)(")',
+                    lambda m: f'{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}{db_suffix}{m.group(5)}',
+                    config_content,
+                )
 
             # Modify mediaproxy
             config_content = re.sub(
@@ -483,10 +685,26 @@ class P2PBenchmark:
                 flags=re.DOTALL,
             )
 
-            # Modify sipflow
+            # Modify sipflow — use remote mode (separate sipflow process with flowdb)
             if sipflow:
-                if "[sipflow]" not in config_content:
-                    config_content += '\n[sipflow]\ntype = "local"\nroot = "./config/sipflow"\n'
+                # Remote mode: sipflow server runs as a separate process.
+                # rustpbx sends SIP messages + RTP via UDP, offloading all
+                # serialization/storage I/O from the main process.
+                sipflow_block = (
+                    '[sipflow]\n'
+                    'type = "remote"\n'
+                    f'udp_addr = "127.0.0.1:{self.sipflow_udp_port}"\n'
+                    f'http_addr = "http://127.0.0.1:{self.sipflow_http_port}"\n'
+                    'timeout_secs = 10\n'
+                )
+                if "[sipflow]" in config_content:
+                    config_content = re.sub(
+                        r'\[sipflow\][\s\S]*?(?=\n\[|\Z)',
+                        sipflow_block.rstrip("\n"),
+                        config_content,
+                    )
+                else:
+                    config_content += "\n" + sipflow_block
             else:
                 config_content = re.sub(
                     r'(\[sipflow\][^\[]*)',
@@ -792,6 +1010,16 @@ class P2PBenchmark:
                 self.rustpbx_process.kill()
                 self.rustpbx_process.wait()
             self.rustpbx_process = None
+        self.stop_sipflow_server()
+
+    def kill_mysql_proxy(self) -> None:
+        if self._mysql_proxy_process:
+            self._mysql_proxy_process.terminate()
+            try:
+                self._mysql_proxy_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._mysql_proxy_process.kill()
+            self._mysql_proxy_process = None
 
     # -----------------------------------------------------------------------
     # Result output
@@ -868,25 +1096,26 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run 500-concurrent benchmark (all scenarios)
-  python bench.py --scenario all
+  # Run all 4 scenarios (100 concurrent quick test)
+  python bench.py --scenario all --total 100 --cps 20 --duration 15
 
-  # Single scenario with defaults (500 concurrent)
-  python bench.py --scenario mediaproxy_all
+  # Media bypass only (RTP direct, PBX signaling only)
+  python bench.py --scenario bypass --total 500 --cps 100
 
-  # Custom load profile
-  python bench.py --scenario all --total 800 --cps 200 --duration 60 --uas-count 4
+  # Media forward + sipflow with flowdb
+  python bench.py --scenario forward_sipflow --total 500 --cps 100
 
-  # Quick test with low load
-  python bench.py --scenario mediaproxy_none --total 50 --cps 10 --duration 10
+  # 5000 concurrent (final goal)
+  python bench.py --scenario all --total 5000 --cps 200 --duration 120 --uas-count 10
         """,
     )
 
     parser.add_argument(
         "--scenario",
-        choices=["mediaproxy_none", "mediaproxy_all", "sipflow", "all"],
+        choices=["bypass", "forward", "bypass_sipflow", "forward_sipflow", "all"],
         default="all",
-        help="Benchmark scenario (default: all)",
+        help="Benchmark scenario (default: all). "
+             "bypass=media_proxy:none, forward=media_proxy:all",
     )
     parser.add_argument(
         "--total",
@@ -980,20 +1209,23 @@ Examples:
         log_dir=args.log_dir,
     )
 
-    # Define scenarios
+    # Define scenarios: (name, mediaproxy, sipflow_enabled)
     scenarios = []
     if args.scenario == "all":
         scenarios = [
-            ("mediaproxy_none", "none", False),
-            ("mediaproxy_all", "all", False),
-            ("mediaproxy_all_sipflow", "all", True),
+            ("bypass",            "none", False),
+            ("forward",           "all",  False),
+            ("bypass_sipflow",    "none", True),
+            ("forward_sipflow",   "all",  True),
         ]
-    elif args.scenario == "mediaproxy_none":
-        scenarios = [("mediaproxy_none", "none", False)]
-    elif args.scenario == "mediaproxy_all":
-        scenarios = [("mediaproxy_all", "all", False)]
-    elif args.scenario == "sipflow":
-        scenarios = [("mediaproxy_all_sipflow", "all", True)]
+    elif args.scenario == "bypass":
+        scenarios = [("bypass", "none", False)]
+    elif args.scenario == "forward":
+        scenarios = [("forward", "all", False)]
+    elif args.scenario == "bypass_sipflow":
+        scenarios = [("bypass_sipflow", "none", True)]
+    elif args.scenario == "forward_sipflow":
+        scenarios = [("forward_sipflow", "all", True)]
 
     # Run scenarios
     all_results: list[BenchmarkResult] = []
@@ -1032,6 +1264,7 @@ Examples:
         return 1
     finally:
         benchmark.cleanup()
+        benchmark.kill_mysql_proxy()
 
     # Print comparison table
     if len(all_results) > 1:
