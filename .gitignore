@@ -56,3 +56,6 @@ screenshots/
 demo/
 *.local
 dist/
+# Benchmark results
+tests/bench/results_*/
+dev.log

@@ -5386,6 +5386,64 @@ impl SipSession {
         } else {
             None
         };
+        // ── Fast-path: transport-level RTP bridge ───────────────────────
+        // When no recording / sipflow / transcoding is needed, wire a direct
+        // RtpTransport→RtpTransport bridge. This short-circuits the entire
+        // ForwardingTrack → depacketizer → SPSC → RtpSender chain inside
+        // `RtpTransport::receive()`, eliminating ~75% of per-packet async
+        // hops (mpsc channel + SPSC/Notify wake) for every relayed packet.
+        let same_codec = match (&caller_profile.audio, &callee_profile.audio) {
+            (Some(ca), Some(ce)) => ca.codec == ce.codec,
+            _ => false,
+        };
+        let bridge_eligible = !self.media.caller_answer_uses_media_bridge
+            && sipflow_tx.is_none()
+            && !self.context.dialplan.recording.enabled
+            && same_codec;
+
+        if bridge_eligible {
+            // The RtpTransport is created asynchronously during ICE candidate
+            // gathering — wait for both legs to be ready before bridging.
+            let ready = caller_pc
+                .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
+                .await
+                .is_ok()
+                && callee_pc
+                    .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
+                    .await
+                    .is_ok();
+            if ready {
+                let params = rustrtc::RtpRewriteBridgeParams {
+                    ssrc_offset: 0,
+                    payload_type: None,
+                    initial_sequence_number: None,
+                    initial_timestamp_offset: None,
+                };
+                let a_to_b = caller_pc.bridge_rtp_with_rewrite_to(&callee_pc, params);
+                let b_to_a = callee_pc.bridge_rtp_with_rewrite_to(&caller_pc, params);
+                if a_to_b.is_ok() && b_to_a.is_ok() {
+                    info!(
+                        session_id = %session_id,
+                        "Anchored media: RTP bridge fast-path activated (transport-level relay, ForwardingTrack bypassed)"
+                    );
+                    return;
+                }
+                warn!(
+                    session_id = %session_id,
+                    a_err = ?a_to_b.err(),
+                    b_err = ?b_to_a.err(),
+                    "RTP bridge setup failed after transport ready, falling back to ForwardingTrack"
+                );
+                caller_pc.clear_rtp_rewrite_bridge();
+                callee_pc.clear_rtp_rewrite_bridge();
+            } else {
+                debug!(
+                    session_id = %session_id,
+                    "RTP bridge: transport not ready within timeout, falling back to ForwardingTrack"
+                );
+            }
+        }
+
         let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
         match Self::wire_with_forwarding_track(
