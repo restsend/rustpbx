@@ -70,12 +70,12 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     let tx_stats = state.sip_server().inner.endpoint.inner.get_stats();
     let app_tasks = {
-        let metrics = crate::utils::GLOBAL_TASK_METRICS.lock().unwrap();
-        metrics
-            .iter()
-            .filter(|&(_, &v)| v > 0)
-            .map(|(k, &v)| (k.clone(), serde_json::json!(v)))
-            .collect::<serde_json::Map<String, serde_json::Value>>()
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "total".to_string(),
+            serde_json::json!(crate::utils::active_task_count()),
+        );
+        map
     };
 
     let sipserver_stats = serde_json::json!({

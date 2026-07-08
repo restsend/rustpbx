@@ -73,6 +73,12 @@ pub struct MediaSession {
     /// Handle of the SipFlow capture task so it can be aborted when capture is
     /// disabled (or when the session is destroyed), instead of running forever.
     pub sipflow_task: Option<tokio::task::JoinHandle<()>>,
+
+    // ── Reaper ─────────────────────────────────────────────────────────
+    /// Wall-clock instant of the last engine command that touched this session.
+    /// Updated by [`EngineCore::dispatch`] and checked by the periodic reaper
+    /// to evict sessions whose `DestroySession` was lost (channel full etc.).
+    pub last_activity: std::time::Instant,
 }
 
 impl MediaSession {
@@ -92,6 +98,7 @@ impl MediaSession {
             bridge_playback_track_ids: Vec::new(),
             mcu,
             sipflow_task: None,
+            last_activity: std::time::Instant::now(),
         }
     }
 

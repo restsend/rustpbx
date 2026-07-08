@@ -245,9 +245,8 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing
         if let Some(callee_user) = origin.uri.user() {
-            let callee_str = callee_user.to_string();
             let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
@@ -291,9 +290,8 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing (preview mode)
         if let Some(callee_user) = origin.uri.user() {
-            let callee_str = callee_user.to_string();
             let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
@@ -895,9 +893,8 @@ impl CallModule {
                 self.inner
                     .server
                     .data_context
-                    .trunks_snapshot()
-                    .get(&ctx.name)
-                    .map(|trunk| trunk.codec.clone())
+                    .get_trunk(&ctx.name)
+                    .map(|trunk| trunk.codec)
             })
             .filter(|codecs| !codecs.is_empty());
         let fallback_codecs = trunk_codecs

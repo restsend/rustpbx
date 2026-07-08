@@ -137,6 +137,7 @@ fn setup_engine() -> (
     let (engine, handle) = MediaEngine::new(MediaEngineConfig {
         command_channel_capacity: 64,
         event_channel_capacity: 64,
+        ..MediaEngineConfig::default()
     });
     let rx = engine.subscribe();
     let _task = engine.spawn(handle);

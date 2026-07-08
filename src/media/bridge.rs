@@ -1885,7 +1885,6 @@ impl BridgePeer {
                     match sample_result {
                         Ok(sample) => {
                             packet_count += 1;
-                            let received_at_micros = receive_clock.now_micros();
                             if !is_video {
                                 let (dtmf_pt, dtmf_clock_rate) = {
                                     let sink_guard = dtmf_sink.read();
@@ -1924,6 +1923,7 @@ impl BridgePeer {
                                     }
 
                                     if let (Some(tx), Some(leg)) = (&sipflow_tx, recorder_leg) {
+                                        let received_at_micros = receive_clock.now_micros();
                                         // Share the sample via Arc instead of deep-cloning
                                         // the `raw_packet.payload` Vec<u8> per packet.
                                         let _ = tx.try_send((
@@ -1988,7 +1988,7 @@ impl BridgePeer {
                             //    abs-send-time / rtp-stream-id extensions.  Forwarding these to
                             //    Linphone's plain RTP causes Linphone's decoder to see unexpected
                             //    extension bytes, potentially rejecting packets (black screen).
-                            let samples_to_send: Vec<MediaSample> = match sample {
+                            match sample {
                                 MediaSample::Audio(mut a) => {
                                     if path.should_strip_caller_audio_metadata() {
                                         a.header_extension = None;
@@ -2044,13 +2044,23 @@ impl BridgePeer {
                                         }
                                         Some(MediaSample::Audio(output))
                                     });
-                                    match transcoded {
-                                        Some(ts) => vec![ts],
-                                        None => vec![MediaSample::Audio(a)],
+                                    let final_sample = transcoded
+                                        .unwrap_or(MediaSample::Audio(a));
+                                    // send() is internally synchronous (try_send_drop_oldest).
+                                    // Avoids per-packet Vec allocation + deep clone.
+                                    if let Err(e) = sender.send(final_sample).await {
+                                        leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
+                                        match e {
+                                            MediaError::Closed | MediaError::KindMismatch { .. } => {
+                                                warn!(bridge_id = %bridge_id, direction = %path, error = ?e, "Failed to forward media sample");
+                                            }
+                                            _ => {}
+                                        }
+                                        break 'outer;
                                     }
                                 }
                                 MediaSample::Video(mut v) => {
-                                    if is_video {
+                                    let video_samples: Vec<MediaSample> = if is_video {
                                         if matches!(v.payload_type, Some(pt) if pt < 96) {
                                             debug!(
                                                 bridge_id = %bridge_id,
@@ -2088,24 +2098,18 @@ impl BridgePeer {
                                         v.sequence_number = None;
                                         v.payload_type = None;
                                         vec![MediaSample::Video(v)]
-                                    }
-                                }
-                            };
-                            for sample in samples_to_send {
-                                // Forward the sample using try_send first to reduce Tokio scheduling overhead
-                                match sender.try_send(sample.clone()) {
-                                    Ok(()) => {}
-                                    Err(MediaError::WouldBlock) => {
-                                        // Fallback to async send only when channel is full
+                                    };
+                                    for sample in video_samples {
                                         if let Err(e) = sender.send(sample).await {
-                                            warn!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to forward media sample");
+                                            leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
+                                            match e {
+                                                MediaError::Closed | MediaError::KindMismatch { .. } => {
+                                                    warn!(bridge_id = %bridge_id, direction = %path, error = ?e, "Failed to forward media sample");
+                                                }
+                                                _ => {}
+                                            }
                                             break 'outer;
                                         }
-                                    }
-                                    Err(e) => {
-                                        leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
-                                        warn!(bridge_id = %bridge_id, direction = %path, error = ?e, "Failed to forward media sample (kind mismatch or closed)");
-                                        break 'outer;
                                     }
                                 }
                             }
@@ -2182,7 +2186,8 @@ impl BridgePeer {
         sample: &MediaSample,
         detector: &mut BridgeDtmfDetector,
     ) {
-        let Some(sink) = dtmf_sink.read().clone() else {
+        let guard = dtmf_sink.read();
+        let Some(sink) = guard.as_ref() else {
             return;
         };
         if sink.endpoint != endpoint {
@@ -2343,8 +2348,8 @@ impl BridgePeer {
     }
 
     /// Close both PeerConnections without waiting for tasks.
-    /// Used by Drop — forwarding tasks will exit on their own via cancel_token.
-    fn close_sync(&self) {
+    /// Forwarding tasks exit on their own via cancel_token.
+    pub fn close_sync(&self) {
         self.cancel_token.cancel();
         self.caller_pc.close();
         self.callee_pc.close();

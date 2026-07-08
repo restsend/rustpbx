@@ -947,6 +947,7 @@ impl SipServerBuilder {
                 let (engine, handle) = MediaEngine::new(MediaEngineConfig {
                     command_channel_capacity: self.config.media_cmd_channel_capacity,
                     event_channel_capacity: self.config.media_event_channel_capacity,
+                    ..MediaEngineConfig::default()
                 });
                 let _task = engine.spawn(handle);
                 engine

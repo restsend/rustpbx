@@ -312,7 +312,7 @@ impl ProxyModule for AuthModule {
                         "Checking in-dialog request against auth cache"
                     );
 
-                    if cache.is_authenticated(&cache_key, &source_addr).await {
+                    if cache.is_authenticated(&cache_key, &source_addr) {
                         debug!(
                             call_id = %cache_key.0,
                             from_tag = %cache_key.1,
@@ -345,7 +345,7 @@ impl ProxyModule for AuthModule {
                         (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
                     {
                         if let Some(cache_key) = self.extract_auth_cache_key(tx) {
-                            cache.put(cache_key, source_addr).await;
+                            cache.put(cache_key, source_addr);
                         }
                     }
 
@@ -428,7 +428,7 @@ impl ProxyModule for AuthModule {
                         if tx.original.method != rsipstack::sip::Method::Register {
                             if let Some(ref cache) = self.dialog_auth_cache {
                                 if let Some(cache_key) = self.extract_auth_cache_key(tx) {
-                                    cache.put(cache_key, source_addr).await;
+                                    cache.put(cache_key, source_addr);
                                 }
                             }
                         }
@@ -456,7 +456,7 @@ impl ProxyModule for AuthModule {
                         (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
                     {
                         if let Some(cache_key) = self.extract_auth_cache_key(tx) {
-                            cache.put(cache_key, source_addr).await;
+                            cache.put(cache_key, source_addr);
                         }
                     }
 

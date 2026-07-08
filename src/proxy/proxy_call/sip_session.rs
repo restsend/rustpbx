@@ -1060,7 +1060,7 @@ impl SipSession {
         if use_media_proxy {
             let offer_sdp =
                 String::from_utf8_lossy(server_dialog.initial_request().body()).to_string();
-            session.media.caller_offer = Some(offer_sdp.clone());
+            session.media.caller_offer = Some(offer_sdp);
         }
 
         let dialog_guard = ServerDialogGuard::new(server.dialog_layer.clone(), server_dialog.id());
@@ -3338,9 +3338,7 @@ impl SipSession {
                                 .server_dialog
                                 .initial_request()
                                 .headers
-                                .iter()
-                                .cloned()
-                                .collect();
+                                .into();
                             enricher
                                 .enrich(
                                     resolved_agents,
@@ -3520,12 +3518,12 @@ impl SipSession {
             ));
         }
 
-        let _caller = self.context.dialplan.caller.clone().ok_or_else(|| {
-            into_callee_err(
+        if self.context.dialplan.caller.is_none() {
+            return Err(into_callee_err(
                 &StatusCode::ServerInternalError,
                 Some("No caller in dialplan".to_string()),
-            )
-        })?;
+            ));
+        }
 
         let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
@@ -4425,12 +4423,12 @@ impl SipSession {
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
 
-        let _caller = self.context.dialplan.caller.clone().ok_or_else(|| {
-            into_callee_err(
+        if self.context.dialplan.caller.is_none() {
+            return Err(into_callee_err(
                 &StatusCode::ServerInternalError,
                 Some("No caller in dialplan".to_string()),
-            )
-        })?;
+            ));
+        }
 
         let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
@@ -4821,8 +4819,8 @@ impl SipSession {
         } else {
             self.create_callee_track(callee_is_webrtc).await.ok()
         };
-        self.media.callee_offer = callee_sdp;
-        self.media.callee_offer.clone().map(|s| s.into_bytes())
+        self.media.callee_offer = callee_sdp.clone();
+        callee_sdp.map(|s| s.into_bytes())
     }
 
     async fn prepare_caller_answer_from_callee_sdp(
@@ -7330,10 +7328,11 @@ impl SipSession {
             let _ = self.stop_recording().await;
         }
 
-        // Stop media bridge (closes both WebRTC + RTP PeerConnections)
+        // Stop media bridge — close_sync cancels tasks without awaiting them.
+        // Forwarder tasks exit via cancel_token / closed PeerConnections.
         if let Some(bridge) = self.media.media_bridge.take() {
             debug!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
-            bridge.stop().await;
+            bridge.close_sync();
             self.media.media_bridge_started = false;
             self.media.bridge_playback_track_ids.clear();
         }
