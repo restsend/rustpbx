@@ -251,8 +251,7 @@ enum Commands {
     CheckConfig,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -273,7 +272,34 @@ async fn main() -> Result<()> {
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
 
-    if matches!(cli.command, Some(Commands::CheckConfig)) {
+    // ---- Dual tokio runtime setup -----------------------------------------
+    // SIP runtime: few threads (signalling is lightweight).
+    // Media runtime: the rest of the cores — dedicated worker threads so that
+    // heavy RTP forwarding does not starve SIP timer/transaction tasks.
+    let sip_workers = config.proxy.sip_worker_threads.max(1);
+    let media_workers = config.proxy.media_worker_threads.max(1);
+
+    println!("SIP workers={} Media workers={}", sip_workers, media_workers);
+
+    let media_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(media_workers)
+        .thread_name("media-worker")
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build media runtime: {}", e))?;
+    rustpbx::utils::set_media_runtime(media_runtime.handle().clone());
+
+    let sip_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(sip_workers)
+        .thread_name("sip-worker")
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build SIP runtime: {}", e))?;
+
+    let _result = sip_runtime.block_on(async move {
+        // Everything that follows is the original async main body,
+        // running inside the SIP-dedicated runtime.
+        if matches!(cli.command, Some(Commands::CheckConfig)) {
         match preflight::validate_start(&config).await {
             Ok(_) => {
                 println!("Configuration is valid; all required sockets are available.");
@@ -614,8 +640,16 @@ async fn main() -> Result<()> {
     }
 
     // Flush any buffered OTel spans before the process exits.
-    #[cfg(feature = "addon-telemetry")]
-    rustpbx::addons::telemetry::TelemetryAddon::shutdown();
+        #[cfg(feature = "addon-telemetry")]
+        rustpbx::addons::telemetry::TelemetryAddon::shutdown();
+
+        Ok(())
+    })?; // end of sip_runtime.block_on
+
+    drop(sip_runtime);
+
+    eprintln!("Shutting down media runtime ...");
+    media_runtime.shutdown_timeout(std::time::Duration::from_secs(10));
 
     Ok(())
 }

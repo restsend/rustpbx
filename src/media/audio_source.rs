@@ -946,7 +946,7 @@ mod tests {
         }
 
         let manager_clone = manager.clone();
-        let notified = crate::utils::spawn(async move {
+        let notified = crate::utils::media_spawn(async move {
             tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 manager_clone.wait_for_completion(),

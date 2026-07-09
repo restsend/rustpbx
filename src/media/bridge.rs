@@ -509,7 +509,10 @@ impl BridgePeer {
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
 
         *self.caller_track.lock().await = Some(caller_track.clone());
-        let _ = self.caller_pc().add_track(caller_track, caller_params);
+        {
+            let _g = crate::utils::media_enter();
+            let _ = self.caller_pc().add_track(caller_track, caller_params);
+        }
         *self.caller_send.lock().await = Some(caller_tx);
 
         // Setup callee side: create sample track and register with PC
@@ -517,7 +520,10 @@ impl BridgePeer {
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
 
         *self.callee_track.lock().await = Some(callee_track.clone());
-        let _ = self.callee_pc().add_track(callee_track, callee_params);
+        {
+            let _g = crate::utils::media_enter();
+            let _ = self.callee_pc().add_track(callee_track, callee_params);
+        }
         *self.callee_send.lock().await = Some(callee_tx);
 
         let mut tasks = self.bridge_tasks.lock().await;
@@ -549,9 +555,12 @@ impl BridgePeer {
                 .store(caller_video_params.payload_type, Ordering::Relaxed);
             let (caller_video_tx, caller_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            if let Ok(sender) = self
-                .caller_pc()
-                .add_track(caller_video_track, caller_video_params.clone())
+            let sender = {
+                let _g = crate::utils::media_enter();
+                self.caller_pc()
+                    .add_track(caller_video_track, caller_video_params.clone())
+            };
+            if let Ok(sender) = sender
             {
                 *self.caller_video_sender.lock().await = Some(sender);
             }
@@ -566,9 +575,12 @@ impl BridgePeer {
                 .store(callee_video_params.payload_type, Ordering::Relaxed);
             let (callee_video_tx, callee_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            if let Ok(sender) = self
-                .callee_pc()
-                .add_track(callee_video_track, callee_video_params.clone())
+            let sender = {
+                let _g = crate::utils::media_enter();
+                self.callee_pc()
+                    .add_track(callee_video_track, callee_video_params.clone())
+            };
+            if let Ok(sender) = sender
             {
                 *self.callee_video_sender.lock().await = Some(sender);
             }
@@ -756,7 +768,7 @@ impl BridgePeer {
             let cancel = self.cancel_token.clone();
             let rtp_timeout = self.rtp_timeout;
             let rtp_timeout_tx = self.rtp_timeout_tx.clone();
-            crate::utils::spawn(async move {
+            crate::utils::media_spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // skip initial immediate tick
@@ -1269,7 +1281,7 @@ impl BridgePeer {
             BridgeEndpoint::Caller => Some(RecLeg::B),
         };
 
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
             // Skip: keep the absolute timeline.  Delay/Burst would accumulate
             // drift (each late tick shifts the schedule forward), eventually
@@ -1426,7 +1438,7 @@ impl BridgePeer {
         let recorder = self.recorder.clone();
         let _recording_paused = self.recording_paused.clone();
 
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             let peers = peers_map.lock().await;
             let extra_peers: Vec<(PeerId, PeerConnection)> = peers
                 .iter()
@@ -1443,7 +1455,7 @@ impl BridgePeer {
                 let pid = peer_id.clone();
                 let bid = bridge_id.clone();
                 let peers_ref = peers_map.clone();
-                crate::utils::spawn(async move {
+                crate::utils::media_spawn(async move {
                     let mut recv = Box::pin(pc.recv());
                     loop {
                         tokio::select! {
@@ -1471,7 +1483,7 @@ impl BridgePeer {
                                                 // task would loop on track.recv() forever and pin
                                                 // the peers map (and every extra-peer PC) in memory.
                                                 let forward_cancel = cancel.child_token();
-                                                crate::utils::spawn(async move {
+                                                crate::utils::media_spawn(async move {
                                                     loop {
                                                         let sample = tokio::select! {
                                                             biased;
@@ -1549,7 +1561,7 @@ impl BridgePeer {
         let caller_gate = Arc::clone(&self.caller_gate);
         let sub_tasks = self.sub_tasks.clone();
 
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             // Create fused receivers for both directions
             let mut caller_recv = Box::pin(caller_pc.recv());
             let mut callee_recv = Box::pin(callee_pc.recv());
@@ -2249,7 +2261,7 @@ impl BridgePeer {
         label: &'static str,
     ) -> tokio::task::JoinHandle<()> {
         let mut rtcp_rx = sender.subscribe_rtcp();
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => break,
@@ -2293,7 +2305,7 @@ impl BridgePeer {
         dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) -> tokio::task::JoinHandle<()> {
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             Self::run_forward_loop(
                 bridge_id,
                 track,
@@ -2654,8 +2666,10 @@ impl BridgePeerBuilder {
         let mut callee_config = callee_config;
         callee_config.label = Some(format!("{}-callee", self.bridge_id));
 
-        let caller_pc = PeerConnection::new(caller_config);
-        let callee_pc = PeerConnection::new(callee_config);
+        let (caller_pc, callee_pc) = {
+            let _guard = crate::utils::media_enter();
+            (PeerConnection::new(caller_config), PeerConnection::new(callee_config))
+        };
 
         let mut bridge = BridgePeer::new(self.bridge_id, caller_pc, callee_pc);
         bridge.session_id = self.session_id;
@@ -4134,7 +4148,7 @@ mod tests {
             let ti = Some(timing);
             let st = stats;
             let ds = dtmf;
-            crate::utils::spawn(async move {
+            crate::utils::media_spawn(async move {
                 BridgePeer::run_forward_loop(
                     "test".to_string(),
                     mt,
@@ -4239,7 +4253,7 @@ mod tests {
             let ds = dtmf_sink;
             let tr = Some(transcoder);
             let dm = Some(dtmf_mapping);
-            crate::utils::spawn(async move {
+            crate::utils::media_spawn(async move {
                 BridgePeer::run_forward_loop(
                     "test-dtmf-mapping".to_string(),
                     mt,
@@ -4552,7 +4566,7 @@ mod tests {
             let sw = sender_weak.clone();
             let st = stats;
             let ds = dtmf;
-            crate::utils::spawn(async move {
+            crate::utils::media_spawn(async move {
                 BridgePeer::run_forward_loop(
                     "test-passthrough".to_string(),
                     mt,

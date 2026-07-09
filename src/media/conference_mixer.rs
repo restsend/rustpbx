@@ -306,7 +306,7 @@ impl ConferenceAudioMixer {
         let route_gains = self.route_gains.clone();
         let recorder_sink = self.recorder_sink.clone();
 
-        let task = crate::utils::spawn(async move {
+        let task = crate::utils::media_spawn(async move {
             Self::mixing_loop(
                 conf_id,
                 participants,

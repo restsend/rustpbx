@@ -289,6 +289,7 @@ impl RtcTrack {
         config: RtcConfiguration,
         rtp_map: Vec<negotiate::CodecInfo>,
     ) -> Self {
+        let _guard = crate::utils::media_enter();
         let pc = PeerConnection::new(config);
 
         // Add a sample track to ensure a sender is created and SSRC is signaled in SDP
@@ -301,6 +302,7 @@ impl RtcTrack {
             params.channels = info.channels as u8;
         }
         let _ = pc.add_track(track, params);
+        drop(_guard);
 
         Self {
             track_id,
@@ -318,6 +320,7 @@ impl RtcTrack {
         rtp_map: Vec<negotiate::CodecInfo>,
         video_capabilities: Vec<rustrtc::config::VideoCapability>,
     ) -> Self {
+        let _guard = crate::utils::media_enter();
         let pc = PeerConnection::new(config);
 
         // Add audio track
@@ -342,6 +345,7 @@ impl RtcTrack {
             };
             let _ = pc.add_track(video_track, video_params);
         }
+        drop(_guard);
 
         Self {
             track_id,
@@ -773,8 +777,12 @@ impl FileTrack {
             ..Default::default()
         };
 
-        let pc = PeerConnection::new(config);
-        pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
+        let pc = {
+            let _guard = crate::utils::media_enter();
+            let pc = PeerConnection::new(config);
+            pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
+            pc
+        };
 
         Self {
             session_id: None,
@@ -885,6 +893,7 @@ impl FileTrack {
             ..Default::default()
         };
 
+        let _guard = crate::utils::media_enter();
         self.pc = PeerConnection::new(config);
         self.pc
             .add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
@@ -1083,7 +1092,7 @@ impl FileTrack {
         let cancel_token = self.cancel_token.clone();
         let loop_playback = self.loop_playback;
 
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             let mut encoder = create_encoder(codec);
             let mut rtp_timestamp: u32 = rand::random();
             let mut sequence_number: u16 = rand::random();

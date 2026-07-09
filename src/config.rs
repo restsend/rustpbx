@@ -826,6 +826,10 @@ pub struct ProxyConfig {
     pub frequency_limiter: Option<String>,
     #[serde(default)]
     pub realms: Option<Vec<String>>,
+    #[serde(default = "default_sip_worker_threads")]
+    pub sip_worker_threads: usize,
+    #[serde(default = "default_media_worker_threads")]
+    pub media_worker_threads: usize,
     pub ws_handler: Option<String>,
     pub ami_path: Option<String>,
     pub rwi_path: Option<String>,
@@ -959,6 +963,31 @@ fn default_media_cmd_channel_capacity() -> usize {
 }
 fn default_media_event_channel_capacity() -> usize {
     1024
+}
+
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
+fn default_sip_worker_threads() -> usize {
+    let n = available_parallelism();
+    if n >= 8 {
+        4
+    } else {
+        (n + 1) / 2
+    }
+}
+
+fn default_media_worker_threads() -> usize {
+    let n = available_parallelism();
+    let sip = default_sip_worker_threads();
+    if n > sip {
+        n - sip
+    } else {
+        1
+    }
 }
 
 fn default_auth_cache_size() -> usize {
@@ -1300,6 +1329,8 @@ impl Default for ProxyConfig {
             contact_username: None,
             rtc_cname: None,
             jwt_auth: None,
+            sip_worker_threads: default_sip_worker_threads(),
+            media_worker_threads: default_media_worker_threads(),
         }
     }
 }

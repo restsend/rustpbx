@@ -134,7 +134,7 @@ impl MediaEngine {
             reaper_interval: self.reaper_interval,
             session_idle_ttl: self.session_idle_ttl,
         };
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             core.run().await;
         })
     }
@@ -352,7 +352,7 @@ impl EngineCore {
                 }
 
                 if let (Some(backend), Some(mut rx)) = (backend, receiver) {
-                    let handle = crate::utils::spawn(async move {
+                    let handle = crate::utils::media_spawn(async move {
                         use crate::sipflow::{SipFlowItem, SipFlowMsgType};
                         while let Some((leg, sample, received_at_micros)) = rx.recv().await {
                             // `sample` is `Arc<MediaSample>`; deref to read.

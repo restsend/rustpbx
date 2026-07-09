@@ -1,6 +1,8 @@
 use sea_orm::sea_query::{Func, IntoCondition, SimpleExpr};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
+use tokio::runtime::Handle;
 
 /// Strip control characters (`\r`, `\n`, `\0`, etc.) from a header value
 /// to prevent HTTP response splitting / header injection.
@@ -153,6 +155,61 @@ where
         let _guard = _guard;
         future.await
     })
+}
+
+// ---------------------------------------------------------------------------
+// Media runtime isolation: a dedicated tokio runtime for RTP/media tasks.
+// Set once at startup via set_media_runtime().  All media-layer tokio::spawn
+// calls should go through media_spawn() so they land on the media runtime
+// instead of the SIP runtime, preventing RTP load from starving SIP timers.
+// ---------------------------------------------------------------------------
+static MEDIA_RUNTIME: OnceLock<Handle> = OnceLock::new();
+
+/// Atomically set the global media runtime handle.  Must be called exactly
+/// once at startup, before any media task is spawned.
+pub fn set_media_runtime(handle: Handle) {
+    MEDIA_RUNTIME
+        .set(handle)
+        .expect("set_media_runtime called more than once");
+}
+
+/// Spawn a future onto the dedicated media runtime.  Falls back to the
+/// ambient tokio runtime if the media runtime has not been initialised
+/// (e.g. during tests).
+#[track_caller]
+pub fn media_spawn<T>(future: T) -> tokio::task::JoinHandle<T::Output>
+where
+    T: std::future::Future + Send + 'static,
+    T::Output: Send + 'static,
+{
+    let location = std::panic::Location::caller();
+    let loc = format!("{}:{}", location.file(), location.line());
+    let _guard = TaskGuard::new(loc);
+    if let Some(handle) = MEDIA_RUNTIME.get() {
+        handle.spawn(async move {
+            let _guard = _guard;
+            future.await
+        })
+    } else {
+        tokio::spawn(async move {
+            let _guard = _guard;
+            future.await
+        })
+    }
+}
+
+/// Enter the media runtime context so that bare `tokio::spawn` calls (e.g.
+/// inside third-party crate constructors like `rustrtc::PeerConnection::new`)
+/// bind to the media runtime rather than the SIP runtime.
+///
+/// The returned guard is **thread-local**.  It is safe to hold across
+/// synchronous code sections, but **not** across `.await` points on a
+/// multi-thread runtime (the guard would be lost after task resumption on
+/// another thread).  For spawns after an await use `media_spawn` instead.
+pub fn media_enter() -> Option<tokio::runtime::EnterGuard<'static>> {
+    // SAFETY: OnceLock::get() returns &Handle with the lifetime of the
+    // OnceLock, which is 'static because MEDIA_RUNTIME is a static.
+    MEDIA_RUNTIME.get().map(|h| h.enter())
 }
 
 /// Get current active task count

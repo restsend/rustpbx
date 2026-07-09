@@ -323,7 +323,7 @@ impl MediaMixer {
         let cancel_token = self.cancel_token.clone();
         let mixer_id = self.id.clone();
 
-        let handle = crate::utils::spawn(async move {
+        let handle = crate::utils::media_spawn(async move {
             Self::mixing_loop(&mixer_id, cancel_token).await;
         });
         *self.task_handle.lock() = Some(handle);

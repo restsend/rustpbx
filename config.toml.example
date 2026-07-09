@@ -70,6 +70,13 @@ ws_handler= "/ws"
 ami_path = "/ami/v1"
 ice_servers_path = "/iceservers"
 media_proxy = "auto"
+
+# Worker thread isolation: SIP signalling and RTP media run on separate tokio
+# runtimes, preventing heavy media-plane load from starving SIP timer tasks.
+# Defaults: sip_worker_threads = min(4, num_cpus), media_worker_threads = rest.
+# sip_worker_threads = 4
+# media_worker_threads = 28
+
 # session_timer = true
 # session_timer_always = false # Keep refreshing even if peer does not negotiate session timer
 # Base directory for generated routing/trunk/ACL files

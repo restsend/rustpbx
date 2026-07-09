@@ -85,6 +85,35 @@ t1_timer = 500      # T1 timer in milliseconds (default: 500)
 t1x64_timer = 32000 # T1x64 timer in milliseconds (default: 32000)
 ```
 
+### Worker Thread Isolation
+
+RustPBX uses two dedicated tokio runtimes for SIP signalling and RTP media
+forwarding. This prevents heavy media-plane load from starving SIP timer and
+transaction tasks, which would otherwise cause 408 Request Timeout responses
+under high concurrency (e.g. `mediaproxy = "all"` with thousands of calls).
+
+```toml
+[proxy]
+# Number of worker threads for the SIP signalling runtime.
+# Default: min(4, num_cpus) — typically 4 on multi-core machines.
+sip_worker_threads = 4
+
+# Number of worker threads for the RTP/media runtime.
+# Default: num_cpus - sip_worker_threads.
+media_worker_threads = 28
+```
+
+- **`sip_worker_threads`**: Threads dedicated to SIP message parsing, transaction
+  management, and timer processing. 2–4 threads are sufficient for most
+  deployments because signalling is lightweight.
+- **`media_worker_threads`**: Threads dedicated to RTP/WebRTC media forwarding,
+  SRTP encryption/decryption, transcoding, file playback, and recording I/O.
+  Assign the majority of available cores here.
+
+> **Note**: These settings are applied at startup only; changing them requires a
+> restart. The two runtimes are completely independent — a busy media runtime
+> will never block the SIP signaling runtime.
+
 ## Modules
 Controls the loading of internal logic pipelines.
 
