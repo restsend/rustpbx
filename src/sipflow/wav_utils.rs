@@ -20,9 +20,7 @@ pub(crate) type LegPayloadTypeMap = HashMap<i32, PayloadTypeMap>;
 struct RtpPacketView<'a> {
     leg: i32,
     payload_type: u8,
-    sequence_number: u16,
-    rtp_timestamp: u32,
-    ssrc: u32,
+    capture_ts: u64,
     payload: &'a [u8],
 }
 
@@ -55,7 +53,11 @@ fn default_payload_descriptor(pt: u8) -> PayloadDescriptor {
     }
 }
 
-fn parse_borrowed_rtp_packet(leg: i32, raw: &[u8]) -> Option<RtpPacketView<'_>> {
+fn parse_borrowed_rtp_packet(
+    leg: i32,
+    capture_ts: u64,
+    raw: &[u8],
+) -> Option<RtpPacketView<'_>> {
     if raw.len() < 12 || raw[0] >> 6 != 2 {
         return None;
     }
@@ -95,9 +97,7 @@ fn parse_borrowed_rtp_packet(leg: i32, raw: &[u8]) -> Option<RtpPacketView<'_>> 
     Some(RtpPacketView {
         leg,
         payload_type: raw[1] & 0x7f,
-        sequence_number: u16::from_be_bytes([raw[2], raw[3]]),
-        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
-        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
+        capture_ts,
         payload: &raw[payload_offset..payload_end],
     })
 }
@@ -393,9 +393,16 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         return Err(anyhow!("No RTP packets found"));
     }
 
+    // Use the earliest capture timestamp as the common timeline origin for
+    // both legs.  Positioning audio by wall-clock capture time (instead of RTP
+    // timestamps) makes the output immune to SSRC changes, clock-rate
+    // mismatches, and RTP timestamp wraparound — all of which previously
+    // caused false gap-detection truncation or multi-GB silence padding.
+    let first_ts = packets.iter().map(|(_, ts, _)| *ts).min().unwrap_or(0);
+
     let mut parsed_packets = Vec::new();
-    for (leg, _, raw_packet) in packets {
-        if let Some(packet) = parse_borrowed_rtp_packet(*leg, raw_packet) {
+    for (leg, capture_ts, raw_packet) in packets {
+        if let Some(packet) = parse_borrowed_rtp_packet(*leg, *capture_ts, raw_packet) {
             parsed_packets.push(packet);
         }
     }
@@ -404,7 +411,7 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         return Err(anyhow!("No valid RTP packets found"));
     }
 
-    parsed_packets.sort_by_key(|rtp| (rtp.leg, rtp.rtp_timestamp, rtp.sequence_number));
+    parsed_packets.sort_by_key(|rtp| (rtp.leg, rtp.capture_ts));
 
     let mut legs_codecs: HashMap<i32, Vec<CodecType>> = HashMap::new();
     let mut leg_audio_clock_rates: HashMap<i32, u32> = HashMap::new();
@@ -464,40 +471,14 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     let mut decoders: HashMap<(i32, u8), Box<dyn Decoder>> = HashMap::new();
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
 
-    // RTP timestamps are per-SSRC, not per-leg.  When the SSRC changes within
-    // a leg (e.g. call-transfer or media-reinvite), each SSRC has its own
-    // independent timeline.  We assign each new SSRC on the same leg an offset
-    // so that its timestamps are placed sequentially in the per-leg buffer,
-    // preventing false truncation by the gap-detection logic below.
-    let mut base_timestamps: HashMap<(i32, u32), u64> = HashMap::new();
-    // Per-stream offset (in target-time units) — set once when the SSRC is
-    // first seen, so all packets from that stream land at the right place.
-    let mut ssrc_target_offset: HashMap<(i32, u32), u32> = HashMap::new();
-    // Per-leg running maximum target timestamp (updated on every packet).
-    let mut leg_max_target: HashMap<i32, u32> = HashMap::new();
-
     for rtp in &parsed_packets {
         let pt = rtp.payload_type;
         let payload = rtp.payload;
         let leg = rtp.leg;
-        let ssrc = rtp.ssrc;
-        let raw_ts = rtp.rtp_timestamp as u64;
 
-        // First time we see this (leg, ssrc)?  Set its offset so it follows
-        // the previous SSRC on this leg (if any).
-        let stream_key = (leg, ssrc);
-        let ssrc_offset = *ssrc_target_offset.entry(stream_key).or_insert_with(|| {
-            let prev_max = leg_max_target.get(&leg).copied().unwrap_or(0);
-            if prev_max > 0 {
-                prev_max + step_samples
-            } else {
-                0
-            }
-        });
-
-        // Base RTP timestamp for this stream.
-        let base = *base_timestamps.entry(stream_key).or_insert(raw_ts);
-        let rtp_diff = raw_ts.saturating_sub(base);
+        // Position each packet on the shared wall-clock timeline.
+        let target_timestamp =
+            ((rtp.capture_ts - first_ts) * target_sample_rate as u64 / 1_000_000) as u32;
 
         let mut descriptor = payload_descriptor(pt, leg, payload_map, leg_payload_map);
         if descriptor.codec != CodecType::TelephoneEvent && looks_like_dtmf_payload(payload) {
@@ -507,16 +488,6 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
             };
         }
         let codec = descriptor.codec;
-        let clock_rate = descriptor.clock_rate as u64;
-
-        let raw_target = (rtp_diff.saturating_mul(target_sample_rate as u64) / clock_rate) as u32;
-        let target_timestamp = raw_target.saturating_add(ssrc_offset);
-
-        // Update the running max per-leg (used to offset the next new SSRC).
-        let leg_max = leg_max_target.entry(leg).or_insert(0);
-        if target_timestamp > *leg_max {
-            *leg_max = target_timestamp;
-        }
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
@@ -578,9 +549,6 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     drop(parsed_packets);
     drop(decoders);
     drop(resamplers);
-    drop(base_timestamps);
-    drop(ssrc_target_offset);
-    drop(leg_max_target);
     drop(leg_audio_clock_rates);
     drop(legs_codecs);
 
@@ -592,37 +560,7 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         .max(max_time_b)
         .max(max_dtmf_time_a)
         .max(max_dtmf_time_b);
-    let max_duration = max_time + target_sample_rate / 50;
-
-    // Detect large gaps between consecutive packet timestamps, which
-    // indicate an anomalously-high timestamp (e.g. from clock-rate
-    // mismatches, cross-call contamination, or wraparound).  If any gap
-    // exceeds MAX_GAP_SAMPLES (5 minutes at the target rate), cap the
-    // output at the audio that came before the gap so we don't pad with
-    // minutes/hours of silence.  Adjust the threshold if you have long
-    // hold/resume scenarios that should be preserved.
-    let max_gap_samples = 5 * 60 * target_sample_rate;
-    let mut gap_capped = max_duration;
-    for buffer in [&buffer_a, &buffer_b, &dtmf_buffer_a, &dtmf_buffer_b] {
-        if buffer.len() < 2 {
-            continue;
-        }
-        let mut prev = None::<u32>;
-        for &ts in buffer.keys() {
-            if let Some(p) = prev {
-                if ts - p > max_gap_samples {
-                    let capped = *buffer.keys().take_while(|&&k| k < ts).last().unwrap_or(&p);
-                    let new_dur = capped + target_sample_rate / 50;
-                    if new_dur < gap_capped {
-                        gap_capped = new_dur;
-                    }
-                    break;
-                }
-            }
-            prev = Some(ts);
-        }
-    }
-    let max_duration = max_duration.min(gap_capped);
+    let max_duration = max_time + step_samples;
 
     tracing::info!(
         "Buffer stats: A_len={} B_len={} A_dtmf_len={} B_dtmf_len={} max_time={} max_duration={}",
@@ -874,12 +812,12 @@ mod tests {
         let packets = vec![
             (
                 0,
-                0,
+                0u64,
                 build_rtp_packet(101, 0, &[5, 0x80, 0x02, 0x80]), // 80 ms digit 5 at 8 kHz
             ),
-            (0, 160, build_rtp_packet(0, 160, &silence_payload)),
-            (0, 320, build_rtp_packet(0, 320, &silence_payload)),
-            (0, 480, build_rtp_packet(0, 480, &silence_payload)),
+            (0, 20_000u64, build_rtp_packet(0, 160, &silence_payload)),
+            (0, 40_000u64, build_rtp_packet(0, 320, &silence_payload)),
+            (0, 60_000u64, build_rtp_packet(0, 480, &silence_payload)),
         ];
 
         let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
@@ -908,10 +846,10 @@ mod tests {
 
         let silence_payload = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
         let packets = vec![
-            (1, 0, build_rtp_packet(0, 0, &silence_payload)),
+            (1, 0u64, build_rtp_packet(0, 0, &silence_payload)),
             (
                 1,
-                160,
+                20_000u64,
                 build_rtp_packet(97, 160, &[5, 0x80, 0x06, 0x40]), // 200 ms digit 5 at 8 kHz
             ),
         ];
@@ -992,18 +930,18 @@ mod tests {
             .map(|i| {
                 (
                     1i32,
-                    i as u64,
+                    (i * 20_000) as u64,
                     build_rtp_packet_with_ssrc(0, i * 160, 0xAAAA, &pcmu_silence),
                 )
             })
             .collect();
 
-        // Leg 1, SSRC 0xBBBB: 5 packets at timestamps shifted by 10000 so
-        // they sort after AAAA's packets, triggering the SSRC-offset path.
+        // Leg 1, SSRC 0xBBBB: 5 packets at wall-clock 100ms onwards.
+        // With wall-clock positioning, SSRC changes are handled transparently.
         packets.extend((0..5).map(|i| {
             (
                 1i32,
-                (i + 100) as u64,
+                (100_000 + i * 20_000) as u64,
                 build_rtp_packet_with_ssrc(0, 10_000 + i * 160, 0xBBBB, &pcmu_silence),
             )
         }));
@@ -1013,8 +951,8 @@ mod tests {
 
         let duration_secs = (wav.len() - 44) as f64 / (16000.0 * 2.0 * 2.0); // 16kHz stereo 16-bit
 
-        // Without SSRC fix: gap detection caps at first SSRC → ~100ms
-        // With SSRC fix: both SSRCs sequenced → ~200ms
+        // Without wall-clock: gap detection caps at first SSRC → ~100ms
+        // With wall-clock: both SSRCs placed by capture time → ~200ms
         assert!(
             duration_secs > 0.15,
             "expected both SSRCs in output (~200ms), got {:.3}s",
@@ -1027,10 +965,11 @@ mod tests {
         );
     }
 
-    /// Same-leg SSRC change with a large timestamp gap between the two
+    /// Same-leg SSRC change with a large RTP timestamp gap between the two
     /// streams (simulating real call-transfer where the second SSRC starts
-    /// at a completely different offset).  Only possible with SSRC-aware
-    /// offsetting — otherwise the gap-detection truncates the output.
+    /// at a completely different clock offset).  With wall-clock positioning,
+    /// the RTP timestamp gap is irrelevant — both streams are placed by their
+    /// actual capture timestamps.
     #[test]
     fn test_wav_generation_ssrc_change_large_gap() {
         let mut payload_map = HashMap::new();
@@ -1044,23 +983,24 @@ mod tests {
 
         let pcmu_silence = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
 
-        // Leg 1, SSRC 0xAAAA: 10 packets, timestamps 0..1440 (180ms)
+        // Leg 1, SSRC 0xAAAA: 10 packets at 20ms intervals (180ms total)
         let mut packets: Vec<(i32, u64, Vec<u8>)> = (0..10)
             .map(|i| {
                 (
                     1i32,
-                    i as u64,
+                    (i * 20_000) as u64,
                     build_rtp_packet_with_ssrc(0, i * 160, 0xAAAA, &pcmu_silence),
                 )
             })
             .collect();
 
-        // Leg 1, SSRC 0xBBBB: timestamps start at ~2 billion (realistic
-        // call-transfer where the second leg has a different clock base).
+        // Leg 1, SSRC 0xBBBB: RTP timestamps start at ~2 billion (realistic
+        // call-transfer where the second leg has a different clock base),
+        // but wall-clock capture timestamps continue from 200ms onwards.
         packets.extend((0..10).map(|i| {
             (
                 1i32,
-                (i + 1000) as u64,
+                (200_000 + i * 20_000) as u64,
                 build_rtp_packet_with_ssrc(0, 2_000_000_000 + i * 160, 0xBBBB, &pcmu_silence),
             )
         }));
@@ -1070,12 +1010,11 @@ mod tests {
 
         let duration_secs = (wav.len() - 44) as f64 / (16000.0 * 2.0 * 2.0);
 
-        // Both SSRCs produce 180ms each = 360ms total.  Without SSRC-aware
-        // offsetting, the second SSRC's huge timestamp creates a gap that
-        // gets capped at ~180ms.  With the fix, output is ~360ms.
+        // Both SSRCs produce 180ms each = 360ms total, placed sequentially
+        // by wall-clock time regardless of RTP timestamp gaps.
         assert!(
             duration_secs > 0.30,
-            "expected both SSRCs (~360ms), got {:.3}s — likely gap-truncated",
+            "expected both SSRCs (~360ms), got {:.3}s",
             duration_secs
         );
         assert!(
@@ -1085,27 +1024,27 @@ mod tests {
         );
     }
 
-    /// After the fix (saturating arithmetic + max_duration cap), WAV generation
-    /// completes normally even with packets from different SSRCs.
+    /// With wall-clock positioning, RTP timestamp mismatches (e.g. from
+    /// different SSRCs with wildly different clock bases) are irrelevant.
+    /// The output is bounded by actual capture timestamps.
     #[test]
     fn test_wav_generation_handles_mismatched_timestamps() {
         let payload = vec![0xffu8; 160]; // 20ms PCMU
 
-        // Two packets on the same leg with very different timestamps
-        // (simulating different SSRCs).
+        // Two packets on the same leg with very different RTP timestamps
+        // but spaced 20ms apart in wall-clock time.
         let packets = vec![
             (0i32, 0u64, build_rtp_packet(0, 100, &payload)),
-            (0i32, 1u64, build_rtp_packet(0, 4_000_000_000, &payload)),
+            (0i32, 20_000u64, build_rtp_packet(0, 4_000_000_000, &payload)),
         ];
 
         let wav = generate_wav_from_packets_ex(&packets, true)
             .expect("wav generation should succeed despite mismatched timestamps");
 
-        // Before fix: this would attempt ~7 GB allocation → OOM kill.
-        // After fix: capped at 1 hour of audio ≈ 230 MB worst case.
+        // Output is tiny because wall-clock span is only 20ms.
         assert!(
             wav.len() < 300_000_000,
-            "wav should be bounded (< 300 MB with 1h cap), got {} bytes ({:.1} MB)",
+            "wav should be bounded, got {} bytes ({:.1} MB)",
             wav.len(),
             wav.len() as f64 / 1_048_576.0
         );
