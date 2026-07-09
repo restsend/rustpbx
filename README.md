@@ -132,20 +132,26 @@ See [API Integration Guide](docs/api_integration_guide.md) and [RWI Protocol](do
 
 ---
 
-## Benchmark
+ ## Benchmark
 
-Tested on 2026-04-03 · RustPBX 0.4.0 · Linux x86_64 · 16 cores / 32 GB · G.711 PCMU
+Tested on 2026-07-09 · RustPBX 0.4.10 · rustrtc 0.3.89 · Linux x86_64 · AMD Ryzen 7 5700X (8C/16T) / 32 GB · G.711 PCMU · CPS=100
 
-| Level | Scenario | Completion | Peak | Loss | Latency | CPU | Mem |
-|---|---|---|---|---|---|---|---|
-| 500 | signaling only | 100% | 500 | 0% | 4.40ms | 32.4% | 137 MB |
-| 500 | + RTP proxy | 100% | 500 | 0% | 3.73ms | 98.4% | 183 MB |
-| 500 | + sipflow | 100% | 500 | 0% | 5.96ms | 101% | 198 MB |
-| 800 | signaling only | 100% | 800 | 0% | 8.32ms | 47.9% | 192 MB |
-| 800 | + RTP proxy | 100% | 800 | 0% | 6.38ms | 155% | 265 MB |
-| 800 | + sipflow | 100% | 800 | 0% | 6.08ms | 156% | 280 MB |
+| Concurrent | Scenario | Completion | Peak Conc | Packet Loss | CPU(Peak/Avg) | Memory(Peak) |
+|---|---|---|---|---|---|---|
+| 500 | signaling only | 100% | 600 | 0% | 18.4% / 9.9% | 382 MB |
+| 500 | + RTP proxy (bridge) | 100% | 595 | 0% | 77.3% / 59.7% | 524 MB |
+| 500 | + sipflow | 100% | 597 | 0% | 75.7% / 33.4% | 569 MB |
+| 2000 | signaling only | 100% | 2090 | 0% | 39.8% / 24.5% | 704 MB |
+| 2000 | + RTP proxy (bridge) | 100% | 2094 | 0% | 255% / 186% | 1209 MB |
+| 2000 | + sipflow | 100% | 2086 | 0% | 254% / 186% | 1209 MB |
+| 4000 | signaling only | 100% | 4078 | 0% | 54.0% / 34.8% | 1131 MB |
+| 4000 | + RTP proxy (bridge) | 100% | 4083 | 0% | 363% / 277% | 2101 MB |
+| 4000 | + sipflow | 100% | 4079 | 0% | 363% / 277% | 2104 MB |
+| 5000 | signaling only | 100% | 5066 | 0% | 58.2% / 39.1% | 1343 MB |
+| 5000 | + RTP proxy (bridge) | 100% | 4670 | 0% | 378% / 298% | 2389 MB |
+| 5000 | + sipflow | 100% | 4693 | 0% | 378% / 297% | 2416 MB |
 
-Per-channel overhead: ~0.06% CPU / 0.24 MB (signaling); ~0.19% CPU / 0.33 MB (with RTP proxy).
+Per-channel overhead: ~0.008% CPU (signaling) / ~0.076% CPU (RTP proxy).  Scaling is linear — 5000 concurrent uses ~3.8 cores, leaving ~12 cores for additional load (~16000+ theoretical).
 
 > See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
 
