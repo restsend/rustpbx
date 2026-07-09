@@ -149,7 +149,6 @@ hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
 rustrtc = { path = "../rustrtc" }
->>>>>>> origin/main
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
