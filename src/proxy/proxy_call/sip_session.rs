@@ -7373,7 +7373,7 @@ impl SipSession {
     }
 
     async fn cleanup(&mut self) {
-        debug!(session_id = %self.context.session_id, "Cleaning up session");
+        trace!(session_id = %self.context.session_id, "Cleaning up session");
 
         self.stop_caller_ingress_monitor().await;
 
@@ -9141,10 +9141,10 @@ impl SipSession {
             let cancel = self.cancel_token.clone();
             tokio::select! {
                 _ = notify.notified() => {
-                    debug!(track_id = %base_track_id, "Playback completed before returning");
+                    trace!(track_id = %base_track_id, "Playback completed before returning");
                 }
                 _ = cancel.cancelled() => {
-                    debug!(track_id = %base_track_id, "Playback wait cancelled");
+                    trace!(track_id = %base_track_id, "Playback wait cancelled");
                 }
             }
         }

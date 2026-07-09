@@ -2127,7 +2127,7 @@ impl BridgePeer {
                             }
                         }
                         Err(e) => {
-                            debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Track recv ended");
+                            trace!(bridge_id = %bridge_id, direction = %path, error = %e, "Track recv ended");
                             break;
                         }
                     }
@@ -2370,7 +2370,7 @@ impl BridgePeer {
 
 impl Drop for BridgePeer {
     fn drop(&mut self) {
-        debug!(bridge_id = %self.id, "BridgePeer dropping, closing PeerConnections");
+        trace!(bridge_id = %self.id, "BridgePeer dropping, closing PeerConnections");
         self.close_sync();
     }
 }

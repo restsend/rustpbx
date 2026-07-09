@@ -39,7 +39,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::media::Track as _;
 
@@ -200,7 +200,7 @@ impl EngineCore {
                             let cmd_name = cmd.name();
                             let session_id = cmd.session_id().map(|s| s.to_string());
 
-                            debug!(command = cmd_name, session = ?session_id, "MediaEngine command received");
+                            trace!(command = cmd_name, session = ?session_id, "MediaEngine command received");
 
                             match self.dispatch(cmd).await {
                                 Ok(()) => {}

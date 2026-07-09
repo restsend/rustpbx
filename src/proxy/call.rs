@@ -1345,9 +1345,22 @@ impl CallModule {
         if let Some(ref conn) = tx.connection {
             if let Some(transport_token) = conn.cancel_token() {
                 let watch = session_token.clone();
+                let remote = conn.get_remote_addr().map(|a| a.to_string());
+                let transport = conn.transport().to_string();
+                let session_id = tx
+                    .original
+                    .call_id_header()
+                    .ok()
+                    .map(|c| c.to_string());
                 crate::utils::spawn(async move {
                     transport_token.cancelled().await;
-                    info!("Transport disconnected, cancelling call session");
+                    info!(
+                        session_id = session_id.as_deref().unwrap_or("-"),
+                        leg = "caller",
+                        remote = remote.as_deref().unwrap_or("-"),
+                        transport,
+                        "Transport disconnected, cancelling call session",
+                    );
                     watch.cancel();
                 });
             }
