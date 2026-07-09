@@ -60,7 +60,7 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
 
 | Software-Defined | AI-Native | High Performance |
 |---|---|---|
-| Every INVITE calls your **HTTP webhook**. Return JSON routing decisions. No recompilation needed. | AI agents are **native participants** — listen, speak, barge, transfer via WebSocket. | 800 concurrent calls with RTP proxy: **6ms latency, 0% loss, 280MB memory**. |
+| Every INVITE calls your **HTTP webhook**. Return JSON routing decisions. No recompilation needed. | AI agents are **native participants** — listen, speak, barge, transfer via WebSocket. | 5000 concurrent calls with RTP proxy: **~3.8 cores, 0% loss**. Linear scaling — 16 cores → ~16000+. |
 
 ---
 
