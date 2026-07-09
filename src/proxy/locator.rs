@@ -1,6 +1,6 @@
 use super::locator_db::DbLocator;
 use crate::{
-    call::Location,
+    call::{Location, LOCATOR_EXPIRE_GRACE_SECS},
     config::{LocatorConfig, ProxyConfig},
 };
 use anyhow::Result;
@@ -120,7 +120,11 @@ pub fn now_epoch_secs() -> i64 {
 ///
 /// `expires == 0` means "never expire".
 pub fn is_location_expired(expires: i64, last_modified: i64, now_epoch: i64) -> bool {
-    expires > 0 && (now_epoch - last_modified) >= expires
+    if expires <= 0 {
+        return false; // never expire
+    }
+    let effective_ttl = expires + LOCATOR_EXPIRE_GRACE_SECS;
+    (now_epoch - last_modified) >= effective_ttl
 }
 
 /// Returns `true` when a binding was registered so recently that a stale

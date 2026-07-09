@@ -7386,41 +7386,6 @@ impl SipSession {
             let _ = self.stop_recording().await;
         }
 
-        // Stop media bridge — close_sync cancels tasks without awaiting them.
-        // Forwarder tasks exit via cancel_token / closed PeerConnections.
-        if let Some(bridge) = self.media.media_bridge.take() {
-            debug!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
-            bridge.close_sync();
-            self.media.media_bridge_started = false;
-            self.media.bridge_playback_track_ids.clear();
-        }
-
-        // Abort all leg-specific spawned tasks
-        for (leg_id, handles) in self.legs.drain_tasks() {
-            for handle in handles {
-                handle.abort();
-            }
-            debug!(session_id = %self.context.session_id, %leg_id, "Aborted tasks for leg during cleanup");
-        }
-
-        // Stop all conference bridge handles (cancel their tasks)
-        self.legs.stop_all_conference_bridge_handles();
-
-        // Stop the session-level conference bridge
-        self.conference_bridge.stop_bridge();
-
-        // Stop caller and callee media peers (cancels their tasks)
-        if let Some(peer) = self.caller_peer() {
-            peer.stop();
-        }
-        if let Some(peer) = self.callee_peer() {
-            peer.stop();
-        }
-
-        if let Some(mixer) = self.supervisor_mixer.take() {
-            mixer.stop();
-        }
-
         // Release any concurrency slots acquired by routing policy checks so
         // they don't permanently exhaust the configured budget. Uses
         // best-effort release (errors are logged inside the helper).
@@ -9840,8 +9805,6 @@ fn parse_sipfrag_status(body: &str) -> Option<u16> {
 
 impl Drop for SipSession {
     fn drop(&mut self) {
-        debug!(session_id = %self.context.session_id, "SipSession dropping");
-
         self.cancel_token.cancel();
 
         self.callee_guards.clear();
@@ -9859,6 +9822,18 @@ impl Drop for SipSession {
         self.conference_bridge.stop_bridge();
         self.legs.stop_all_conference_bridge_handles();
         self.supervisor_mixer.take();
+
+        // Media bridge — sync close in Drop for RAII.
+        if let Some(bridge) = self.media.media_bridge.take() {
+            bridge.close_sync();
+        }
+
+        // Abort leg-specific spawned tasks so they can't outlive the session.
+        for (_, handles) in self.legs.drain_tasks() {
+            for handle in handles {
+                handle.abort();
+            }
+        }
 
         // Safety net: ensure the registry entry is always removed even if
         // cleanup() was never called (e.g. tokio task cancellation).

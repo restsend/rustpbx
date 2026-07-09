@@ -19,6 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const LOCATOR_EXPIRE_GRACE_SECS: i64 = 30;
+
 pub mod adapters;
 pub mod app;
 pub mod cookie;
@@ -256,7 +258,7 @@ impl Location {
             return true;
         }
         if let Some(last_modified) = self.last_modified {
-            let ttl = std::time::Duration::from_secs(self.expires as u64);
+            let ttl = std::time::Duration::from_secs(self.expires as u64 + LOCATOR_EXPIRE_GRACE_SECS as u64);
             return now.duration_since(last_modified) >= ttl;
         }
         false
