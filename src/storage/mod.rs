@@ -184,9 +184,23 @@ impl Storage {
     }
 
     pub fn local_path(&self, path: &str) -> Option<PathBuf> {
-        self.local_root
-            .as_ref()
-            .map(|root| root.join(path.trim_start_matches('/')))
+        self.local_root.as_ref().map(|root| {
+            let cleaned: String = path
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|segment| !segment.is_empty() && *segment != ".")
+                .map(|segment| {
+                    if segment == ".." {
+                        // Replace path traversal segments with safe placeholder
+                        "_"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            root.join(cleaned)
+        })
     }
 
     // Helper to upload a local file to storage (move)

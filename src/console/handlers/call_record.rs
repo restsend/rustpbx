@@ -546,7 +546,7 @@ async fn stream_file_with_range(
         .and_then(|name| name.to_str())
         .unwrap_or("recording");
     let mime = guess_audio_mime(file_name);
-    let safe_file_name = file_name.replace('"', "'");
+    let safe_file_name = crate::utils::sanitize_header_value(file_name);
     if let Ok(mime_value) = HeaderValue::from_str(mime) {
         headers_mut.insert(http::header::CONTENT_TYPE, mime_value);
     }

@@ -1,12 +1,27 @@
 use super::CliTtsConfig;
 use anyhow::{Result, anyhow};
 
+const MAX_CLI_TEXT_LEN: usize = 5000;
+
 pub async fn synthesize_cli(
     cfg: &CliTtsConfig,
     text: &str,
     voice: &str,
     output_path: &str,
 ) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(anyhow!("text must not be empty"));
+    }
+    if text.len() > MAX_CLI_TEXT_LEN {
+        return Err(anyhow!(
+            "text too long (max {} characters)",
+            MAX_CLI_TEXT_LEN
+        ));
+    }
+    let voice = voice.trim();
+    let output_path = output_path.trim();
+
     let args: Vec<String> = cfg
         .args
         .iter()

@@ -695,7 +695,7 @@ async fn resolve_audio_source(
         let temp_file_name = format!(
             "transcript_{}_{}.wav",
             record.id,
-            chrono::Utc::now().timestamp_millis()
+            uuid::Uuid::new_v4()
         );
         let temp_path = temp_dir.join(temp_file_name).to_string_lossy().into_owned();
         info!(call_id = %record.call_id, temp_path = %temp_path, "Using SipFlow audio data");
@@ -873,43 +873,68 @@ pub async fn update_settings(
 
 #[derive(Debug, Deserialize)]
 pub struct DownloadModelRequest {
-    pub command: Option<String>,
     pub models_path: Option<String>,
     pub hf_endpoint: Option<String>,
 }
 
 pub async fn download_model(
-    State(_state): State<Arc<ConsoleState>>,
+    State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(payload): Json<DownloadModelRequest>,
 ) -> Response {
-    // Validate command
-    let command = match &payload.command {
-        Some(cmd) if !cmd.trim().is_empty() => cmd.trim(),
-        _ => {
+    let app_state = match state.app_state() {
+        Some(app) => app,
+        None => {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message": "Command is required"})),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"message": "Application state unavailable"})),
             )
                 .into_response();
         }
     };
 
-    // Check if command exists
-    if !command_exists(command) {
+    let transcript_cfg = get_merged_config(&app_state).await;
+
+    // Get command from config only — NEVER from user input
+    let command = transcript_cfg
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+        .unwrap_or("sensevoice-cli")
+        .to_string();
+
+    if !command_exists(&command) {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::FAILED_DEPENDENCY,
             Json(json!({
-                "message": format!("Command '{}' not found in PATH", command)
+                "message": format!(
+                    "sensevoice-cli is not available (looked for '{}'). Install via `cargo install sensevoice-cli` or configure proxy.transcript.command.",
+                    command
+                )
             })),
         )
             .into_response();
     }
 
-    // Validate models_path
-    let models_path = match &payload.models_path {
-        Some(path) if !path.trim().is_empty() => path.trim(),
-        _ => {
+    // Prefer models_path from config, fall back to request body
+    let models_path = transcript_cfg
+        .models_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .or_else(|| {
+            payload
+                .models_path
+                .as_ref()
+                .map(|p| p.trim().to_string())
+        })
+        .filter(|p| !p.is_empty());
+
+    let models_path = match models_path {
+        Some(p) => p,
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"message": "Models path is required"})),
@@ -918,8 +943,20 @@ pub async fn download_model(
         }
     };
 
+    // Validate models_path doesn't contain path traversal components
+    let models_dir = std::path::Path::new(&models_path);
+    if models_dir
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"message": "Invalid models path"})),
+        )
+            .into_response();
+    }
+
     // Create models directory if it doesn't exist
-    let models_dir = std::path::Path::new(models_path);
     if let Err(e) = tokio::fs::create_dir_all(models_dir).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -931,15 +968,24 @@ pub async fn download_model(
     }
 
     // Build download command
-    let mut cmd = tokio::process::Command::new(command);
-    cmd.arg("--models-path").arg(models_path);
+    let mut cmd = tokio::process::Command::new(&command);
+    cmd.arg("--models-path").arg(&models_path);
     cmd.arg("--download-only");
 
-    // Add HF endpoint if provided
+    // Add HF endpoint if provided — validate it's a reasonable URL
     if let Some(endpoint) = payload.hf_endpoint
         && !endpoint.trim().is_empty()
     {
-        cmd.env("HF_ENDPOINT", endpoint.trim());
+        let ep = endpoint.trim();
+        // Allow only https:// endpoints for HuggingFace
+        if !ep.starts_with("https://") || ep.len() > 256 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message": "Invalid HF endpoint URL. Must be an https:// URL."})),
+            )
+                .into_response();
+        }
+        cmd.env("HF_ENDPOINT", ep);
     }
 
     // Set a long timeout for download (10 minutes)

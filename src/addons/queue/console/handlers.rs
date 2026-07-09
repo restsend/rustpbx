@@ -748,6 +748,17 @@ pub async fn download_audio_handler(
             .into_response();
     }
 
+    // Prevent SSRF to internal networks
+    if !crate::utils::is_url_ssrf_safe(&url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error", "message": "URL points to a private or internal address"
+            })),
+        )
+            .into_response();
+    }
+
     // Determine sounds directory
     let sounds_dir = if std::path::Path::new("config/sounds").exists() {
         PathBuf::from("config/sounds")
@@ -755,8 +766,9 @@ pub async fn download_audio_handler(
         PathBuf::from("sounds")
     };
 
-    // Create filename from URL
-    let filename = sanitize_filename(url.split('/').last().unwrap_or("audio.wav"));
+    // Create filename from URL — strip query string first
+    let url_basename = url.split('/').last().unwrap_or("audio.wav").split('?').next().unwrap_or("audio.wav");
+    let filename = sanitize_filename(url_basename);
     let dest_path = sounds_dir.join(&filename);
 
     // Download
@@ -832,15 +844,22 @@ pub async fn serve_sound_handler(AxumPath(file_path): AxumPath<String>) -> Respo
 }
 
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    // Allow safe chars only: alphanumeric, dash, underscore, dot.
+    // Prevent path traversal by stripping ".." and leading dots.
+    let sanitized: String = name
+        .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
             } else {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    // Remove path traversal sequences
+    let no_dotdot = sanitized.replace("..", "_");
+    // Strip leading dots
+    no_dotdot.trim_start_matches('.').to_string()
 }
 
 fn proxy_config_optional(state: &ConsoleState) -> Option<ProxyConfig> {

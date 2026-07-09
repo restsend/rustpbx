@@ -496,7 +496,10 @@ async fn query_media(
                 .header(header::CONTENT_TYPE, "audio/wav")
                 .header(
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}.wav\"", call_id),
+                    format!(
+                        "attachment; filename=\"{}.wav\"",
+                        crate::utils::sanitize_header_value(&call_id)
+                    ),
                 )
                 .body(body)
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());

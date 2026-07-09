@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::media::wav_reader::WavReader;
+use crate::utils::is_url_ssrf_safe;
 
 pub trait AudioSource: Send + Sync {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize;
@@ -44,6 +45,9 @@ impl FileAudioSource {
     pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
         let (actual_path, temp_file_path) =
             if file_path.starts_with("http://") || file_path.starts_with("https://") {
+                if !is_url_ssrf_safe(&file_path) {
+                    return Err(anyhow!("Audio URL points to a private or internal address"));
+                }
                 debug!(file = %file_path, "Downloading audio file");
                 let temp_path = Self::download_file(&file_path).await?;
                 (temp_path.clone(), Some(temp_path))
@@ -275,14 +279,9 @@ impl FileAudioSource {
 
     async fn download_file(url: &str) -> Result<String> {
         let temp_dir = std::env::temp_dir();
-        let file_name = url
-            .split('/')
-            .next_back()
-            .unwrap_or("audio_file")
-            .split('?')
-            .next()
-            .unwrap_or("audio_file");
-        let temp_path = temp_dir.join(format!("rustpbx_audio_{}", file_name));
+        // Use UUID for unpredictable temp filename
+        let file_name = format!("rustpbx_audio_{}", uuid::Uuid::new_v4());
+        let temp_path = temp_dir.join(&file_name);
 
         debug!(temp = %temp_path.display(), "Downloading to temporary file");
 

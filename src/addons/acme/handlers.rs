@@ -154,10 +154,19 @@ pub async fn request_cert(
     Extension(acme_state): Extension<AcmeState>,
     Json(payload): Json<RequestCertPayload>,
 ) -> impl IntoResponse {
-    let domain = payload.domain.clone();
+    let domain = payload.domain.trim().to_string();
     let email = payload.email.clone();
     let enable_https = payload.enable_https;
     let enable_sip_tls = payload.enable_sip_tls;
+
+    // Validate domain format to prevent path traversal
+    if !crate::utils::validate_domain(&domain) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid domain: {}", domain),
+        )
+            .into_response();
+    }
 
     info!(
         "Received certificate request for domain: {}, email: {}",
@@ -188,7 +197,7 @@ pub async fn request_cert(
         }
     });
 
-    serde_json::json!({ "status": "started", "message": "Certificate request started in background." }).to_string()
+    serde_json::json!({ "status": "started", "message": "Certificate request started in background." }).to_string().into_response()
 }
 
 async fn process_acme(
@@ -476,6 +485,11 @@ fn save_cert_and_update_config(
     enable_sip_tls: bool,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
+    // Extra safety: domain should already be validated, but double-check
+    if !crate::utils::validate_domain(domain) {
+        return Err(anyhow::anyhow!("Invalid domain name: {}", domain));
+    }
+
     let cert_dir = StdPath::new("config/certs");
     std::fs::create_dir_all(cert_dir)?;
 
