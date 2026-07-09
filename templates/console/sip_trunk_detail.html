@@ -165,7 +165,7 @@ default('RustPBX') }}{% endblock %}
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_display_name" | t }}
-                            <input type="text" x-model.trim="form.display_name" maxlength="160"
+                            <input type="text" data-testid="trunk-display-name" x-model.trim="form.display_name" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_display_name_placeholder" | t }}">
                         </label>
@@ -853,19 +853,19 @@ default('RustPBX') }}{% endblock %}
                 return this.mode === 'edit' ? 'PATCH' : 'PUT';
             },
             buildPayload() {
-                const params = new URLSearchParams();
-                params.set('name', this.form.name.trim());
-                params.set('display_name', this.form.display_name.trim());
-                params.set('carrier', this.form.carrier.trim());
-                params.set('description', this.form.description.trim());
-                params.set('status', this.form.status.trim());
-                params.set('direction', this.form.direction.trim());
-                params.set('sip_transport', this.form.sip_transport.trim());
+                const payload = {};
+                payload.name = this.form.name.trim();
+                payload.display_name = this.form.display_name.trim();
+                payload.carrier = this.form.carrier.trim();
+                payload.description = this.form.description.trim();
+                payload.status = this.form.status.trim();
+                payload.direction = this.form.direction.trim();
+                payload.sip_transport = this.form.sip_transport.trim();
 
-                if (this.form.sip_server.trim()) params.set('sip_server', this.form.sip_server.trim());
-                if (this.form.outbound_proxy.trim()) params.set('outbound_proxy', this.form.outbound_proxy.trim());
-                if (this.form.auth_username.trim()) params.set('auth_username', this.form.auth_username.trim());
-                if (this.form.auth_password.trim()) params.set('auth_password', this.form.auth_password.trim());
+                if (this.form.sip_server.trim()) payload.sip_server = this.form.sip_server.trim();
+                if (this.form.outbound_proxy.trim()) payload.outbound_proxy = this.form.outbound_proxy.trim();
+                if (this.form.auth_username.trim()) payload.auth_username = this.form.auth_username.trim();
+                if (this.form.auth_password.trim()) payload.auth_password = this.form.auth_password.trim();
 
                 const numericFields = [
                     ['max_cps', this.form.max_cps],
@@ -876,18 +876,18 @@ default('RustPBX') }}{% endblock %}
                     if (value !== '' && value !== null && value !== undefined) {
                         const num = Number(value);
                         if (!Number.isNaN(num)) {
-                            params.set(key, String(Math.max(0, Math.round(num))));
+                            payload[key] = Math.max(0, Math.round(num));
                         }
                     }
                 });
 
-                params.set('allowed_ips', this.form.allowed_ips.trim());
-                params.set('did_numbers', this.form.did_numbers.trim());
-                params.set('billing_snapshot', this.form.billing_snapshot.trim());
-                params.set('analytics', this.form.analytics.trim());
-                params.set('tags', this.form.tags.trim());
-                params.set('incoming_from_user_prefix', this.form.incoming_from_user_prefix.trim());
-                params.set('incoming_to_user_prefix', this.form.incoming_to_user_prefix.trim());
+                payload.allowed_ips = this.form.allowed_ips.trim();
+                payload.did_numbers = this.form.did_numbers.trim();
+                payload.billing_snapshot = this.form.billing_snapshot.trim();
+                payload.analytics = this.form.analytics.trim();
+                payload.tags = this.form.tags.trim();
+                payload.incoming_from_user_prefix = this.form.incoming_from_user_prefix.trim();
+                payload.incoming_to_user_prefix = this.form.incoming_to_user_prefix.trim();
                 // Merge SBC settings into metadata
                 try {
                     const meta = this.form.metadata.trim() ? JSON.parse(this.form.metadata.trim()) : {};
@@ -941,23 +941,23 @@ default('RustPBX') }}{% endblock %}
                     if (!Object.keys(meta.sbc).length) {
                         delete meta.sbc;
                     }
-                    params.set('metadata', JSON.stringify(meta, null, 2));
+                    payload.metadata = JSON.stringify(meta, null, 2);
                 } catch(e) {
-                    params.set('metadata', this.form.metadata.trim());
+                    payload.metadata = this.form.metadata.trim();
                 }
-                params.set('is_active', this.form.is_active ? 'true' : 'false');
-                params.set('register_enabled', this.form.register_enabled ? 'true' : 'false');
+                payload.is_active = !!this.form.is_active;
+                payload.register_enabled = !!this.form.register_enabled;
                 if (this.form.register_expires !== '' && this.form.register_expires != null) {
                     const expNum = Number(this.form.register_expires);
                     if (!Number.isNaN(expNum) && expNum >= 60) {
-                        params.set('register_expires', String(Math.round(expNum)));
+                        payload.register_expires = Math.round(expNum);
                     }
                 }
                 if (this.form.register_extra_headers.trim()) {
-                    params.set('register_extra_headers', this.form.register_extra_headers.trim());
+                    payload.register_extra_headers = this.form.register_extra_headers.trim();
                 }
 
-                return params;
+                return payload;
             },
             async submit() {
                 const td = (this.t || {}).sip_trunk_detail || {};
@@ -969,17 +969,14 @@ default('RustPBX') }}{% endblock %}
                 this.error = null;
                 this.success = null;
                 try {
-                    const response = await fetch(this.submitUrl(), {
-                        method: this.submitMethod(),
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                        },
-                        body: this.buildPayload().toString(),
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || td.save_failed || 'Failed to save SIP trunk');
+                    const url = this.submitUrl();
+                    const method = this.submitMethod().toLowerCase();
+                    const payload = this.buildPayload();
+                    let data;
+                    if (method === 'put') {
+                        data = await apiPut(url, payload);
+                    } else {
+                        data = await apiPatch(url, payload);
                     }
                     this.success = td.save_success || 'Changes saved successfully.';
                     setTimeout(() => {

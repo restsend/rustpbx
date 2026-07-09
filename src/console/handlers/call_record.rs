@@ -42,6 +42,9 @@ use urlencoding::encode;
 
 use crate::media::wav_reader::{WavReader, WavSpec, WavWriter};
 
+const OUTBOUND_TRUNK_NAME_KEY: &str = "outbound_trunk_name";
+const OUTBOUND_TRUNK_DEST_KEY: &str = "outbound_trunk_dest";
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct QueryCallRecordFilters {
@@ -62,7 +65,13 @@ struct QueryCallRecordFilters {
     #[serde(default)]
     sip_trunk_ids: Option<Vec<i64>>,
     #[serde(default)]
+    outbound_sip_trunk_ids: Option<Vec<i64>>,
+    #[serde(default)]
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    caller: Option<String>,
+    #[serde(default)]
+    callee: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1061,6 +1070,22 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
             }
         }
 
+        if let Some(caller_raw) = filters.caller.as_ref() {
+            let caller_trimmed = caller_raw.trim();
+            if !caller_trimmed.is_empty() {
+                let pattern = format!("%{}%", caller_trimmed);
+                condition = condition.add(CallRecordColumn::FromNumber.like(pattern));
+            }
+        }
+
+        if let Some(callee_raw) = filters.callee.as_ref() {
+            let callee_trimmed = callee_raw.trim();
+            if !callee_trimmed.is_empty() {
+                let pattern = format!("%{}%", callee_trimmed);
+                condition = condition.add(CallRecordColumn::ToNumber.like(pattern));
+            }
+        }
+
         let date_from = parse_date(filters.date_from.as_ref(), false);
         let date_to = parse_date(filters.date_to.as_ref(), true);
 
@@ -1088,6 +1113,11 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
         let sip_trunk_ids = normalize_i64_list(filters.sip_trunk_ids.as_ref());
         if !sip_trunk_ids.is_empty() {
             condition = condition.add(CallRecordColumn::SipTrunkId.is_in(sip_trunk_ids));
+        }
+
+        let outbound_sip_trunk_ids = normalize_i64_list(filters.outbound_sip_trunk_ids.as_ref());
+        if !outbound_sip_trunk_ids.is_empty() {
+            condition = condition.add(CallRecordColumn::OutboundSipTrunkId.is_in(outbound_sip_trunk_ids));
         }
 
         let tags = normalize_string_list(filters.tags.as_ref());
@@ -1157,6 +1187,9 @@ async fn load_related_context(
         }
         if let Some(id) = record.sip_trunk_id {
             sip_trunk_ids.insert(id);
+        }
+        if let Some(id) = record.outbound_sip_trunk_id {
+            sip_trunk_ids.insert(id); // Using the same sip_trunk_ids pool for query
         }
     }
 
@@ -1258,6 +1291,13 @@ fn build_record_payload(
         .sip_gateway
         .clone()
         .or_else(|| sip_trunk_name.clone());
+    let outbound_trunk_name = record
+        .outbound_sip_trunk_id
+        .and_then(|id| related.sip_trunks.get(&id))
+        .map(|trunk| trunk.display_name.clone().unwrap_or(trunk.name.clone()))
+        .or_else(|| metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_NAME_KEY));
+        
+    let outbound_trunk_dest = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_DEST_KEY);
 
     let caller_uri = record.caller_uri.clone();
     let callee_uri = record.callee_uri.clone();
@@ -1293,6 +1333,9 @@ fn build_record_payload(
         "callee_uri": callee_uri,
         "sip_gateway": sip_gateway,
         "sip_trunk": sip_trunk_name,
+        "outbound_trunk": outbound_trunk_name,
+        "outbound_trunk_id": record.outbound_sip_trunk_id,
+        "outbound_trunk_dest": outbound_trunk_dest,
         "tags": tags,
         "has_transcript": record.has_transcript,
         "transcript_status": record.transcript_status,
@@ -1320,6 +1363,15 @@ fn build_record_payload(
             "destination": rewrite_destination,
         },
     })
+}
+
+fn metadata_string(metadata: Option<&Value>, key: &str) -> Option<String> {
+    metadata
+        .and_then(|value| value.as_object())
+        .and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn build_recording_payload(
@@ -1878,6 +1930,42 @@ mod tests {
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state, None);
         assert_eq!(payload["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn build_record_payload_includes_outbound_trunk_metadata() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let record = call_record::ActiveModel {
+            call_id: Set("call-outbound-meta-1".into()),
+            direction: Set("outbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(60),
+            metadata: Set(Some(json!({
+                "outbound_trunk_name": "carrier-a",
+                "outbound_trunk_dest": "sip:carrier-a.example.com:5060"
+            }))),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let related = load_related_context(&db, &[record.clone()])
+            .await
+            .expect("related context");
+        let payload = build_record_payload(&record, &related, &state, None);
+        assert_eq!(payload["outbound_trunk"], "carrier-a");
+        assert_eq!(
+            payload["outbound_trunk_dest"],
+            "sip:carrier-a.example.com:5060"
+        );
     }
 
     #[tokio::test]

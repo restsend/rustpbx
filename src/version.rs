@@ -63,7 +63,7 @@ pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
         .with_timeout(std::time::Duration::from_secs(5))
         .with_header("User-Agent", &get_useragent());
 
-    let req = reqwest::Client::new()
+    let req = crate::http_util::shared_keepalive_client()
         .get("https://miuda.ai/api/check_update")
         .query(&[
             ("version", version),

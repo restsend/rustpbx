@@ -207,24 +207,6 @@ endblock %}
                             <span class="text-xs font-normal text-slate-400"
                                 x-text="tt('queue.field_ring_timeout_hint')"></span>
                         </label>
-                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            <span x-text="tt('queue.field_acd_policy')"></span>
-                            <template x-if="acdPolicies.length">
-                                <select x-model="form.spec.acd_policy"
-                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="" x-text="tt('queue.field_acd_policy_placeholder')"></option>
-                                    <template x-for="policy in acdPolicies" :key="policy.name">
-                                        <option :value="policy.name" x-text="policy.name"></option>
-                                    </template>
-                                </select>
-                            </template>
-                            <template x-if="!acdPolicies.length">
-                                <input type="text" x-model.trim="form.spec.acd_policy"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    :placeholder="tt('queue.field_acd_policy_placeholder')">
-                            </template>
-                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_acd_policy_hint')"></span>
-                        </label>
                     </div>
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
@@ -264,15 +246,32 @@ endblock %}
                                     <template x-if="target.uri && target.uri.startsWith('skill-group:')">
                                         <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
                                             <span x-text="tt('queue.target_skill_group')"></span>
-                                            <select x-model="target.skill_group_id"
-                                                x-effect="target.skill_group_id && skillGroups.length ? $el.value = target.skill_group_id : ''"
-                                                @change="target.uri = 'skill-group:' + target.skill_group_id"
-                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
-                                                <template x-for="group in skillGroups" :key="group.skill_group_id">
-                                                    <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                            <div class="relative" @click.outside="closeSg(target)" x-init="ensureSgState(target)">
+                                                <input type="text" x-model="target._sgQuery"
+                                                    @input="onSgInput(target)" @focus="target._sgOpen = true"
+                                                    @keydown="sgHandleKeydown($event, target)"
+                                                    class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    :placeholder="tt('queue.skill_group_search_placeholder')">
+                                                <template x-if="target._sgOpen && filteredSkillGroups(target).length">
+                                                    <ul class="absolute z-30 max-h-48 w-full overflow-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                        :class="sgDropdownUp($el.parentElement) ? 'bottom-full mb-1' : 'top-full mt-1'">
+                                                        <template x-for="(group, i) in filteredSkillGroups(target)" :key="group.skill_group_id || i">
+                                                            <li @click="selectSkillGroup(target, group)"
+                                                                class="cursor-pointer px-3 py-2 text-sm"
+                                                                :class="target._sgIndex === i ? 'bg-sky-50 text-sky-700' : 'text-slate-700 hover:bg-slate-50'">
+                                                                <span x-text="group.display_name || group.skill_group_id" class="font-medium"></span>
+                                                                <span x-show="group.display_name" class="ml-1 text-xs text-slate-400" x-text="'(' + group.skill_group_id + ')'"></span>
+                                                            </li>
+                                                        </template>
+                                                    </ul>
                                                 </template>
-                                            </select>
+                                                <template x-if="target._sgOpen && filteredSkillGroups(target).length === 0">
+                                                    <div class="absolute z-30 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-400 shadow-lg"
+                        :class="sgDropdownUp($el.parentElement) ? 'bottom-full mb-1' : 'top-full mt-1'"
+                                                        x-text="tt('queue.skill_group_no_results')">
+                                                    </div>
+                                                </template>
+                                            </div>
                                         </label>
                                     </template>
                                     <label
@@ -329,12 +328,13 @@ endblock %}
                             <span x-text="tt('queue.fallback_failure_opt')"></span>
                         </label>
                     </div>
-                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'redirect'" x-cloak>
+                    <div x-show="fallbackMode === 'redirect'" x-cloak
+                        @destination-change="form.spec.fallback.redirect = $event.detail.type === 'extension' ? 'sip:' + $event.detail.value : ($event.detail.type === 'uri' ? $event.detail.value : $event.detail.type + ':' + $event.detail.value)">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             <span x-text="tt('queue.fallback_redirect_label')"></span>
-                            <input type="text" x-model.trim="form.spec.fallback.redirect"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                :placeholder="tt('queue.fallback_redirect_placeholder')">
+                            {% set queue_items = forwarding_catalog.queues | default([]) %}
+                            {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                            {% include "console/_destination_selector.html" %}
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'failure'" x-cloak>
@@ -373,14 +373,32 @@ endblock %}
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             <span x-text="tt('queue.fallback_skill_group_label')"></span>
                             <template x-if="skillGroups.length">
-                                                <select x-model="form.spec.fallback.skill_group_ref"
-                                                    x-effect="form.spec.fallback.skill_group_ref && skillGroups.length ? $el.value = form.spec.fallback.skill_group_ref : ''"
-                                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                    <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
-                                                    <template x-for="group in skillGroups" :key="group.skill_group_id">
-                                                        <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
-                                                    </template>
-                                                </select>
+                                <div class="relative" @click.outside="closeSg(form.spec.fallback)" x-init="ensureSgState(form.spec.fallback)">
+                                    <input type="text" x-model="form.spec.fallback._sgQuery"
+                                        @input="onSgInput(form.spec.fallback)" @focus="form.spec.fallback._sgOpen = true"
+                                        @keydown="sgHandleKeydown($event, form.spec.fallback)"
+                                        class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        :placeholder="tt('queue.skill_group_search_placeholder')">
+                                    <template x-if="form.spec.fallback._sgOpen && filteredSkillGroups(form.spec.fallback).length">
+                                        <ul class="absolute z-30 max-h-48 w-full overflow-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                                            :class="sgDropdownUp($el.parentElement) ? 'bottom-full mb-1' : 'top-full mt-1'">
+                                            <template x-for="(group, i) in filteredSkillGroups(form.spec.fallback)" :key="group.skill_group_id || i">
+                                                <li @click="selectSkillGroup(form.spec.fallback, group)"
+                                                    class="cursor-pointer px-3 py-2 text-sm"
+                                                    :class="form.spec.fallback._sgIndex === i ? 'bg-sky-50 text-sky-700' : 'text-slate-700 hover:bg-slate-50'">
+                                                    <span x-text="group.display_name || group.skill_group_id" class="font-medium"></span>
+                                                    <span x-show="group.display_name" class="ml-1 text-xs text-slate-400" x-text="'(' + group.skill_group_id + ')'"></span>
+                                                </li>
+                                            </template>
+                                        </ul>
+                                    </template>
+                                    <template x-if="form.spec.fallback._sgOpen && filteredSkillGroups(form.spec.fallback).length === 0">
+                                        <div class="absolute z-30 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-400 shadow-lg"
+                                            :class="sgDropdownUp($el.parentElement) ? 'bottom-full mb-1' : 'top-full mt-1'"
+                                            x-text="tt('queue.skill_group_no_results')">
+                                        </div>
+                                    </template>
+                                </div>
                             </template>
                             <template x-if="!skillGroups.length">
                                 <input type="text" x-model.trim="form.spec.fallback.skill_group_ref"
@@ -728,7 +746,7 @@ endblock %}
 
 <script>
     window.__consoleApiPrefix = {{ api_prefix | default('/api') | tojson }};
-    window._queueTranslations = {{ t | json | safe }};
+    window._queueTranslations = window.__i18n_t || {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',
@@ -742,7 +760,6 @@ endblock %}
             pageTitle: options.mode === 'edit' ? (window._queueTranslations?.queue?.detail_subtitle_edit || 'Edit queue') : (window._queueTranslations?.queue?.new_queue || 'New queue'),
             activeTab: 'overview',
             skillGroups: [],
-            acdPolicies: [],
             pendingSkillGroup: '',
             form: {
                 name: '',
@@ -770,7 +787,6 @@ endblock %}
                         targets: [],
                         skill_groups: [],
                     },
-                    acd_policy: '',
                     voice_prompts: null,
                     // Callback
                     callback: {
@@ -831,7 +847,6 @@ endblock %}
                 this.apiPrefix = this.normalizeApiPrefix(this.apiPrefix || window.__consoleApiPrefix || '/api');
                 this.applyModel(this.model || {});
                 this.loadSkillGroups();
-                this.loadAcdPolicies();
             },
             extractSkillGroupId(value) {
                 const raw = String(value || '').trim();
@@ -857,6 +872,18 @@ endblock %}
                     if (!target || typeof target !== 'object') {
                         return;
                     }
+                    // Only reconcile targets that are ACTUALLY skill groups.
+                    // `extractSkillGroupId` returns its input unchanged when there is no
+                    // `skill-group:` prefix, so without this guard a plain SIP target
+                    // (e.g. `sip:1000@localhost`) would be coerced into
+                    // `skill-group:sip:1000@localhost` and rendered as a skill-group
+                    // dropdown every time the form is (re)loaded.
+                    const isSkillGroup =
+                        (typeof target.uri === 'string' && /^skill(?:-|_)?group:/i.test(target.uri)) ||
+                        !!target.skill_group_id;
+                    if (!isSkillGroup) {
+                        return;
+                    }
                     const groupId = this.extractSkillGroupId(target.skill_group_id || target.uri);
                     if (!groupId) {
                         return;
@@ -868,6 +895,7 @@ endblock %}
                 if (fallbackRef && this.form?.spec?.fallback) {
                     this.form.spec.fallback.skill_group_ref = fallbackRef;
                 }
+                this.syncSkillGroupPickers();
             },
             hasSkillGroupOption(value) {
                 const target = this.extractSkillGroupId(value);
@@ -890,6 +918,7 @@ endblock %}
                         })
                         .catch(() => {
                             this.skillGroups = [];
+                            this.reconcileSkillGroupTargets();
                         });
                 } else {
                     fetch(this.apiPrefix + '/cc/skill-groups', { credentials: 'same-origin' })
@@ -901,29 +930,133 @@ endblock %}
                         })
                         .catch(() => {
                             this.skillGroups = [];
+                            this.reconcileSkillGroupTargets();
                         });
                 }
             },
-            loadAcdPolicies() {
-                const loader = window.__ccAcdPoliciesLoader;
-                if (typeof loader === 'function') {
-                    loader()
-                        .then((policies) => {
-                            this.acdPolicies = Array.isArray(policies) ? policies : [];
-                        })
-                        .catch(() => {
-                            this.acdPolicies = [];
-                        });
+
+            skillGroupDisplayName(id) {
+                const target = this.extractSkillGroupId(id);
+                if (!target) return '';
+                const list = this.skillGroups || [];
+                const found = list.find((g) => this.extractSkillGroupId(g.skill_group_id) === target);
+                return found ? (found.display_name || found.skill_group_id) : target;
+            },
+            ensureSgState(obj) {
+                if (!obj || typeof obj !== 'object') return;
+                if (typeof obj._sgQuery === 'undefined') obj._sgQuery = '';
+                if (typeof obj._sgOpen === 'undefined') obj._sgOpen = false;
+                if (typeof obj._sgIndex === 'undefined') obj._sgIndex = -1;
+            },
+            sgIdOf(obj) {
+                if (!obj) return '';
+                if (typeof obj.skill_group_id === 'string') return this.extractSkillGroupId(obj.skill_group_id);
+                if (typeof obj.skill_group_ref === 'string') return this.extractSkillGroupId(obj.skill_group_ref);
+                return '';
+            },
+            setSgId(obj, id) {
+                if (!obj) return;
+                if ('skill_group_id' in obj) {
+                    obj.skill_group_id = id;
+                    obj.uri = id ? ('skill-group:' + id) : 'skill-group:';
+                } else if ('skill_group_ref' in obj) {
+                    obj.skill_group_ref = id;
+                }
+            },
+            syncSkillGroupPickers() {
+                const targets = this.form?.spec?.strategy?.targets;
+                if (Array.isArray(targets)) {
+                    targets.forEach((t) => {
+                        if (!t || typeof t !== 'object') return;
+                        this.ensureSgState(t);
+                        const id = this.sgIdOf(t);
+                        t._sgQuery = id ? this.skillGroupDisplayName(id) : '';
+                        t._sgOpen = false;
+                        t._sgIndex = -1;
+                    });
+                }
+                const fb = this.form?.spec?.fallback;
+                if (fb) {
+                    this.ensureSgState(fb);
+                    const id = this.sgIdOf(fb);
+                    fb._sgQuery = id ? this.skillGroupDisplayName(id) : '';
+                    fb._sgOpen = false;
+                    fb._sgIndex = -1;
+                }
+            },
+            filteredSkillGroups(obj) {
+                this.ensureSgState(obj);
+                const q = String(obj._sgQuery || '').toLowerCase();
+                const list = this.skillGroups || [];
+                if (!q) return list;
+                return list.filter((g) => {
+                    const name = String(g.display_name || g.skill_group_id || '').toLowerCase();
+                    const gid = String(g.skill_group_id || '').toLowerCase();
+                    return name.indexOf(q) !== -1 || gid.indexOf(q) !== -1;
+                });
+            },
+            onSgInput(obj) {
+                if (!obj) return;
+                this.ensureSgState(obj);
+                obj._sgOpen = true;
+                obj._sgIndex = -1;
+                const id = this.sgIdOf(obj);
+                const displayName = id ? this.skillGroupDisplayName(id) : '';
+                if (obj._sgQuery !== displayName) {
+                    this.setSgId(obj, '');
+                }
+            },
+            selectSkillGroup(obj, group) {
+                if (!obj || !group) return;
+                this.ensureSgState(obj);
+                const id = this.extractSkillGroupId(group.skill_group_id);
+                this.setSgId(obj, id);
+                obj._sgQuery = group.display_name || group.skill_group_id || id;
+                obj._sgOpen = false;
+                obj._sgIndex = -1;
+            },
+            closeSg(obj) {
+                if (!obj) return;
+                this.ensureSgState(obj);
+                obj._sgOpen = false;
+                const id = this.sgIdOf(obj);
+                obj._sgQuery = id ? this.skillGroupDisplayName(id) : '';
+            },
+            sgHandleKeydown(e, obj) {
+                if (!obj || !e) return;
+                this.ensureSgState(obj);
+                const list = this.filteredSkillGroups(obj);
+                if (!obj._sgOpen && (e.key === 'ArrowDown' || e.key === 'Enter')) {
+                    obj._sgOpen = true;
+                    obj._sgIndex = -1;
+                    e.preventDefault();
                     return;
                 }
-                fetch(this.apiPrefix + '/cc/acd/policies', { credentials: 'same-origin' })
-                    .then(res => res.ok ? res.json() : { data: [] })
-                    .then(payload => {
-                        this.acdPolicies = Array.isArray(payload?.data) ? payload.data : [];
-                    })
-                    .catch(() => {
-                        this.acdPolicies = [];
-                    });
+                if (!obj._sgOpen) return;
+                if (e.key === 'ArrowDown') {
+                    obj._sgIndex = obj._sgIndex < list.length - 1 ? obj._sgIndex + 1 : 0;
+                    e.preventDefault();
+                } else if (e.key === 'ArrowUp') {
+                    obj._sgIndex = obj._sgIndex > 0 ? obj._sgIndex - 1 : list.length - 1;
+                    e.preventDefault();
+                } else if (e.key === 'Enter') {
+                    if (obj._sgIndex >= 0 && list[obj._sgIndex]) {
+                        this.selectSkillGroup(obj, list[obj._sgIndex]);
+                        e.preventDefault();
+                    }
+                } else if (e.key === 'Escape') {
+                    this.closeSg(obj);
+                    e.preventDefault();
+                }
+            },
+            sgDropdownUp(el) {
+                if (!el) return false;
+                try {
+                    const rect = el.getBoundingClientRect();
+                    return rect.top < 220;
+                } catch (err) {
+                    return false;
+                }
             },
 
             tt(key) {
@@ -1171,7 +1304,6 @@ endblock %}
                             });
                         })(),
                     },
-                    acd_policy: raw?.acd_policy || '',
                     voice_prompts: raw?.voice_prompts || null,
                     // Callback
                     callback: {
@@ -1320,10 +1452,6 @@ endblock %}
                         wait_timeout_secs: waitTimeout,
                         targets,
                     };
-                }
-                const acdPolicy = (this.form.spec.acd_policy || '').trim();
-                if (acdPolicy) {
-                    spec.acd_policy = acdPolicy;
                 }
                 // Voice prompts
                 spec.voice_prompts = this.buildVoicePrompts();

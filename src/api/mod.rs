@@ -4,6 +4,7 @@ use crate::console::middleware::ApiTokenAuth;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use std::collections::HashMap;
@@ -34,14 +35,40 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::dashboard::api_urls())
         .merge(crate::addons::queue::console::handlers::api_urls().with_state(state.clone()));
 
-    let api_routes = api_routes.layer(axum::middleware::from_fn_with_state(
-        ApiAuthState {
-            console: state.clone(),
-            api_tokens: Arc::new(token_map),
-            phone_auth,
-        },
-        api_auth_middleware,
-    ));
+    // Unified home for console-internal JSON endpoints (formerly nested inside
+    // the console router). They all flow through the same api_auth_middleware.
+    let mut api_routes = api_routes
+        .route("/pending-reloads", get(crate::console::handlers::pending_reloads_handler))
+        .merge(crate::console::handlers::locales::api_urls())
+        .merge(crate::console::handlers::presence::api_urls())
+        .merge(crate::console::handlers::notifications::api_urls())
+        .merge(crate::console::handlers::metrics::api_urls())
+        .merge(crate::console::handlers::addons::api_urls());
+
+    // Addon API routes (collected at runtime via Addon trait hooks).
+    // Each addon applies its own middleware layers (e.g. phone-auth) as needed.
+    if let Some(app_state) = state.app_state() {
+        let config = app_state.config();
+        for r in app_state
+            .addon_registry
+            .get_console_api_routes(&state, &config)
+        {
+            api_routes = api_routes.merge(r);
+        }
+    }
+
+    let api_routes = api_routes
+        .layer(axum::middleware::from_fn(
+            crate::console::middleware::csrf_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            ApiAuthState {
+                console: state.clone(),
+                api_tokens: Arc::new(token_map),
+                phone_auth,
+            },
+            api_auth_middleware,
+        ));
 
     let api_prefix = state.api_prefix().to_string();
     Router::new()
@@ -51,18 +78,10 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
 
 fn build_phone_auth(console: &Arc<ConsoleState>) -> Option<DynTokenValidator> {
     let app_state = console.app_state()?;
-
-    #[cfg(feature = "addon-cc")]
-    {
-        let cc_state = app_state.get_addon_state::<crate::addons::cc::CcAddonState>()?;
-        Some(Arc::new(cc_state.phone_auth.clone()) as DynTokenValidator)
-    }
-
-    #[cfg(not(feature = "addon-cc"))]
-    {
-        let _ = app_state;
-        None
-    }
+    let config = app_state.config();
+    app_state
+        .addon_registry
+        .get_phone_auth_validator(console, &config)
 }
 
 #[derive(Clone)]
@@ -101,7 +120,7 @@ async fn api_auth_middleware(
 
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "message": "invalid or expired token" })),
+            Json(json!({ "status": "error", "message": "invalid or expired token" })),
         )
             .into_response();
     }
@@ -115,7 +134,7 @@ async fn api_auth_middleware(
 
     (
         StatusCode::UNAUTHORIZED,
-        Json(json!({ "message": "authentication required" })),
+        Json(json!({ "status": "error", "message": "authentication required" })),
     )
         .into_response()
 }

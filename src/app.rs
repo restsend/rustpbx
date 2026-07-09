@@ -64,6 +64,7 @@ pub struct CoreContext {
 pub struct AppStateInner {
     pub core: Arc<CoreContext>,
     pub sip_server: SipServer,
+    pub http_client: reqwest::Client,
     pub skip_migrate: bool,
     pub total_calls: AtomicU64,
     pub total_failed_calls: AtomicU64,
@@ -116,6 +117,10 @@ impl AppStateInner {
 
     pub fn config(&self) -> &Arc<Config> {
         &self.core.config
+    }
+
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 
     pub fn db(&self) -> &DatabaseConnection {
@@ -469,6 +474,7 @@ impl AppStateBuilder {
         let app_state = Arc::new(AppStateInner {
             core: core.clone(),
             sip_server,
+            http_client: crate::http_util::build_keepalive_client(None, None)?,
             skip_migrate: self.skip_migrate,
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),

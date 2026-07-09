@@ -30,6 +30,7 @@ pub mod server;
 #[cfg(test)]
 pub mod tests;
 pub mod trunk_health;
+pub mod trunk_rate_limiter;
 pub mod trunk_registrar;
 pub mod user;
 pub mod user_db;

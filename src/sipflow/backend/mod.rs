@@ -97,6 +97,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             if *engine == SipFlowEngine::FlowDb {
                 FlowDbBackend::new(
                     root.clone(),
+                    subdirs.clone(),
                     *ttl_secs,
                     *memtable_size_mb,
                     *block_cache_capacity_mb,
@@ -120,6 +121,9 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             udp_addr,
             http_addr,
             timeout_secs,
+            batch_size,
+            batch_flush_ms,
+            channel_capacity,
             ..
         } => {
             let resolved = if !nodes.is_empty() {
@@ -134,8 +138,14 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
                     "Remote backend requires either `nodes` or both `udp_addr` and `http_addr`"
                 )
             };
-            remote::RemoteBackend::new(resolved, *timeout_secs)
-                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+            remote::RemoteBackend::new(
+                resolved,
+                *timeout_secs,
+                *batch_size,
+                *batch_flush_ms,
+                *channel_capacity,
+            )
+            .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }
     }
 }

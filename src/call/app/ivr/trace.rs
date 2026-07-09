@@ -4,6 +4,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::rwi::TriggerInfo;
+
+use super::provider::SessionEndTag;
+
 /// A single step trace entry for IVR step mode execution.
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrTraceEntry {
@@ -11,12 +15,10 @@ pub struct IvrTraceEntry {
     pub caller: String,
     pub callee: String,
     pub step_index: u32,
-    pub event_type: String,
-    pub event_detail: Option<String>,
+    pub trigger: TriggerInfo,
     pub provider_url: Option<String>,
     pub action_type: String,
     pub action_json: Option<String>,
-    pub result_kind: String,
     pub duration_ms: u64,
     pub error: Option<String>,
     pub step_id: Option<String>,
@@ -24,6 +26,13 @@ pub struct IvrTraceEntry {
     pub step_start_time: Option<String>,
     pub step_end_time: Option<String>,
     pub extra: Option<serde_json::Value>,
+    /// Filled only on the session-end trace entry (the final row that records
+    /// how the whole IVR session ended). `None` for ordinary step entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<SessionEndTag>,
+    /// Companion detail for [`end_reason`](Self::end_reason) (e.g. transfer target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_detail: Option<String>,
 }
 
 /// A summary of a trace session.
@@ -134,12 +143,10 @@ mod tests {
             caller: "1001".to_string(),
             callee: "2000".to_string(),
             step_index: step,
-            event_type: "test".to_string(),
-            event_detail: None,
+            trigger: TriggerInfo::new("test"),
             provider_url: None,
             action_type: "Transfer".to_string(),
             action_json: None,
-            result_kind: "terminal".to_string(),
             duration_ms: 0,
             error: None,
             step_id: None,
@@ -147,6 +154,8 @@ mod tests {
             step_start_time: None,
             step_end_time: None,
             extra: None,
+            end_reason: None,
+            end_detail: None,
         }
     }
 

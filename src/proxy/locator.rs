@@ -65,6 +65,18 @@ pub trait Locator: Send + Sync {
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
+
+    /// Remove and return all expired bindings.
+    ///
+    /// Default implementation is a no-op so that backends relying on
+    /// `lookup`-side filtering (e.g. SQL queries with `WHERE expires > 0`)
+    /// keep working unchanged. In-memory backends like [`MemoryLocator`]
+    /// override this so that a periodic background sweeper can emit
+    /// [`LocatorEvent::Offline`] for bindings whose transport never sent a
+    /// Close frame (browser tab close, network loss, ...).
+    async fn sweep_expired(&self) -> Result<Vec<Location>> {
+        Ok(Vec::new())
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -643,6 +655,56 @@ impl Locator for MemoryLocator {
 
         Ok(vec![])
     }
+
+    /// Periodically called by the background sweeper in `proxy::server`.
+    ///
+    /// Removes every binding whose `last_modified + expires` is in the past
+    /// and returns the removed locations so the caller can broadcast
+    /// `LocatorEvent::Offline`. Without this, bindings registered by clients
+    /// that vanished without sending a SIP REGISTER expires=0 (e.g. browser
+    /// tab closed mid-session) would linger until something happens to look
+    /// them up.
+    async fn sweep_expired(&self) -> Result<Vec<Location>> {
+        let mut locations = self.locations.lock().await;
+        let now = Instant::now();
+        let mut removed: Vec<Location> = Vec::new();
+        let mut empty_identifiers: Vec<String> = Vec::new();
+
+        for (identifier, map) in locations.iter_mut() {
+            let expired_keys: Vec<String> = map
+                .iter()
+                .filter_map(|(key, loc)| {
+                    if loc.is_expired_at(now) {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for key in expired_keys {
+                if let Some(loc) = map.remove(&key) {
+                    info!(
+                        identifier,
+                        binding = %loc.binding_key(),
+                        %loc,
+                        "swept expired registration"
+                    );
+                    removed.push(loc);
+                }
+            }
+
+            if map.is_empty() {
+                empty_identifiers.push(identifier.clone());
+            }
+        }
+
+        for identifier in empty_identifiers {
+            locations.remove(&identifier);
+        }
+
+        Ok(removed)
+    }
 }
 
 fn compare_location_recency(a: &Location, b: &Location) -> Ordering {
@@ -922,6 +984,72 @@ mod tests {
         assert_eq!(locations.len(), 2);
         assert_eq!(locations[0].instance_id.as_deref(), Some("primary"));
         assert_eq!(locations[1].instance_id.as_deref(), Some("secondary"));
+    }
+
+    #[tokio::test]
+    async fn memory_locator_sweep_expired_removes_only_stale_bindings() {
+        // Regression test for the "agent stuck in idle" issue: when a client
+        // disappears without sending REGISTER expires=0 and without closing
+        // the WebSocket politely, only the periodic sweep can promote the
+        // expired binding to a LocatorEvent::Offline so the CC agent moves
+        // back to `offline`.
+        let locator = MemoryLocator::new();
+        let uri: rsipstack::sip::Uri = "sip:bob@rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Ws),
+            addr: HostWithPort::try_from("127.0.0.1:53867").unwrap(),
+        };
+
+        // Stale binding: registered 120s ago with a 30s expiry → already
+        // past its TTL.
+        let stale_modified = Instant::now() - Duration::from_secs(120);
+        locator
+            .register(
+                "bob",
+                Some("rustpbx.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 30,
+                    destination: Some(destination.clone()),
+                    last_modified: Some(stale_modified),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Fresh binding: would not normally happen for the same contact, but
+        // keeps this test self-contained by proving the sweeper only removes
+        // the stale entry.
+        let fresh_uri: rsipstack::sip::Uri = "sip:carol@rustpbx.com".try_into().unwrap();
+        locator
+            .register(
+                "carol",
+                Some("rustpbx.com"),
+                Location {
+                    aor: fresh_uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let removed = locator.sweep_expired().await.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].aor, uri);
+
+        // The fresh binding survives and is still lookup-able.
+        assert!(locator.lookup(&fresh_uri).await.unwrap().len() == 1);
+        // The stale binding is gone.
+        assert!(locator.lookup(&uri).await.unwrap().is_empty());
+
+        // A second sweep is a no-op (idempotent).
+        let again = locator.sweep_expired().await.unwrap();
+        assert!(again.is_empty());
     }
 
     #[tokio::test]

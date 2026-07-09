@@ -89,7 +89,7 @@ pub struct MediaState {
     pub caller_answer_uses_media_bridge: bool,
     pub callee_offer_uses_media_bridge: bool,
     pub media_bridge_started: bool,
-    pub bridge_playback_track_id: Option<String>,
+    pub bridge_playback_track_ids: HashMap<String, String>,
     pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
 }
 
@@ -108,7 +108,7 @@ impl MediaState {
             caller_answer_uses_media_bridge: false,
             callee_offer_uses_media_bridge: false,
             media_bridge_started: false,
-            bridge_playback_track_id: None,
+            bridge_playback_track_ids: HashMap::new(),
             rtp_timeout_tx: None,
         }
     }
@@ -184,5 +184,47 @@ mod tests {
         };
         let elapsed = state.elapsed().unwrap();
         assert!(elapsed < Duration::from_millis(100));
+    }
+
+    /// Regression for Fix A: `bridge_playback_track_ids` must track caller and
+    /// callee track ids independently. Previously this was a single
+    /// `Option<String>` that only ever held the caller's id, so stopping the
+    /// callee track never matched and the callee endpoint was left muted.
+    #[test]
+    fn test_bridge_playback_track_ids_tracks_both_legs_independently() {
+        let mut state = MediaState::new(None);
+        assert!(state.bridge_playback_track_ids.is_empty());
+
+        // Simulate `play_to_leg!("both", ...)` writing one entry per leg.
+        state
+            .bridge_playback_track_ids
+            .insert("caller".to_string(), "pb-base-caller".to_string());
+        state
+            .bridge_playback_track_ids
+            .insert("callee".to_string(), "pb-base-callee".to_string());
+
+        // Each leg resolves to its own track id — the lookup the stop path uses.
+        assert_eq!(
+            state.bridge_playback_track_ids.get("caller").map(String::as_str),
+            Some("pb-base-caller"),
+        );
+        assert_eq!(
+            state.bridge_playback_track_ids.get("callee").map(String::as_str),
+            Some("pb-base-callee"),
+        );
+
+        // Stopping the callee leg removes only the callee entry; the caller
+        // entry is unaffected (with the old single-field, stopping callee was
+        // a no-op and the field still held the caller id).
+        state.bridge_playback_track_ids.remove("callee");
+        assert!(state.bridge_playback_track_ids.get("callee").is_none());
+        assert_eq!(
+            state.bridge_playback_track_ids.get("caller").map(String::as_str),
+            Some("pb-base-caller"),
+        );
+
+        // Cleanup clears everything.
+        state.bridge_playback_track_ids.clear();
+        assert!(state.bridge_playback_track_ids.is_empty());
     }
 }

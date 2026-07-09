@@ -231,6 +231,13 @@ pub async fn page_queue_create(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let script_path = format!("{}/queues/new", state.base_path());
+    let forwarding_catalog = if let Some(proxy_config) =
+        crate::console::catalog::load_proxy_config(state.app_state().as_ref())
+    {
+        crate::console::catalog::build_forwarding_catalog(&proxy_config)
+    } else {
+        crate::console::catalog::ForwardingCatalog::empty()
+    };
     state.render_with_headers(
         "queue_detail.html",
         json!({
@@ -242,6 +249,7 @@ pub async fn page_queue_create(
                 "tags": Vec::<String>::new(),
                 "metadata_text": "",
             },
+            "forwarding_catalog": forwarding_catalog,
             "create_url": state.url_for("/queues"),
             "update_url": Value::Null,
             "list_url": state.url_for("/queues"),
@@ -276,6 +284,13 @@ pub async fn page_queue_edit(
     let tags = queue_tags(model.metadata.as_ref());
 
     let script_path = format!("{}/queues/{}", state.base_path(), model.id);
+    let forwarding_catalog = if let Some(proxy_config) =
+        crate::console::catalog::load_proxy_config(state.app_state().as_ref())
+    {
+        crate::console::catalog::build_forwarding_catalog(&proxy_config)
+    } else {
+        crate::console::catalog::ForwardingCatalog::empty()
+    };
     state.render_with_headers(
         "queue_detail.html",
         json!({
@@ -291,6 +306,7 @@ pub async fn page_queue_edit(
                 "metadata_text": metadata_text,
                 "updated_at": model.updated_at.to_rfc3339(),
             },
+            "forwarding_catalog": forwarding_catalog,
             "create_url": state.url_for("/queues"),
             "update_url": state.url_for(&format!("/queues/{}", model.id)),
             "list_url": state.url_for("/queues"),
@@ -705,7 +721,7 @@ pub async fn reload_queues_handler(
 }
 
 pub async fn download_audio_handler(
-    State(_state): State<Arc<ConsoleState>>,
+    State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
@@ -746,8 +762,7 @@ pub async fn download_audio_handler(
     // Download
     let opts =
         crate::http_util::HttpFetchOptions::new().with_timeout(std::time::Duration::from_secs(30));
-    match crate::http_util::fetch_bytes(&reqwest::Client::new(), reqwest::Method::GET, &url, &opts)
-        .await
+    match crate::http_util::fetch_bytes(state.http_client(), reqwest::Method::GET, &url, &opts).await
     {
         Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {

@@ -3,7 +3,8 @@ use audio_codec::{CodecType, Decoder, Resampler, create_decoder};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
@@ -43,7 +44,7 @@ impl FileAudioSource {
     pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
         let (actual_path, temp_file_path) =
             if file_path.starts_with("http://") || file_path.starts_with("https://") {
-                debug!("Downloading audio file from URL: {}", file_path);
+                debug!(file = %file_path, "Downloading audio file");
                 let temp_path = Self::download_file(&file_path).await?;
                 (temp_path.clone(), Some(temp_path))
             } else {
@@ -283,9 +284,11 @@ impl FileAudioSource {
             .unwrap_or("audio_file");
         let temp_path = temp_dir.join(format!("rustpbx_audio_{}", file_name));
 
-        debug!("Downloading to temporary file: {:?}", temp_path);
+        debug!(temp = %temp_path.display(), "Downloading to temporary file");
 
-        let response = reqwest::get(url)
+        let response = crate::http_util::shared_keepalive_client()
+            .get(url)
+            .send()
             .await
             .map_err(|e| anyhow!("Failed to download audio file: {}", e))?;
 
@@ -303,7 +306,11 @@ impl FileAudioSource {
         file.write_all(&bytes)
             .map_err(|e| anyhow!("Failed to write temporary file: {}", e))?;
 
-        debug!("Downloaded {} bytes to {:?}", bytes.len(), temp_path);
+        debug!(
+            bytes = bytes.len(),
+            temp = %temp_path.display(),
+            "Downloaded audio file"
+        );
 
         Ok(temp_path.to_string_lossy().to_string())
     }
@@ -321,7 +328,7 @@ impl FileAudioSource {
                     "u" | "ulaw" => Ok(CodecType::PCMU),
                     "a" | "alaw" => Ok(CodecType::PCMA),
                     _ => {
-                        warn!("Unknown file extension '{}', assuming PCMU", ext);
+                        warn!(extension = %ext, "Unknown file extension, assuming PCMU");
                         Ok(CodecType::PCMU)
                     }
                 },
@@ -517,9 +524,9 @@ impl Drop for FileAudioSource {
     fn drop(&mut self) {
         if let Some(ref temp_path) = self.temp_file_path {
             if let Err(e) = std::fs::remove_file(temp_path) {
-                warn!("Failed to remove temporary file {}: {}", temp_path, e);
+                warn!(temp = %temp_path, error = %e, "Failed to remove temporary file");
             } else {
-                debug!("Cleaned up temporary file: {}", temp_path);
+                debug!(temp = %temp_path, "Cleaned up temporary file");
             }
         }
     }
@@ -649,7 +656,7 @@ impl AudioSourceManager {
         let resampling_source =
             ResamplingAudioSource::new(Box::new(file_source), self.target_sample_rate);
 
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         *current = Some(Box::new(resampling_source));
 
         debug!(
@@ -663,14 +670,14 @@ impl AudioSourceManager {
 
     pub fn switch_to_silence(&self) {
         let silence = SilenceSource::new(self.target_sample_rate);
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         *current = Some(Box::new(silence));
 
         debug!("Switched to silence audio source");
     }
 
     pub fn read_samples(&self, buffer: &mut [i16]) -> usize {
-        let mut current = self.current_source.lock().unwrap();
+        let mut current = self.current_source.lock();
         if let Some(ref mut source) = *current {
             let read = source.read_samples(buffer);
             if read == 0 {
@@ -686,7 +693,7 @@ impl AudioSourceManager {
     }
 
     pub fn has_active_source(&self) -> bool {
-        let current = self.current_source.lock().unwrap();
+        let current = self.current_source.lock();
         current.is_some()
     }
 
@@ -935,7 +942,7 @@ mod tests {
                 pos: 0,
             };
             let resampled = ResamplingAudioSource::new(Box::new(src), 8000);
-            let mut current = manager.current_source.lock().unwrap();
+            let mut current = manager.current_source.lock();
             *current = Some(Box::new(resampled));
         }
 

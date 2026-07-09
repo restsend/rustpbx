@@ -56,10 +56,10 @@ impl RecordingUploadHook {
         Ok(Self {
             policy,
             rwi_gateway: None,
-            client: reqwest::Client::builder()
-                .timeout(CALL_RECORD_HTTP_TIMEOUT)
-                .connect_timeout(CALL_RECORD_HTTP_CONNECT_TIMEOUT)
-                .build()?,
+            client: crate::http_util::build_keepalive_client(
+                Some(CALL_RECORD_HTTP_TIMEOUT),
+                Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
+            )?,
             s3_storage,
         })
     }

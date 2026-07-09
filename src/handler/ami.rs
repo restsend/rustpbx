@@ -70,12 +70,12 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     let tx_stats = state.sip_server().inner.endpoint.inner.get_stats();
     let app_tasks = {
-        let metrics = crate::utils::GLOBAL_TASK_METRICS.lock().unwrap();
-        metrics
-            .iter()
-            .filter(|&(_, &v)| v > 0)
-            .map(|(k, &v)| (k.clone(), serde_json::json!(v)))
-            .collect::<serde_json::Map<String, serde_json::Value>>()
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "total".to_string(),
+            serde_json::json!(crate::utils::active_task_count()),
+        );
+        map
     };
 
     let sipserver_stats = serde_json::json!({
@@ -923,11 +923,7 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         let start = Instant::now();
         let opts = crate::http_util::HttpFetchOptions::new()
             .with_timeout(std::time::Duration::from_secs(5));
-        match crate::http_util::execute_request(
-            reqwest::Client::new().get(&url),
-            &opts.headers,
-            opts.timeout,
-        )
+        match crate::http_util::execute_request(state.http_client().get(&url), &opts.headers, opts.timeout)
         .await
         {
             Ok(resp) => {
@@ -1081,7 +1077,7 @@ async fn cluster_reload_config_handler(
                 .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            let req = reqwest::Client::new().post(&url).json(&payload);
+            let req = state.http_client().post(&url).json(&payload);
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;

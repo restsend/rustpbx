@@ -257,7 +257,7 @@ impl AclModule {
         if let Some(server) = &self.inner.server {
             let trunks = server.data_context.trunks_snapshot();
             for (name, trunk) in trunks.iter() {
-                if trunk.matches_inbound_ip(addr).await {
+                if trunk.matches_inbound_source_ip(addr).await {
                     return Some(TrunkContext {
                         id: trunk.id,
                         name: name.clone(),
@@ -277,7 +277,7 @@ impl AclModule {
             .collect();
 
         for (name, trunk) in trunks {
-            if trunk.matches_inbound_ip(addr).await {
+            if trunk.matches_inbound_source_ip(addr).await {
                 return Some(TrunkContext {
                     id: trunk.id,
                     name,
@@ -498,6 +498,7 @@ fn parse_rules(rules: Vec<String>) -> Vec<AclRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::routing::TrunkDirection;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn create_test_config(rules: Vec<String>) -> Arc<ProxyConfig> {
@@ -522,6 +523,60 @@ mod tests {
             dos_scan_block_duration_secs: block_secs,
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn trunk_context_ignores_outbound_dest_same_ip() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let mut config = ProxyConfig::default();
+
+        config.trunks.insert(
+            "outbound-same-ip".to_string(),
+            TrunkConfig {
+                id: Some(147),
+                direction: Some(TrunkDirection::Outbound),
+                dest: "43.198.217.33:5396".to_string(),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "inbound-source".to_string(),
+            TrunkConfig {
+                id: Some(144),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["43.198.217.33".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let acl = AclModule::new(Arc::new(config));
+        let ctx = acl
+            .is_from_trunk_context(&source_ip)
+            .await
+            .expect("inbound trunk should match");
+
+        assert_eq!(ctx.id, Some(144));
+        assert_eq!(ctx.name, "inbound-source");
+    }
+
+    #[tokio::test]
+    async fn trunk_context_does_not_match_inbound_dest_only() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let mut config = ProxyConfig::default();
+
+        config.trunks.insert(
+            "inbound-dest-only".to_string(),
+            TrunkConfig {
+                id: Some(144),
+                direction: Some(TrunkDirection::Inbound),
+                dest: "43.198.217.33:5060".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let acl = AclModule::new(Arc::new(config));
+
+        assert!(acl.is_from_trunk_context(&source_ip).await.is_none());
     }
 
     #[test]

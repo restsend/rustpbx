@@ -3,8 +3,9 @@ use crate::call::user::SipUser;
 use crate::proxy::auth::AuthError;
 use anyhow::Result;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::io::BufRead;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{collections::HashMap, fs::File, io, path::Path};
 use tracing::{info, warn};
 
@@ -35,7 +36,7 @@ impl PlainTextBackend {
             }
         };
         let reader = io::BufReader::new(file);
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock();
         users.clear();
 
         for line in reader.lines() {
@@ -92,7 +93,7 @@ impl UserBackend for PlainTextBackend {
         realm: Option<&str>,
         _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
-        let mut user = match self.users.lock().unwrap().get(username) {
+        let mut user = match self.users.lock().get(username) {
             Some(user) => user.clone(),
             None => return Ok(None),
         };

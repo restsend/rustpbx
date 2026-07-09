@@ -16,9 +16,7 @@
             <div class="flex gap-3">
                 <button @click="importModal = true"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                    </svg>
+                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
                     {{ "extension.csv_import" | t }}
                 </button>
                 <a :href="createUrl"
@@ -277,10 +275,10 @@
                                     <span
                                         class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1"
                                         :class="publicCallsAllowed(extension) ? 'bg-sky-50 text-sky-600 ring-sky-100' : 'bg-slate-100 text-slate-600 ring-slate-200'">
-                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                             stroke-width="1.8">
                                             <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M4.75 3.75h2.5l1 3-1.5.75a7 7 0 0 0 4.5 4.5l.75-1.5 3 1v2.5a1 1 0 0 1-1 1c-6.351 0-11.5-5.149-11.5-11.5a1 1 0 0 1 1-1Z" />
+                                                d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z" />
                                         </svg>
                                         <span x-text="publicCallsAllowed(extension) ? 'Allowed' : 'Restricted'"></span>
                                     </span>
@@ -358,15 +356,23 @@
                                                     d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
                                             </svg>
                                         </a>
-                                        <button type="button" title="Toggle login"
-                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-amber-300 hover:text-amber-600"
+                                        <button type="button"
+                                            :title="loginAllowed(extension) ? 'Disable login' : 'Enable login'"
+                                            class="inline-flex items-center justify-center rounded-full border p-2 transition"
+                                            :class="loginAllowed(extension)
+                                                ? 'border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600'
+                                                : 'border-amber-200 bg-amber-50 text-amber-600 hover:border-amber-300'"
                                             :disabled="processing.toggle === extension.id"
                                             @click="toggleLogin(extension)">
-                                            <span class="sr-only">Toggle login</span>
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            <span class="sr-only" x-text="loginAllowed(extension) ? 'Disable login' : 'Enable login'"></span>
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+                                                    x-show="loginAllowed(extension)"
+                                                    d="M13.5 10.5V6.75C13.5 4.26472 15.5147 2.25 18 2.25C20.4853 2.25 22.5 4.26472 22.5 6.75V10.5M3.75 21.75H14.25C15.4926 21.75 16.5 20.7426 16.5 19.5V12.75C16.5 11.5074 15.4926 10.5 14.25 10.5H3.75C2.50736 10.5 1.5 11.5074 1.5 12.75V19.5C1.5 20.7426 2.50736 21.75 3.75 21.75Z" />
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    x-show="!loginAllowed(extension)"
+                                                    d="M16.5 10.5V6.75C16.5 4.26472 14.4853 2.25 12 2.25C9.51472 2.25 7.5 4.26472 7.5 6.75V10.5M6.75 21.75H17.25C18.4926 21.75 19.5 20.7426 19.5 19.5V12.75C19.5 11.5074 18.4926 10.5 17.25 10.5H6.75C5.50736 10.5 4.5 11.5074 4.5 12.75V19.5C4.5 20.7426 5.50736 21.75 6.75 21.75Z" />
                                             </svg>
                                         </button>
                                         <button type="button" title="Delete extension"
@@ -374,10 +380,10 @@
                                             :disabled="processing.delete === extension.id"
                                             @click="confirmDelete(extension)">
                                             <span class="sr-only">Delete</span>
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M6 7h8m-7 0v8m3-8v8m3-8v8M4 7h12M8 4h4a1 1 0 011 1v2H7V5a1 1 0 011-1z" />
+                                                    d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6" />
                                             </svg>
                                         </button>
                                     </div>
@@ -435,12 +441,11 @@
             </div>
         </section>
     </div>
-</div>
 
-<!-- CSV Import Modal -->
-<div x-show="importModal" x-cloak class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto pt-10 pb-10"
-    @click.self="importModal = false">
-    <div class="w-full max-w-3xl rounded-xl bg-white shadow-2xl ring-1 ring-black/5">
+    <!-- CSV Import Modal -->
+    <div x-show="importModal" x-cloak class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto pt-10 pb-10"
+        @click.self="importModal = false">
+        <div class="w-full max-w-3xl rounded-xl bg-white shadow-2xl ring-1 ring-black/5">
         <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
             <h3 class="text-lg font-semibold text-slate-800">{{ "extension.csv_import_title" | t }}</h3>
             <button @click="importModal = false" class="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
@@ -468,7 +473,7 @@
             </div>
             <div>
                 <label class="block text-sm font-medium text-slate-700 mb-1">{{ "extension.csv_select_file" | t }}</label>
-                <input type="file" accept=".csv,.txt" @change="handleCsvFile($event)"
+                <input type="file" accept=".csv,.txt" x-ref="csvInput" @change="handleCsvFile()"
                     class="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-sky-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-sky-700 hover:file:bg-sky-100">
             </div>
             <p x-show="importError" class="text-xs text-red-600" x-text="importError"></p>
@@ -1060,15 +1065,13 @@
                     this.error = null;
                     try {
                         const nextDisabled = this.loginAllowed(extension);
-                        const body = new URLSearchParams();
-                        body.set('login_disabled', nextDisabled ? 'true' : 'false');
                         const response = await fetch(`${this.apiBase}/extensions/${extension.id}`, {
                             method: 'PATCH',
                             headers: {
                                 'Accept': 'application/json',
-                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'Content-Type': 'application/json',
                             },
-                            body: body.toString(),
+                            body: JSON.stringify({ login_disabled: nextDisabled }),
                         });
                         const data = await response.json();
                         if (!response.ok) {
@@ -1122,40 +1125,52 @@
                         this.processing.delete = null;
                     }
                 },
-                handleCsvFile(event) {
-                    const file = event.target.files[0];
-                    if (!file) return;
-                    this.importError = '';
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                        this.importRawText = e.target.result;
-                        this.previewCsv();
-                    };
-                    reader.onerror = () => { this.importError = 'Failed to read file'; };
-                    reader.readAsText(file);
+                handleCsvFile() {
+                    try {
+                        const file = this.$refs.csvInput.files[0];
+                        if (!file) return;
+                        this.importError = '';
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            try {
+                                this.importRawText = e.target.result;
+                                this.previewCsv();
+                            } catch (err) {
+                                this.importError = 'Parse error: ' + err.message;
+                            }
+                        };
+                        reader.onerror = () => { this.importError = 'Failed to read file'; };
+                        reader.readAsText(file);
+                    } catch (err) {
+                        this.importError = 'File error: ' + err.message;
+                    }
                 },
                 previewCsv() {
-                    const text = this.importRawText.trim();
-                    if (!text) { this.importError = 'File is empty'; return; }
-                    const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-                    if (lines.length < 2) { this.importError = 'No data rows found (only header or comments)'; return; }
-                    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-                    const extIdx = headers.indexOf('extension');
-                    if (extIdx < 0) { this.importError = 'CSV must have an \'extension\' column'; return; }
-                    const existingExts = new Set(this.extensions.map(e => e.extension));
-                    this.importPreview = [];
-                    this.importErrors = [];
-                    for (let i = 1; i < lines.length; i++) {
-                        const row = this.parseCsvLine(lines[i], headers);
-                        if (!row.extension) {
-                            row._error = 'extension is required';
-                            this.importErrors.push({ row: i, message: row._error });
-                        } else if (existingExts.has(row.extension)) {
-                            row._warn = 'extension already exists (will be skipped)';
+                    try {
+                        const text = this.importRawText.trim();
+                        if (!text) { this.importError = 'File is empty'; return; }
+                        const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+                        if (lines.length < 2) { this.importError = 'No data rows found (only header or comments)'; return; }
+                        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                        const extIdx = headers.indexOf('extension');
+                        if (extIdx < 0) { this.importError = 'CSV must have an \'extension\' column'; return; }
+                        const existingExts = new Set((this.extensions || []).map(e => e && e.extension));
+                        this.importPreview = [];
+                        this.importErrors = [];
+                        for (let i = 1; i < lines.length; i++) {
+                            const row = this.parseCsvLine(lines[i], headers);
+                            if (!row.extension) {
+                                row._error = 'extension is required';
+                                this.importErrors.push({ row: i, message: row._error });
+                            } else if (existingExts.has(row.extension)) {
+                                row._warn = 'extension already exists (will be skipped)';
+                            }
+                            this.importPreview.push(row);
                         }
-                        this.importPreview.push(row);
+                        this.importStep = 'preview';
+                    } catch (err) {
+                        this.importError = 'Preview error: ' + err.message;
                     }
-                    this.importStep = 'preview';
                 },
                 parseCsvLine(line, headers) {
                     const values = [];

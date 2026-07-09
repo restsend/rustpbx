@@ -8,9 +8,10 @@ use rustrtc::{
     RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
     media::{AudioFrame, MediaSample, SampleStreamSource},
 };
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -48,7 +49,7 @@ pub trait StreamWriter: Send + Sync {
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
     now.duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -118,9 +119,7 @@ pub trait Track: Send + Sync {
     }
 
     /// Allow downcasting to concrete types for dynamic audio source switching
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        unimplemented!("as_any_mut not implemented for this Track type")
-    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Set muted state for this track
     /// Returns true if the operation was successful
@@ -209,7 +208,7 @@ impl MediaStream {
         let id = track.id().to_string();
         let wrapped = Arc::new(AsyncMutex::new(track));
         {
-            let mut tracks = self.tracks.lock().unwrap();
+            let mut tracks = self.tracks.lock();
             tracks.insert(id.clone(), wrapped.clone());
         }
         if let Some(play_id) = play_id {
@@ -218,13 +217,13 @@ impl MediaStream {
     }
 
     pub async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>> {
-        let tracks = self.tracks.lock().unwrap();
+        let tracks = self.tracks.lock();
         tracks.values().cloned().collect()
     }
 
     pub async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()> {
         let handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
         let Some(track) = handle else {
@@ -235,7 +234,7 @@ impl MediaStream {
     }
 
     pub async fn remove_track(&self, track_id: &str, _stop_audio_immediately: bool) {
-        let mut tracks = self.tracks.lock().unwrap();
+        let mut tracks = self.tracks.lock();
         tracks.remove(track_id);
     }
 
@@ -244,7 +243,7 @@ impl MediaStream {
     pub async fn mute_track(&self, track_id: &str) -> bool {
         // Get track handle while holding the lock, then release the lock before await
         let track_handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
 
@@ -261,7 +260,7 @@ impl MediaStream {
     pub async fn unmute_track(&self, track_id: &str) -> bool {
         // Get track handle while holding the lock, then release the lock before await
         let track_handle = {
-            let tracks = self.tracks.lock().unwrap();
+            let tracks = self.tracks.lock();
             tracks.get(track_id).cloned()
         };
 
@@ -442,6 +441,10 @@ impl Track for RtcTrack {
 
     fn get_sender(&self) -> Option<SampleStreamSource> {
         self.sender.clone()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -647,7 +650,8 @@ impl RtpTrackBuilder {
 ///
 /// Used for playing audio files (e.g., ringback tones, hold music, announcements).
 pub struct FileTrack {
-    track_id: String,
+    pub(crate) track_id: String,
+    pub(crate) session_id: Option<String>,
     file_path: Option<String>,
     loop_playback: bool,
     cancel_token: CancellationToken,
@@ -670,6 +674,7 @@ impl Clone for FileTrack {
     fn clone(&self) -> Self {
         Self {
             track_id: self.track_id.clone(),
+            session_id: self.session_id.clone(),
             file_path: self.file_path.clone(),
             loop_playback: self.loop_playback,
             cancel_token: self.cancel_token.clone(),
@@ -696,22 +701,26 @@ pub(crate) struct FileTrackPlaybackSource {
     audio_source_manager: Arc<audio_source::AudioSourceManager>,
     encoder: Box<dyn audio_codec::Encoder>,
     codec_info: negotiate::CodecInfo,
-    samples_per_frame: usize,
     rtp_ticks_per_frame: u32,
     rtp_timestamp: u32,
     sequence_number: u16,
     on_end: Option<PlaybackEndCallback>,
     loop_playback: bool,
+    /// Reusable PCM read buffer — avoids a heap allocation on every 20 ms
+    /// tick (50 allocations/s).  Allocated once in `create_playback_source`.
+    pcm_buf: Vec<i16>,
 }
 
 impl FileTrackPlaybackSource {
     pub(crate) fn next_audio_sample(&mut self) -> Option<MediaSample> {
-        let mut pcm_buf = vec![0i16; self.samples_per_frame];
-        let mut read = self.audio_source_manager.read_samples(&mut pcm_buf);
-
-        if read == 0 && self.loop_playback {
-            read = self.audio_source_manager.read_samples(&mut pcm_buf);
-        }
+        let read = {
+            let buf = &mut self.pcm_buf;
+            let mut read = self.audio_source_manager.read_samples(buf);
+            if read == 0 && self.loop_playback {
+                read = self.audio_source_manager.read_samples(buf);
+            }
+            read
+        };
 
         if read == 0 {
             debug!("FileTrack playback completed (source exhausted)");
@@ -721,7 +730,7 @@ impl FileTrackPlaybackSource {
             return None;
         }
 
-        let encoded = self.encoder.encode(&pcm_buf[..read]);
+        let encoded = self.encoder.encode(&self.pcm_buf[..read]);
         let frame = AudioFrame {
             rtp_timestamp: self.rtp_timestamp,
             clock_rate: self.codec_info.clock_rate,
@@ -768,6 +777,7 @@ impl FileTrack {
         pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
 
         Self {
+            session_id: None,
             track_id,
             file_path: None,
             loop_playback: false,
@@ -846,6 +856,15 @@ impl FileTrack {
     pub fn with_cname(mut self, cname: String) -> Self {
         self.cname = Some(cname);
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn codec_info(&self) -> Option<&negotiate::CodecInfo> {
+        self.codec_info.as_ref()
     }
 
     fn recreate_pc(&mut self) {
@@ -942,6 +961,8 @@ impl FileTrack {
         };
 
         debug!(
+            track_id = %self.track_id,
+            session_id = ?self.session_id,
             file = %file_path.unwrap_or("<silence>"),
             loop_playback = self.loop_playback,
             codec = ?selected.codec,
@@ -955,12 +976,12 @@ impl FileTrack {
             audio_source_manager,
             encoder: audio_codec::create_encoder(selected.codec),
             codec_info: selected,
-            samples_per_frame: frame_timing.pcm_samples_per_frame,
             rtp_ticks_per_frame: frame_timing.rtp_ticks_per_frame,
             rtp_timestamp: rand::random(),
             sequence_number: rand::random(),
             on_end: self.on_end.clone(),
             loop_playback: self.loop_playback,
+            pcm_buf: vec![0i16; frame_timing.pcm_samples_per_frame],
         })
     }
 
@@ -999,6 +1020,8 @@ impl FileTrack {
         let pc = target_pc.unwrap_or_else(|| self.pc.clone());
 
         debug!(
+            track_id = %self.track_id,
+            session_id = ?self.session_id,
             file = %file_path,
             loop_playback = self.loop_playback,
             ?codec,
@@ -1067,6 +1090,9 @@ impl FileTrack {
             let interval_ms = 20u64;
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Allocate the PCM read buffer once and reuse it on every tick.
+            let mut pcm_buf: Vec<i16> = vec![0i16; samples_per_frame];
 
             loop {
                 tokio::select! {
@@ -1079,7 +1105,6 @@ impl FileTrack {
                     }
                     _ = interval.tick() => {
                         // Read one frame of PCM samples from the source.
-                        let mut pcm_buf = vec![0i16; samples_per_frame];
                         let read = audio_source_manager.read_samples(&mut pcm_buf);
 
                         if read == 0 {

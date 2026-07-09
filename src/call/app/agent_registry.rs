@@ -26,41 +26,40 @@ pub use memory::MemoryRegistry;
 // Presence State Machine
 // ===================================================================
 
-/// Standard presence states based on RFC 3856 + CC extensions
-/// Supports custom states for flexible agent status management
+/// Standard presence states based on RFC 3856 + CC extensions.
+/// `Away` carries an optional break reason (e.g. "lunch", "training").
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PresenceState {
-    /// Agent is offline and cannot receive calls
+    /// Agent is offline and cannot receive calls.
     Offline,
-    /// Agent is online but not ready (e.g., logged in but on break)
-    Away,
-    /// Agent is online and ready to receive calls
-    Available,
-    /// Agent is being rang for a call
+    /// Agent is online but not ready (on break). The String carries the
+    /// break reason / detail (empty = generic away).
+    Away(String),
+    /// Agent is online and ready to receive calls.
+    Idle,
+    /// Agent is being rang for a call.
     Ringing {
         /// ID of the call being routed to this agent
         call_id: Option<String>,
     },
-    /// Agent is on an active call
+    /// Agent is on an active call.
     Busy {
         /// ID of the active call
         call_id: Option<String>,
     },
-    /// Agent is in wrap-up after a call
+    /// Agent is in wrap-up after a call.
     Wrapup {
         /// ID of the just-finished call
         call_id: Option<String>,
     },
-    /// Agent is in a meeting/training (Do Not Disturb)
+    /// Agent is in a meeting/training (Do Not Disturb).
     Dnd,
-    /// Custom state for extended use cases (e.g., "training", "lunch", "meeting")
-    Custom(String),
 }
 
 impl PresenceState {
     /// Check if agent can receive calls
     pub fn can_receive_calls(&self) -> bool {
-        matches!(self, PresenceState::Available)
+        matches!(self, PresenceState::Idle)
     }
 
     /// Check if agent is in a call-related state
@@ -71,49 +70,56 @@ impl PresenceState {
         )
     }
 
-    /// Check if state is a custom state
-    pub fn is_custom(&self) -> bool {
-        matches!(self, PresenceState::Custom(_))
-    }
-
-    /// Get the custom state name if it's a custom state
-    pub fn custom_name(&self) -> Option<&str> {
+    /// Get the away/break detail if in Away state.
+    pub fn away_detail(&self) -> Option<&str> {
         match self {
-            PresenceState::Custom(name) => Some(name),
+            PresenceState::Away(detail) => Some(detail),
             _ => None,
         }
     }
 
-    /// Get state name for API/DB storage
+    /// Get state name for API/DB storage.
+    /// `Away("lunch")` serialises as `"away:lunch"`; `Away("")` as `"away"`.
     pub fn as_str(&self) -> String {
         match self {
             PresenceState::Offline => "offline".to_string(),
-            PresenceState::Away => "away".to_string(),
-            PresenceState::Available => "available".to_string(),
+            PresenceState::Away(detail) => {
+                if detail.is_empty() {
+                    "away".to_string()
+                } else {
+                    format!("away:{}", detail)
+                }
+            }
+            PresenceState::Idle => "idle".to_string(),
             PresenceState::Ringing { .. } => "ringing".to_string(),
             PresenceState::Busy { .. } => "busy".to_string(),
             PresenceState::Wrapup { .. } => "wrapup".to_string(),
             PresenceState::Dnd => "dnd".to_string(),
-            PresenceState::Custom(name) => format!("custom:{}", name),
         }
     }
 
-    /// Parse state from string
-    /// Supports custom states in format "custom:state_name"
+    /// Parse state from string.
+    /// Accepts `"away"`, `"away:detail"`, and legacy `"custom:detail"`.
     pub fn parse_state(s: &str) -> Option<Self> {
         match s {
             "offline" => Some(PresenceState::Offline),
-            "away" => Some(PresenceState::Away),
-            "available" => Some(PresenceState::Available),
+            "away" => Some(PresenceState::Away(String::new())),
+            "idle" | "available" => Some(PresenceState::Idle),
             "ringing" => Some(PresenceState::Ringing { call_id: None }),
             "busy" => Some(PresenceState::Busy { call_id: None }),
             "wrapup" => Some(PresenceState::Wrapup { call_id: None }),
             "dnd" => Some(PresenceState::Dnd),
             _ => {
-                // Check for custom state format: "custom:state_name"
-                if let Some(custom_name) = s.strip_prefix("custom:") {
-                    if !custom_name.is_empty() {
-                        Some(PresenceState::Custom(custom_name.to_string()))
+                if let Some(detail) = s.strip_prefix("away:") {
+                    if !detail.is_empty() {
+                        Some(PresenceState::Away(detail.to_string()))
+                    } else {
+                        Some(PresenceState::Away(String::new()))
+                    }
+                } else if let Some(detail) = s.strip_prefix("custom:") {
+                    // Backward compatibility: "custom:lunch" → Away("lunch")
+                    if !detail.is_empty() {
+                        Some(PresenceState::Away(detail.to_string()))
                     } else {
                         None
                     }
@@ -128,13 +134,18 @@ impl PresenceState {
     pub fn display_name(&self) -> String {
         match self {
             PresenceState::Offline => "Offline".to_string(),
-            PresenceState::Away => "Away".to_string(),
-            PresenceState::Available => "Available".to_string(),
+            PresenceState::Away(detail) => {
+                if detail.is_empty() {
+                    "Away".to_string()
+                } else {
+                    format!("Away ({})", detail)
+                }
+            }
+            PresenceState::Idle => "Idle".to_string(),
             PresenceState::Ringing { .. } => "Ringing".to_string(),
             PresenceState::Busy { .. } => "Busy".to_string(),
             PresenceState::Wrapup { .. } => "Wrap-up".to_string(),
             PresenceState::Dnd => "Do Not Disturb".to_string(),
-            PresenceState::Custom(name) => name.clone(),
         }
     }
 }
@@ -318,17 +329,16 @@ pub trait AgentRegistry: Send + Sync {
             // Any state can go to Offline
             (_, PresenceState::Offline) => true,
 
-            // Can go to Available from any non-active state
+            // Can go to Idle from any non-active state
             (
-                PresenceState::Away
+                PresenceState::Away(_)
                 | PresenceState::Wrapup { .. }
-                | PresenceState::Dnd
-                | PresenceState::Custom(_),
-                PresenceState::Available,
+                | PresenceState::Dnd,
+                PresenceState::Idle,
             ) => true,
 
-            // Can go to Ringing only from Available
-            (PresenceState::Available, PresenceState::Ringing { .. }) => true,
+            // Can go to Ringing only from Idle
+            (PresenceState::Idle, PresenceState::Ringing { .. }) => true,
 
             // Can go to Busy only from Ringing
             (PresenceState::Ringing { .. }, PresenceState::Busy { .. }) => true,
@@ -336,20 +346,18 @@ pub trait AgentRegistry: Send + Sync {
             // Can go to Wrapup only from Busy
             (PresenceState::Busy { .. }, PresenceState::Wrapup { .. }) => true,
 
-            // Can go to Away/Dnd from Available or Custom
-            (
-                PresenceState::Available | PresenceState::Custom(_),
-                PresenceState::Away | PresenceState::Dnd,
-            ) => true,
+            // Can go to Away/Dnd from Idle
+            (PresenceState::Idle, PresenceState::Away(_) | PresenceState::Dnd) => true,
 
-            // Can go to any Custom state from Available, Away, Dnd, or Wrapup
-            (
-                PresenceState::Available
-                | PresenceState::Away
-                | PresenceState::Dnd
-                | PresenceState::Wrapup { .. },
-                PresenceState::Custom(_),
-            ) => true,
+            // Can change break reason: Away(_) → Away(_)
+            (PresenceState::Away(_), PresenceState::Away(_)) => true,
+
+            // Can switch between Away and Dnd
+            (PresenceState::Away(_), PresenceState::Dnd) => true,
+            (PresenceState::Dnd, PresenceState::Away(_)) => true,
+
+            // Wrapup can go to Away/Dnd (after-call break)
+            (PresenceState::Wrapup { .. }, PresenceState::Away(_) | PresenceState::Dnd) => true,
 
             // Same state is valid (no-op)
             (a, b) if a == b => true,

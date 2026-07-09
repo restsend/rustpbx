@@ -20,6 +20,7 @@ Unit tests:
 import json
 import sys
 import time
+from urllib.parse import urlsplit
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Lock
 
@@ -168,13 +169,24 @@ class IvrStepHandler(BaseHTTPRequestHandler):
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b"{}"
-        return json.loads(raw) if raw else {}
+        body = json.loads(raw) if raw else {}
+        self._log_json("request", body)
+        return body
 
     def _send_json(self, status, data):
+        self._log_json("response", data, status=status)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data).encode("utf-8"))
+
+    def _log_json(self, kind, data, status=None):
+        path = urlsplit(self.path).path or self.path
+        prefix = f"[IVR Provider] {kind.upper()} {path}"
+        if status is not None:
+            prefix += f" status={status}"
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        print(f"{prefix} {payload}")
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[IVR Provider] {args}\n")

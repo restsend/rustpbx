@@ -1,30 +1,26 @@
 use crate::console::ConsoleState;
 use axum::{
     Router,
-    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
-/// Register license routes — commerce builds add a `/licenses/verify` POST endpoint.
+// Only the commerce route module pulls in the `State` extractor; gate the
+// import so the default build does not warn about it being unused.
+#[cfg(feature = "commerce")]
+use axum::extract::State;
+
+/// Register license routes — only the commerce build exposes the
+/// `/licenses/verify` POST endpoint. The legacy `GET /licenses` redirect has
+/// been removed in favour of the unified `/addons#licenses` tab.
 pub fn urls() -> Router<Arc<ConsoleState>> {
     #[cfg(feature = "commerce")]
     return commerce::urls();
 
     #[cfg(not(feature = "commerce"))]
-    Router::new().route("/licenses", get(index))
-}
-
-pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
-    let bp = state.base_path().to_string();
-    // Community build: redirect straight to addons (no license tab).
-    #[cfg(not(feature = "commerce"))]
-    return axum::response::Redirect::to(&format!("{bp}/addons"));
-    #[cfg(feature = "commerce")]
-    axum::response::Redirect::to(&format!("{bp}/addons#licenses"))
+    Router::new()
 }
 
 /// Core license-key verification logic — commerce builds only.
@@ -313,8 +309,6 @@ mod commerce {
 
     pub fn urls() -> Router<Arc<ConsoleState>> {
         let _ = Json::<()>;
-        Router::new()
-            .route("/licenses", get(super::index))
-            .route("/licenses/verify", post(verify_license))
+        Router::new().route("/licenses/verify", post(verify_license))
     }
 }

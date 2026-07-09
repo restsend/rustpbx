@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::trace;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioMapping {
     pub source_pt: u8,
     pub target_pt: u8,
@@ -21,7 +21,7 @@ pub struct AudioMapping {
 }
 
 /// Mapping for a single DTMF PT from source to target, or drop if target is absent.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DtmfMapping {
     pub source_pt: u8,
     pub target_pt: Option<u8>,
@@ -251,8 +251,8 @@ impl MediaStreamTrack for ForwardingTrack {
         loop {
             self.rebuild_runtime_if_needed();
 
-            let audio_mapping = self.audio_mapping.lock().clone();
-            let dtmf_mapping = self.dtmf_mapping.lock().clone();
+            let audio_mapping = *self.audio_mapping.lock();
+            let dtmf_mapping = *self.dtmf_mapping.lock();
             let sample = self.inner.recv().await?;
             let received_at_micros = self.receive_clock.now_micros();
 

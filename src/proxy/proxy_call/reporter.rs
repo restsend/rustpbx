@@ -147,6 +147,10 @@ impl CallReporter {
             (None, None)
         };
 
+        let outbound_trunk_context = self.context.cookie.get_extension::<crate::call::OutboundTrunkContext>()
+            .or_else(|| self.context.dialplan.extensions.get::<crate::call::OutboundTrunkContext>().cloned());
+        let outbound_sip_trunk_id = outbound_trunk_context.as_ref().and_then(|ctx| ctx.id);
+
         let mut recorder = Vec::new();
 
         if call_was_accepted
@@ -176,6 +180,19 @@ impl CallReporter {
 
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
+        let mut metadata_map = snapshot
+            .extensions
+            .get::<HashMap<String, String>>()
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(ctx) = &outbound_trunk_context {
+            metadata_map.insert("outbound_trunk_name".to_string(), ctx.name.clone());
+            if let Some(dest) = &ctx.dest {
+                metadata_map.insert("outbound_trunk_dest".to_string(), dest.clone());
+            }
+        }
+
         let mut details = CallDetails {
             direction,
             status,
@@ -187,14 +204,12 @@ impl CallReporter {
             department_id,
             extension_id,
             sip_trunk_id,
+            outbound_sip_trunk_id,
             sip_gateway,
             recording_url: recording_path_for_db,
             rewrite,
             last_error,
-            metadata: snapshot
-                .extensions
-                .get::<HashMap<String, String>>()
-                .cloned(),
+            metadata: if metadata_map.is_empty() { None } else { Some(metadata_map) },
             ..Default::default()
         };
 

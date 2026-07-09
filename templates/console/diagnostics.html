@@ -2164,11 +2164,6 @@
                         } else {
                             configuration.authorization_user = parsed.user;
                         }
-                        console.log('[Diagnostics] Registering SIP:', {
-                            uri: configuration.uri,
-                            hasPassword: !!configuration.password,
-                            authUser: configuration.authorization_user
-                        });
                         if (!configuration.password) {
                             console.warn('[Diagnostics] No password provided for SIP registration. Authentication may fail.');
                         }

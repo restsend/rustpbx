@@ -245,14 +245,14 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing
         if let Some(callee_user) = origin.uri.user() {
-            let callee_str = callee_user.to_string();
             let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
                     app_params: app_params.clone(),
                     auto_answer: true,
+                    hints: None,
                 });
             }
         }
@@ -290,14 +290,14 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing (preview mode)
         if let Some(callee_user) = origin.uri.user() {
-            let callee_str = callee_user.to_string();
             let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
                     app_params: app_params.clone(),
                     auto_answer: true,
+                    hints: None,
                 });
             }
         }
@@ -453,7 +453,12 @@ impl CallModule {
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
         let dialog_layer = server.dialog_layer.clone();
-        let mut routing_state = RoutingState::new();
+        // Share the trunk rate limiter between RoutingState (acquire during
+        // routing) and SipSession (release on teardown) by taking the Arc from
+        // the server inner.
+        let mut routing_state = RoutingState::with_trunk_rate_limiter(
+            server.trunk_rate_limiter.clone(),
+        );
         let limiter = server
             .frequency_limiter
             .clone()
@@ -523,11 +528,14 @@ impl CallModule {
         let media_config = MediaConfig::new()
             .with_proxy_mode(self.inner.config.media_proxy)
             .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
+            .with_bind_ip(self.inner.server.rtp_config.bind_ip.clone())
             .with_rtp_start_port(self.inner.server.rtp_config.start_port)
             .with_rtp_end_port(self.inner.server.rtp_config.end_port)
             .with_webrtc_start_port(self.inner.server.rtp_config.webrtc_start_port)
             .with_webrtc_end_port(self.inner.server.rtp_config.webrtc_end_port)
-            .with_ice_servers(self.inner.server.rtp_config.ice_servers.clone());
+            .with_ice_servers(self.inner.server.rtp_config.ice_servers.clone())
+            .with_enable_latching(self.inner.config.enable_latching)
+            .with_probation_max_packets(self.inner.config.latching_probation_max_packets);
 
         let caller_is_same_realm = self
             .inner
@@ -616,8 +624,10 @@ impl CallModule {
         {
             match &config.endpoint {
                 crate::call::TransferEndpoint::Uri(uri) => {
+                    let realm = self.inner.config.select_realm("");
+                    let normalized = crate::call::build_sip_uri(uri, &realm);
                     let forwarded_uri =
-                        rsipstack::sip::Uri::try_from(uri.as_str()).map_err(|e| {
+                        rsipstack::sip::Uri::try_from(normalized.as_str()).map_err(|e| {
                             RouteError::from((
                                 anyhow!("invalid always-forwarding target '{}': {}", uri, e),
                                 Some(rsipstack::sip::StatusCode::ServerInternalError),
@@ -693,6 +703,50 @@ impl CallModule {
                         true,
                     ));
                 }
+                crate::call::TransferEndpoint::Voicemail(ext) => {
+                    let extension = ext.trim();
+                    if extension.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding voicemail extension is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    forced_pending_app = Some((
+                        "voicemail".to_string(),
+                        Some(serde_json::json!({ "extension": extension })),
+                        true,
+                    ));
+                }
+                crate::call::TransferEndpoint::Conference(id) => {
+                    let conf_id = id.trim();
+                    if conf_id.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding conference id is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    forced_pending_app = Some((
+                        "conference".to_string(),
+                        Some(serde_json::json!({ "id": conf_id })),
+                        true,
+                    ));
+                }
+            }
+        }
+
+        let mut source_trunk_lookup = None;
+        if matches!(direction, DialDirection::Inbound)
+            && let Some(source_addr) = cookie.get_extension::<SourceAddress>()
+            && let Some(source_ip) = source_addr_ip(&source_addr.0)
+        {
+            let source_trunks = self
+                .inner
+                .server
+                .data_context
+                .find_trunks_by_ip(&source_ip)
+                .await;
+            if !source_trunks.is_empty() {
+                source_trunk_lookup = Some((source_ip, source_trunks));
             }
         }
 
@@ -702,12 +756,23 @@ impl CallModule {
         {
             internal_lookup_empty = results.is_empty();
             if internal_lookup_empty {
-                warn!(
-                    callee_uri = %callee_uri,
-                    callee_realm = %callee_realm,
-                    caller_realm = ?caller.realm,
-                    "locator lookup returned empty results for same-realm callee"
-                );
+                if let Some((source_ip, source_trunks)) = source_trunk_lookup.as_ref() {
+                    debug!(
+                        callee_uri = %callee_uri,
+                        callee_realm = %callee_realm,
+                        caller_realm = ?caller.realm,
+                        %source_ip,
+                        source_trunks = ?source_trunks,
+                        "locator lookup returned empty results for same-realm callee; source trunk routing may handle call"
+                    );
+                } else {
+                    warn!(
+                        callee_uri = %callee_uri,
+                        callee_realm = %callee_realm,
+                        caller_realm = ?caller.realm,
+                        "locator lookup returned empty results for same-realm callee"
+                    );
+                }
             } else if !results.is_empty() {
                 // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
                 // so SipSession can route cross-node calls via remote home_proxy.
@@ -765,10 +830,10 @@ impl CallModule {
                     app_name,
                     app_params,
                     auto_answer,
-                    ..
+                    hints,
                 } => {
                     routed_headers = option.headers;
-                    (None, None, Some((app_name, app_params, auto_answer)), None)
+                    (None, None, Some((app_name, app_params, auto_answer)), hints)
                 }
             }
         };
@@ -828,9 +893,8 @@ impl CallModule {
                 self.inner
                     .server
                     .data_context
-                    .trunks_snapshot()
-                    .get(&ctx.name)
-                    .map(|trunk| trunk.codec.clone())
+                    .get_trunk(&ctx.name)
+                    .map(|trunk| trunk.codec)
             })
             .filter(|codecs| !codecs.is_empty());
         let fallback_codecs = trunk_codecs
@@ -877,6 +941,14 @@ impl CallModule {
                 dialplan.audio_profile = Some(ringback);
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
+            *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
+            *dialplan.trunk_concurrency_holds.lock() =
+                std::mem::take(&mut hints.trunk_concurrency_holds);
+            #[cfg(feature = "addon-wholesale")]
+            {
+                dialplan.wholesale_tenant_concurrency_hold =
+                    hints.wholesale_tenant_concurrency_hold.take();
+            }
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }
@@ -1265,6 +1337,24 @@ impl CallModule {
             .unwrap_or(70)
     }
 
+    /// Build a session cancel token linked to both the SIP server (for global
+    /// shutdown) and the incoming transport connection (so that a WebSocket
+    /// disconnect immediately cancels the session).
+    fn build_session_token(&self, tx: &Transaction) -> CancellationToken {
+        let session_token = self.inner.server.cancel_token.child_token();
+        if let Some(ref conn) = tx.connection {
+            if let Some(transport_token) = conn.cancel_token() {
+                let watch = session_token.clone();
+                crate::utils::spawn(async move {
+                    transport_token.cancelled().await;
+                    info!("Transport disconnected, cancelling call session");
+                    watch.cancel();
+                });
+            }
+        }
+        session_token
+    }
+
     async fn build_and_serve_dialplan(
         &self,
         tx: &mut Transaction,
@@ -1285,7 +1375,7 @@ impl CallModule {
         }
         let builder = CallSessionBuilder::new(cookie, dialplan, max_forwards - 1)
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_cancel_token(self.inner.server.cancel_token.child_token());
+            .with_cancel_token(self.build_session_token(tx));
         builder.build_and_serve(self.inner.server.clone(), tx).await
     }
 
@@ -1340,6 +1430,7 @@ impl CallModule {
         }?;
 
         let mut dialplan = dialplan;
+
         if dialplan.caller_contact.is_none()
             && let Some(contact_uri) = self.inner.server.default_contact_uri()
         {
@@ -1472,6 +1563,12 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
+        // Immediately acknowledge the INVITE with 100 Trying BEFORE any routing work.
+        // Routing (esp. wholesale route_wholesale) may block on CPS locks, DB lookups or
+        // semaphores; without an early 100 the upstream retransmits (Timer A: 500ms..16s)
+        // and may give up, inflating observed 408s under load.
+        tx.send_trying().await.ok();
+
         // Check for incoming INVITE with Replaces header (seat replacement scenario)
         if let Some((replaces_call_id, replaces_to_tag, replaces_from_tag)) =
             Self::parse_replaces_header(&tx.original)
@@ -1526,7 +1623,7 @@ impl CallModule {
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-                            .with_cancel_token(self.inner.server.cancel_token.child_token());
+                            .with_cancel_token(self.build_session_token(tx));
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
@@ -1601,7 +1698,7 @@ impl CallModule {
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-                            .with_cancel_token(self.inner.server.cancel_token.child_token());
+                            .with_cancel_token(self.build_session_token(tx));
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform conference merge once new call answers
@@ -1664,6 +1761,7 @@ impl CallModule {
                                     let g = gw.read();
                                     g.broadcast(&crate::rwi::CallTransferred {
                                         call_id: old_session_id.clone(),
+                                        transfer_target: None,
                                     });
                                 }
                             }
@@ -1871,6 +1969,7 @@ impl CallModule {
                 let g = gw.read();
                 g.send_to_owner(&crate::rwi::CallTransferred {
                     call_id: original_session_id.clone(),
+                    transfer_target: Some(refer_to_clone.clone()),
                 });
             }
         });
@@ -1968,9 +2067,9 @@ impl CallModule {
             ));
         }
 
-        // Get external IP for SDP
-        let external_ip = server
-            .rtp_config
+        // Get media config for SDP
+        let media = server.default_media_config();
+        let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -1980,9 +2079,11 @@ impl CallModule {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("inbound-refer-{}", new_call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
+                .with_enable_latching(media.enable_latching)
+                .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip)
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
@@ -2176,93 +2277,6 @@ impl CallModule {
         });
 
         info!(content_type = ?content_type, body = %body, "Received SIP MESSAGE");
-
-        // Parse JSON body
-        if content_type.as_deref() == Some("application/json")
-            && let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&body)
-        {
-            let cmd_type = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or_default();
-            let call_id = cmd
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let agent_id = cmd
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let target = cmd
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let transfer_id = cmd
-                .get("transfer_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-            match cmd_type {
-                "consult.initiate" => {
-                    info!(call_id = %call_id, agent_id = %agent_id, target = %target, "SIP MESSAGE: consult.initiate");
-
-                    // Hold the original call (A)
-                    let registry = self.inner.server.active_call_registry.clone();
-                    if let Some(handle) = registry.get_handle(call_id) {
-                        let _ = handle.send_command(crate::call::domain::CallCommand::Hold {
-                            leg_id: crate::call::domain::LegId::new(call_id),
-                            music: None,
-                        });
-                    }
-
-                    // Send 200 OK with transfer_id
-                    let response_body = serde_json::json!({
-                        "status": "ok",
-                        "transfer_id": transfer_id,
-                        "cmd": "consult.initiate"
-                    })
-                    .to_string();
-                    tx.reply_with(
-                        rsipstack::sip::StatusCode::OK,
-                        vec![rsipstack::sip::Header::ContentType(
-                            rsipstack::sip::headers::untyped::ContentType::new("application/json"),
-                        )],
-                        Some(response_body.into_bytes()),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                "consult.merge" => {
-                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.merge");
-
-                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
-                        .await?;
-                    return Ok(());
-                }
-                "consult.complete" => {
-                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.complete");
-
-                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
-                        .await?;
-                    return Ok(());
-                }
-                "consult.cancel" => {
-                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.cancel");
-
-                    // Unhold the original call
-                    let registry = self.inner.server.active_call_registry.clone();
-                    if let Some(handle) = registry.get_handle(call_id) {
-                        let _ = handle.send_command(crate::call::domain::CallCommand::Unhold {
-                            leg_id: crate::call::domain::LegId::new(call_id),
-                        });
-                    }
-
-                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
-                        .await?;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
         // Default: accept but do nothing
         tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
             .await?;
@@ -2464,6 +2478,7 @@ mod tests {
                 app_name: "ivr".to_string(),
                 app_params: None,
                 auto_answer: true,
+                hints: None,
             })
         }
     }

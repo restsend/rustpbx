@@ -2,11 +2,13 @@ use crate::call::domain::PlayOptions;
 use crate::call::domain::{CallCommand, HangupCommand, LegId, MediaSource};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
@@ -56,6 +58,11 @@ pub struct CallController {
     pub(crate) fired_timer_tx: mpsc::UnboundedSender<String>,
     /// Set of timer IDs that have been cancelled and should be suppressed.
     pub(crate) cancelled_timers: Arc<Mutex<HashSet<String>>>,
+    /// JoinHandles of pending timer tasks, keyed by timer id, so they can be
+    /// aborted on cancel/re-register instead of sleeping for the full delay
+    /// (which previously kept Arc clones + the channel sender alive past call
+    /// end and skewed task metrics).
+    pub(crate) timer_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 /// Error returned when the remote party hangs up during `collect_dtmf`.
@@ -121,6 +128,7 @@ impl CallController {
             event_rx,
             fired_timer_tx,
             cancelled_timers: Arc::new(Mutex::new(HashSet::new())),
+            timer_tasks: Arc::new(Mutex::new(HashMap::new())),
         };
         (ctrl, fired_timer_rx)
     }
@@ -217,33 +225,44 @@ impl CallController {
     /// After `delay`, [`CallApp::on_timeout`] will be invoked with `id`.
     ///
     /// Calling `set_timeout` with the same `id` before it fires **re-registers**
-    /// the timer (the previous one is cancelled). Use [`cancel_timeout`](Self::cancel_timeout)
+    /// the timer (the previous task is aborted). Use [`cancel_timeout`](Self::cancel_timeout)
     /// to suppress a pending fire without re-registering.
-    ///
-    /// # Panics
-    /// Will not panic; timer tasks are fire-and-forget on a Tokio runtime.
     pub fn set_timeout(&self, id: impl Into<String>, delay: Duration) {
         let id = id.into();
-        // If re-registering, un-cancel any previous suppression.
-        self.cancelled_timers.lock().unwrap().remove(&id);
+        // Re-registering: abort the previous timer task (if any) and clear any
+        // cancellation flag so the new timer is armed fresh.
+        if let Some(handle) = self.timer_tasks.lock().remove(&id) {
+            handle.abort();
+        }
+        self.cancelled_timers.lock().remove(&id);
+
         let tx = self.fired_timer_tx.clone();
         let cancelled = self.cancelled_timers.clone();
+        let tasks = self.timer_tasks.clone();
         let id_task = id.clone();
-        crate::utils::spawn(async move {
+        let handle = crate::utils::spawn(async move {
             tokio::time::sleep(delay).await;
+            // Self-remove so the handle map does not retain finished tasks.
+            tasks.lock().remove(&id_task);
             // Only fire if not cancelled in the meantime.
-            let was_cancelled = cancelled.lock().unwrap().remove(&id_task);
+            let was_cancelled = cancelled.lock().remove(&id_task);
             if !was_cancelled {
                 let _ = tx.send(id_task);
             }
         });
+        self.timer_tasks.lock().insert(id, handle);
     }
 
     /// Cancel a pending timer previously registered with [`set_timeout`](Self::set_timeout).
     ///
     /// If the timer has already fired, this is a no-op.
     pub fn cancel_timeout(&self, id: &str) {
-        self.cancelled_timers.lock().unwrap().insert(id.to_string());
+        self.cancelled_timers.lock().insert(id.to_string());
+        // Abort the sleeping task immediately rather than letting it run for the
+        // remainder of its delay.
+        if let Some(handle) = self.timer_tasks.lock().remove(id) {
+            handle.abort();
+        }
     }
 
     /// Start recording the call audio.
@@ -420,6 +439,17 @@ impl CallController {
             track_id,
             interrupted,
         });
+    }
+}
+
+impl Drop for CallController {
+    fn drop(&mut self) {
+        // Abort every still-pending timer task so they don't keep sleeping (and
+        // holding their captured Arc/channel clones) after the call has ended.
+        let tasks = std::mem::take(&mut *self.timer_tasks.lock());
+        for (_, handle) in tasks {
+            handle.abort();
+        }
     }
 }
 

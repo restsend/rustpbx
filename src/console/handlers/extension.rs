@@ -124,13 +124,7 @@ async fn fetch_extension_locator_summary(
         return summary;
     }
 
-    let query_uri = if trimmed_ext.starts_with("sip:") {
-        trimmed_ext.to_string()
-    } else if trimmed_ext.contains('@') {
-        format!("sip:{}", trimmed_ext)
-    } else {
-        format!("sip:{}@{}", trimmed_ext, realm)
-    };
+    let query_uri = crate::call::build_sip_uri(trimmed_ext, realm);
     summary.query_uri = Some(query_uri.clone());
 
     let Some(server) = server else {
@@ -461,6 +455,14 @@ async fn create_extension(
         return internal_error(err.to_string());
     }
 
+    // Notify addons that an extension was created.
+    if let Some(app_state) = state.app_state() {
+        app_state
+            .addon_registry
+            .on_extension_created(app_state.config(), db, extension)
+            .await;
+    }
+
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
@@ -649,9 +651,12 @@ async fn update_extension(
     let db = state.db();
     let model = find_or_404!(ExtensionEntity, id, db, "Extension");
 
+    // Capture the original extension before model is consumed.
+    let current_ext = model.extension.clone();
+
     let mut active: ExtensionActiveModel = model.into();
-    if let Some(extension) = payload.extension {
-        active.extension = Set(extension);
+    if let Some(ref extension) = payload.extension {
+        active.extension = Set(extension.clone());
     }
     if let Some(display_name) = payload.display_name {
         active.display_name = Set(Some(display_name));
@@ -703,6 +708,18 @@ async fn update_extension(
         )
             .into_response();
     }
+
+    // Notify addons that an extension was updated.
+    let ext = payload.extension.clone().unwrap_or(current_ext);
+    if !ext.is_empty() {
+        if let Some(app_state) = state.app_state() {
+            app_state
+                .addon_registry
+                .on_extension_updated(app_state.config(), db, &ext)
+                .await;
+        }
+    }
+
     Json(json!({"status": "ok"})).into_response()
 }
 
@@ -717,8 +734,29 @@ async fn delete_extension(
     {
         return resp;
     }
-    match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
-        Ok(r) => Json(json!({"status": r.rows_affected})).into_response(),
+    let db = state.db();
+
+    // Resolve extension number before deletion for addon hooks.
+    let ext_number = ExtensionEntity::find_by_id(id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.extension)
+        .unwrap_or_default();
+
+    match ExtensionEntity::delete_by_id(id).exec(db).await {
+        Ok(r) => {
+            if !ext_number.is_empty() {
+                if let Some(app_state) = state.app_state() {
+                    app_state
+                        .addon_registry
+                        .on_extension_deleting(app_state.config(), db, &ext_number)
+                        .await;
+                }
+            }
+            Json(json!({"status": r.rows_affected})).into_response()
+        }
         Err(err) => {
             warn!("failed to delete extension {}: {}", id, err);
             (
@@ -934,6 +972,16 @@ pub async fn csv_import_extensions(
                 unknown_depts.push(*name);
             }
         }
+        if !unknown_depts.is_empty() {
+            skipped += 1;
+            errors.push(format!(
+                "Row {}: extension '{}' has unknown departments: {}",
+                i + 1,
+                ext_number,
+                unknown_depts.join(", ")
+            ));
+            continue;
+        }
 
         let active = ExtensionActiveModel {
             extension: Set(ext_number.clone()),
@@ -956,14 +1004,6 @@ pub async fn csv_import_extensions(
 
         match active.insert(db).await {
             Ok(model) => {
-                if !unknown_depts.is_empty() {
-                    errors.push(format!(
-                        "Row {}: extension '{}' imported but unknown departments: {}",
-                        i + 1,
-                        ext_number,
-                        unknown_depts.join(", ")
-                    ));
-                }
                 if !dept_ids.is_empty() {
                     if let Err(err) =
                         ExtensionEntity::replace_departments(db, model.id, &dept_ids).await
@@ -975,6 +1015,13 @@ pub async fn csv_import_extensions(
                             err
                         ));
                     }
+                }
+                // Notify addons that an extension was created via CSV import.
+                if let Some(app_state) = state.app_state() {
+                    app_state
+                        .addon_registry
+                        .on_extension_created(app_state.config(), db, &ext_number)
+                        .await;
                 }
                 imported += 1;
                 existing_extensions.insert(ext_number);

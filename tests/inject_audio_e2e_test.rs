@@ -137,6 +137,7 @@ fn setup_engine() -> (
     let (engine, handle) = MediaEngine::new(MediaEngineConfig {
         command_channel_capacity: 64,
         event_channel_capacity: 64,
+        ..MediaEngineConfig::default()
     });
     let rx = engine.subscribe();
     let _task = engine.spawn(handle);
@@ -177,6 +178,7 @@ async fn test_inject_audio_both_endpoints_produce_rtp() {
             bridge: bridge.clone(),
             caller_is_webrtc: false,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 
@@ -270,6 +272,7 @@ async fn test_inject_audio_single_leg_produces_rtp() {
             bridge: bridge.clone(),
             caller_is_webrtc: true,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 
@@ -350,6 +353,7 @@ async fn test_inject_audio_mute_peer_suppresses_output() {
             bridge: bridge.clone(),
             caller_is_webrtc: true,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 
@@ -429,6 +433,7 @@ async fn test_inject_audio_stop_restores_peer_output() {
             bridge: bridge.clone(),
             caller_is_webrtc: false,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 
@@ -531,6 +536,7 @@ async fn test_inject_audio_rtp_sequence_continuity() {
             bridge: bridge.clone(),
             caller_is_webrtc: false,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 
@@ -909,6 +915,7 @@ async fn test_inject_audio_pcmu_encoding_correctness() {
             bridge: bridge.clone(),
             caller_is_webrtc: true,
             caller_codec_info: vec![codec_info()],
+            callee_codec_info: vec![codec_info()],
         })
         .unwrap();
 

@@ -524,6 +524,9 @@ async fn test_guest_call_allowed_extension() {
             let _ = engine.spawn(handle);
             engine
         },
+        trunk_rate_limiter: Arc::new(
+            crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
+        ),
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 
@@ -1404,6 +1407,7 @@ fn make_jwt_config() -> JwtAuthConfig {
         sip_header_name: "X-Auth-Token".to_string(),
         check_local_user: false,
         ws_token_param: "token".to_string(),
+        dev_mint_enabled: false,
     }
 }
 

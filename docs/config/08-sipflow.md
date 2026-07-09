@@ -86,7 +86,7 @@ rustpbx node → UDP send to sipflow cluster
 | Write method | Batch INSERT + transaction commit | Per-record `write_batch_sync` |
 | Compression | Per-packet zstd (level 3, ≥96 bytes) | Block-level LSM compression |
 | TTL | No auto-expiry | Built-in TTL garbage collection |
-| Subdirectory policy | None / Daily / Hourly | Single directory |
+| Subdirectory policy | None / Daily / Hourly | None / Daily / Hourly |
 | Data isolation | JOIN via `call_meta` table | Key prefix scan (`sip:{id}:`, `rtp:{id}:`) |
 
 ### SQLite Storage Format
@@ -143,6 +143,31 @@ SIP:  src_len(2B) | src(dynamic) | dst_len(2B) | dst(dynamic) | payload
 RTP:  leg(4B) | src_len(2B) | src(dynamic) | payload
 ```
 
+### Subdirectory Layout (FlowDB and SQLite)
+
+Both local backends honour the `subdirs` setting. Data is partitioned into
+time-bucketed directories under `root`, which keeps each storage instance
+small, makes per-day/hour cleanup trivial, and bounds the working set that
+any single query has to open.
+
+| Mode | Layout | Example |
+|------|--------|---------|
+| `none` | `<root>/` | `/var/sipflow/data/` |
+| `daily` | `<root>/YYYYMMDD/` | `/var/sipflow/data/20260702/` |
+| `hourly` | `<root>/YYYYMMDD/HH/` | `/var/sipflow/data/20260702/14/` |
+
+- A record is filed under the bucket for `Local::now()` at write time, so a
+  call that spans a bucket boundary will have its data split across two
+  directories. Queries automatically fan out over every bucket that
+  intersects the requested `[start, end]` range and merge the results.
+- **SQLite** opens a fresh `sipflow.db` + `data.raw` per bucket.
+- **FlowDB** maintains an LRU cache of open `Engine` instances (one per
+  bucket, capped at 24 simultaneous engines). When the cache is full the
+  least-recently-used engine is flushed and closed; its data remains
+  queryable and is simply re-opened on demand. Pending batches are never
+  lost — an engine is only eligible for eviction once its in-memory batch
+  has been flushed to the LSM-tree.
+
 ---
 
 ## Performance Benchmark
@@ -188,6 +213,7 @@ Results from `cargo run --release --example sipflow_bench -- --calls 50 --rtp-pe
 type = "local"
 root = "/var/sipflow/data"
 engine = "flowdb"          # "flowdb" (default) or "sqlite"
+subdirs = "hourly"         # "none" / "daily" / "hourly" (default: "daily")
 ttl_secs = 86400           # optional TTL
 memtable_size_mb = 64
 block_cache_capacity_mb = 128
@@ -211,10 +237,10 @@ root = "recordings/"
 type = "local"
 root = "/var/sipflow/data"
 engine = "sqlite"
-subdirs = "daily"          # "none" / "daily" / "hourly" (SQLite only)
+subdirs = "daily"          # "none" / "daily" / "hourly"
 # flush_count = 0          # 0=immediate write, no app-level buffering
 # flush_interval_secs = 0
-id_cache_size = 8192
+id_cache_size = 8192       # SQLite-only: CallID→row-id LRU cache
 ```
 
 **Remote cluster:**
@@ -240,7 +266,7 @@ timeout_secs = 10
 | `type` | `"local"` / `"remote"` | required | Backend type |
 | `root` | String | - | Data directory (local) |
 | `engine` | `"flowdb"` / `"sqlite"` | `"flowdb"` | Storage engine (local) |
-| `subdirs` | `"none"` / `"daily"` / `"hourly"` | `"daily"` | Directory partitioning (local SQLite) |
+| `subdirs` | `"none"` / `"daily"` / `"hourly"` | `"daily"` | Time-bucketed directory partitioning (local, both engines) |
 | `flush_count` | usize | 0 | Batch size before flush; 0 = immediate write (local) |
 | `flush_interval_secs` | u64 | 0 | Max flush interval; 0 = no timer (local) |
 | `id_cache_size` | usize | 8192 | CallID→ID LRU cache (local SQLite) |

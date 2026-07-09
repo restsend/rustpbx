@@ -92,6 +92,9 @@ mod tests {
             udp_addr: Some("127.0.0.1:3000".to_string()),
             http_addr: Some("http://127.0.0.1:3001".to_string()),
             timeout_secs: 10,
+            batch_size: 256,
+            batch_flush_ms: 20,
+            channel_capacity: 8192,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -106,6 +109,9 @@ mod tests {
             udp_addr: Some("localhost:3000".to_string()),
             http_addr: Some("http://localhost:3001".to_string()),
             timeout_secs: 10,
+            batch_size: 256,
+            batch_flush_ms: 20,
+            channel_capacity: 8192,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -129,6 +135,9 @@ mod tests {
             udp_addr: None,
             http_addr: None,
             timeout_secs: 10,
+            batch_size: 256,
+            batch_flush_ms: 20,
+            channel_capacity: 8192,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -143,6 +152,9 @@ mod tests {
             udp_addr: None,
             http_addr: None,
             timeout_secs: 10,
+            batch_size: 256,
+            batch_flush_ms: 20,
+            channel_capacity: 8192,
             upload: None,
         };
         let result = create_backend(&cfg);
@@ -286,5 +298,188 @@ root = "/var/sipflow"
             }
             _ => panic!("expected Local config"),
         }
+    }
+
+    /// Remote batch defaults: TOML with no `batch_size` / `batch_flush_ms`
+    /// / `channel_capacity` must yield the documented defaults
+    /// (256 / 20 / 8192).
+    #[test]
+    fn test_remote_config_batch_defaults() {
+        let toml_str = r#"
+type = "remote"
+nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse remote config");
+        match cfg {
+            crate::config::SipFlowConfig::Remote {
+                batch_size,
+                batch_flush_ms,
+                channel_capacity,
+                ..
+            } => {
+                assert_eq!(batch_size, 256);
+                assert_eq!(batch_flush_ms, 20);
+                assert_eq!(channel_capacity, 8192);
+            }
+            _ => panic!("expected Remote config"),
+        }
+    }
+
+    /// End-to-end batch validation: many `record()` calls must arrive at a
+    /// UDP receiver as **fewer** datagrams than records (i.e. the worker
+    /// coalesced them), and every received datagram must parse as a batch
+    /// containing the original packets in order.
+    ///
+    /// This guards the whole pipeline: `try_send` on the bounded channel →
+    /// `recv_many` → per-node buffers → `encode_batch_into` → `send_to` →
+    /// `parse_datagram`.
+    #[tokio::test]
+    async fn test_remote_backend_batches_on_the_wire() {
+        use std::net::SocketAddr;
+        use tokio::net::UdpSocket;
+
+        // Bind the fake sipflow server first so the backend can resolve it.
+        let rx_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rx_addr: SocketAddr = rx_sock.local_addr().unwrap();
+        let tx_port = rx_addr.port();
+
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![SipFlowClusterNode {
+                udp: format!("127.0.0.1:{tx_port}"),
+                http: format!("http://127.0.0.1:{tx_port}"),
+            }],
+            udp_addr: None,
+            http_addr: None,
+            timeout_secs: 5,
+            // Small batch + short flush so the test resolves quickly while
+            // still exercising the coalescing path.
+            batch_size: 16,
+            batch_flush_ms: 20,
+            channel_capacity: 8192,
+            upload: None,
+        };
+        let backend = create_backend(&cfg).expect("backend creation");
+
+        // Send N records (N > batch_size) with the same call_id so they all
+        // hash to the same single node.
+        const N: u32 = 50;
+        for i in 0..N {
+            backend
+                .record("call-batch-e2e", make_rtp_item(i as i32))
+                .expect("record must succeed");
+        }
+
+        // Collect datagrams until we've gathered all N packets worth.
+        let mut got_packets = 0u32;
+        let mut datagram_count = 0u32;
+        let mut buf = vec![0u8; 65535];
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
+        while got_packets < N && tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, rx_sock.recv(&mut buf)).await {
+                Ok(Ok(size)) => {
+                    datagram_count += 1;
+                    let packets = crate::sipflow::protocol::parse_datagram(&buf[..size])
+                        .expect("received datagram must parse");
+                    got_packets += packets.len() as u32;
+                    for p in &packets {
+                        assert_eq!(p.msg_type, crate::sipflow::protocol::MsgType::Rtp);
+                        assert_eq!(p.call_id.as_deref(), Some("call-batch-e2e"));
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(
+            got_packets, N,
+            "all {N} records should reach the receiver"
+        );
+        // The whole point: 50 records must arrive in fewer than 50 datagrams.
+        assert!(
+            datagram_count < N,
+            "expected batching to coalesce records into fewer datagrams, \
+             got {datagram_count} datagrams for {N} records"
+        );
+        tracing::debug!(
+            "batch e2e: {N} records -> {datagram_count} datagrams"
+        );
+    }
+
+    /// `batch_size = 0` disables batching: each record must arrive as its
+    /// own legacy single-packet datagram (magic `0x5346`, not `0x5347`),
+    /// and the number of datagrams equals the number of records.
+    #[tokio::test]
+    async fn test_remote_backend_batch_size_zero_disables_batching() {
+        use std::net::SocketAddr;
+        use tokio::net::UdpSocket;
+
+        let rx_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rx_addr: SocketAddr = rx_sock.local_addr().unwrap();
+        let tx_port = rx_addr.port();
+
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![SipFlowClusterNode {
+                udp: format!("127.0.0.1:{tx_port}"),
+                http: format!("http://127.0.0.1:{tx_port}"),
+            }],
+            udp_addr: None,
+            http_addr: None,
+            timeout_secs: 5,
+            // batch_size=0 → opt out of batching entirely.
+            batch_size: 0,
+            // Sub-MIN value; must be clamped to 20 internally. Doesn't
+            // affect this test since flushes are immediate when disabled.
+            batch_flush_ms: 1,
+            channel_capacity: 8192,
+            upload: None,
+        };
+        let backend = create_backend(&cfg).expect("backend creation");
+
+        const N: u32 = 10;
+        for i in 0..N {
+            backend
+                .record("call-disabled", make_rtp_item(i as i32))
+                .expect("record must succeed");
+        }
+
+        let mut got_packets = 0u32;
+        let mut datagram_count = 0u32;
+        let mut buf = vec![0u8; 65535];
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
+        while got_packets < N && tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, rx_sock.recv(&mut buf)).await {
+                Ok(Ok(size)) => {
+                    datagram_count += 1;
+                    // Each datagram must be the LEGACY single-packet format
+                    // (PACKET_MAGIC 0x5346), not the batch format (0x5347).
+                    assert_eq!(
+                        &buf[..2],
+                        &[0x53, 0x46],
+                        "batch_size=0 must produce legacy single-packet datagrams"
+                    );
+                    let packets = crate::sipflow::protocol::parse_datagram(&buf[..size])
+                        .expect("received datagram must parse");
+                    assert_eq!(
+                        packets.len(),
+                        1,
+                        "disabled backend must put exactly one packet per datagram"
+                    );
+                    got_packets += 1;
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(got_packets, N, "all {N} records should reach the receiver");
+        // With batching disabled: one datagram per record, no exceptions.
+        assert_eq!(
+            datagram_count, N,
+            "disabled backend must send one datagram per record"
+        );
     }
 }

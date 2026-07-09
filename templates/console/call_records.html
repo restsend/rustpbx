@@ -8,7 +8,7 @@
             list_url: {{ list_url | default("/console/call-records") | tojson }},
             page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }},
             translations: window.__i18n_t || {}
-        })' x-init="init()">
+        })'>
         <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "call_record.voice_analytics" | t }}</p>
@@ -112,6 +112,12 @@
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "call_record.search_call_records" | t }}'>
                         </label>
+                        <input type="search" x-model.trim="callerFilter" @input.debounce.400ms="scheduleFetch()"
+                            class="w-40 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            :placeholder="t.filter_caller || 'Caller'">
+                        <input type="search" x-model.trim="calleeFilter" @input.debounce.400ms="scheduleFetch()"
+                            class="w-40 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            :placeholder="t.filter_callee || 'Callee'">
                         <div class="flex flex-wrap items-center gap-2">
                             <select aria-label="{{ "call_record.add_filter" | t }}"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -229,6 +235,24 @@
                                         </template>
                                     </div>
                                 </template>
+                                <template x-if="filter === 'outbound_sip_trunks'">
+                                    <div class="flex max-h-48 flex-col gap-2 overflow-y-auto pr-1">
+                                        <template x-if="!filterOptions.sip_trunks.length">
+                                            <span
+                                                class="rounded-full border border-dashed border-slate-200 px-3 py-1 text-xs text-slate-400">No
+                                                trunks</span>
+                                        </template>
+                                        <template x-for="trunk in filterOptions.sip_trunks" :key="trunk.id">
+                                            <label
+                                                class="inline-flex items-center gap-2 rounded border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                                <input type="checkbox"
+                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                                    :value="String(trunk.id)" x-model="selectedOutboundSipTrunks">
+                                                <span x-text="trunk.display_name || trunk.name"></span>
+                                            </label>
+                                        </template>
+                                    </div>
+                                </template>
                                 <template x-if="filter === 'billing_status'">
                                     <select x-model="billingStatusFilter"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -319,6 +343,16 @@
                                                             d="M8 4v12M12 8h4" />
                                                     </svg>
                                                     <span x-text="record.sip_gateway || '—'"></span>
+                                                </div>
+                                            </template>
+                                            <template x-if="record.outbound_trunk">
+                                                <div class="inline-flex items-center gap-1 text-emerald-700">
+                                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.6">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10h10M10 5l5 5-5 5" />
+                                                    </svg>
+                                                    <span x-text="record.outbound_trunk"></span>
                                                 </div>
                                             </template>
                                         </div>
@@ -454,10 +488,10 @@
                                             class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-rose-200 text-rose-500 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
                                             :disabled="deletingId === record.id" @click.stop="deleteRecord(record)"
                                             :title="t.action_delete_record || 'Delete record'">
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M6 6h8m-7 3v6m6-6v6M4 6h12" />
+                                                    d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6" />
                                             </svg>
                                         </button>
                                     </div>
@@ -491,7 +525,11 @@
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
                                 :disabled="currentPage === 1" @click="prevPage" x-text="t.page_prev || 'Prev'">
                             </button>
-                            <span class="px-2" x-text="`${currentPage} / ${totalPages}`"></span>
+                            <input type="number" min="1" :max="totalPages" :value="currentPage"
+                                @change="goToPage($event)"
+                                @keydown.enter="goToPage($event); $event.target.blur()"
+                                class="w-14 rounded-full border border-slate-200 bg-white px-2 py-1 text-center text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <span class="px-1 text-slate-400">/ <span x-text="totalPages"></span></span>
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
                                 :disabled="currentPage === totalPages" @click="nextPage" x-text="t.page_next || 'Next'">
                             </button>
@@ -537,6 +575,8 @@
                 billing_status: ['any'],
             },
             search: '',
+            callerFilter: '',
+            calleeFilter: '',
             statusFilter: 'any',
             directionFilter: 'any',
             dateRangePreset: 'custom',
@@ -554,6 +594,7 @@
             onlyTranscribed: false,
             selectedDepartments: [],
             selectedSipTrunks: [],
+            selectedOutboundSipTrunks: [],
             selectedTags: [],
             billingStatusFilter: 'any',
             exportedAt: null,
@@ -587,6 +628,7 @@
                 { key: 'only_transcribed', labelKey: 'filter_only_transcribed' },
                 { key: 'departments', labelKey: 'filter_departments' },
                 { key: 'sip_trunks', labelKey: 'filter_sip_trunks' },
+                { key: 'outbound_sip_trunks', labelKey: 'filter_outbound_sip_trunks' },
             ],
             activeFilters: [],
             persistentFilters: [],
@@ -744,8 +786,12 @@
                     this.currentPage = currentPageRaw;
                 }
 
+                this.syncActiveFilters();
+
                 if (!this.dateFrom) {
                     this.applyDatePreset('last_7_days');
+                } else if (!Array.isArray(data.records) || !data.records.length) {
+                    this.fetchRecords({ page: this.currentPage });
                 }
 
                 const scheduleWatcher = () => {
@@ -766,6 +812,7 @@
                 this.$watch('onlyTranscribed', immediateWatcher);
                 this.$watch('selectedDepartments', immediateWatcher);
                 this.$watch('selectedSipTrunks', immediateWatcher);
+                this.$watch('selectedOutboundSipTrunks', immediateWatcher);
                 this.$watch('selectedTags', immediateWatcher);
                 this.$watch('dateFrom', () => {
                     if (!this._updatingPreset) {
@@ -787,10 +834,6 @@
                     this.applyPageSize(value);
                 });
 
-                this.syncActiveFilters();
-                if (!Array.isArray(data.records) || !data.records.length) {
-                    this.fetchRecords({ page: this.currentPage });
-                }
             },
             normalizeBasePath(value) {
                 if (!value || value === '/') {
@@ -864,6 +907,16 @@
                     filters.q = query;
                 }
 
+                const caller = (this.callerFilter || '').trim();
+                if (caller) {
+                    filters.caller = caller;
+                }
+
+                const callee = (this.calleeFilter || '').trim();
+                if (callee) {
+                    filters.callee = callee;
+                }
+
                 const status = (this.statusFilter || '').toLowerCase();
                 if (status && status !== 'any') {
                     filters.status = status;
@@ -903,6 +956,13 @@
                     .filter((value) => Number.isInteger(value));
                 if (sipIds.length) {
                     filters.sipTrunkIds = sipIds;
+                }
+
+                const outboundSipIds = (Array.isArray(this.selectedOutboundSipTrunks) ? this.selectedOutboundSipTrunks : [])
+                    .map((value) => parseInt(value, 10))
+                    .filter((value) => Number.isInteger(value));
+                if (outboundSipIds.length) {
+                    filters.outboundSipTrunkIds = outboundSipIds;
                 }
 
                 const tags = (Array.isArray(this.selectedTags) ? this.selectedTags : [])
@@ -1030,6 +1090,20 @@
                     this.setPage(this.currentPage + 1);
                 }
             },
+            goToPage(event) {
+                const input = event?.target;
+                if (!input) {
+                    return;
+                }
+                const raw = parseInt(input.value, 10);
+                if (!Number.isFinite(raw)) {
+                    input.value = this.currentPage;
+                    return;
+                }
+                const target = Math.min(Math.max(raw, 1), Math.max(this.totalPages || 1, 1));
+                input.value = target;
+                this.setPage(target);
+            },
             get filteredRecords() {
                 return Array.isArray(this.records) ? this.records : [];
             },
@@ -1055,6 +1129,8 @@
                 }
                 this._sync.filters = true;
                 this.search = '';
+                this.callerFilter = '';
+                this.calleeFilter = '';
                 this.statusFilter = 'any';
                 this.directionFilter = 'any';
                 this.billingStatusFilter = 'any';
@@ -1064,6 +1140,7 @@
                 this.onlyTranscribed = false;
                 this.selectedDepartments = [];
                 this.selectedSipTrunks = [];
+                this.selectedOutboundSipTrunks = [];
                 this.selectedTags = [];
                 this.sortOrder = this.defaultSort();
                 this.activeFilters = [];
@@ -1327,6 +1404,8 @@
                         return this.t.filter_departments || 'Departments';
                     case 'sip_trunks':
                         return this.t.filter_sip_trunks || 'SIP trunks';
+                    case 'outbound_sip_trunks':
+                        return this.t.filter_outbound_sip_trunks || 'Outbound trunks';
                     case 'billing_status':
                         return this.t.filter_billing_status || 'Billing status';
                     default:
@@ -1398,6 +1477,28 @@
                             .filter(Boolean);
                         return names.length ? names.join(', ') : '';
                     }
+                    case 'outbound_sip_trunks': {
+                        const options = Array.isArray(this.filterOptions.sip_trunks)
+                            ? this.filterOptions.sip_trunks
+                            : [];
+                        const selected = Array.isArray(this.selectedOutboundSipTrunks)
+                            ? this.selectedOutboundSipTrunks
+                            : [];
+                        if (!selected.length) {
+                            return '';
+                        }
+                        const names = selected
+                            .map((id) => {
+                                const numeric = Number(id);
+                                const match = options.find((trunk) => Number(trunk.id) === numeric);
+                                if (!match) {
+                                    return Number.isFinite(numeric) ? `#${numeric}` : String(id);
+                                }
+                                return match.display_name || match.name || `#${numeric}`;
+                            })
+                            .filter(Boolean);
+                        return names.length ? names.join(', ') : '';
+                    }
                     case 'billing_status':
                         return this.billingStatusFilter && this.billingStatusFilter !== 'any'
                             ? this.billingStatusLabel(this.billingStatusFilter)
@@ -1452,6 +1553,9 @@
                     case 'sip_trunks':
                         this.selectedSipTrunks = [];
                         break;
+                    case 'outbound_sip_trunks':
+                        this.selectedOutboundSipTrunks = [];
+                        break;
                     case 'billing_status':
                         this.billingStatusFilter = 'any';
                         break;
@@ -1469,7 +1573,7 @@
                 });
             },
             shouldPersistFilter(key) {
-                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks'].includes(key);
+                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks', 'outbound_sip_trunks'].includes(key);
             },
             syncActiveFilters() {
                 const manualFilters = Array.isArray(this.activeFilters)
@@ -1481,6 +1585,7 @@
                 const hasDate = Boolean(this.dateFrom) || Boolean(this.dateTo);
                 const departmentsSelected = Array.isArray(this.selectedDepartments) && this.selectedDepartments.length;
                 const sipSelected = Array.isArray(this.selectedSipTrunks) && this.selectedSipTrunks.length;
+                const outboundSipSelected = Array.isArray(this.selectedOutboundSipTrunks) && this.selectedOutboundSipTrunks.length;
                 const next = [];
                 const addUnique = (key) => {
                     if (!next.includes(key)) {
@@ -1510,6 +1615,9 @@
                 }
                 if (sipSelected || this.persistentFilters.includes('sip_trunks')) {
                     addUnique('sip_trunks');
+                }
+                if (outboundSipSelected || this.persistentFilters.includes('outbound_sip_trunks')) {
+                    addUnique('outbound_sip_trunks');
                 }
 
                 this.activeFilters = next;

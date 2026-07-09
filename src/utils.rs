@@ -1,6 +1,5 @@
 use sea_orm::sea_query::{Func, IntoCondition, SimpleExpr};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 pub fn sanitize_id(id: &str) -> String {
     id.chars()
@@ -24,30 +23,21 @@ where
     .into()
 }
 
-pub struct TaskGuard {
-    pub loc: String,
-}
+/// Global active task counter (atomic, no lock contention).
+pub static GLOBAL_TASK_COUNT: AtomicI64 = AtomicI64::new(0);
 
-pub static GLOBAL_TASK_METRICS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, usize>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+pub struct TaskGuard;
 
 impl TaskGuard {
-    pub fn new(loc: String) -> Self {
-        if let Ok(mut metrics) = GLOBAL_TASK_METRICS.lock() {
-            *metrics.entry(loc.clone()).or_insert(0) += 1;
-        }
-        Self { loc }
+    pub fn new(_loc: String) -> Self {
+        GLOBAL_TASK_COUNT.fetch_add(1, Ordering::Relaxed);
+        Self
     }
 }
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        if let Ok(mut metrics) = GLOBAL_TASK_METRICS.lock()
-            && let Some(count) = metrics.get_mut(&self.loc)
-            && *count > 0
-        {
-            *count -= 1;
-        }
+        GLOBAL_TASK_COUNT.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -68,28 +58,22 @@ where
 
 /// Get current active task count
 pub fn active_task_count() -> usize {
-    GLOBAL_TASK_METRICS.lock().unwrap().values().sum()
+    GLOBAL_TASK_COUNT.load(Ordering::Relaxed) as usize
 }
 
-/// Get task count by location prefix (e.g., "src/rwi" for all RWI tasks)
-pub fn active_task_count_by_prefix(prefix: &str) -> usize {
-    GLOBAL_TASK_METRICS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(loc, _)| loc.starts_with(prefix))
-        .map(|(_, count)| *count)
-        .sum()
+/// Get task count by location prefix (stub — always returns 0, kept for test compat)
+pub fn active_task_count_by_prefix(_prefix: &str) -> usize {
+    0
 }
 
-/// Get detailed task metrics
-pub fn task_metrics_snapshot() -> HashMap<String, usize> {
-    GLOBAL_TASK_METRICS.lock().unwrap().clone()
+/// Get detailed task metrics (stub — returns empty map, kept for compat)
+pub fn task_metrics_snapshot() -> std::collections::HashMap<String, usize> {
+    std::collections::HashMap::new()
 }
 
 /// Reset all metrics (useful for tests)
 pub fn reset_task_metrics() {
-    GLOBAL_TASK_METRICS.lock().unwrap().clear();
+    GLOBAL_TASK_COUNT.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]

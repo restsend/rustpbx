@@ -38,6 +38,12 @@ pub struct MediaSession {
     /// Used to configure FileTrack payload type for bridge playback.
     pub caller_codec_info: Vec<crate::media::negotiate::CodecInfo>,
 
+    /// Codec info from the callee-facing SDP answer.
+    /// Used to configure FileTrack playback on the callee endpoint when the
+    /// callee uses a different codec than the caller (e.g. caller=Opus,
+    /// callee=G.729).
+    pub callee_codec_info: Vec<crate::media::negotiate::CodecInfo>,
+
     // ── Recording ───────────────────────────────────────────────────────
     /// Shared recorder — the same `Arc` is passed to `BridgePeer::with_recorder`
     /// so the bridge's forwarding loop writes samples into it directly.
@@ -62,6 +68,17 @@ pub struct MediaSession {
     /// Manages dynamic switching between direct bridge forwarding (low CPU)
     /// and MCU mixing (needed for TTS injection, conference).
     pub mcu: McuSwitch,
+
+    // ── SipFlow capture ────────────────────────────────────────────────
+    /// Handle of the SipFlow capture task so it can be aborted when capture is
+    /// disabled (or when the session is destroyed), instead of running forever.
+    pub sipflow_task: Option<tokio::task::JoinHandle<()>>,
+
+    // ── Reaper ─────────────────────────────────────────────────────────
+    /// Wall-clock instant of the last engine command that touched this session.
+    /// Updated by [`EngineCore::dispatch`] and checked by the periodic reaper
+    /// to evict sessions whose `DestroySession` was lost (channel full etc.).
+    pub last_activity: std::time::Instant,
 }
 
 impl MediaSession {
@@ -73,12 +90,15 @@ impl MediaSession {
             bridge: None,
             caller_is_webrtc: false,
             caller_codec_info: vec![],
+            callee_codec_info: vec![],
             recorder: Arc::new(RwLock::new(None)),
             recording_paused: Arc::new(AtomicBool::new(false)),
             recording_started_at: None,
             playback_tracks: HashMap::new(),
             bridge_playback_track_ids: Vec::new(),
             mcu,
+            sipflow_task: None,
+            last_activity: std::time::Instant::now(),
         }
     }
 

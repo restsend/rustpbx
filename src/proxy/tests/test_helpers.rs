@@ -49,6 +49,7 @@ pub fn standard_test_users() -> Vec<SipUser> {
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
             is_support_webrtc: true,
+            voicemail_disabled: true,
             ..Default::default()
         },
         SipUser {
@@ -58,6 +59,7 @@ pub fn standard_test_users() -> Vec<SipUser> {
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
             is_support_webrtc: false,
+            voicemail_disabled: true,
             ..Default::default()
         },
         SipUser {
@@ -67,6 +69,7 @@ pub fn standard_test_users() -> Vec<SipUser> {
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
             is_support_webrtc: true,
+            voicemail_disabled: true,
             ..Default::default()
         },
     ]

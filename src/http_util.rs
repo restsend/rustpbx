@@ -5,8 +5,42 @@
 
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+
+const DEFAULT_HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+const DEFAULT_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_HTTP_POOL_MAX_IDLE_PER_HOST: usize = 8;
+
+pub fn build_keepalive_client(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .tcp_keepalive(DEFAULT_HTTP_TCP_KEEPALIVE)
+        .pool_idle_timeout(DEFAULT_HTTP_POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(DEFAULT_HTTP_POOL_MAX_IDLE_PER_HOST);
+
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+
+    if let Some(connect_timeout) = connect_timeout {
+        builder = builder.connect_timeout(connect_timeout);
+    }
+
+    builder
+        .build()
+        .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))
+}
+
+pub fn shared_keepalive_client() -> &'static reqwest::Client {
+    static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP_CLIENT.get_or_init(|| {
+        build_keepalive_client(None, None).unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// Options for an HTTP fetch request.
 #[derive(Debug, Clone, Default)]

@@ -94,6 +94,7 @@ pub struct CallDetails {
     pub department_id: Option<i64>,
     pub extension_id: Option<i64>,
     pub sip_trunk_id: Option<i64>,
+    pub outbound_sip_trunk_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
     pub recording_url: Option<String>,
@@ -563,10 +564,10 @@ impl CallRecordManagerBuilder {
                 Box::new(HttpCallRecordSaver {
                     url,
                     headers,
-                    client: reqwest::Client::builder()
-                        .timeout(CALL_RECORD_HTTP_TIMEOUT)
-                        .connect_timeout(CALL_RECORD_HTTP_CONNECT_TIMEOUT)
-                        .build()?,
+                    client: crate::http_util::build_keepalive_client(
+                        Some(CALL_RECORD_HTTP_TIMEOUT),
+                        Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
+                    )?,
                 })
             }
             Some(CallRecordStorageConfig::Database {

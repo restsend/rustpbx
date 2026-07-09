@@ -100,12 +100,16 @@ users = [
 type = "extension"
 
 # JWT Fast Registration — skip 401/407 Digest challenge for JWT-authenticated clients.
+# Required for CC Agent-ID (cc-phone JWT) login mode. See docs/cc_agent_login_modes.md.
 # See docs/config/03-auth-users.md for full documentation.
 # [proxy.jwt_auth]
 # enabled = true
 # secret = "your-shared-hs256-secret"
 # user_id_claim = "userId"
 # check_local_user = false
+# Enable dev-console JWT/PhoneAuth token mint endpoints (POST /api/cc/dev/*).
+# Defaults to false — production should keep this off.
+# dev_mint_enabled = true
 
 # HTTP Token Auth Backend — one-shot token auth via external HTTP service.
 # Add token_header to any HTTP user backend to enable one-shot registration.

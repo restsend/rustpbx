@@ -22,6 +22,7 @@ use tracing::{debug, warn};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type EventVec = Arc<RwLock<Vec<serde_json::Value>>>;
+type ResponseVec = Arc<RwLock<Vec<serde_json::Value>>>;
 type WsWriter = futures::stream::SplitSink<WsStream, Message>;
 
 fn is_rwi_event(v: &serde_json::Value, event_type: &str) -> bool {
@@ -97,6 +98,7 @@ fn extract_rwi_event_type(v: &serde_json::Value) -> String {
 pub struct RwiCollector {
     writer: WsWriter,
     events: EventVec,
+    responses: ResponseVec,
     subscribe_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -113,7 +115,9 @@ impl RwiCollector {
         .expect("RWI connect error");
 
         let events: EventVec = Arc::new(RwLock::new(Vec::new()));
+        let responses: ResponseVec = Arc::new(RwLock::new(Vec::new()));
         let events_clone = events.clone();
+        let responses_clone = responses.clone();
         let (writer, read) = ws.split();
 
         // Spawn a background reader that collects ALL events
@@ -125,9 +129,13 @@ impl RwiCollector {
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    let event_type = extract_rwi_event_type(&val);
-                                    debug!(event_type, text_len = text.len(), "RWI event collected");
-                                    events_clone.write().await.push(val);
+                                    if val.get("action_id").is_some() && val.get("status").is_some() {
+                                        responses_clone.write().await.push(val);
+                                    } else {
+                                        let event_type = extract_rwi_event_type(&val);
+                                        debug!(event_type, text_len = text.len(), "RWI event collected");
+                                        events_clone.write().await.push(val);
+                                    }
                                 }
                             }
                             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -150,6 +158,7 @@ impl RwiCollector {
         let mut collector = Self {
             writer,
             events,
+            responses,
             subscribe_handle,
         };
 
@@ -177,6 +186,47 @@ impl RwiCollector {
             .send(Message::Text(json.to_string().into()))
             .await
             .unwrap();
+    }
+
+    /// Send a command and wait for the matching action response while continuing
+    /// to collect all out-of-band events in the background reader.
+    pub async fn send_command(
+        &mut self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let request = serde_json::json!({
+            "rwi": "1.0",
+            "action_id": action_id,
+            "action": action,
+            "params": params,
+        });
+        self.send(&request).await;
+        self.wait_for_response(&action_id, 15)
+            .await
+            .unwrap_or_else(|| panic!("timed out waiting for action response: {}", action_id))
+    }
+
+    pub async fn wait_for_response(
+        &self,
+        action_id: &str,
+        timeout_secs: u64,
+    ) -> Option<serde_json::Value> {
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        while start.elapsed() < timeout {
+            let responses = self.responses.read().await;
+            if let Some(resp) = responses.iter().rev().find(|&v| {
+                v.get("action_id").and_then(|a| a.as_str()) == Some(action_id)
+            }) {
+                return Some(resp.clone());
+            }
+            drop(responses);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
     }
 
     /// Wait for an event matching `predicate` with timeout.

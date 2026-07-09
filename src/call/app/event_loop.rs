@@ -1,6 +1,7 @@
 use super::app_context::ApplicationContext;
 use super::controller::ControllerEvent;
 use super::{AppAction, AppEvent, CallApp, CallController, ExitReason};
+use std::future::Future;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -17,6 +18,16 @@ pub struct AppEventLoop {
 }
 
 impl AppEventLoop {
+    async fn await_or_cancel<F>(cancel_token: &CancellationToken, future: F) -> WaitResult<F::Output>
+    where
+        F: Future,
+    {
+        tokio::select! {
+            res = future => WaitResult::Completed(res),
+            _ = cancel_token.cancelled() => WaitResult::Cancelled,
+        }
+    }
+
     pub fn new(
         app: Box<dyn CallApp>,
         controller: CallController,
@@ -36,10 +47,18 @@ impl AppEventLoop {
     /// Run the application until it exits or the call ends.
     pub async fn run(mut self) -> anyhow::Result<()> {
         // Initial entry point
-        let mut action = self
-            .app
-            .on_enter(&mut self.controller, &self.context)
-            .await?;
+        let mut action = match Self::await_or_cancel(
+            &self.cancel_token,
+            self.app.on_enter(&mut self.controller, &self.context),
+        )
+        .await
+        {
+            WaitResult::Completed(res) => res?,
+            WaitResult::Cancelled => {
+                self.app.on_exit(ExitReason::Cancelled).await?;
+                return Ok(());
+            }
+        };
 
         loop {
             // Check cancellation token first
@@ -92,32 +111,62 @@ impl AppEventLoop {
         tokio::select! {
             event = self.controller.wait_event() => {
                 match event {
-                    Some(ControllerEvent::DtmfReceived(digit)) => {
-                        self.app.on_dtmf(digit, &mut self.controller, &self.context).await
+            Some(ControllerEvent::DtmfReceived(digit)) => {
+                        match Self::await_or_cancel(&self.cancel_token, self.app.on_dtmf(digit, &mut self.controller, &self.context)).await {
+                            WaitResult::Completed(res) => res,
+                            WaitResult::Cancelled => {
+                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                Ok(AppAction::Exit)
+                            }
+                        }
                     }
                     Some(ControllerEvent::AudioComplete { track_id, interrupted }) => {
                         if interrupted {
                             Ok(AppAction::Continue)
                         } else {
-                            self.app.on_audio_complete(track_id, &mut self.controller, &self.context).await
+                            match Self::await_or_cancel(&self.cancel_token, self.app.on_audio_complete(track_id, &mut self.controller, &self.context)).await {
+                                WaitResult::Completed(res) => res,
+                                WaitResult::Cancelled => {
+                                    self.app.on_exit(ExitReason::Cancelled).await?;
+                                    Ok(AppAction::Exit)
+                                }
+                            }
                         }
                     }
                     Some(ControllerEvent::RecordingComplete(info)) => {
-                        self.app.on_record_complete(info, &mut self.controller, &self.context).await
+                        match Self::await_or_cancel(&self.cancel_token, self.app.on_record_complete(info, &mut self.controller, &self.context)).await {
+                            WaitResult::Completed(res) => res,
+                            WaitResult::Cancelled => {
+                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                Ok(AppAction::Exit)
+                            }
+                        }
                     }
                     Some(ControllerEvent::Hangup(reason)) => {
                         self.app.on_exit(ExitReason::RemoteHangup(reason)).await?;
                         Ok(AppAction::Exit)
                     }
                     Some(ControllerEvent::Timeout(id)) => {
-                        self.app.on_timeout(id, &mut self.controller, &self.context).await
+                        match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(id, &mut self.controller, &self.context)).await {
+                            WaitResult::Completed(res) => res,
+                            WaitResult::Cancelled => {
+                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                Ok(AppAction::Exit)
+                            }
+                        }
                     }
                     Some(ControllerEvent::Custom(name, data)) => {
-                        self.app.on_external_event(
+                        match Self::await_or_cancel(&self.cancel_token, self.app.on_external_event(
                             AppEvent::Custom { name, data },
                             &mut self.controller,
                             &self.context
-                        ).await
+                        )).await {
+                            WaitResult::Completed(res) => res,
+                            WaitResult::Cancelled => {
+                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                Ok(AppAction::Exit)
+                            }
+                        }
                     }
                     None => {
                         self.app.on_exit(ExitReason::Normal).await?;
@@ -126,11 +175,23 @@ impl AppEventLoop {
                 }
             }
             Some(timer_id) = self.fired_timer_rx.recv() => {
-                self.app.on_timeout(timer_id, &mut self.controller, &self.context).await
+                match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(timer_id, &mut self.controller, &self.context)).await {
+                    WaitResult::Completed(res) => res,
+                    WaitResult::Cancelled => {
+                        self.app.on_exit(ExitReason::Cancelled).await?;
+                        Ok(AppAction::Exit)
+                    }
+                }
             }
             _ = self.cancel_token.cancelled() => {
+                self.app.on_exit(ExitReason::Cancelled).await?;
                 Ok(AppAction::Exit)
             }
         }
     }
+}
+
+enum WaitResult<T> {
+    Completed(T),
+    Cancelled,
 }

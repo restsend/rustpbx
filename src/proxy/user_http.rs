@@ -68,10 +68,11 @@ impl HttpUserBackend {
         let sip_headers = sip_headers.clone().unwrap_or_default();
 
         let timeout_ms = http_timeout_ms.unwrap_or(5000);
-        let client = Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        let client = crate::http_util::build_keepalive_client(
+            Some(Duration::from_millis(timeout_ms)),
+            None,
+        )
+        .unwrap_or_else(|_| Client::new());
 
         let retry_count = http_retry_count.unwrap_or(1);
         let retry_delay = Duration::from_millis(http_retry_delay_ms.unwrap_or(500));

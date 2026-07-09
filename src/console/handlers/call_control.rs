@@ -303,7 +303,7 @@ async fn forward_command_to_peers(
         "payload": payload,
     });
 
-    let client = reqwest::Client::new();
+    let client = state.http_client().clone();
     let mut handles: Vec<tokio::task::JoinHandle<Option<Response>>> = Vec::new();
 
     for peer in &peers {
@@ -351,7 +351,7 @@ async fn query_session_from_peers(state: &ConsoleState, session_id: &str) -> Opt
     }
 
     let ami_path = get_ami_path(state);
-    let client = reqwest::Client::new();
+    let client = state.http_client().clone();
     let mut handles: Vec<tokio::task::JoinHandle<Option<Response>>> = Vec::new();
 
     for peer in &peers {
@@ -398,7 +398,7 @@ async fn fetch_peer_calls(state: &ConsoleState, limit: usize) -> Vec<serde_json:
     };
 
     let ami_path = get_ami_path(state);
-    let client = reqwest::Client::new();
+    let client = state.http_client().clone();
     let mut handles: Vec<tokio::task::JoinHandle<Vec<serde_json::Value>>> = Vec::new();
 
     for peer in &peers {

@@ -34,6 +34,7 @@ pub use transport::resolve_audio_path;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
@@ -51,6 +52,12 @@ use crate::media::Track as _;
 pub struct MediaEngineConfig {
     pub command_channel_capacity: usize,
     pub event_channel_capacity: usize,
+    /// How often the reaper sweeps the session map for stale entries.
+    pub session_reaper_interval: Duration,
+    /// A session whose `last_activity` is older than this is considered stale
+    /// and will be evicted by the reaper (safety net for lost
+    /// `DestroySession` commands).
+    pub session_idle_ttl: Duration,
 }
 
 impl Default for MediaEngineConfig {
@@ -58,6 +65,8 @@ impl Default for MediaEngineConfig {
         Self {
             command_channel_capacity: 512,
             event_channel_capacity: 1024,
+            session_reaper_interval: Duration::from_secs(60),
+            session_idle_ttl: Duration::from_secs(7200),
         }
     }
 }
@@ -74,6 +83,8 @@ impl Default for MediaEngineConfig {
 pub struct MediaEngine {
     cmd_tx: mpsc::Sender<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
+    reaper_interval: Duration,
+    session_idle_ttl: Duration,
     #[cfg(test)]
     sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
 }
@@ -99,6 +110,8 @@ impl MediaEngine {
         let engine = Self {
             cmd_tx,
             event_tx: event_tx.clone(),
+            reaper_interval: config.session_reaper_interval,
+            session_idle_ttl: config.session_idle_ttl,
             #[cfg(test)]
             sessions: sessions.clone(),
         };
@@ -118,6 +131,8 @@ impl MediaEngine {
             cmd_rx: handle.cmd_rx,
             event_tx: handle.event_tx,
             sessions: handle.sessions,
+            reaper_interval: self.reaper_interval,
+            session_idle_ttl: self.session_idle_ttl,
         };
         crate::utils::spawn(async move {
             core.run().await;
@@ -159,27 +174,51 @@ struct EngineCore {
     cmd_rx: mpsc::Receiver<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
     sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
+    reaper_interval: Duration,
+    session_idle_ttl: Duration,
 }
 
 impl EngineCore {
     async fn run(mut self) {
-        info!("MediaEngine command loop started");
+        info!(
+            reaper_interval = ?self.reaper_interval,
+            session_idle_ttl = ?self.session_idle_ttl,
+            "MediaEngine command loop started"
+        );
 
-        while let Some(cmd) = self.cmd_rx.recv().await {
-            let cmd_name = cmd.name();
-            let session_id = cmd.session_id().map(|s| s.to_string());
+        let mut reaper = tokio::time::interval(self.reaper_interval);
+        reaper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the immediate first tick so the reaper only fires after one
+        // full interval has elapsed.
+        reaper.tick().await;
 
-            debug!(command = cmd_name, session = ?session_id, "MediaEngine command received");
+        loop {
+            tokio::select! {
+                maybe_cmd = self.cmd_rx.recv() => {
+                    match maybe_cmd {
+                        Some(cmd) => {
+                            let cmd_name = cmd.name();
+                            let session_id = cmd.session_id().map(|s| s.to_string());
 
-            match self.dispatch(cmd).await {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(command = cmd_name, error = %e, "MediaEngine command failed");
-                    let _ = self.event_tx.send(MediaEvent::Error {
-                        session_id: session_id.unwrap_or_default(),
-                        command: cmd_name.to_string(),
-                        error: e.to_string(),
-                    });
+                            debug!(command = cmd_name, session = ?session_id, "MediaEngine command received");
+
+                            match self.dispatch(cmd).await {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    error!(command = cmd_name, error = %e, "MediaEngine command failed");
+                                    let _ = self.event_tx.send(MediaEvent::Error {
+                                        session_id: session_id.unwrap_or_default(),
+                                        command: cmd_name.to_string(),
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = reaper.tick() => {
+                    self.reap_stale_sessions().await;
                 }
             }
         }
@@ -188,6 +227,19 @@ impl EngineCore {
     }
 
     async fn dispatch(&mut self, cmd: MediaCommand) -> Result<()> {
+        // Blanket refresh of `last_activity` for every session-scoped command.
+        // This keeps long-running sessions alive in the reaper even if the
+        // session timer or DTMF path doesn't produce engine events.
+        //
+        // Done *before* the match so even commands that only take a read lock
+        // (e.g. GetSessionInfo) still count as activity.
+        if let Some(sid) = cmd.session_id() {
+            let now = std::time::Instant::now();
+            if let Some(sess) = self.sessions.write().get_mut(sid) {
+                sess.last_activity = now;
+            }
+        }
+
         match cmd {
             MediaCommand::CreateSession { session_id } => {
                 let entry = session::MediaSession::new(session_id.clone());
@@ -199,31 +251,12 @@ impl EngineCore {
             }
 
             MediaCommand::DestroySession { session_id } => {
-                let (sess, tracks_to_stop) = {
+                let sess = {
                     let mut sessions = self.sessions.write();
-                    match sessions.remove(&session_id) {
-                        Some(s) => {
-                            let tracks: Vec<_> = s.playback_tracks.values().cloned().collect();
-                            (Some(s), tracks)
-                        }
-                        None => (None, vec![]),
-                    }
+                    sessions.remove(&session_id)
                 };
-                for track in tracks_to_stop {
-                    track.stop().await;
-                }
-                if let Some(mut sess) = sess {
-                    if sess.mcu.mode() == mcu_switch::MediaMode::Mcu {
-                        sess.mcu.switch_to_bridge().await.ok();
-                    }
-                    {
-                        let mut guard = sess.recorder.write();
-                        if let Some(ref mut rec) = *guard {
-                            let _ = rec.finalize();
-                        }
-                        *guard = None;
-                    }
-                    sess.bridge = None;
+                if let Some(sess) = sess {
+                    Self::finalize_session_resources(sess).await;
                 }
                 info!(session_id = %session_id, "MediaEngine session destroyed");
                 let _ = self
@@ -254,6 +287,7 @@ impl EngineCore {
                 bridge,
                 caller_is_webrtc,
                 caller_codec_info,
+                callee_codec_info,
             } => {
                 let old_bridge = {
                     let mut sessions = self.sessions.write();
@@ -264,6 +298,7 @@ impl EngineCore {
                     sess.bridge = Some(bridge);
                     sess.caller_is_webrtc = caller_is_webrtc;
                     sess.caller_codec_info = caller_codec_info;
+                    sess.callee_codec_info = callee_codec_info;
                     old
                 };
                 if let Some(old) = old_bridge {
@@ -303,13 +338,21 @@ impl EngineCore {
                 backend,
                 receiver,
             } => {
-                if !self.sessions.read().contains_key(&session_id) {
+                let mut sessions = self.sessions.write();
+                let Some(sess) = sessions.get_mut(&session_id) else {
                     debug!(session_id = %session_id, "SipFlow capture skipped for missing session");
                     return Ok(());
+                };
+
+                // Always abort any previously-running capture task first, so a
+                // stop (backend=None) or a restart actually halts the old task
+                // instead of letting it (and the backend it captured) run forever.
+                if let Some(handle) = sess.sipflow_task.take() {
+                    handle.abort();
                 }
 
                 if let (Some(backend), Some(mut rx)) = (backend, receiver) {
-                    crate::utils::spawn(async move {
+                    let handle = crate::utils::spawn(async move {
                         use crate::sipflow::{SipFlowItem, SipFlowMsgType};
                         while let Some((leg, sample, received_at_micros)) = rx.recv().await {
                             // `sample` is `Arc<MediaSample>`; deref to read.
@@ -337,6 +380,7 @@ impl EngineCore {
                             }
                         }
                     });
+                    sess.sipflow_task = Some(handle);
                     debug!(session_id = %session_id, "SipFlow capture started");
                 } else {
                     debug!(session_id = %session_id, "SipFlow capture stopped");
@@ -384,7 +428,7 @@ impl EngineCore {
                     }
                 };
 
-                let (bridge, endpoint, codec_info_first) = {
+                let (bridge, endpoint, codec_info) = {
                     let sessions = self.sessions.read();
                     let sess = sessions
                         .get(&session_id)
@@ -397,21 +441,28 @@ impl EngineCore {
                         Some(id) => sess.endpoint_for_leg(id),
                         None => sess.caller_endpoint(),
                     };
-                    let codec = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
-                        crate::media::negotiate::CodecInfo {
-                            payload_type: 0,
-                            codec: audio_codec::CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        }
-                    });
+                    // Select the codec for the TARGET endpoint, not just the caller.
+                    // When caller=Opus and callee=G.729, playing to the callee must
+                    // use G.729 encoding so the callee can actually decode it.
+                    let endpoint_codecs = if endpoint == sess.caller_endpoint() {
+                        &sess.caller_codec_info
+                    } else {
+                        &sess.callee_codec_info
+                    };
+                    let fallback = crate::media::negotiate::CodecInfo {
+                        payload_type: 0,
+                        codec: audio_codec::CodecType::PCMU,
+                        clock_rate: 8000,
+                        channels: 1,
+                    };
+                    let codec = endpoint_codecs.first().cloned().unwrap_or(fallback);
                     (bridge, endpoint, codec)
                 };
 
                 let track = crate::media::FileTrack::new(play_id.clone())
                     .with_path(resolved_path)
                     .with_loop(options.loop_playback)
-                    .with_codec_info(codec_info_first);
+                    .with_codec_info(codec_info);
 
                 match bridge.replace_output_with_file(endpoint, &track).await {
                     Ok(()) => {
@@ -715,7 +766,7 @@ impl EngineCore {
                     }
                 };
 
-                let (bridge, codec_info_first) = {
+                let (bridge, caller_codec, callee_codec) = {
                     let sessions = self.sessions.read();
                     let sess = sessions
                         .get(&session_id)
@@ -723,28 +774,43 @@ impl EngineCore {
                     let bridge = sess.bridge.clone().ok_or_else(|| {
                         anyhow!("No bridge for InjectAudio in session {}", session_id)
                     })?;
-                    let codec = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
-                        crate::media::negotiate::CodecInfo {
-                            payload_type: 0,
-                            codec: audio_codec::CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        }
+                    let fallback = crate::media::negotiate::CodecInfo {
+                        payload_type: 0,
+                        codec: audio_codec::CodecType::PCMU,
+                        clock_rate: 8000,
+                        channels: 1,
+                    };
+                    let cc = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
+                        fallback.clone()
                     });
-                    (bridge, codec)
+                    let ce = sess.callee_codec_info.first().cloned().unwrap_or_else(|| {
+                        fallback
+                    });
+                    (bridge, cc, ce)
                 };
 
                 // Each endpoint needs its own FileTrack so each bridge
                 // forwarding loop reads from an independent
                 // AudioSourceManager (they run concurrently).
+                // Use the codec that matches the target endpoint so the
+                // receiver can actually decode the audio.
+                let caller_ep = {
+                    let sessions = self.sessions.read();
+                    sessions.get(&session_id).map(|s| s.caller_endpoint())
+                };
                 let mut tracks: Vec<(
                     crate::media::bridge::BridgeEndpoint,
                     crate::media::FileTrack,
                 )> = Vec::new();
                 for ep in &endpoints {
+                    let codec = if Some(*ep) == caller_ep {
+                        caller_codec.clone()
+                    } else {
+                        callee_codec.clone()
+                    };
                     let t = crate::media::FileTrack::new(play_id.clone())
                         .with_path(resolved_path.clone())
-                        .with_codec_info(codec_info_first.clone());
+                        .with_codec_info(codec);
                     tracks.push((*ep, t));
                 }
 
@@ -830,6 +896,108 @@ impl EngineCore {
 
         Ok(())
     }
+
+    /// Tear down all resources owned by a [`session::MediaSession`] *outside*
+    /// the sessions write lock (tracks and MCU require `.await`).
+    ///
+    /// Shared by `DestroySession` dispatch and the periodic reaper so both
+    /// paths produce identical cleanup.
+    async fn finalize_session_resources(mut sess: session::MediaSession) {
+        // Stop playback tracks.
+        let tracks: Vec<_> = sess.playback_tracks.values().cloned().collect();
+        for track in tracks {
+            track.stop().await;
+        }
+
+        // Switch MCU back to bridge mode (releases mixer task if active).
+        if sess.mcu.mode() == mcu_switch::MediaMode::Mcu {
+            sess.mcu.switch_to_bridge().await.ok();
+        }
+
+        // Finalize recorder.
+        {
+            let mut guard = sess.recorder.write();
+            if let Some(ref mut rec) = *guard {
+                let _ = rec.finalize();
+            }
+            *guard = None;
+        }
+
+        // Abort SipFlow capture task (dropping the JoinHandle alone does not
+        // abort it).
+        if let Some(handle) = sess.sipflow_task.take() {
+            handle.abort();
+        }
+
+        // Drop the bridge reference. BridgePeer::Drop calls close_sync() which
+        // cancels forwarding tasks and closes both PeerConnections.
+        sess.bridge = None;
+    }
+
+    /// Periodic sweep: remove sessions whose `last_activity` is older than
+    /// `session_idle_ttl`.
+    ///
+    /// This is a safety net for the case where `DestroySession` was lost
+    /// (e.g. command channel was full so `try_send` failed). Without this
+    /// sweep the `MediaSession` would leak forever because the engine session
+    /// map has no other eviction mechanism.
+    async fn reap_stale_sessions(&self) {
+        let ttl = self.session_idle_ttl;
+        let now = std::time::Instant::now();
+
+        // Step 1: identify stale session IDs (read lock).
+        let stale_ids: Vec<String> = {
+            let sessions = self.sessions.read();
+            sessions
+                .iter()
+                .filter_map(|(sid, sess)| {
+                    let idle = now.duration_since(sess.last_activity);
+                    if idle > ttl {
+                        warn!(
+                            session_id = %sid,
+                            idle_secs = idle.as_secs(),
+                            ttl_secs = ttl.as_secs(),
+                            "Reaping stale MediaEngine session (DestroySession was likely lost)"
+                        );
+                        Some(sid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if stale_ids.is_empty() {
+            let remaining = self.sessions.read().len();
+            debug!(active_sessions = remaining, "MediaEngine session map size");
+            return;
+        }
+
+        // Step 2: remove & collect the MediaSession values (write lock).
+        let stale: Vec<session::MediaSession> = {
+            let mut sessions = self.sessions.write();
+            stale_ids
+                .iter()
+                .filter_map(|sid| sessions.remove(sid))
+                .collect()
+        };
+
+        // Step 3: async cleanup outside the lock.
+        let count = stale.len();
+        for (sid, sess) in stale_ids.into_iter().zip(stale) {
+            Self::finalize_session_resources(sess).await;
+            let _ = self
+                .event_tx
+                .send(MediaEvent::SessionDestroyed { session_id: sid });
+        }
+
+        let remaining = self.sessions.read().len();
+        warn!(
+            reaped = count,
+            remaining,
+            "MediaEngine reaper swept stale sessions"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -869,6 +1037,9 @@ mod tests {
         let (engine, handle) = MediaEngine::new(MediaEngineConfig {
             command_channel_capacity: 64,
             event_channel_capacity: 64,
+            // Short reaper interval for tests so sweep tests don't take long.
+            session_reaper_interval: Duration::from_millis(100),
+            session_idle_ttl: Duration::from_millis(300),
         });
         let rx = engine.subscribe();
         let _task = engine.spawn(handle);
@@ -907,6 +1078,60 @@ mod tests {
             .expect("timeout")
             .expect("channel closed");
         assert!(matches!(ev, MediaEvent::SessionDestroyed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_reaper_evicts_stale_session() {
+        // setup_engine uses idle_ttl=300ms, reaper_interval=100ms.
+        let (engine, mut event_rx) = setup_engine();
+        create_session(&engine, "leaked-1").await;
+        let _ = event_rx.recv().await; // SessionCreated
+
+        // Do NOT send DestroySession — simulate a lost command.
+        // Wait long enough for the TTL to expire and the reaper to sweep.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        // The reaper should have evicted the session and emitted SessionDestroyed.
+        let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("timeout waiting for reaper SessionDestroyed")
+            .expect("channel closed");
+        assert!(
+            matches!(ev, MediaEvent::SessionDestroyed { ref session_id } if session_id == "leaked-1")
+        );
+
+        // Confirm the session is gone from the map.
+        assert_eq!(engine.sessions.read().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_reaper_keeps_active_session() {
+        let (engine, mut event_rx) = setup_engine();
+        create_session(&engine, "active-1").await;
+        let _ = event_rx.recv().await; // SessionCreated
+
+        // Keep the session alive by sending periodic commands that refresh
+        // last_activity.  Reaper interval=100ms, idle_ttl=300ms.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            // AddLeg touches the session, refreshing last_activity.
+            engine
+                .send(MediaCommand::AddLeg {
+                    session_id: "active-1".into(),
+                    leg_id: "keepalive".into(),
+                    transport: LegTransport::File {
+                        path: "/dev/null".into(),
+                    },
+                    codec_profile: Some(CodecProfile::pcmu()),
+                })
+                .unwrap();
+            // Drain the LegAdded event so it doesn't clog the pipe.
+            let _ = event_rx.recv().await;
+        }
+
+        // After ~750ms (well past the 300ms TTL) the session should still
+        // be alive because last_activity was refreshed.
+        assert_eq!(engine.sessions.read().len(), 1);
     }
 
     #[tokio::test]
@@ -1152,6 +1377,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
 
@@ -1231,6 +1457,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
 
@@ -1443,6 +1670,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -1546,6 +1774,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1611,6 +1840,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1841,6 +2071,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -1969,6 +2200,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -2058,6 +2290,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         engine
@@ -2216,6 +2449,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: true,
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync
@@ -2340,6 +2574,7 @@ mod tests {
                 bridge: bridge.clone(),
                 caller_is_webrtc: false, // caller is RTP → endpoint_for_leg("callee") == Caller
                 caller_codec_info: vec![],
+                callee_codec_info: vec![],
             })
             .unwrap();
         // Sync

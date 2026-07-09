@@ -512,6 +512,12 @@ impl RwiCommandProcessor {
         }
 
         match &command {
+            RwiCommandPayload::CallHold { call_id, music } => {
+                return self.call_hold(call_id, music.clone()).await;
+            }
+            RwiCommandPayload::CallUnhold { call_id } => {
+                return self.call_unhold(call_id).await;
+            }
             RwiCommandPayload::QueueEnqueue(req) => {
                 return self.queue_enqueue(req.clone()).await;
             }
@@ -1132,8 +1138,8 @@ impl RwiCommandProcessor {
             headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
         }
 
-        let external_ip = server
-            .rtp_config
+        let media = server.default_media_config();
+        let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -1141,9 +1147,11 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
+                .with_enable_latching(media.enable_latching)
+                .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip.clone())
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
@@ -1859,6 +1867,20 @@ impl RwiCommandProcessor {
                                     }
                                 } => {}
                             }
+                            {
+                                let gw = gateway.read();
+                                gw.send_event_to_call_owner(
+                                    &call_id,
+                                    &crate::rwi::event::to_legacy_event(
+                                        &crate::rwi::CallHangup {
+                                            call_id: call_id.clone(),
+                                            reason: Some("normal".to_string()),
+                                            sip_status: None,
+                                        },
+                                        None,
+                                    ),
+                                );
+                            }
                             cleanup().await;
                         }
                         Ok((_dialog_id, resp_opt)) => {
@@ -2150,8 +2172,8 @@ impl RwiCommandProcessor {
 
         let dialog_layer = server.dialog_layer.clone();
 
-        let external_ip = server
-            .rtp_config
+        let media = server.default_media_config();
+        let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -2159,9 +2181,11 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("parallel-{}-{}", operation_id, call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
+                .with_enable_latching(media.enable_latching)
+                .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip.clone())
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
@@ -2333,6 +2357,54 @@ impl RwiCommandProcessor {
         self.call_registry
             .get_handle(call_id)
             .ok_or_else(|| CommandError::CallNotFound(call_id.to_string()))
+    }
+
+    async fn call_hold(
+        &self,
+        call_id: &str,
+        music: Option<String>,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+        let music = music.map(crate::call::domain::MediaSource::file);
+
+        handle
+            .send_command(CallCommand::Hold {
+                leg_id: crate::call::domain::LegId::new("callee"),
+                music,
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        let event = crate::rwi::event::to_legacy_event(
+            &crate::rwi::MediaHoldStarted {
+                call_id: call_id.to_string(),
+            },
+            None,
+        );
+        let gw = self.gateway.read();
+        gw.send_event_to_call_owner(&call_id.to_string(), &event);
+
+        Ok(CommandResult::Success)
+    }
+
+    async fn call_unhold(&self, call_id: &str) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        handle
+            .send_command(CallCommand::Unhold {
+                leg_id: crate::call::domain::LegId::new("callee"),
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        let event = crate::rwi::event::to_legacy_event(
+            &crate::rwi::MediaHoldStopped {
+                call_id: call_id.to_string(),
+            },
+            None,
+        );
+        let gw = self.gateway.read();
+        gw.send_event_to_call_owner(&call_id.to_string(), &event);
+
+        Ok(CommandResult::Success)
     }
 
     async fn leg_add(
@@ -2761,8 +2833,8 @@ impl RwiCommandProcessor {
         );
 
         match overflow.action.as_deref() {
-            Some("transfer") if overflow.target_queue.is_some() => {
-                let target_queue = overflow.target_queue.unwrap();
+            Some("transfer") => match overflow.target_queue.as_ref() {
+                Some(target_queue) => {
                 info!(
                     call_id = %req.call_id,
                     from_queue = %req.queue_id,
@@ -2800,7 +2872,7 @@ impl RwiCommandProcessor {
                 let joined_event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::QueueJoined {
                         call_id: req.call_id.clone(),
-                        queue_id: target_queue,
+                        queue_id: target_queue.clone(),
                     },
                     None,
                 );
@@ -2808,7 +2880,12 @@ impl RwiCommandProcessor {
 
                 Ok(CommandResult::Success)
             }
-            Some("voicemail") => {
+            None => {
+                warn!("Queue overflow: transfer action but no target queue");
+                Ok(CommandResult::Success)
+            }
+        },
+        Some("voicemail") => {
                 info!(call_id = %req.call_id, "Redirecting to voicemail due to overflow");
                 let event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::QueueVoicemailRedirected {
@@ -6162,6 +6239,53 @@ mod tests {
                 .to_string()
                 .contains("Call not in queue")
         );
+    }
+
+    #[tokio::test]
+    async fn test_call_hold_success() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let (_handle, mut rx) = create_test_call_with_rx(
+            &registry,
+            "call-hold-direct",
+            "1001",
+            "1002",
+            DialDirection::Inbound,
+        );
+        let (processor, _cm) = create_test_processor_with_registry(registry);
+
+        let result = processor
+            .process_command(RwiCommandPayload::CallHold {
+                call_id: "call-hold-direct".into(),
+                music: None,
+            })
+            .await;
+        assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+
+        let cmd = rx.try_recv();
+        assert!(cmd.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_call_unhold_success() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let (_handle, mut rx) = create_test_call_with_rx(
+            &registry,
+            "call-unhold-direct",
+            "1001",
+            "1002",
+            DialDirection::Inbound,
+        );
+        let (processor, _cm) = create_test_processor_with_registry(registry);
+
+        let result = processor
+            .process_command(RwiCommandPayload::CallUnhold {
+                call_id: "call-unhold-direct".into(),
+            })
+            .await;
+        assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+
+        let cmd = rx.try_recv();
+        assert!(cmd.is_ok());
     }
 
     #[tokio::test]

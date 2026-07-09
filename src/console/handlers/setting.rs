@@ -132,6 +132,28 @@ pub(crate) struct ProxySettingsPayload {
     pub rwi_webhook: Option<LocatorWebhookConfig>,
     pub user_backends: Option<Vec<UserBackendConfig>>,
     pub http_router: Option<HttpRouterConfig>,
+    pub jwt_auth: Option<Option<JwtAuthPayload>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JwtAuthPayload {
+    pub enabled: bool,
+    #[serde(default)]
+    pub secret: String,
+    #[serde(default)]
+    pub user_id_claim: Option<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default)]
+    pub sip_header_name: Option<String>,
+    #[serde(default)]
+    pub check_local_user: Option<bool>,
+    #[serde(default)]
+    pub ws_token_param: Option<String>,
+    #[serde(default)]
+    pub dev_mint_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -500,6 +522,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "uri_max_length": config.proxy.uri_max_length,
             "uri_reject_malformed": config.proxy.uri_reject_malformed,
             "emergency": config.proxy.emergency.clone(),
+            "jwt_auth": config.proxy.jwt_auth.clone(),
             "session_cmd_channel_capacity": config.proxy.session_cmd_channel_capacity,
             "session_state_channel_capacity": config.proxy.session_state_channel_capacity,
             "media_cmd_channel_capacity": config.proxy.media_cmd_channel_capacity,
@@ -1543,6 +1566,15 @@ enum CallRecordStoragePayload {
         #[serde(default)]
         keep_media_copy: Option<bool>,
     },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+        #[serde(default)]
+        with_media: Option<bool>,
+        #[serde(default)]
+        keep_media_copy: Option<bool>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1839,6 +1871,21 @@ pub(crate) async fn update_proxy_settings(
             }
             modified = true;
         }
+    }
+
+    if let Some(jwt_opt) = payload.jwt_auth {
+        match jwt_opt {
+            Some(jwt) if jwt.enabled && !jwt.secret.is_empty() => {
+                match serialize_to_item(&jwt, "jwt_auth") {
+                    Ok(item) => table["jwt_auth"] = item,
+                    Err(resp) => return resp,
+                }
+            }
+            _ => {
+                table.remove("jwt_auth");
+            }
+        }
+        modified = true;
     }
 
     // Write rwi_webhook at root level (after table borrow is done)
@@ -2455,7 +2502,7 @@ async fn cluster_reload_sse_handler(
                 .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            let req = reqwest::Client::new().post(&url).json(&payload);
+            let req = state.http_client().post(&url).json(&payload);
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -2968,7 +3015,7 @@ pub(crate) async fn test_locator_webhook(
         "message": "RustPBX locator webhook test"
     });
 
-    let req = reqwest::Client::new().post(&payload.url).json(&test_event);
+    let req = state.http_client().post(&payload.url).json(&test_event);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(resp) => Json(json!({
             "status": "ok",
@@ -3025,7 +3072,8 @@ pub(crate) async fn test_http_router(
         "direction": "internal"
     });
 
-    let req = reqwest::Client::new()
+    let req = state
+        .http_client()
         .post(&payload.url)
         .json(&test_request);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
@@ -3083,7 +3131,7 @@ pub(crate) async fn test_user_backend(
                 .with_timeout(std::time::Duration::from_secs(5));
 
             match crate::http_util::execute_request(
-                reqwest::Client::new().get(&url),
+                state.http_client().get(&url),
                 &opts.headers,
                 opts.timeout,
             )

@@ -211,35 +211,15 @@
                                                     d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
                                             </svg>
                                         </a>
-                                        <button type="button" :title="tt('queue.export_queue')"
-                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
-                                            :class="exportingQueueId === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-indigo-300 hover:text-indigo-600'"
-                                            :disabled="exportingQueueId === queue.id" @click="exportQueue(queue)">
-                                            <span class="sr-only" x-text="tt('queue.export_queue')"></span>
-                                            <template x-if="exportingQueueId === queue.id">
-                                                <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"
-                                                    stroke="currentColor" stroke-width="1.8">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
-                                                </svg>
-                                            </template>
-                                            <template x-if="exportingQueueId !== queue.id">
-                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-                                                    stroke-width="1.5" stroke="currentColor" class="size-4">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />
-                                                </svg>
-                                            </template>
-                                        </button>
                                         <button type="button" :title="tt('queue.delete_queue')"
                                             class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
                                             :class="processingDelete === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-rose-300 hover:text-rose-600'"
                                             :disabled="processingDelete === queue.id" @click="confirmDelete(queue)">
                                             <span class="sr-only" x-text="tt('queue.delete_queue')"></span>
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M6 7h8m-7 0v8m3-8v8m3-8v8M4 7h12M8 4h4a1 1 0 011 1v2H7V5a1 1 0 011-1z" />
+                                                    d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6" />
                                             </svg>
                                         </button>
                                     </div>
@@ -346,7 +326,7 @@
 </div>
 
 <script>
-    window._queueTranslations = {{ t | json | safe }};
+    window._queueTranslations = window.__i18n_t || {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queuePage', (options) => ({
             basePath: options.basePath || '/console',
@@ -372,7 +352,6 @@
             perPage: 20,
             processingDelete: null,
             exportingAll: false,
-            exportingQueueId: null,
             reloading: false,
             pendingReload: false,
             showingFrom: 0,
@@ -697,36 +676,6 @@
                     this.error = err?.message || this.tt('queue.export_all_error');
                 } finally {
                     this.exportingAll = false;
-                }
-            },
-            exportEndpoint(queue) {
-                if (!queue) return null;
-                if (typeof queue.export_url === 'string' && queue.export_url.trim().length) return queue.export_url;
-                return `${this.apiBase}/queues/${queue.id}/export`;
-            },
-            async exportQueue(queue) {
-                if (!queue || !queue.id || this.exportingQueueId === queue.id) return;
-                const endpoint = this.exportEndpoint(queue);
-                if (!endpoint) return;
-                this.exportingQueueId = queue.id;
-                this.error = null;
-                try {
-                    const response = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: { 'Accept': 'application/json' },
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) throw new Error(data?.message || this.tt('queue.export_error'));
-                    const path = data?.path || data?.paths?.[0];
-                    this.flash = path
-                        ? this.tt('queue.queue_exported_to').replace('{path}', path)
-                        : this.tt('queue.queue_exported');
-                    await this.refresh();
-                } catch (err) {
-                    console.error(err);
-                    this.error = err?.message || this.tt('queue.export_error');
-                } finally {
-                    this.exportingQueueId = null;
                 }
             },
         }));

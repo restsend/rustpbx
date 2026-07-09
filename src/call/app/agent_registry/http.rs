@@ -37,7 +37,8 @@ impl HttpRegistry {
         Self {
             base_url,
             api_key,
-            client: reqwest::Client::new(),
+            client: crate::http_util::build_keepalive_client(None, None)
+                .unwrap_or_else(|_| reqwest::Client::new()),
             cache: RwLock::new(HashMap::new()),
             rr_counter: RwLock::new(0),
             event_handlers: RwLock::new(Vec::new()),
@@ -165,7 +166,7 @@ impl AgentRegistry for HttpRegistry {
             "uri": uri,
             "skills": skills,
             "max_concurrency": max_concurrency,
-            "presence": "available",
+            "presence": "idle",
         });
 
         let req = self.client.post(&url).json(&payload);
@@ -350,7 +351,7 @@ mod tests {
             "skills": ["support", "sales"],
             "max_concurrency": 2,
             "current_calls": 0,
-            "presence": "available",
+            "presence": "idle",
             "total_calls_handled": 10,
             "total_talk_time_secs": 3600,
         });
@@ -360,6 +361,6 @@ mod tests {
         assert_eq!(agent.display_name, "Alice");
         assert_eq!(agent.skills, vec!["support", "sales"]);
         assert_eq!(agent.max_concurrency, 2);
-        assert!(matches!(agent.presence, PresenceState::Available));
+        assert!(matches!(agent.presence, PresenceState::Idle));
     }
 }

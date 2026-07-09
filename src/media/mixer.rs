@@ -1,7 +1,8 @@
 use crate::proxy::proxy_call::media_peer::MediaPeer;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -120,6 +121,9 @@ pub struct MediaMixer {
     mixer: Arc<AudioMixer>,
     /// Cancel token for stopping
     cancel_token: CancellationToken,
+    /// Handle to the mixing-loop task, so `Drop` can abort it even if `stop()`
+    /// was never called (prevents a permanently-leaked 1 Hz task).
+    task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl MediaMixer {
@@ -134,12 +138,13 @@ impl MediaMixer {
             channels: 1,
             mixer: Arc::new(AudioMixer::new(sample_rate, 1)),
             cancel_token: CancellationToken::new(),
+            task_handle: Mutex::new(None),
         }
     }
 
     /// Get all routing configuration (input_id -> MixerRoute)
     pub fn get_routes(&self) -> std::collections::HashMap<String, MixerRoute> {
-        let routes = self.routes.lock().unwrap();
+        let routes = self.routes.lock();
         routes.clone()
     }
 
@@ -149,40 +154,40 @@ impl MediaMixer {
 
     /// Add an input peer to the mixer
     pub fn add_input(&self, peer: MixerPeer) {
-        let mut inputs = self.inputs.lock().unwrap();
+        let mut inputs = self.inputs.lock();
         inputs.insert(peer.input_id().to_string(), peer);
     }
 
     /// Remove an input peer from the mixer
     pub fn remove_input(&self, input_id: &str) {
-        let mut inputs = self.inputs.lock().unwrap();
+        let mut inputs = self.inputs.lock();
         inputs.remove(input_id);
 
-        let mut routes = self.routes.lock().unwrap();
+        let mut routes = self.routes.lock();
         routes.remove(input_id);
     }
 
     /// Set routing for an input
     pub fn set_route(&self, route: MixerRoute) {
-        let mut routes = self.routes.lock().unwrap();
+        let mut routes = self.routes.lock();
         routes.insert(route.input_id.clone(), route);
     }
 
     /// Clear all routes for an input
     pub fn clear_route(&self, input_id: &str) {
-        let mut routes = self.routes.lock().unwrap();
+        let mut routes = self.routes.lock();
         routes.remove(input_id);
     }
 
     /// Set supervisor mode
     pub fn set_mode(&self, mode: SupervisorMixerMode) {
-        let mut current = self.mode.lock().unwrap();
+        let mut current = self.mode.lock();
         *current = mode;
     }
 
     /// Get current supervisor mode
     pub fn get_mode(&self) -> SupervisorMixerMode {
-        self.mode.lock().unwrap().clone()
+        self.mode.lock().clone()
     }
 
     /// Apply supervisor mode and configure routes automatically
@@ -200,7 +205,7 @@ impl MediaMixer {
 
         // Clear existing routes
         {
-            let mut routes = self.routes.lock().unwrap();
+            let mut routes = self.routes.lock();
             routes.clear();
         }
 
@@ -306,21 +311,22 @@ impl MediaMixer {
             return;
         }
 
-        let mode = self.mode.lock().unwrap().clone();
+        let mode = self.mode.lock().clone();
 
         info!(
             "MediaMixer {} started with {} inputs, mode: {:?}",
             self.id,
-            self.inputs.lock().unwrap().len(),
+            self.inputs.lock().len(),
             mode
         );
 
         let cancel_token = self.cancel_token.clone();
         let mixer_id = self.id.clone();
 
-        crate::utils::spawn(async move {
+        let handle = crate::utils::spawn(async move {
             Self::mixing_loop(&mixer_id, cancel_token).await;
         });
+        *self.task_handle.lock() = Some(handle);
     }
 
     /// The main mixing loop
@@ -380,6 +386,19 @@ impl MediaMixer {
     /// Get the underlying audio mixer
     pub fn audio_mixer(&self) -> Arc<AudioMixer> {
         self.mixer.clone()
+    }
+}
+
+impl Drop for MediaMixer {
+    fn drop(&mut self) {
+        // Safety net: if stop() was never called (e.g. an orphaned mixer whose
+        // supervisor session hung up without supervisor_stop), cancel the token
+        // and abort the mixing-loop task so it doesn't run forever logging at
+        // 1 Hz and pinning this MediaMixer + its inputs/routes in memory.
+        self.cancel_token.cancel();
+        if let Some(handle) = self.task_handle.lock().take() {
+            handle.abort();
+        }
     }
 }
 

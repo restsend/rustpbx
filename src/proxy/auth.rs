@@ -312,7 +312,7 @@ impl ProxyModule for AuthModule {
                         "Checking in-dialog request against auth cache"
                     );
 
-                    if cache.is_authenticated(&cache_key, &source_addr).await {
+                    if cache.is_authenticated(&cache_key, &source_addr) {
                         debug!(
                             call_id = %cache_key.0,
                             from_tag = %cache_key.1,
@@ -345,7 +345,7 @@ impl ProxyModule for AuthModule {
                         (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
                     {
                         if let Some(cache_key) = self.extract_auth_cache_key(tx) {
-                            cache.put(cache_key, source_addr).await;
+                            cache.put(cache_key, source_addr);
                         }
                     }
 
@@ -379,39 +379,68 @@ impl ProxyModule for AuthModule {
             }
         }
 
-        // Path B: Check WebSocket pre-authentication via JWT
+        // Path B: Check WebSocket pre-authentication via JWT.
+        //
+        // A WS connection that presented a valid JWT at upgrade time is recorded
+        // in `pre_auth_registry` (source addr -> agent_id). We trust that mapping
+        // for ALL out-of-dialog requests from the same source -- not only
+        // REGISTER -- so that passwordless agents (cc-phone with a `jwt` and no
+        // SIP password) can place calls, publish presence, etc. In-dialog
+        // requests are handled earlier by the dialog_auth_cache branch.
         if let Some(ref registry) = self.server.pre_auth_registry {
             if let Some(source_addr) = self.get_source_addr(tx) {
                 if let Some(agent_id) = registry.lookup(&source_addr).await {
-                    if tx.original.method == rsipstack::sip::Method::Register {
-                        let realm = tx.original.uri().host().to_string();
-                        match self
-                            .server
-                            .user_backend
-                            .get_user(&agent_id, Some(&realm), Some(&tx.original))
-                            .await
-                        {
-                            Ok(Some(mut user)) => {
-                                if !user.enabled {
-                                    info!(username = %agent_id, "Pre-authed user is disabled");
-                                } else {
-                                    user.username = agent_id;
-                                    cookie.set_user(user);
-                                    return Ok(ProxyAction::Continue);
+                    let realm = tx.original.uri().host().to_string();
+                    let resolved = match self
+                        .server
+                        .user_backend
+                        .get_user(&agent_id, Some(&realm), Some(&tx.original))
+                        .await
+                    {
+                        Ok(Some(mut user)) if user.enabled => {
+                            user.username = agent_id.clone();
+                            Some(user)
+                        }
+                        Ok(Some(_)) => {
+                            // Disabled user -- do not auto-admit; fall through to
+                            // a normal digest challenge.
+                            info!(username = %agent_id, "Pre-authed user is disabled");
+                            None
+                        }
+                        _ => {
+                            // User not in backend (JWT-only agent managed by the
+                            // CC addon) -- synthesize a minimal SipUser from the
+                            // JWT identity so passwordless agents still work.
+                            Some(SipUser {
+                                username: agent_id.clone(),
+                                enabled: true,
+                                realm: Some(realm),
+                                ..Default::default()
+                            })
+                        }
+                    };
+
+                    if let Some(mut user) = resolved {
+                        // Cache the dialog so subsequent in-dialog requests
+                        // (re-INVITE, BYE, INFO with tags) skip auth even if the
+                        // registry entry has since expired. REGISTER is not part
+                        // of a dialog, so skip caching it.
+                        if tx.original.method != rsipstack::sip::Method::Register {
+                            if let Some(ref cache) = self.dialog_auth_cache {
+                                if let Some(cache_key) = self.extract_auth_cache_key(tx) {
+                                    cache.put(cache_key, source_addr);
                                 }
                             }
-                            _ => {
-                                // User not found in backend — create minimal SipUser from JWT identity
-                                let user = SipUser {
-                                    username: agent_id,
-                                    enabled: true,
-                                    realm: Some(realm),
-                                    ..Default::default()
-                                };
-                                cookie.set_user(user);
-                                return Ok(ProxyAction::Continue);
-                            }
                         }
+                        user.merge_with(&tx_user);
+                        cookie.set_user(user);
+                        debug!(
+                            agent_id = %agent_id,
+                            method = %tx.original.method,
+                            %source,
+                            "Authenticated via WS JWT pre-auth registry"
+                        );
+                        return Ok(ProxyAction::Continue);
                     }
                 }
             }
@@ -427,7 +456,7 @@ impl ProxyModule for AuthModule {
                         (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
                     {
                         if let Some(cache_key) = self.extract_auth_cache_key(tx) {
-                            cache.put(cache_key, source_addr).await;
+                            cache.put(cache_key, source_addr);
                         }
                     }
 

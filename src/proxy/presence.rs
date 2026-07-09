@@ -67,8 +67,10 @@ struct RpidEmpty {}
 #[serde(untagged)]
 #[derive(Default)]
 pub enum PresenceStatus {
-    Available,
+    Idle,
     Busy,
+    Ringing,
+    Wrapup,
     Dnd,
     Away(String),
     #[default]
@@ -78,8 +80,10 @@ pub enum PresenceStatus {
 impl std::fmt::Display for PresenceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PresenceStatus::Available => write!(f, "available"),
+            PresenceStatus::Idle => write!(f, "idle"),
             PresenceStatus::Busy => write!(f, "busy"),
+            PresenceStatus::Ringing => write!(f, "ringing"),
+            PresenceStatus::Wrapup => write!(f, "wrapup"),
             PresenceStatus::Dnd => write!(f, "dnd"),
             PresenceStatus::Away(detail) => {
                 if detail.is_empty() {
@@ -185,8 +189,10 @@ impl PresenceManager {
             let mut map = self.states.write().unwrap();
             for s in states {
                 let status = match s.status.as_str() {
-                    "available" => PresenceStatus::Available,
+                    "idle" | "available" => PresenceStatus::Idle,
                     "busy" => PresenceStatus::Busy,
+                    "ringing" => PresenceStatus::Ringing,
+                    "wrapup" => PresenceStatus::Wrapup,
                     "away" => PresenceStatus::Away(String::new()),
                     "dnd" => PresenceStatus::Dnd,
                     "offline" => PresenceStatus::Offline,
@@ -371,13 +377,15 @@ impl PresenceManager {
                     });
 
                     let new_status = match header_status {
-                        Some("online" | "available") => PresenceStatus::Available,
+                        Some("online" | "available" | "idle") => PresenceStatus::Idle,
                         Some(s @ ("away" | "break" | "lunch" | "training" | "meeting" | "personal")) => PresenceStatus::Away(s.to_string()),
                         Some("dnd") => PresenceStatus::Dnd,
-                        Some("busy" | "ringing") => PresenceStatus::Busy,
+                        Some("busy") => PresenceStatus::Busy,
+                        Some("ringing") => PresenceStatus::Ringing,
+                        Some("wrapup") => PresenceStatus::Wrapup,
                         Some("offline" | "closed") => PresenceStatus::Offline,
                         Some(s) => PresenceStatus::Away(s.to_string()),
-                        None if current.status == PresenceStatus::Offline => PresenceStatus::Available,
+                        None if current.status == PresenceStatus::Offline => PresenceStatus::Idle,
                         None => return,
                     };
 
@@ -670,7 +678,7 @@ impl PresenceModule {
 
             for tuple in &pidf.tuples {
                 if tuple.status.basic == "open" {
-                    status = PresenceStatus::Available;
+                    status = PresenceStatus::Idle;
 
                     // Try to refine status from RPID activities
                     if let Some(activities) = &tuple.activities {
@@ -680,7 +688,14 @@ impl PresenceModule {
                             status = PresenceStatus::Away(tuple.note.clone().unwrap_or_default());
                         }
                     }
+                    // Allow clients to signal call-related states via the
+                    // PIDF <note> element (e.g. "ringing", "wrapup").
                     if let Some(note) = &tuple.note {
+                        match note.to_ascii_lowercase().as_str() {
+                            "ringing" => status = PresenceStatus::Ringing,
+                            "wrapup" | "wrap-up" | "wrap_up" => status = PresenceStatus::Wrapup,
+                            _ => {}
+                        }
                         activity_note = Some(note.clone());
                     }
                     break;
@@ -689,12 +704,17 @@ impl PresenceModule {
 
             if status == PresenceStatus::Offline && pidf.tuples.is_empty() {
                 // Fallback to simple string check if XML parsed but no tuples found
-                if body.contains("busy") {
+                let lower = body.to_ascii_lowercase();
+                if lower.contains("ringing") {
+                    status = PresenceStatus::Ringing;
+                } else if lower.contains("wrapup") || lower.contains("wrap-up") {
+                    status = PresenceStatus::Wrapup;
+                } else if lower.contains("busy") {
                     status = PresenceStatus::Busy;
-                } else if body.contains("away") {
+                } else if lower.contains("away") {
                     status = PresenceStatus::Away(String::new());
-                } else if body.contains("available") || body.contains("open") {
-                    status = PresenceStatus::Available;
+                } else if lower.contains("idle") || lower.contains("available") || lower.contains("open") {
+                    status = PresenceStatus::Idle;
                 }
             }
 
@@ -706,14 +726,19 @@ impl PresenceModule {
             }
         } else {
             // Fallback for non-compliant or simplified clients
-            if body.contains("busy") {
+            let lower = body.to_ascii_lowercase();
+            if lower.contains("ringing") {
+                current.status = PresenceStatus::Ringing;
+            } else if lower.contains("wrapup") || lower.contains("wrap-up") {
+                current.status = PresenceStatus::Wrapup;
+            } else if lower.contains("busy") {
                 current.status = PresenceStatus::Busy;
-            } else if body.contains("away") {
+            } else if lower.contains("away") {
                 current.status = PresenceStatus::Away(String::new());
-            } else if body.contains("offline") {
+            } else if lower.contains("offline") {
                 current.status = PresenceStatus::Offline;
             } else {
-                current.status = PresenceStatus::Available;
+                current.status = PresenceStatus::Idle;
             }
         }
 
@@ -743,9 +768,16 @@ impl PresenceModule {
         );
 
         // Build PIDF-XML (RFC 3863)
+        // Ringing/Wrapup/Busy are active (on-a-call) states — represented as
+        // <basic>open</basic> per RFC 3863, with RPID activities for detail.
         let basic_status = if matches!(
             state.status,
-            PresenceStatus::Available | PresenceStatus::Busy | PresenceStatus::Away(_) | PresenceStatus::Dnd
+            PresenceStatus::Idle
+                | PresenceStatus::Busy
+                | PresenceStatus::Ringing
+                | PresenceStatus::Wrapup
+                | PresenceStatus::Away(_)
+                | PresenceStatus::Dnd
         ) {
             "open"
         } else {
@@ -767,11 +799,18 @@ impl PresenceModule {
                 note: state
                     .note
                     .clone()
-                    .or_else(|| Some(state.status.to_string())),
+                    .or_else(|| match &state.status {
+                        PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
+                        _ => Some(state.status.to_string()),
+                    }),
                 contact: Some(format!("sip:{}@{}", identity, domain)),
                 activities: match state.status {
                     PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
                         busy: Some(RpidEmpty {}),
+                        ..Default::default()
+                    }),
+                    PresenceStatus::Ringing | PresenceStatus::Wrapup => Some(RpidActivities {
+                        on_the_phone: Some(RpidEmpty {}),
                         ..Default::default()
                     }),
                     PresenceStatus::Away(_) => Some(RpidActivities {
@@ -961,12 +1000,12 @@ mod tests {
 
         // Update state manually
         let mut state = manager.get_state(ext);
-        state.status = PresenceStatus::Available;
+        state.status = PresenceStatus::Idle;
         state.note = Some("On line".to_string());
         manager.update_state(ext, state, &EventSource::Local).await;
 
         let updated = manager.get_state(ext);
-        assert_eq!(updated.status, PresenceStatus::Available);
+        assert_eq!(updated.status, PresenceStatus::Idle);
         assert_eq!(updated.note, Some("On line".to_string()));
     }
 
@@ -985,7 +1024,7 @@ mod tests {
         manager
             .handle_locator_event(LocatorEvent::Registered(loc.clone()), &EventSource::Local)
             .await;
-        assert_eq!(manager.get_state(ext).status, PresenceStatus::Available);
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
 
         // Test unregistration
         manager

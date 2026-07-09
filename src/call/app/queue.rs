@@ -137,8 +137,6 @@ pub struct QueueConfig {
     pub autonomous_routing: bool,
     /// Routing strategy for agent selection.
     pub routing_strategy: RoutingStrategy,
-    /// Optional ACD policy name.
-    pub acd_policy: Option<String>,
     /// No-answer action.
     pub no_answer_action: NoAnswerAction,
     /// Fallback skill group.
@@ -217,7 +215,6 @@ impl Default for QueueConfig {
             max_retries: 2,
             autonomous_routing: false,
             routing_strategy: RoutingStrategy::LongestIdle,
-            acd_policy: None,
             no_answer_action: NoAnswerAction::Voicemail,
             fallback_skill_group: None,
             sla_monitoring: false,
@@ -246,7 +243,6 @@ impl QueueConfig {
             fallback: self.fallback.clone(),
             dial_strategy: Some(self.strategy.clone()),
             ring_timeout: self.ring_timeout,
-            acd_policy: self.acd_policy.clone(),
             label: Some(self.name.clone()),
             retry_codes: None,
             no_trying_timeout: None,
@@ -511,6 +507,12 @@ impl QueueApp {
                     }
                     crate::call::TransferEndpoint::Ivr(ivr_name) => {
                         AppAction::Transfer(format!("ivr:{}", ivr_name))
+                    }
+                    crate::call::TransferEndpoint::Voicemail(ext) => {
+                        AppAction::Transfer(format!("voicemail:{}", ext))
+                    }
+                    crate::call::TransferEndpoint::Conference(id) => {
+                        AppAction::Transfer(format!("conference:{}", id))
                     }
                 }
             }
@@ -1068,12 +1070,7 @@ impl CallApp for QueueApp {
             let strategy = self.config.routing_strategy;
 
             if let Some(agent) = registry
-                .select_agent_with_policy(
-                    skills,
-                    strategy,
-                    self.config.acd_policy.as_deref(),
-                    &self.call_id,
-                )
+                .select_agent_with_policy(skills, strategy, None, &self.call_id)
                 .await
             {
                 info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
@@ -1482,7 +1479,7 @@ impl CallApp for QueueApp {
                         && let Some(ref registry) = self.agent_registry
                     {
                         let _ = registry
-                            .update_presence(agent_id, PresenceState::Available)
+                            .update_presence(agent_id, PresenceState::Idle)
                             .await;
                     }
                     self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer)
@@ -1514,7 +1511,7 @@ impl CallApp for QueueApp {
                     for agent in agents {
                         if matches!(agent.presence, PresenceState::Ringing { .. }) {
                             let _ = registry
-                                .update_presence(&agent.agent_id, PresenceState::Available)
+                                .update_presence(&agent.agent_id, PresenceState::Idle)
                                 .await;
 
                             ctrl.notify_event(

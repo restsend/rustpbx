@@ -560,6 +560,7 @@
                         <button class="tab" data-tab="debug-state">Call State</button>
                         <button class="tab" data-tab="debug-sip">SIP Messages</button>
                         <button class="tab" data-tab="debug-sip-commands">SIP Commands</button>
+                        <button class="tab" data-tab="debug-http-commands">HTTP Commands</button>
                     </div>
                     <div class="tab-content active" id="debug-ws">
                         <div class="form-group">
@@ -608,6 +609,23 @@
                         </div>
                         <button type="button" id="sendSipInfoCmdBtn" style="width:auto;" onclick="sendSipInfoCommand()">Send INFO Command</button>
                         <div class="debug-panel" id="sipCmdLog" style="margin-top:10px;height:150px;"></div>
+                    </div>
+                    <div class="tab-content" id="debug-http-commands">
+                        <div class="form-group">
+                            <label>API Server URL:</label>
+                            <input type="text" id="httpApiUrl" placeholder="http://localhost:8082">
+                        </div>
+                        <div class="form-group">
+                            <label>Bearer Token:</label>
+                            <input type="text" id="httpApiToken" value="dev" placeholder="Bearer token">
+                        </div>
+
+                        <div class="form-group">
+                            <label>JSON Body:</label>
+                             <textarea id="httpCmdBody" rows="6">{"action":"play","leg_id":"both","source":{"type":"url","url":"http://192.168.3.181:8000/H000026548852213211.wav"},"loop_playback":false}</textarea>
+                        </div>
+                        <button type="button" id="sendHttpCmdBtn" onclick="sendHttpCommand()">Send HTTP Command</button>
+                        <div class="debug-panel" id="httpCmdLog" style="margin-top:10px;height:150px;"></div>
                     </div>
                 </div>
             </div>
@@ -2381,16 +2399,14 @@
 
         function getSessionCallId(session) {
             if (!session) return null;
-            if (session.id) return session.id;
-            if (session._id) return session._id;
-            if (session.request && session.request.call_id) return session.request.call_id;
-            if (session.request && session.request.headers && session.request.headers['Call-ID']) {
-                const hdr = session.request.headers['Call-ID'];
-                if (Array.isArray(hdr) && hdr[0] && hdr[0].raw) return hdr[0].raw;
+            let callId = session._request && session._request.call_id;
+            if (!callId) callId = session._id || session.id || null;
+
+            if (callId && typeof callId === 'string') {
+                callId = callId.split(';')[0].split('\r')[0].split('\n')[0].trim();
             }
-            if (session.dialog && session.dialog.id && session.dialog.id.call_id) return session.dialog.id.call_id;
-            if (session.dialog && session.dialog.call_id) return session.dialog.call_id;
-            return null;
+
+            return callId;
         }
 
         function notifyCcCallAction(action, session) {
@@ -2509,6 +2525,77 @@
             }
         }
 
+        // ========== HTTP Commands ==========
+        function sendHttpCommand() {
+            const apiUrl = document.getElementById('httpApiUrl').value.trim();
+            const token = document.getElementById('httpApiToken').value.trim();
+            const bodyRaw = document.getElementById('httpCmdBody').value.trim();
+            const logPanel = document.getElementById('httpCmdLog');
+
+            function logHttpMsg(message, type) {
+                if (!logPanel) return;
+                const entry = document.createElement('div');
+                entry.className = 'debug-entry';
+                const ts = new Date().toLocaleTimeString();
+                entry.innerHTML = `<span class="debug-time">[${ts}]</span> <span class="${type === 'error' ? 'debug-error' : 'debug-info'}">${message}</span>`;
+                logPanel.appendChild(entry);
+                logPanel.scrollTop = logPanel.scrollHeight;
+            }
+
+            if (!apiUrl) { logHttpMsg('Please enter API Server URL', 'error'); return; }
+            if (!token) { logHttpMsg('Please enter Bearer Token', 'error'); return; }
+            if (!bodyRaw) { logHttpMsg('Empty command body', 'error'); return; }
+
+            let parsedBody;
+            try { parsedBody = JSON.parse(bodyRaw); } catch (e) {
+                logHttpMsg('Invalid JSON: ' + e.message, 'error');
+                return;
+            }
+
+            const session = currentSession;
+            if (!session) { logHttpMsg('No active call session', 'error'); return; }
+
+            const callId = getSessionCallId(session);
+            logHttpMsg('Call ID: ' + (callId || 'null'), 'info');
+            if (!callId) { logHttpMsg('Could not get call ID from session', 'error'); return; }
+
+            const url = apiUrl.replace(/\/+$/, '') + '/api/calls/active/' + encodeURIComponent(callId) + '/commands';
+
+            logHttpMsg('POST ' + url, 'info');
+            logHttpMsg('Request: ' + JSON.stringify(parsedBody, null, 2), 'info');
+
+            fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(parsedBody)
+            })
+            .then(async response => {
+                const text = await response.text();
+                logHttpMsg('Status: ' + response.status + ' ' + response.statusText, 'info');
+                let contentType = response.headers.get('Content-Type') || '';
+                logHttpMsg('Content-Type: ' + contentType, 'info');
+                if (text) {
+                    try {
+                        const pretty = JSON.stringify(JSON.parse(text), null, 2);
+                        logHttpMsg('Response: ' + pretty, 'info');
+                    } catch (e) {
+                        logHttpMsg('Response: ' + text, 'info');
+                    }
+                } else {
+                    logHttpMsg('Response: (empty)', 'info');
+                }
+                if (!response.ok) {
+                    logHttpMsg('Request failed with status ' + response.status, 'error');
+                }
+            })
+            .catch(error => {
+                logHttpMsg('Request error: ' + error.message, 'error');
+            });
+        }
+
         // ========== SIP Message Logging ==========
         function logSipMessage(direction, method, body) {
             const entry = document.createElement('div');
@@ -2526,6 +2613,11 @@
         window.addEventListener('beforeunload', () => { if (ua) ua.stop(); if (ccWs) ccWs.close(); });
         loadDefaultIceServers();
         enumerateCameras();
+        // Set default HTTP API URL to current origin
+        const httpApiUrlInput = document.getElementById('httpApiUrl');
+        if (httpApiUrlInput && !httpApiUrlInput.value) {
+            httpApiUrlInput.value = window.location.origin;
+        }
         log('CC SIP Phone initialized');
     </script>
 </body>

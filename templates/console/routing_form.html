@@ -13,7 +13,7 @@
             formAction: {{ form_action | tojson }},
             apiPrefix: {{ api_prefix | tojson }},
             listUrl: {{ back_url | tojson }}
-    })'>
+    })' @destination-change="onDestinationChange($event.detail)">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
                 <nav class="text-xs font-medium text-slate-400">
@@ -629,76 +629,16 @@
                 </div>
             </div>
 
-            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
+            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                x-show="!isSipTrunkTarget" x-cloak>
                 <div>
                     <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
                     <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
                 </div>
-                <div class="mt-4 space-y-3">
-                    <template x-if="queueOptions.length">
-                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                            {{ "routing_form.queue_file_path_label" | t }}
-                            <select x-model="route.action.queue_file" id="queue-select"
-                                class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="">— {{ "routing_form.queue_file_placeholder" | t }} —</option>
-                                <template x-for="option in queueOptions" :key="option.reference">
-                                    <option :value="option.reference" x-text="option.name"></option>
-                                </template>
-                            </select>
-                        </label>
-                    </template>
-                    <template x-if="!queueOptions.length">
-                        <div class="space-y-1">
-                            <input type="text" x-model="route.action.queue_file"
-                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder='{{ "routing_form.queue_file_placeholder" | t }}'>
-                            <p class="text-xs text-amber-600">{{ "routing_form.no_queues_available" | t }}</p>
-                        </div>
-                    </template>
-                </div>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isVoicemailTarget" x-cloak>
-                <div>
-                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.voicemail_dest_title" | t }}</h3>
-                    <p class="text-xs text-slate-500">{{ "routing_form.voicemail_dest_desc" | t }}</p>
-                </div>
-                <div class="mt-4 space-y-2">
-                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                        "routing_form.voicemail_target_ext_label" | t }}</label>
-                    <input type="text" x-model="route.action.voicemail_extension" maxlength="50"
-                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder='{{ "routing_form.voicemail_ext_placeholder" | t }}'>
-                    <p class="text-[11px] text-slate-500">{{ "routing_form.voicemail_ext_hint" | t }}</p>
-                </div>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
-                <div>
-                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
-                    <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
-                </div>
-                <div class="mt-4 space-y-3">
-                    <template x-if="ivrOptions.length">
-                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                            {{ "routing_form.ivr_file_path_label" | t }}
-                            <select x-model="route.action.ivr_file" id="ivr-select"
-                                class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="">— {{ "routing_form.ivr_file_placeholder" | t }} —</option>
-                                <template x-for="option in ivrOptions" :key="option.file_path">
-                                    <option :value="option.name" x-text="option.name + ' (' + option.ivr_mode + ')'"></option>
-                                </template>
-                            </select>
-                        </label>
-                    </template>
-                    <template x-if="!ivrOptions.length">
-                        <div class="space-y-1">
-                            <input type="text" x-model="route.action.ivr_file" maxlength="200"
-                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
-                            <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
-                        </div>
-                    </template>
+                <div class="mt-4">
+                    {% set queue_items = forwarding_catalog.queues | default([]) %}
+                    {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                    {% include "console/_destination_selector.html" %}
                 </div>
             </div>
 
@@ -811,10 +751,7 @@
                 algorithmOptions: [],
                 destinationOptions: [
                     { value: 'sip_trunk', label: '{{ "routing_form.dest_sip_trunks" | t }}' },
-                    ...(window.queueAddonEnabled ? [{ value: 'queue', label: '{{ "routing_form.dest_queue" | t }}' }] : []),
-                    ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: '{{ "routing_form.dest_voicemail" | t }}' }] : []),
-                    // IVR is always available via file path; the IVR Editor addon adds the project-picker.
-                    { value: 'ivr', label: '{{ "routing_form.dest_ivr" | t }}' },
+                    { value: 'dest', label: '{{ "routing_form.dest_other" | t }}' },
                 ],
                 selectionOptionAliases: {
                     rr: 'rr',
@@ -941,7 +878,10 @@
                     if (this.mode === 'create' && !this.route.id) {
                         this.route.direction = '';
                     }
-                    this.$nextTick(() => this.reconcileSelectValues());
+                    this.$nextTick(() => {
+                        this.reconcileSelectValues();
+                        this.syncDestSelector();
+                    });
                 },
                 reconcileSelectValues() {
                     const reconcileTrunkSelects = (container) => {
@@ -981,6 +921,29 @@
                             const el = document.getElementById('queue-select');
                             if (el) el.value = match.reference;
                         }
+                    }
+                },
+
+                syncDestSelector() {
+                    var child = this.$el.querySelector('[x-data^="destinationSelector"]');
+                    if (!child) return;
+                    var action = this.route.action || {};
+                    var type = 'uri';
+                    var value = '';
+                    if (action.target_type === 'queue' && action.queue_file) {
+                        type = 'queue';
+                        value = action.queue_file;
+                    } else if (action.target_type === 'ivr' && action.ivr_file) {
+                        type = 'ivr';
+                        value = action.ivr_file;
+                    } else if (action.target_type === 'voicemail' && action.voicemail_extension) {
+                        type = 'voicemail';
+                        value = action.voicemail_extension;
+                    }
+                    if (value) {
+                        child.dispatchEvent(new CustomEvent('set-destination', {
+                            detail: { type: type, value: value }
+                        }));
                     }
                 },
                 // Regex helper methods
@@ -1190,7 +1153,7 @@
                 normalizeTargetType(value) {
                     if (typeof value === 'string') {
                         const trimmed = value.trim().toLowerCase();
-                        if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
+                        if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr' || trimmed === 'dest') {
                             return trimmed;
                         }
                     }
@@ -1327,6 +1290,43 @@
                     }
                     if (!this.isIvrTarget) {
                         this.route.action.ivr_file = '';
+                    }
+                },
+
+                onDestinationChange(detail) {
+                    var type = detail.type;
+                    var value = detail.value;
+                    if (type === 'queue') {
+                        this.route.action.target_type = 'queue';
+                        this.route.action.queue_file = value;
+                        this.route.action.voicemail_extension = '';
+                        this.route.action.ivr_file = '';
+                        this.route.action.trunks = [];
+                    } else if (type === 'ivr') {
+                        this.route.action.target_type = 'ivr';
+                        this.route.action.ivr_file = value;
+                        this.route.action.queue_file = '';
+                        this.route.action.voicemail_extension = '';
+                        this.route.action.trunks = [];
+                    } else if (type === 'voicemail') {
+                        this.route.action.target_type = 'voicemail';
+                        this.route.action.voicemail_extension = value;
+                        this.route.action.queue_file = '';
+                        this.route.action.ivr_file = '';
+                        this.route.action.trunks = [];
+                    } else if (type === 'extension') {
+                        this.route.action.target_type = 'voicemail';
+                        this.route.action.voicemail_extension = value;
+                        this.route.action.queue_file = '';
+                        this.route.action.ivr_file = '';
+                        this.route.action.trunks = [];
+                    } else {
+                        // uri type - use as trunk target
+                        this.route.action.target_type = 'sip_trunk';
+                        this.route.action.trunks = [];
+                        this.route.action.queue_file = '';
+                        this.route.action.ivr_file = '';
+                        this.route.action.voicemail_extension = '';
                     }
                 },
                 get isSipTrunkTarget() {
@@ -1506,17 +1506,11 @@
                     this.success = null;
                     const payload = this.buildPayload();
                     try {
-                        const response = await fetch(this.submitUrl(), {
-                            method: this.submitMethod(),
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify(payload),
-                        });
-                        const data = await response.json().catch(() => ({}));
-                        if (!response.ok) {
-                            throw new Error(data?.message || this.translations.err_failed_save);
+                        const method = this.submitMethod().toLowerCase();
+                        if (method === 'put') {
+                            await apiPut(this.submitUrl(), payload);
+                        } else {
+                            await apiPatch(this.submitUrl(), payload);
                         }
                         this.success = this.translations.saved_successfully;
                         setTimeout(() => {

@@ -7,7 +7,7 @@ use super::{
 use crate::{
     auth::{jwt_auth_backend::JwtAuthBackend, jwt_validator::JwtValidator},
     auto_external_ip,
-    call::{TransactionCookie, policy::FrequencyLimiter},
+    call::{MediaConfig, TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder},
@@ -19,7 +19,7 @@ use crate::{
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
         cluster_event::{ClusterEventHub, ClusterEventModule},
-        locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
+        locator::{DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator},
         pre_auth_registry::PreAuthRegistry,
         presence::PresenceManager,
     },
@@ -114,6 +114,10 @@ pub struct SipServerInner {
     pub rtc_cname: String,
     /// In-process media engine: handles bridge/playback/recording/MCU for all sessions.
     pub media_engine: crate::media::engine::MediaEngine,
+    /// Per-trunk CPS / concurrent-call rate limiter. Enforces the `max_cps` and
+    /// `max_concurrent` columns configured on each SIP trunk. Shared between
+    /// the routing layer (acquire) and the session teardown path (release).
+    pub trunk_rate_limiter: Arc<crate::proxy::trunk_rate_limiter::TrunkRateLimiter>,
 }
 
 fn random_hex() -> String {
@@ -765,6 +769,8 @@ impl SipServerBuilder {
                 http_router_config.clone(),
                 rtp_config.clone(),
                 self.config.media_proxy,
+                self.config.enable_latching,
+                self.config.latching_probation_max_packets,
             )));
         }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
@@ -822,6 +828,60 @@ impl SipServerBuilder {
         // Start the local event-dispatch loop.
         cluster_event_hub.clone().start().await;
         let cluster_event_hub: Option<Arc<ClusterEventHub>> = Some(cluster_event_hub);
+
+        // Background sweeper for expired SIP REGISTER bindings.
+        //
+        // Why we need this:
+        //   Transport-layer cleanup (TransportInspectorLocator::handle on
+        //   TransportEvent::Closed) only fires when the TCP/WS connection is
+        //   politely closed. When a client vanishes without sending a SIP
+        //   REGISTER expires=0 AND without emitting a WebSocket Close frame
+        //   (e.g. browser tab closed, network loss, laptop sleep), the only
+        //   signal we have is the REGISTER expiry itself. `MemoryLocator`'s
+        //   opportunistic GC only runs during `lookup`/`register`, so a
+        //   binding that nobody looks up would linger forever, leaving the
+        //   CC agent stuck in `idle`. This task periodically sweeps expired
+        //   bindings and broadcasts `LocatorEvent::Offline` so the registrar
+        //   bridge can move the agent back to `offline`.
+        {
+            let locator_for_sweep = locator.clone();
+            let locator_events_for_sweep = locator_events.clone();
+            let sweep_token = cancel_token.child_token();
+            tokio::spawn(async move {
+                // Run roughly every quarter of the shortest typical registrar
+                // expiry (the server caps Contact expiry at ~50s, see
+                // registrar.rs `max_registrar_expires`). 15s gives us <1 expiry
+                // interval of latency between the binding technically expiring
+                // and the agent being marked offline.
+                const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+                let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Skip the immediate first tick — there is nothing to sweep
+                // right after boot and we don't want to log a noisy "swept 0"
+                // line during startup.
+                ticker.tick().await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = sweep_token.cancelled() => break,
+                        _ = ticker.tick() => {
+                            match locator_for_sweep.sweep_expired().await {
+                                Ok(removed) if !removed.is_empty() => {
+                                    info!(
+                                        count = removed.len(),
+                                        "locator swept expired registrations"
+                                    );
+                                    let _ = locator_events_for_sweep
+                                        .send(LocatorEvent::Offline(removed));
+                                }
+                                Ok(_) => {}
+                                Err(e) => warn!(error = %e, "locator sweep failed"),
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
 
@@ -887,10 +947,14 @@ impl SipServerBuilder {
                 let (engine, handle) = MediaEngine::new(MediaEngineConfig {
                     command_channel_capacity: self.config.media_cmd_channel_capacity,
                     event_channel_capacity: self.config.media_event_channel_capacity,
+                    ..MediaEngineConfig::default()
                 });
                 let _task = engine.spawn(handle);
                 engine
             },
+            trunk_rate_limiter: Arc::new(
+                crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
+            ),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -1286,6 +1350,20 @@ impl SipServerInner {
             params,
             ..Default::default()
         })
+    }
+
+    pub fn default_media_config(&self) -> MediaConfig {
+        MediaConfig::new()
+            .with_proxy_mode(self.proxy_config.media_proxy)
+            .with_external_ip(self.rtp_config.external_ip.clone())
+            .with_bind_ip(self.rtp_config.bind_ip.clone())
+            .with_rtp_start_port(self.rtp_config.start_port)
+            .with_rtp_end_port(self.rtp_config.end_port)
+            .with_webrtc_start_port(self.rtp_config.webrtc_start_port)
+            .with_webrtc_end_port(self.rtp_config.webrtc_end_port)
+            .with_ice_servers(self.rtp_config.ice_servers.clone())
+            .with_enable_latching(self.proxy_config.enable_latching)
+            .with_probation_max_packets(self.proxy_config.latching_probation_max_packets)
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {

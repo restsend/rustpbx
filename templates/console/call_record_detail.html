@@ -110,6 +110,16 @@
                         </svg>
                         <span x-text="record.sip_gateway || '—'"></span>
                     </span>
+                    <template x-if="record.outbound_trunk">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700"
+                            :title="record.outbound_trunk_dest || ''">
+                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5l5 5-5 5" />
+                            </svg>
+                            <span x-text="record.outbound_trunk"></span>
+                        </span>
+                    </template>
                 </div>
                 <template x-if="record.hangup_messages && record.hangup_messages.length">
                     <div class="mt-2 space-y-1 text-xs text-slate-500">
@@ -354,14 +364,6 @@
                         <div class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
                             <div class="font-medium text-slate-700 text-xs">{{ "call_record_detail.rtp_streams_title" |
                                 t }}</div>
-                            <!-- Analytics removed
-                            <template x-if="mediaMetrics && mediaMetrics.rtp_packets !== undefined">
-                                <div class="text-[10px] text-slate-500">
-                                    Total Packets (Analytics): <span class="font-mono text-slate-700"
-                                        x-text="mediaMetrics.rtp_packets"></span>
-                                </div>
-                            </template>
-                            -->
                         </div>
                         <div class="overflow-x-auto">
                             <table class="w-full text-left text-xs" x-show="rtpStreams && rtpStreams.length">
@@ -747,7 +749,6 @@
                 ];
                 this.selectedSipEntry = null;
                 this.flowStartEpoch = this.parseTimestamp(this.record.started_at);
-                this.mediaMetrics = data.media_metrics || {};
 
                 this.actions = data.actions || {};
                 this.backUrl = data.back_url || '/console/call-records';
@@ -823,7 +824,6 @@
             sipFlowLoading: false,
             selectedSipEntry: null,
             flowStartEpoch: null,
-            mediaMetrics: {},
             pbxAliases: [],
             rtpStreams: [],
 

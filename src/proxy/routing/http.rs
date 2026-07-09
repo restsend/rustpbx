@@ -18,6 +18,8 @@ pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
     pub rtp_config: RtpConfig,
     pub default_media_proxy_mode: MediaProxyMode,
+    pub enable_latching: bool,
+    pub probation_max_packets: Option<u8>,
     pub client: reqwest::Client,
 }
 
@@ -26,8 +28,14 @@ impl HttpCallRouter {
         config: HttpRouterConfig,
         rtp_config: RtpConfig,
         default_media_proxy_mode: MediaProxyMode,
+        enable_latching: bool,
+        probation_max_packets: Option<u8>,
     ) -> Self {
         let mut builder = reqwest::Client::builder();
+        builder = builder
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(8);
         if let Some(timeout) = config.timeout_ms {
             builder = builder.timeout(Duration::from_millis(timeout));
         } else {
@@ -37,6 +45,8 @@ impl HttpCallRouter {
             config,
             rtp_config,
             default_media_proxy_mode,
+            enable_latching,
+            probation_max_packets,
             client: builder.build().unwrap_or_default(),
         }
     }
@@ -270,11 +280,14 @@ impl CallRouter for HttpCallRouter {
                 // Start from server defaults, then let HTTP router override individual fields.
                 dialplan.media.proxy_mode = self.default_media_proxy_mode;
                 dialplan.media.external_ip = self.rtp_config.external_ip.clone();
+                dialplan.media.bind_ip = self.rtp_config.bind_ip.clone();
                 dialplan.media.rtp_start_port = self.rtp_config.start_port;
                 dialplan.media.rtp_end_port = self.rtp_config.end_port;
                 dialplan.media.webrtc_port_start = self.rtp_config.webrtc_start_port;
                 dialplan.media.webrtc_port_end = self.rtp_config.webrtc_end_port;
                 dialplan.media.ice_servers = self.rtp_config.ice_servers.clone();
+                dialplan.media.enable_latching = self.enable_latching;
+                dialplan.media.probation_max_packets = self.probation_max_packets;
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());

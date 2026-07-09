@@ -1,4 +1,5 @@
 use serde::Serialize;
+use tracing::warn;
 
 use crate::rwi::proto::EventCallContext;
 
@@ -14,7 +15,10 @@ pub struct RwiEvent {
 impl RwiEvent {
     /// Build from a typed RwiEventSpec. If context provided, merge it into payload.
     pub fn from_spec<E: RwiEventSpec>(event: &E, ctx: Option<&EventCallContext>) -> Self {
-        let mut payload = serde_json::to_value(event).expect("RwiEventSpec must be Serialize");
+        let mut payload = serde_json::to_value(event).unwrap_or_else(|e| {
+            warn!("RwiEventSpec serialization failed: {}", e);
+            serde_json::json!({})
+        });
         payload["event_type"] = serde_json::Value::String(E::TYPE.into());
         merge_event_context(&mut payload, ctx);
         RwiEvent {
@@ -146,12 +150,14 @@ rwi_event!(CallBusy, "call_busy");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferred {
     pub call_id: String,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferred, "call_transferred");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferAccepted {
     pub call_id: String,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferAccepted, "call_transfer_accepted");
 
@@ -160,6 +166,7 @@ pub struct CallTransferFailed {
     pub call_id: String,
     pub sip_status: Option<u16>,
     pub reason: Option<String>,
+    pub transfer_target: Option<String>,
 }
 rwi_event!(CallTransferFailed, "call_transfer_failed");
 
@@ -719,6 +726,38 @@ pub struct IvrFlowCompleted {
 }
 rwi_event!(IvrFlowCompleted, "ivr_flow_completed");
 
+/// Structured trigger info describing what caused an IVR step to execute.
+///
+/// Serialized as a nested object: `{"type": "dtmf", "detail": {"digit": "2"}}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TriggerInfo {
+    /// Trigger source type, e.g. `dtmf`, `dtmf_menu`, `audio_complete`,
+    /// `session_start`, `action_execute`, `chained`, `dtmf_menu_timeout`, ...
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Structured detail for the trigger. For DTMF this is `{"digit": "2"}`,
+    /// for an API response `{"status": 200}`, for phone collection
+    /// `{"number": "..."}`. `None` when the trigger carries no detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+impl TriggerInfo {
+    pub fn new(r#type: impl Into<String>) -> Self {
+        Self {
+            r#type: r#type.into(),
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(r#type: impl Into<String>, detail: serde_json::Value) -> Self {
+        Self {
+            r#type: r#type.into(),
+            detail: Some(detail),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrStepTrace {
     pub call_id: String,
@@ -726,11 +765,9 @@ pub struct IvrStepTrace {
     pub caller: String,
     pub callee: String,
     pub step_index: u32,
-    pub event_type: String,
-    pub event_detail: Option<String>,
+    pub trigger: TriggerInfo,
     pub action_type: String,
     pub action_json: Option<String>,
-    pub result_kind: String,
     pub duration_ms: u64,
     pub error: Option<String>,
     pub step_id: Option<String>,
@@ -739,6 +776,13 @@ pub struct IvrStepTrace {
     pub step_end_time: Option<String>,
     pub extra: Option<serde_json::Value>,
     pub sip_headers: Option<std::collections::HashMap<String, String>>,
+    /// Filled only on the session-end trace entry that records how the whole
+    /// IVR session ended. `None` for ordinary step entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<crate::call::app::ivr::provider::SessionEndTag>,
+    /// Companion detail for [`end_reason`](Self::end_reason) (e.g. transfer target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_detail: Option<String>,
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
 

@@ -666,3 +666,40 @@ async fn test_start_playback_on_none_backward_compatible() {
 
     let _ = fs::remove_file(&test_file).await;
 }
+
+#[tokio::test]
+async fn test_file_track_session_id() {
+    let temp_dir = std::env::temp_dir();
+    let test_file_path = temp_dir.join("test_file_track_session_id.wav");
+    let test_file = test_file_path.to_str().unwrap().to_string();
+    create_test_wav_file(&test_file).await.unwrap();
+    let session_id = "test-session-001".to_string();
+
+    let track = FileTrack::new("sid-track".to_string())
+        .with_session_id(session_id.clone())
+        .with_path(test_file.clone())
+        .with_codec_info(negotiate::MediaNegotiator::codec_info_for_type(CodecType::PCMU))
+        .with_loop(false);
+
+    // Direct field access — session_id is pub(crate), accessible within the crate
+    assert_eq!(
+        track.session_id.as_deref(),
+        Some("test-session-001"),
+        "session_id should be stored"
+    );
+
+    // Verify it survives clone
+    let cloned = track.clone();
+    assert_eq!(
+        cloned.session_id.as_deref(),
+        Some("test-session-001"),
+        "session_id should survive clone"
+    );
+
+    // Verify codec_info getter works
+    let codec = track.codec_info().expect("codec_info should be set");
+    assert_eq!(codec.codec, CodecType::PCMU);
+    assert_eq!(codec.clock_rate, 8000);
+
+    let _ = fs::remove_file(&test_file).await;
+}

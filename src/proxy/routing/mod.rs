@@ -294,6 +294,22 @@ impl Default for TrunkConfig {
 }
 
 impl TrunkConfig {
+    pub async fn matches_inbound_source_ip(&self, addr: &IpAddr) -> bool {
+        if let Some(trunk_direction) = self.direction
+            && !trunk_direction.allows(&DialDirection::Inbound)
+        {
+            return false;
+        }
+
+        for host in &self.inbound_hosts {
+            if candidate_matches(host, addr).await {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub async fn matches_inbound_ip(&self, addr: &IpAddr) -> bool {
         for host in &self.inbound_hosts {
             if candidate_matches(host, addr).await {
@@ -678,8 +694,6 @@ pub enum ActionType {
 pub struct RouteQueueConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acd_policy: Option<String>,
     pub accept_immediately: bool,
     #[serde(default)]
     pub passthrough_ringback: bool,
@@ -763,11 +777,6 @@ impl RouteQueueConfig {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
             hold: None,
-            acd_policy: self
-                .acd_policy
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
             failure_audio,
             ..Default::default()
         };

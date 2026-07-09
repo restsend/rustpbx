@@ -2,7 +2,7 @@
 {% block title %}{{ "acme.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl space-y-6" x-data='acmeManager({{ t | tojson }})'>
+    <div class="mx-auto max-w-7xl space-y-6" x-data='acmeManager()'>
 
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
@@ -213,8 +213,8 @@
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('acmeManager', (translations) => ({
-            t: translations.acme || {},
+        Alpine.data('acmeManager', () => ({
+            t: (window.__i18n_t || {}).acme || {},
             domain: '',
             email: '',
             enable_https: false,

@@ -63,14 +63,12 @@ impl ConsoleState {
     }
 
     pub fn clear_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
-        let _is_secure = self.config.secure_cookie || request_secure;
-        // let secure_attr = if is_secure { "; Secure" } else { "" };
-        let secure_attr = "";
+        let suffix = self.cookie_suffix(request_secure);
         let cookie = format!(
             "{}=; Path={}; HttpOnly; Max-Age=0{}",
             SESSION_COOKIE_NAME,
             self.cookie_path(),
-            secure_attr
+            suffix
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),
@@ -96,15 +94,14 @@ impl ConsoleState {
 
     pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
         let value = self.generate_session_token(user_id)?;
-        let _is_secure = self.config.secure_cookie || request_secure;
-        let secure_attr = "";
+        let suffix = self.cookie_suffix(request_secure);
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age={}{}",
             SESSION_COOKIE_NAME,
             value,
             self.cookie_path(),
             SESSION_TTL_HOURS * 3600,
-            secure_attr
+            suffix
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),
@@ -119,6 +116,13 @@ impl ConsoleState {
         // Always scope the session cookie to the site root so AMI requests outside the
         // console base path still receive it.
         "/"
+    }
+
+    /// Build the cookie attribute suffix: always `SameSite=Lax`, plus `Secure`
+    /// when the request was over TLS (or `secure_cookie` is forced in config).
+    fn cookie_suffix(&self, request_secure: bool) -> String {
+        let is_secure = self.config.secure_cookie || request_secure;
+        format!("; SameSite=Lax{}", if is_secure { "; Secure" } else { "" })
     }
 
     /// Generate a temporary MFA verification session token
@@ -164,15 +168,14 @@ impl ConsoleState {
         request_secure: bool,
     ) -> Option<HeaderValue> {
         let value = self.generate_mfa_session_token(user_id)?;
-        let _is_secure = self.config.secure_cookie || request_secure;
-        let secure_attr = "";
+        let suffix = self.cookie_suffix(request_secure);
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age={}{}",
             MFA_SESSION_COOKIE_NAME,
             value,
             self.cookie_path(),
             MFA_SESSION_TTL_SECS,
-            secure_attr
+            suffix
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),
@@ -184,14 +187,14 @@ impl ConsoleState {
     }
 
     /// Clear MFA session cookie
-    pub fn clear_mfa_session_cookie(&self, _request_secure: bool) -> Option<HeaderValue> {
-        let secure_attr = "";
+    pub fn clear_mfa_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
+        let suffix = self.cookie_suffix(request_secure);
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age=0{}",
             MFA_SESSION_COOKIE_NAME,
             "",
             self.cookie_path(),
-            secure_attr
+            suffix
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),

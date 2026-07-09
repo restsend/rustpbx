@@ -618,6 +618,36 @@ pub enum SipFlowConfig {
         http_addr: Option<String>,
         #[serde(default = "default_sipflow_timeout")]
         timeout_secs: u64,
+        /// Maximum number of packets to pack into one batched UDP datagram
+        /// before flushing (default 256).
+        ///
+        /// Special value `0` disables batching entirely: each record is sent
+        /// immediately as a legacy single-packet datagram. Use this as the
+        /// escape hatch if the remote `sipflow` server is too old to
+        /// understand the batch wire format.
+        ///
+        /// Any other value is clamped to `[1, MAX_BATCH_COUNT]`.
+        #[serde(default = "default_remote_batch_size")]
+        batch_size: usize,
+        /// Maximum time (milliseconds) a packet may sit in a per-node buffer
+        /// before the buffer is flushed (default 20).
+        ///
+        /// Values below 20 are silently raised to 20, because flushing more
+        /// often than once per RTP frame interval defeats the purpose of
+        /// batching and risks tight-loop sending under low load.
+        #[serde(default = "default_remote_batch_flush_ms")]
+        batch_flush_ms: u64,
+        /// Capacity of the ingest channel between `record()` callers and the
+        /// background worker (default 8192).
+        ///
+        /// Provides backpressure: when full, `record()` returns an error
+        /// (upstream swallows it) instead of allowing unbounded memory
+        /// growth. Lower values shed earlier under overload; larger values
+        /// absorb bigger spikes at the cost of more memory.
+        ///
+        /// Values below 1 are clamped to 1.
+        #[serde(default = "default_remote_channel_capacity")]
+        channel_capacity: usize,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },
@@ -629,6 +659,18 @@ fn default_sipflow_flush_count() -> usize {
 
 fn default_sipflow_flush_interval() -> u64 {
     0
+}
+
+fn default_remote_batch_size() -> usize {
+    256
+}
+
+fn default_remote_batch_flush_ms() -> u64 {
+    20
+}
+
+fn default_remote_channel_capacity() -> usize {
+    8192
 }
 
 fn default_sipflow_timeout() -> u64 {
@@ -728,6 +770,11 @@ pub struct JwtAuthConfig {
     pub check_local_user: bool,
     #[serde(default = "default_jwt_ws_token_param")]
     pub ws_token_param: String,
+    /// Enable dev-console JWT/PhoneAuth token mint endpoints
+    /// (`POST /cc/dev/jwt-preview`, `POST /cc/dev/phone-token`).
+    /// Defaults to false — production should keep this off.
+    #[serde(default)]
+    pub dev_mint_enabled: bool,
 }
 
 fn default_jwt_user_id_claim() -> String {
@@ -973,6 +1020,19 @@ pub struct DialplanHints {
     pub video_policy: Option<crate::proxy::routing::VideoPolicy>,
     /// Per-trunk ringback/early-media audio configuration
     pub ringback: Option<crate::proxy::routing::RingbackAudio>,
+    /// Concurrency slots acquired during routing policy enforcement. The
+    /// session releases them on hangup to avoid leaking the concurrency budget.
+    pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
+    /// Trunk names whose per-trunk concurrent-call slot was acquired by the
+    /// [`crate::proxy::trunk_rate_limiter::TrunkRateLimiter`] during routing.
+    /// Each entry must be released exactly once when the call ends so the
+    /// trunk's `max_concurrent` budget is not leaked.
+    pub trunk_concurrency_holds: Vec<String>,
+    /// Wholesale tenant concurrent-call slot acquired during routing.
+    /// The permit releases when the last holder drops.
+    #[cfg(feature = "addon-wholesale")]
+    pub wholesale_tenant_concurrency_hold:
+        Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl std::fmt::Debug for DialplanHints {
@@ -1003,6 +1063,7 @@ pub enum RouteResult {
         app_name: String,
         app_params: Option<serde_json::Value>,
         auto_answer: bool,
+        hints: Option<DialplanHints>,
     },
     NotHandled(InviteOption, Option<DialplanHints>),
     Abort(StatusCode, Option<String>),
