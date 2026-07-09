@@ -9,6 +9,8 @@ use rsipstack::{
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
 };
+use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -17,7 +19,6 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 #[derive(Clone, Debug)]
@@ -401,7 +402,7 @@ impl TransportEventInspector for TransportInspectorLocator {
 }
 
 pub struct MemoryLocator {
-    locations: Mutex<HashMap<String, HashMap<String, Location>>>,
+    locations: DashMap<String, HashMap<String, Location>>,
     realm_checker: Mutex<Option<RealmChecker>>,
 }
 
@@ -414,7 +415,7 @@ impl Default for MemoryLocator {
 impl MemoryLocator {
     pub fn new() -> Self {
         Self {
-            locations: Mutex::new(HashMap::new()),
+            locations: DashMap::new(),
             realm_checker: Mutex::new(None),
         }
     }
@@ -426,7 +427,7 @@ impl MemoryLocator {
 #[async_trait]
 impl Locator for MemoryLocator {
     async fn is_local_realm(&self, realm: &str) -> bool {
-        let checker = self.realm_checker.lock().await.clone();
+        let checker = self.realm_checker.lock().clone();
         if let Some(checker) = checker {
             checker(realm).await
         } else {
@@ -454,51 +455,50 @@ impl Locator for MemoryLocator {
         }
         let mut location = location;
         let key = location.binding_key();
-        let mut locations = self.locations.lock().await;
+        let now = Instant::now();
 
-        // Opportunistic GC: prune expired bindings for THIS identifier on
-        // every register. Without this, clients that crash without sending
-        // REGISTER expires=0 leave stale entries forever (lookup() only
-        // sweeps the entries it actually visits, so never-looked-up AoRs
-        // would accumulate). This stays O(1) amortised because each AoR's
-        // binding map is small (typically a single binding).
-        if let Some(map) = locations.get_mut(&identifier) {
-            let now = Instant::now();
+        // Prune expired bindings for THIS identifier (opportunistic GC).
+        if let Some(mut map) = self.locations.get_mut(&identifier) {
             map.retain(|_, loc| !loc.is_expired_at(now));
+            let empty = map.is_empty();
+            drop(map);
+            if empty {
+                self.locations.remove(&identifier);
+            }
         }
 
-        let entry = locations
-            .entry(identifier.clone())
-            .or_insert_with(HashMap::new);
         if location.expires == 0 {
-            entry.remove(&key);
-            if entry.is_empty() {
-                locations.remove(&identifier);
+            if let Some(mut map) = self.locations.get_mut(&identifier) {
+                map.remove(&key);
+                let empty = map.is_empty();
+                drop(map);
+                if empty {
+                    self.locations.remove(&identifier);
+                }
             }
-            info!(identifier, binding = %key, %location, "unregistered location (expires=0)");
+            info!(identifier, "unregistered location (expires=0)");
         } else {
             if location.last_modified.is_none() {
                 location.last_modified = Some(Instant::now());
             }
-            info!(identifier, binding = %key, %location, "registered location");
-            entry.insert(key, location);
+            self.locations
+                .entry(identifier.clone())
+                .or_default()
+                .insert(key, location);
+            info!(identifier, "registered location");
         }
         Ok(())
     }
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm).await;
-        let mut locations = self.locations.lock().await;
-        locations.remove(&identifier);
+        self.locations.remove(&identifier);
         Ok(())
     }
 
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
-        let mut locations = self.locations.lock().await;
-        let mut identifiers_to_remove = Vec::new();
         let mut removed_locations = Vec::new();
-
-        for (identifier, map) in locations.iter_mut() {
+        self.locations.retain(|_, map| {
             let keys_to_remove: Vec<String> = map
                 .iter()
                 .filter_map(|(key, loc)| {
@@ -516,19 +516,8 @@ impl Locator for MemoryLocator {
                     removed_locations.push(loc);
                 }
             }
-
-            if map.is_empty() {
-                identifiers_to_remove.push(identifier.clone());
-            }
-        }
-
-        for identifier in identifiers_to_remove {
-            if let Some(locs) = locations.remove(&identifier) {
-                for loc in locs.values() {
-                    removed_locations.push(loc.clone());
-                }
-            }
-        }
+            !map.is_empty()
+        });
 
         if removed_locations.is_empty() {
             Ok(None)
@@ -538,18 +527,19 @@ impl Locator for MemoryLocator {
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
-        let mut locations = self.locations.lock().await;
         let now: Instant = Instant::now();
         let uri_string = uri.to_string();
         let mut direct_hits = Vec::new();
 
-        // Prune expired bindings and attempt direct contact/GRUU matches first
-        locations.retain(|_, map| {
+        // Prune expired bindings (DashMap retain is concurrent per shard).
+        self.locations.retain(|_, map| {
             map.retain(|_, loc| !loc.is_expired_at(now));
             !map.is_empty()
         });
-        for map in locations.values() {
-            for loc in map.values() {
+
+        // Direct match by AOR or GRUU.
+        for map_ref in self.locations.iter() {
+            for loc in map_ref.value().values() {
                 if &loc.aor == uri || uri_matches(&loc.aor, uri) {
                     direct_hits.push(loc.clone());
                     continue;
@@ -576,7 +566,6 @@ impl Locator for MemoryLocator {
         // Fall back to classic AoR lookup by username/realm
         let username_raw = uri.user().unwrap_or("");
         let username = username_raw.trim();
-        let username_lower = username.to_ascii_lowercase();
         let realm_raw = uri.host().to_string();
         let realm_trimmed = realm_raw.trim();
 
@@ -590,7 +579,7 @@ impl Locator for MemoryLocator {
         }
 
         for id in identifiers {
-            if let Some(map) = locations.get(&id)
+            if let Some(map) = self.locations.get(&id)
                 && !map.is_empty()
             {
                 let results: Vec<_> = map.values().cloned().collect();
@@ -599,10 +588,11 @@ impl Locator for MemoryLocator {
         }
 
         if !username.is_empty() {
+            let username_lower = username.to_ascii_lowercase();
             let mut fallback_hits = Vec::new();
 
-            for map in locations.values() {
-                for loc in map.values() {
+            for map_ref in self.locations.iter() {
+                for loc in map_ref.value().values() {
                     let mut matched = false;
 
                     if let Some(registered) = &loc.registered_aor {
