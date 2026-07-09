@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::TimeZone;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, atomic::Ordering};
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -38,6 +38,8 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/reload/routes", post(reload_routes_handler))
         .route("/reload/acl", post(reload_acl_handler))
         .route("/reload/app", post(reload_app_handler))
+        .route("/reload/queues", post(reload_queues_handler))
+        .route("/reload/ivr", post(reload_ivr_handler))
         .route(
             "/frequency_limits",
             get(list_frequency_limits).delete(clear_frequency_limits),
@@ -430,6 +432,59 @@ async fn reload_app_handler(
         "message": "Configuration validated. Restarting services with updated configuration.",
     }))
     .into_response()
+}
+
+/// Query/body params for the addon-scoped reload endpoints
+/// (`/reload/queues`, `/reload/ivr`).
+#[derive(Debug, Default, Deserialize)]
+pub struct ReloadAddonParams {
+    /// When true, after the local export+reload the request is fanned out to
+    /// every configured cluster peer via `POST /ami/v1/cluster/reload_sync`.
+    /// Defaults to `false` (local-only). Requires the `commerce` feature;
+    /// otherwise it is ignored with a note in the response.
+    #[serde(default)]
+    pub sync_cluster: bool,
+}
+
+/// Reload call queues (export DB -> TOML -> in-memory) on this node and,
+/// optionally, on every cluster peer.
+///
+/// Reuses the `"queue"` export-reload handler registered by the Queue addon.
+/// Addon CRUD is unchanged — callers continue to use the existing
+/// `/api/queues/*` console endpoints to edit queues, then hit this endpoint
+/// to publish the changes.
+pub async fn reload_queues_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    Query(params): Query<ReloadAddonParams>,
+) -> Response {
+    info!(
+        %client_ip,
+        sync_cluster = params.sync_cluster,
+        "Reload queues via /reload/queues endpoint"
+    );
+    let result = reload_addons_with_sync(&state, &["queue"], params.sync_cluster).await;
+    Json(result).into_response()
+}
+
+/// Reload IVR projects (build TOML -> reload routes) on this node and,
+/// optionally, on every cluster peer.
+///
+/// Reuses the `"ivr"` export-reload handler registered by the IVR Editor
+/// addon. When the `addon-ivr-editor` feature is disabled, the local handler
+/// is absent and the response reports "Handler not found".
+pub async fn reload_ivr_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    Query(params): Query<ReloadAddonParams>,
+) -> Response {
+    info!(
+        %client_ip,
+        sync_cluster = params.sync_cluster,
+        "Reload IVR via /reload/ivr endpoint"
+    );
+    let result = reload_addons_with_sync(&state, &["ivr"], params.sync_cluster).await;
+    Json(result).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1225,6 +1280,184 @@ async fn reload_routes_on_node(state: &AppState, _node: &str) -> serde_json::Val
     }
 }
 
+// ── Addon-scoped reload helpers (queues / IVR + optional cluster sync) ───────
+
+/// Outcome of reloading a single cluster peer.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerReloadResult {
+    /// `"{addr}:{ami_port}"` of the peer.
+    pub node: String,
+    /// `"ok"` or `"error"`.
+    pub status: String,
+    /// Round-trip latency in milliseconds.
+    pub elapsed_ms: u64,
+    /// Error message when `status == "error"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Fan out a reload request to every configured cluster peer.
+///
+/// Each peer receives `POST {ami_path}/cluster/reload_sync` with the supplied
+/// payload (the same endpoint used by the console SSE cluster-reload flow).
+/// Peers are processed sequentially with a 120s per-peer timeout.
+///
+/// Returns one [`PeerReloadResult`] per peer, in peer-config order. An empty
+/// slice means no peers are configured.
+#[cfg(feature = "commerce")]
+pub async fn fanout_reload_to_peers(
+    app: &AppState,
+    payload: &PingReloadPayload,
+) -> Vec<PeerReloadResult> {
+    let peers = app
+        .config()
+        .cluster
+        .as_ref()
+        .map(|c| c.peers.clone())
+        .unwrap_or_default();
+    let ami_path = app
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
+
+    let mut results = Vec::with_capacity(peers.len());
+    for peer in &peers {
+        let node = format!("{}:{}", peer.addr, peer.ami_port);
+        let url = format!(
+            "http://{}:{}{}/cluster/reload_sync",
+            peer.addr, peer.ami_port, ami_path
+        );
+        let opts = crate::http_util::HttpFetchOptions::new()
+            .with_timeout(std::time::Duration::from_secs(120));
+        let start = std::time::Instant::now();
+        let req = app.http_client().post(&url).json(&payload);
+        match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+            Ok(resp) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                match resp.json::<serde_json::Value>().await {
+                    Ok(_body) => results.push(PeerReloadResult {
+                        node,
+                        status: "ok".into(),
+                        elapsed_ms,
+                        error: None,
+                    }),
+                    Err(e) => results.push(PeerReloadResult {
+                        node,
+                        status: "error".into(),
+                        elapsed_ms,
+                        error: Some(format!("Invalid response: {e}")),
+                    }),
+                }
+            }
+            Err(e) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                results.push(PeerReloadResult {
+                    node,
+                    status: "error".into(),
+                    elapsed_ms,
+                    error: Some(format!("Connection failed: {e}")),
+                });
+            }
+        }
+    }
+    results
+}
+
+/// Pure helper: turn a set of registry results into the `"local"` JSON object.
+///
+/// Requested handlers that produced no result (not registered) are reported as
+/// `{"status":"error","message":"Handler not found"}` so callers always get a
+/// deterministic key set. Extracted for unit testing.
+fn build_local_reload_map(
+    requested: &[String],
+    results: Vec<(&str, Result<serde_json::Value, String>)>,
+) -> serde_json::Value {
+    let mut local_map = serde_json::Map::new();
+    for (id, result) in results {
+        let value = match result {
+            Ok(v) => serde_json::json!({ "status": "ok", "details": v }),
+            Err(e) => serde_json::json!({ "status": "error", "message": e }),
+        };
+        local_map.insert(id.to_string(), value);
+    }
+    for id in requested {
+        if !local_map.contains_key(id) {
+            local_map.insert(
+                id.clone(),
+                serde_json::json!({ "status": "error", "message": "Handler not found" }),
+            );
+        }
+    }
+    serde_json::Value::Object(local_map)
+}
+
+/// Reload the given addons via the [`ExportReloadRegistry`] on this node and,
+/// when `sync_cluster` is true, fan the reload out to all cluster peers.
+///
+/// This is the shared engine behind `/reload/queues` and `/reload/ivr`.
+/// It is safe to call without the `commerce` feature: the cluster fan-out is
+/// skipped (with an explanatory note) and only the local reload runs.
+///
+/// Returns a JSON object of the shape:
+/// ```json
+/// {
+///   "local": { "<addon_id>": { "status": "ok"|"error", ... }, ... },
+///   "synced": false,
+///   "peers": [ { "node": "...", "status": "ok", "elapsed_ms": 0 }, ... ]
+/// }
+/// ```
+pub async fn reload_addons_with_sync(
+    app: &AppState,
+    addon_ids: &[&str],
+    sync_cluster: bool,
+) -> serde_json::Value {
+    let selected: Vec<String> = addon_ids.iter().map(|s| s.to_string()).collect();
+
+    // ── Local: invoke each addon's export+reload handler ──
+    let local_results = app
+        .addon_registry
+        .export_reload
+        .invoke_selected(&selected, app)
+        .await;
+    let local_json = build_local_reload_map(&selected, local_results);
+
+    // ── Cluster fan-out (commerce only) ──
+    #[cfg(feature = "commerce")]
+    if sync_cluster {
+        let payload = PingReloadPayload {
+            trunks: false,
+            routes: false,
+            addons: selected.clone(),
+        };
+        let peers = fanout_reload_to_peers(app, &payload).await;
+        let peers_json =
+            serde_json::to_value(&peers).unwrap_or(serde_json::json!([]));
+        return serde_json::json!({
+            "local": local_json,
+            "synced": true,
+            "peers": peers_json,
+        });
+    }
+
+    #[cfg(not(feature = "commerce"))]
+    if sync_cluster {
+        return serde_json::json!({
+            "local": local_json,
+            "synced": false,
+            "peers": [],
+            "note": "cluster sync requires the 'commerce' feature",
+        });
+    }
+
+    serde_json::json!({
+        "local": local_json,
+        "synced": false,
+        "peers": [],
+    })
+}
+
 #[cfg(feature = "commerce")]
 async fn cluster_dispatch_command_handler(
     State(state): State<AppState>,
@@ -1348,6 +1581,86 @@ async fn cluster_list_calls_handler(
 }
 
 #[cfg(test)]
+mod reload_addon_tests {
+    use super::*;
+
+    #[test]
+    fn reload_addon_params_defaults_to_no_sync() {
+        // No query string => sync_cluster defaults to false.
+        let params = ReloadAddonParams::default();
+        assert!(!params.sync_cluster);
+    }
+
+    #[test]
+    fn reload_addon_params_parses_sync_cluster_true() {
+        // Query-string deserialization mirrors how axum::Query feeds the struct.
+        let qs = "sync_cluster=true";
+        let params: ReloadAddonParams = serde_urlencoded::from_str(qs).unwrap();
+        assert!(params.sync_cluster);
+    }
+
+    #[test]
+    fn reload_addon_params_parses_sync_cluster_false() {
+        let qs = "sync_cluster=false";
+        let params: ReloadAddonParams = serde_urlencoded::from_str(qs).unwrap();
+        assert!(!params.sync_cluster);
+    }
+
+    #[test]
+    fn build_local_reload_map_ok_result() {
+        let requested = vec!["queue".to_string()];
+        let results = vec![("queue", Ok(serde_json::json!({"queues_reloaded": 3})))];
+        let map = build_local_reload_map(&requested, results);
+        let entry = map.get("queue").expect("queue key present");
+        assert_eq!(entry["status"], "ok");
+        assert_eq!(entry["details"]["queues_reloaded"], 3);
+    }
+
+    #[test]
+    fn build_local_reload_map_error_result() {
+        let requested = vec!["ivr".to_string()];
+        let results = vec![(
+            "ivr",
+            Err("build failed: no provider url".to_string()),
+        )];
+        let map = build_local_reload_map(&requested, results);
+        let entry = map.get("ivr").expect("ivr key present");
+        assert_eq!(entry["status"], "error");
+        assert_eq!(entry["message"], "build failed: no provider url");
+    }
+
+    #[test]
+    fn build_local_reload_map_reports_missing_handler() {
+        // Handler requested but not registered (e.g. addon-ivr-editor disabled).
+        let requested = vec!["ivr".to_string()];
+        let results: Vec<(&str, Result<serde_json::Value, String>)> = vec![];
+        let map = build_local_reload_map(&requested, results);
+        let entry = map.get("ivr").expect("ivr key present");
+        assert_eq!(entry["status"], "error");
+        assert_eq!(entry["message"], "Handler not found");
+    }
+
+    #[test]
+    fn build_local_reload_map_multiple_addons() {
+        let requested = vec!["queue".to_string(), "ivr".to_string()];
+        let results = vec![
+            ("queue", Ok(serde_json::json!({"reloaded": 5}))),
+            ("ivr", Err("nope".to_string())),
+        ];
+        let map = build_local_reload_map(&requested, results);
+        assert_eq!(map.as_object().unwrap().len(), 2);
+        assert_eq!(map["queue"]["status"], "ok");
+        assert_eq!(map["ivr"]["status"], "error");
+    }
+
+    #[test]
+    fn build_local_reload_map_empty() {
+        let map = build_local_reload_map(&[], vec![]);
+        assert!(map.as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
 #[cfg(feature = "commerce")]
 mod cluster_tests {
     use super::*;
@@ -1397,5 +1710,51 @@ mod cluster_tests {
         let decoded: PingReloadPayload = serde_json::from_str(&json_str).unwrap();
         assert_eq!(decoded.trunks, true);
         assert_eq!(decoded.addons, vec!["queue", "ivr"]);
+    }
+
+    #[test]
+    fn peer_reload_result_ok_omits_error_field() {
+        let r = PeerReloadResult {
+            node: "10.0.0.2:8080".into(),
+            status: "ok".into(),
+            elapsed_ms: 42,
+            error: None,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(v["node"], "10.0.0.2:8080");
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["elapsed_ms"], 42);
+        // error must be skipped when None.
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn peer_reload_result_error_includes_message() {
+        let r = PeerReloadResult {
+            node: "10.0.0.3:8080".into(),
+            status: "error".into(),
+            elapsed_ms: 120003,
+            error: Some("Connection failed: timeout".into()),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["error"], "Connection failed: timeout");
+    }
+
+    #[test]
+    fn fanout_payload_serializes_for_queue_reload() {
+        // Verifies the payload shape POSTed to peer /cluster/reload_sync.
+        let payload = PingReloadPayload {
+            trunks: false,
+            routes: false,
+            addons: vec!["queue".into()],
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
+        assert_eq!(v["trunks"], false);
+        assert_eq!(v["routes"], false);
+        assert_eq!(v["addons"][0], "queue");
     }
 }

@@ -484,16 +484,23 @@ impl StepIvrApp {
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
-                    ActionResult::WaitFor(_) => {
-                        // Step isn't done yet (e.g. waiting for audio to complete / DTMF).
-                        // Save as pending — will be finalized in request_next when next event arrives.
+                    ActionResult::WaitFor(ref wait_event) => {
+                        let step_trigger = match wait_event {
+                            WaitEvent::DtmfCollected { digit } => {
+                                crate::rwi::TriggerInfo::with_detail(
+                                    "dtmf_collected",
+                                    serde_json::json!({ "digit": digit }),
+                                )
+                            }
+                            _ => trigger.clone(),
+                        };
                         self.pending_start_instant = self.step_start_instant;
                         self.pending_trace = Some(IvrTraceEntry {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
                             step_index: self.step_index,
-                            trigger: trigger.clone(),
+                            trigger: step_trigger,
                             provider_url: None,
                             action_type: node_type_str,
                             action_json,
@@ -957,10 +964,17 @@ impl CallApp for StepIvrApp {
 
             if let Some(next) = self.handle_menu_dtmf(&digit) {
                 self.provider.on_local_dtmf_match(&digit, &next).await;
+                let dtmf_detail = serde_json::json!({ "digit": digit.clone() });
                 self.current_trigger = Some(crate::rwi::TriggerInfo::with_detail(
                     "dtmf_menu",
-                    serde_json::json!({ "digit": digit }),
+                    dtmf_detail,
                 ));
+                if let Some(ref mut t) = self.pending_trace {
+                    t.trigger = crate::rwi::TriggerInfo::with_detail(
+                        "dtmf_menu",
+                        serde_json::json!({ "digit": digit }),
+                    );
+                }
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }

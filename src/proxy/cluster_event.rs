@@ -55,6 +55,25 @@ pub trait ClusterEventHandler: Send + Sync {
         _source: &EventSource,
     ) {
     }
+
+    /// Agent status change forwarded from a cluster peer.
+    ///
+    /// Carries the full snapshot needed for ACD scheduling: status, skills,
+    /// concurrency, priority, and the originating `instance_id`.
+    async fn on_agent_status_event(
+        &self,
+        _msg: &ClusterAgentStatusMessage,
+        _source: &EventSource,
+    ) {
+    }
+
+    /// Queue event forwarded from a cluster peer (enqueue / dequeue / assign).
+    async fn on_queue_event(
+        &self,
+        _msg: &ClusterQueueEventMessage,
+        _source: &EventSource,
+    ) {
+    }
 }
 
 // ── Cluster message body (serialised in SIP MESSAGE) ────────────────────────
@@ -68,6 +87,10 @@ enum ClusterMessageBody {
     Locator(ClusterLocatorMessage),
     #[serde(rename = "presence")]
     Presence(ClusterPresenceMessage),
+    #[serde(rename = "agent_status")]
+    AgentStatus(ClusterAgentStatusMessage),
+    #[serde(rename = "queue_event")]
+    QueueEvent(ClusterQueueEventMessage),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -177,6 +200,44 @@ impl From<(&str, &PresenceState)> for ClusterPresenceMessage {
             last_updated: state.last_updated,
         }
     }
+}
+
+// ── Agent status message (CC ACD cluster sync) ──────────────────────────────
+
+/// Wire format for agent status changes forwarded between cluster peers.
+///
+/// Sent on every `AgentRegistry::update_status` so that every node's ACD
+/// tick has a cluster-wide view of agent availability.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ClusterAgentStatusMessage {
+    pub agent_id: String,
+    /// One of: idle / busy / ringing / wrapup / offline / away / dnd.
+    pub status: String,
+    /// JSON array of skill names.
+    pub skills: serde_json::Value,
+    /// JSON map of skill → level.
+    pub skill_levels: serde_json::Value,
+    pub max_concurrency: i32,
+    pub current_calls: i32,
+    pub priority: i32,
+    /// Which node owns this agent (RUSTPBX_INSTANCE_ID / hostname).
+    pub instance_id: String,
+}
+
+/// Wire format for ACD queue events forwarded between cluster peers.
+///
+/// Enables every node's ACD tick to see calls queued on other nodes.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ClusterQueueEventMessage {
+    pub action: String,
+    pub call_id: String,
+    pub queue_id: String,
+    pub trace_id: String,
+    /// For `assign` actions: the agent_id that claimed the call.
+    pub agent_id: Option<String>,
+    /// For `enqueue`: the skill group the call is waiting for.
+    pub required_skills: Vec<String>,
+    pub priority: i32,
 }
 
 // ── ClusterEventHub ─────────────────────────────────────────────────────────
@@ -353,6 +414,60 @@ impl ClusterEventHub {
         };
         for peer in &self.peers {
             let _ = self.send_sip_message(peer, &body).await;
+        }
+    }
+
+    /// Broadcast an agent status change to all cluster peers.
+    pub async fn send_agent_status_to_peers(&self, msg: &ClusterAgentStatusMessage) {
+        let body = match serde_json::to_vec(&ClusterMessageBody::AgentStatus(msg.clone())) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("failed to serialize agent_status cluster msg: {}", e);
+                return;
+            }
+        };
+        for peer in &self.peers {
+            let _ = self.send_sip_message(peer, &body).await;
+        }
+    }
+
+    /// Broadcast a queue event (enqueue / dequeue / assign) to all peers.
+    pub async fn send_queue_event_to_peers(&self, msg: &ClusterQueueEventMessage) {
+        let body = match serde_json::to_vec(&ClusterMessageBody::QueueEvent(msg.clone())) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("failed to serialize queue_event cluster msg: {}", e);
+                return;
+            }
+        };
+        for peer in &self.peers {
+            let _ = self.send_sip_message(peer, &body).await;
+        }
+    }
+
+    /// Remote agent status event (from peer MESSAGE).
+    pub async fn on_remote_agent_status(
+        &self,
+        msg: ClusterAgentStatusMessage,
+        source: EventSource,
+    ) {
+        let handlers: Vec<Arc<dyn ClusterEventHandler>> =
+            self.handlers.read().iter().cloned().collect();
+        for h in &handlers {
+            h.on_agent_status_event(&msg, &source).await;
+        }
+    }
+
+    /// Remote queue event (from peer MESSAGE).
+    pub async fn on_remote_queue_event(
+        &self,
+        msg: ClusterQueueEventMessage,
+        source: EventSource,
+    ) {
+        let handlers: Vec<Arc<dyn ClusterEventHandler>> =
+            self.handlers.read().iter().cloned().collect();
+        for h in &handlers {
+            h.on_queue_event(&msg, &source).await;
         }
     }
 
@@ -549,6 +664,12 @@ impl ProxyModule for ClusterEventModule {
                         .on_remote_presence_change(&msg.identity, state, remote_source)
                         .await;
                 }
+            }
+            ClusterMessageBody::AgentStatus(msg) => {
+                self.hub.on_remote_agent_status(msg, remote_source).await;
+            }
+            ClusterMessageBody::QueueEvent(msg) => {
+                self.hub.on_remote_queue_event(msg, remote_source).await;
             }
         }
 
@@ -1366,5 +1487,100 @@ mod tests {
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Offline); // unknown -> offline
+    }
+
+    // ── ClusterAgentStatusMessage JSON round-trip ───────────────────────────
+
+    #[test]
+    fn test_agent_status_message_round_trip() {
+        let msg = ClusterAgentStatusMessage {
+            agent_id: "agent-001".to_string(),
+            status: "idle".to_string(),
+            skills: serde_json::json!(["support", "english"]),
+            skill_levels: serde_json::json!({"support": 5}),
+            max_concurrency: 2,
+            current_calls: 0,
+            priority: 10,
+            instance_id: "node-a".to_string(),
+        };
+        let body = ClusterMessageBody::AgentStatus(msg.clone());
+        let json = serde_json::to_string(&body).unwrap();
+        let parsed: ClusterMessageBody = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClusterMessageBody::AgentStatus(m) => {
+                assert_eq!(m.agent_id, "agent-001");
+                assert_eq!(m.status, "idle");
+                assert_eq!(m.max_concurrency, 2);
+                assert_eq!(m.instance_id, "node-a");
+            }
+            _ => panic!("expected AgentStatus variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_status_message_tagged_correctly() {
+        let msg = ClusterAgentStatusMessage {
+            agent_id: "a1".to_string(),
+            status: "busy".to_string(),
+            skills: serde_json::json!([]),
+            skill_levels: serde_json::json!({}),
+            max_concurrency: 1,
+            current_calls: 1,
+            priority: 0,
+            instance_id: "node-b".to_string(),
+        };
+        let json = serde_json::to_string(&ClusterMessageBody::AgentStatus(msg)).unwrap();
+        assert!(
+            json.contains("\"type\":\"agent_status\""),
+            "JSON should contain type=agent_status tag, got: {}",
+            json
+        );
+    }
+
+    // ── ClusterQueueEventMessage JSON round-trip ────────────────────────────
+
+    #[test]
+    fn test_queue_event_message_round_trip() {
+        let msg = ClusterQueueEventMessage {
+            action: "enqueue".to_string(),
+            call_id: "call-123".to_string(),
+            queue_id: "sg_support".to_string(),
+            trace_id: "trace-1".to_string(),
+            agent_id: None,
+            required_skills: vec!["support".to_string()],
+            priority: 0,
+        };
+        let body = ClusterMessageBody::QueueEvent(msg.clone());
+        let json = serde_json::to_string(&body).unwrap();
+        let parsed: ClusterMessageBody = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClusterMessageBody::QueueEvent(m) => {
+                assert_eq!(m.action, "enqueue");
+                assert_eq!(m.call_id, "call-123");
+                assert_eq!(m.queue_id, "sg_support");
+                assert!(m.agent_id.is_none());
+            }
+            _ => panic!("expected QueueEvent variant"),
+        }
+    }
+
+    #[test]
+    fn test_queue_event_assign_message() {
+        let msg = ClusterQueueEventMessage {
+            action: "assign".to_string(),
+            call_id: "call-456".to_string(),
+            queue_id: "sg_sales".to_string(),
+            trace_id: "trace-2".to_string(),
+            agent_id: Some("agent-007".to_string()),
+            required_skills: vec![],
+            priority: 5,
+        };
+        let json = serde_json::to_string(&ClusterMessageBody::QueueEvent(msg)).unwrap();
+        assert!(
+            json.contains("\"type\":\"queue_event\""),
+            "JSON should contain type=queue_event tag, got: {}",
+            json
+        );
+        assert!(json.contains("\"agent_id\":\"agent-007\""));
     }
 }

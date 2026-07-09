@@ -184,12 +184,14 @@ sea-orm = { version = "1.1.20", features = [
     "sqlx-sqlite",
     "sqlx-mysql",
     "sqlx-postgres",
+    "sqlite-use-returning-for-3_35",
 ] }
 sea-orm-migration = { version = "1.1.20", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "sqlx-mysql",
     "sqlx-postgres",
+    "sqlite-use-returning-for-3_35",
 ] }
 argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.14.0", default-features = false, features = [

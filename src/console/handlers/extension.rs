@@ -25,7 +25,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Order, Query as SeaQuery};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    QueryOrder, QuerySelect, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -437,13 +437,22 @@ async fn create_extension(
         updated_at: Set(now),
         ..Default::default()
     };
-    let model = match active.insert(db).await {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(e) => return internal_error(e.to_string()),
+    };
+    let model = match active.insert(&txn).await {
         Ok(model) => model,
         Err(err) => {
             warn!("failed to create extension: {}", err);
+            let _ = txn.rollback().await;
             return internal_error(err.to_string());
         }
     };
+    if let Err(e) = txn.commit().await {
+        warn!("failed to commit extension transaction: {}", e);
+        return internal_error(e.to_string());
+    }
 
     if let Some(ref dept_ids) = payload.department_ids
         && let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await
