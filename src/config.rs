@@ -1461,13 +1461,6 @@ impl Config {
         "/static".to_string()
     }
 
-    /// Returns the wholesale bills directory.
-    pub fn wholesale_bills_dir(&self) -> String {
-        format!(
-            "{}/wholesale_bills",
-            self.recorder_path().trim_end_matches('/')
-        )
-    }
 }
 
 // ===================================================================

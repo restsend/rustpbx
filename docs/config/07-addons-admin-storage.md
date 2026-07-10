@@ -91,18 +91,11 @@ retention_days = 90
 ```
 
 ## Wholesale Addon
-Example of addon-specific configuration.
+Enable the addon in the proxy configuration.
 
 ```toml
-# Enable the addon
 [proxy]
 addons = ["wholesale"]
-
-# Configure the addon
-[addons.wholesale]
-billing_cycle = "monthly"
-currency = "USD"
-# bills_dir = "storage/wholesale/bills"  # Override CSV output directory
 ```
 
 ## Cluster Configuration

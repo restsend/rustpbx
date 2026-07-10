@@ -24,15 +24,11 @@ acl_files = ["config/acl/*.toml"]
 Changes to `rustpbx.toml` usually require a restart. However, **Trunks**, **Queues**, **Routes**, and **ACLs** can be reloaded at runtime without dropping active calls via the Admin Console or API.
 
 ## Addon System
-Addons (like Wholesale, Queue, Transcript) are enabled in the `[proxy]` section but configured in their own namespaces.
+Addons (like Wholesale, Queue, Transcript) are enabled in the `[proxy]` section.
 
 ```toml
 [proxy]
 addons = ["wholesale", "queue"]
-
-# Addon-specific configuration map
-[addons.wholesale]
-license = "key-123"
 ```
 
 ## Configuration Reference

@@ -51,6 +51,7 @@ addon-wholesale = [
     "dep:async-compression",
     "dep:arc-swap",
     "dep:country-emoji",
+    "dep:crossbeam-utils",
     "dep:hex",
     "dep:iso_currency",
 ]
@@ -128,7 +129,6 @@ thiserror = "2"
 tokio = { version = "1.52.2", features = ["full", "tracing", "test-util"] }
 parking_lot = "0.12"
 dashmap = "6"
-moka = { version = "0.12", features = ["sync"] }
 tokio-util = "0.7.18"
 tokio-tungstenite = { version = "0.29.0", features = [
     "rustls-tls-native-roots",
@@ -212,6 +212,7 @@ async-compression = { version = "0.4", default-features = false, features = [
 flate2 = "1"
 console-subscriber = "0.5.0"
 crossbeam-channel = "0.5"
+crossbeam-utils = { version = "0.8", optional = true }
 lru = "0.18.0"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = [
