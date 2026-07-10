@@ -3,7 +3,7 @@ use super::config::{ActionNode, EntryAction};
 use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
 use super::trace::{IvrTraceCollector, IvrTraceEntry, IvrTraceSession};
 use crate::call::app::{
-    AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController,
+    AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController, RecordingInfo,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -80,6 +80,7 @@ struct PendingMenu {
     invalid_action: Option<Box<ActionNode>>,
     max_retries: u32,
     retry_count: u32,
+    timeout_ms: u64,
 }
 
 impl StepIvrApp {
@@ -485,6 +486,52 @@ impl StepIvrApp {
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::WaitFor(ref wait_event) => {
+                        // InputPhone collects digits synchronously; forward to provider
+                        if matches!(node.action, EntryAction::InputPhone { .. }) {
+                            let (provider_event, step_trigger) = match wait_event {
+                                WaitEvent::DtmfCollected { .. } => {
+                                    let number = self.sess.variables
+                                        .get("phone_number")
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    (ProviderEvent::PhoneCollected { number: number.clone() },
+                                     crate::rwi::TriggerInfo::with_detail(
+                                         "phone_collected",
+                                         serde_json::json!({ "number": number }),
+                                     ))
+                                }
+                                WaitEvent::DtmfTimeout => {
+                                    (ProviderEvent::DtmfTimeout,
+                                     crate::rwi::TriggerInfo::new("dtmf_timeout"))
+                                }
+                                _ => unreachable!(),
+                            };
+                            self.pending_start_instant = self.step_start_instant;
+                            self.pending_trace = Some(IvrTraceEntry {
+                                session_id: session_id.clone(),
+                                caller: caller.clone(),
+                                callee: callee.clone(),
+                                step_index: self.step_index,
+                                trigger: step_trigger,
+                                provider_url: None,
+                                action_type: node_type_str,
+                                action_json,
+                                error: None,
+                                step_id: step_id.clone(),
+                                step_name: step_name.clone(),
+                                step_start_time: self.current_step_start_time.clone(),
+                                step_end_time: None,
+                                duration_ms: 0,
+                                extra: self.extra.clone(),
+                                end_reason: None,
+                                end_detail: None,
+                            });
+                            self.current_node = Some(
+                                self.request_next(Some(provider_event)).await?,
+                            );
+                            return Box::pin(self.__exec_node(ctrl, ctx)).await;
+                        }
+
                         let step_trigger = match wait_event {
                             WaitEvent::DtmfCollected { digit } => {
                                 crate::rwi::TriggerInfo::with_detail(
@@ -744,7 +791,7 @@ impl StepIvrApp {
                 if let Some(ref menu) = self.pending_menu {
                     ctrl.set_timeout(
                         "ivr_dtmf_timeout",
-                        Duration::from_millis(menu.max_retries as u64 * 5000),
+                        Duration::from_millis(menu.timeout_ms),
                     );
                 }
                 return Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
@@ -768,6 +815,7 @@ impl StepIvrApp {
                 timeout_action,
                 invalid_action,
                 max_retries,
+                timeout_ms,
                 ..
             } => PendingMenu {
                 entries: entries.clone(),
@@ -775,6 +823,7 @@ impl StepIvrApp {
                 invalid_action: invalid_action.clone(),
                 max_retries: *max_retries,
                 retry_count: 0,
+                timeout_ms: *timeout_ms,
             },
             _ => {
                 warn!("build_pending_menu called with unexpected action type, returning empty menu");
@@ -784,6 +833,7 @@ impl StepIvrApp {
                     invalid_action: None,
                     max_retries: 0,
                     retry_count: 0,
+                    timeout_ms: 0,
                 }
             }
         }
@@ -796,6 +846,7 @@ impl StepIvrApp {
         let timeout_action = menu.timeout_action;
         let invalid_action = menu.invalid_action;
         let max_retries = menu.max_retries;
+        let timeout_ms = menu.timeout_ms;
 
         if let Some(next) = entries.get(digit) {
             return Some(next.clone());
@@ -812,6 +863,7 @@ impl StepIvrApp {
                 timeout_action,
                 invalid_action: None,
                 max_retries,
+                timeout_ms,
             });
             return Some(next_action);
         }
@@ -821,6 +873,7 @@ impl StepIvrApp {
             timeout_action,
             invalid_action: None,
             max_retries,
+            timeout_ms,
         });
         None
     }
@@ -832,6 +885,7 @@ impl StepIvrApp {
         let timeout_action = menu.timeout_action;
         let invalid_action = menu.invalid_action;
         let max_retries = menu.max_retries;
+        let timeout_ms = menu.timeout_ms;
 
         if let Some(ta) = timeout_action {
             return Some(*ta);
@@ -849,6 +903,7 @@ impl StepIvrApp {
             timeout_action: None,
             invalid_action,
             max_retries,
+            timeout_ms,
         });
         None
     }
@@ -962,6 +1017,16 @@ impl CallApp for StepIvrApp {
             self.current_track_id = None;
             self.interrupt_on_dtmf = false;
 
+            // Provider-driven menus (empty entries) forward any DTMF to provider
+            let is_provider_driven = self.pending_menu.as_ref().map_or(false, |m| m.entries.is_empty());
+            if is_provider_driven {
+                self.pending_menu.take();
+                self.current_node = Some(
+                    self.request_next(Some(ProviderEvent::Dtmf { digit })).await?,
+                );
+                return self.__exec_node(ctrl, context).await;
+            }
+
             if let Some(next) = self.handle_menu_dtmf(&digit) {
                 self.provider.on_local_dtmf_match(&digit, &next).await;
                 let dtmf_detail = serde_json::json!({ "digit": digit.clone() });
@@ -1008,7 +1073,7 @@ impl CallApp for StepIvrApp {
                 self.awaiting_dtmf = true;
                 ctrl.set_timeout(
                     "ivr_dtmf_timeout",
-                    Duration::from_millis(menu.max_retries as u64 * 5000),
+                    Duration::from_millis(menu.timeout_ms),
                 );
                 return Ok(AppAction::Continue);
             }
@@ -1067,6 +1132,17 @@ impl CallApp for StepIvrApp {
         self.awaiting_dtmf = false;
 
         if self.pending_menu.is_some() {
+            // Provider-driven menus (empty entries) forward timeout to provider
+            let is_provider_driven = self.pending_menu.as_ref().map_or(false, |m| m.entries.is_empty());
+            if is_provider_driven {
+                self.pending_menu.take();
+                self.current_node = Some(
+                    self.request_next(Some(ProviderEvent::DtmfMenuTimeout)).await?,
+                );
+                self.current_trigger = Some(crate::rwi::TriggerInfo::new("dtmf_menu_timeout"));
+                return self.__exec_node(ctrl, context).await;
+            }
+
             if let Some(next) = self.handle_menu_timeout() {
                 self.current_trigger = Some(crate::rwi::TriggerInfo::new("dtmf_menu_timeout"));
                 self.current_node = Some(next);
@@ -1201,6 +1277,23 @@ impl CallApp for StepIvrApp {
         }
         self.pending_menu = None;
         Ok(())
+    }
+
+    async fn on_record_complete(
+        &mut self,
+        info: RecordingInfo,
+        ctrl: &mut CallController,
+        context: &ApplicationContext,
+    ) -> anyhow::Result<AppAction> {
+        let duration_secs = info.duration.as_secs();
+        self.current_node = Some(
+            self.request_next(Some(ProviderEvent::RecordingComplete {
+                url: info.path,
+                duration_secs,
+            }))
+            .await?,
+        );
+        self.__exec_node(ctrl, context).await
     }
 }
 
@@ -2354,6 +2447,147 @@ mod tests {
         assert_eq!(state.end_calls.lock().await.len(), 0);
 
         state.release_step.notify_waiters();
+    }
+
+    // ── Bug 6: Provider-driven menu timeout forwards to provider ──────────
+
+    #[tokio::test]
+    async fn test_provider_driven_menu_timeout_forwards_to_provider() {
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: None,
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 3000,
+            max_retries: 1,
+            entries: HashMap::new(),
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        let followup = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+        });
+
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![menu, followup])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Menu has no greeting → NoAudio path → timeout set, app waiting
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stack.timeout("ivr_dtmf_timeout");
+
+        // With fix: provider called with DtmfMenuTimeout → returns Transfer
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    // ── Bug 7: InputPhone forwards collected digits to provider ───────────
+
+    #[tokio::test]
+    async fn test_input_phone_forwards_to_provider() {
+        let input_phone = ActionNode::new(EntryAction::InputPhone {
+            prompt: Some("enter_phone.wav".into()),
+            prompt_text: None,
+            prompt_voice: None,
+            min_digits: 11,
+            max_digits: 11,
+        });
+        let followup = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+        });
+
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![input_phone, followup])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "enter_phone.wav"
+                )
+            })
+            .await;
+
+        // Inject DTMF digits while collect_dtmf is waiting
+        stack.dtmf("12345678901");
+
+        // With fix: provider called with PhoneCollected → returns Transfer
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    // ── Bug 8: Torecord forwards recording complete to provider ──────────
+
+    #[tokio::test]
+    async fn test_torecord_recording_complete_forwards_to_provider() {
+        let torecord = ActionNode::new(EntryAction::Torecord {
+            prompt: Some("record.wav".into()),
+            beep: true,
+            max_duration_secs: Some(5),
+        });
+        let followup = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+        });
+
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![torecord, followup])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "record.wav"
+                )
+            })
+            .await;
+        stack
+            .assert_cmd(200, "start_record", |c| {
+                matches!(c, CallCommand::StartRecording { .. })
+            })
+            .await;
+
+        // Inject recording complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stack.record_complete("recordings/test.wav", Duration::from_secs(3), 12345);
+
+        // With fix: provider called with RecordingComplete → returns Transfer
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
     }
 
     // ── True E2E: HTTP → Python provider ─────────────────────────────────

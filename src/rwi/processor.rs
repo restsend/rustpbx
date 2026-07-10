@@ -90,6 +90,35 @@ async fn start_peer_conference_bridge(
         }
     };
 
+    // Determine the negotiated audio codec from the remote description.
+    // If the remote description is not yet available (pre-answer race), fall back to PCMU.
+    let (negotiated_codec, negotiated_params) = pc
+        .remote_description()
+        .and_then(|desc| {
+            let sdp = desc.to_sdp_string();
+            let profile =
+                crate::media::negotiate::MediaNegotiator::extract_leg_profile(&sdp);
+            profile.audio.map(|audio| {
+                let codec = audio.codec;
+                let params = RtpCodecParameters {
+                    payload_type: audio.payload_type,
+                    clock_rate: audio.clock_rate,
+                    channels: audio.channels as u8,
+                };
+                (codec, params)
+            })
+        })
+        .unwrap_or_else(|| {
+            (
+                audio_codec::CodecType::PCMU,
+                RtpCodecParameters {
+                    payload_type: 0,
+                    clock_rate: 8000,
+                    channels: 1,
+                },
+            )
+        });
+
     // Wire conference output → peer RTP sender using the EXISTING negotiated transceiver.
     // We must NOT call pc.add_track() on an already-negotiated PC: that would create a second
     // transceiver with no remote-address binding, causing start_playback_on() to pick it up
@@ -97,11 +126,6 @@ async fn start_peer_conference_bridge(
     // FileTrack::start_playback_on does: find the existing audio transceiver and replace its
     // sender with a new one backed by our sample_track.
     let (audio_sender, sample_track_arc, _) = sample_track(rustrtc::media::MediaKind::Audio, 100);
-    let params = RtpCodecParameters {
-        payload_type: 0, // PCMU
-        clock_rate: 8000,
-        channels: 1,
-    };
     let ssrc = rand::random::<u32>();
 
     let transceivers = pc.get_transceivers();
@@ -111,16 +135,16 @@ async fn start_peer_conference_bridge(
 
     if let Some(transceiver) = existing {
         let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> = sample_track_arc;
-        let mut sender_builder = rustrtc::RtpSender::builder(track_arc, ssrc).params(params);
+        let mut sender_builder = rustrtc::RtpSender::builder(track_arc, ssrc).params(negotiated_params);
         if let Some(ref cname) = pc.config().cname {
             sender_builder = sender_builder.cname(cname.clone());
         }
         let new_sender = sender_builder.build();
         transceiver.set_sender(Some(new_sender));
-        tracing::debug!(%leg_id, "auto-bridge: set_sender on existing transceiver");
+        tracing::debug!(%leg_id, codec = ?negotiated_codec, "auto-bridge: set_sender on existing transceiver");
     } else {
         // No existing transceiver yet (pre-negotiation race) — fall back to add_track.
-        if let Err(e) = pc.add_track(sample_track_arc, params) {
+        if let Err(e) = pc.add_track(sample_track_arc, negotiated_params) {
             tracing::warn!(%leg_id, error = %e, "auto-bridge: add_track failed, skipping");
             return None;
         }
@@ -148,7 +172,7 @@ async fn start_peer_conference_bridge(
     });
 
     // PeerConnectionAudioReceiver reads incoming RTP from the peer and decodes to PCM
-    let decoder = audio_codec::create_decoder(audio_codec::CodecType::PCMU);
+    let decoder = audio_codec::create_decoder(negotiated_codec);
     let audio_receiver = Box::new(PeerConnectionAudioReceiver::new(pc, decoder));
 
     // Start the full-duplex bridge
@@ -159,12 +183,12 @@ async fn start_peer_conference_bridge(
             leg_id,
             tx,
             audio_receiver,
-            audio_codec::CodecType::PCMU,
+            negotiated_codec,
         )
         .await
     {
         Ok(handle) => {
-            tracing::info!(%conf_id, %leg_id, "auto-bridge: conference media bridge started");
+            tracing::info!(%conf_id, %leg_id, codec = ?negotiated_codec, "auto-bridge: conference media bridge started");
             Some(handle)
         }
         Err(e) => {
@@ -1182,16 +1206,6 @@ impl RwiCommandProcessor {
         Ok(trunk)
     }
 
-    /// True when an originate is routed out an explicit named carrier trunk.
-    ///
-    /// Uses the SAME trim/non-empty rule as `apply_explicit_originate_trunk` (a
-    /// `Some("")`/whitespace trunk does NOT route to a trunk), so the two never
-    /// disagree about whether a leg is a PSTN-trunk originate. Used to gate the
-    /// PCMU-only SDP offer below.
-    fn is_trunk_originate(trunk_name: Option<&str>) -> bool {
-        trunk_name.map(str::trim).is_some_and(|s| !s.is_empty())
-    }
-
     /// Apply an explicit carrier-trunk override to an originate's InviteOption.
     ///
     /// When `trunk_name` names a configured (and enabled) trunk, stamp that trunk's
@@ -1278,19 +1292,29 @@ impl RwiCommandProcessor {
         } else {
             media_track
         };
-        // PSTN carrier trunks are G.711, and the RWI conference bridge sends RTP
-        // with a fixed PCMU payload type (see start_peer_conference_bridge). The
-        // default offer advertises the full set (opus, G729, G722, PCMU, PCMA)
-        // with opus/G729 ahead of PCMU, so a carrier that can't do opus answers
-        // G.729 — which the PCMU bridge then mis-handles, garbling audio both
-        // ways. Offer PCMU ONLY when routing out a named trunk so negotiation can
-        // only converge on PCMU, matching the bridge. (PCMA is deliberately
-        // excluded: the bridge can't speak a-law either, so offering it would
-        // reintroduce the same mismatch if a trunk preferred a-law.) Non-trunk
-        // originates (registered/WebRTC agents, direct SIP URIs) keep the full
-        // codec set so opus still works.
-        let media_track = if Self::is_trunk_originate(req.trunk.as_deref()) {
-            media_track.with_codec_preference(vec![audio_codec::CodecType::PCMU])
+        // If routing out a named carrier trunk, respect the trunk's codec configuration.
+        // When no codecs are configured on the trunk, use the default full set (the
+        // conference bridge now sends whatever codec was negotiated, so there is no
+        // need to restrict to PCMU-only).
+        let media_track = if let Some(trunk_name) = req.trunk.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
+                if !trunk.codec.is_empty() {
+                    let codecs: Vec<audio_codec::CodecType> = trunk
+                        .codec
+                        .iter()
+                        .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
+                        .collect();
+                    if !codecs.is_empty() {
+                        media_track.with_codec_preference(codecs)
+                    } else {
+                        media_track
+                    }
+                } else {
+                    media_track
+                }
+            } else {
+                media_track
+            }
         } else {
             media_track
         }
@@ -1557,10 +1581,30 @@ impl RwiCommandProcessor {
                                         tracing::warn!(%cmd_call_id, %mixer_id, "No track sender found, conference audio will not be sent");
                                     }
 
+                                    // Determine the negotiated codec from the caller_peer's PeerConnection
+                                    let join_mixer_codec = {
+                                        let tracks = cmd_caller_peer.get_tracks().await;
+                                        let mut codec = audio_codec::CodecType::PCMU;
+                                        for t in &tracks {
+                                            let guard = t.lock().await;
+                                            if let Some(pc) = guard.get_peer_connection().await {
+                                                if let Some(desc) = pc.remote_description() {
+                                                    let sdp = desc.to_sdp_string();
+                                                    let profile = crate::media::negotiate::MediaNegotiator::extract_leg_profile(&sdp);
+                                                    if let Some(audio) = profile.audio {
+                                                        codec = audio.codec;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        codec
+                                    };
+
                                     // Create audio receiver from caller_peer
                                     let audio_receiver = Box::new(OriginateAudioReceiver);
 
-                                    if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver, audio_codec::CodecType::PCMU).await {
+                                    if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver, join_mixer_codec).await {
                                         tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to start conference bridge");
                                     } else {
                                         tracing::info!(%cmd_call_id, %mixer_id, "Successfully joined conference from originate");
@@ -2382,12 +2426,26 @@ impl RwiCommandProcessor {
         } else {
             media_track
         };
-        // Same constraint as the single-originate path: a parallel leg routed out
-        // a named carrier trunk must offer PCMU only (PSTN is G.711 and the RWI
-        // conference bridge sends a fixed PCMU payload type), or the carrier can
-        // answer G.729/PCMA and the bridge mis-handles it. See is_trunk_originate.
-        let media_track = if Self::is_trunk_originate(trunk) {
-            media_track.with_codec_preference(vec![audio_codec::CodecType::PCMU])
+        // If routing out a named carrier trunk, respect the trunk's codec configuration.
+        let media_track = if let Some(trunk_name) = trunk.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
+                if !trunk.codec.is_empty() {
+                    let codecs: Vec<audio_codec::CodecType> = trunk
+                        .codec
+                        .iter()
+                        .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
+                        .collect();
+                    if !codecs.is_empty() {
+                        media_track.with_codec_preference(codecs)
+                    } else {
+                        media_track
+                    }
+                } else {
+                    media_track
+                }
+            } else {
+                media_track
+            }
         } else {
             media_track
         }
