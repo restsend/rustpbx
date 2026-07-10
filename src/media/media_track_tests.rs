@@ -96,6 +96,31 @@ async fn test_media_track_codec_preference() {
     );
 }
 
+/// A PCMU-only codec preference (used for carrier-trunk originates, where the
+/// RWI conference bridge sends a fixed PCMU payload type) must produce an offer
+/// that ADVERTISES PCMU and EXCLUDES the wideband/compressed codecs. Regression
+/// guard for the trunk-audio garble bug: offering opus/G729/G722 ahead of PCMU
+/// let a carrier answer G.729, which the PCMU-only bridge then mis-decoded.
+#[tokio::test]
+async fn test_pcmu_only_preference_excludes_wideband_codecs() {
+    let track = RtpTrackBuilder::new("test-track-trunk-pcmu".to_string())
+        .with_codec_preference(vec![CodecType::PCMU])
+        .build();
+
+    let offer_sdp = track.local_description().await.unwrap();
+
+    assert!(
+        offer_sdp.contains("PCMU"),
+        "trunk offer must advertise PCMU, got:\n{offer_sdp}"
+    );
+    for banned in ["opus", "G729", "G722", "PCMA"] {
+        assert!(
+            !offer_sdp.contains(banned),
+            "trunk offer must NOT advertise {banned} (bridge is PCMU-only), got:\n{offer_sdp}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_media_track_preserves_custom_dtmf_rtpmap() {
     let track = RtpTrackBuilder::new("test-track-dtmf-rtpmap".to_string())

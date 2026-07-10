@@ -1104,6 +1104,131 @@ impl RwiCommandProcessor {
         }
     }
 
+    /// Normalize an RWI-supplied `caller_id` into a valid SIP URI string for the
+    /// originate `From` header.
+    ///
+    /// `caller_id` is commonly a bare phone number ("+16142159851") — caller ID
+    /// *is* a number. A bare token parses into a user-less URI, and a trunk's
+    /// `rewrite_hostport` then restamps the host, yielding an invalid `From` like
+    /// `<carrier.example.com>` (no user) that carriers reject with
+    /// "400 Invalid From". Rules:
+    ///   * `None`/blank → `sip:rwi@<realm>` (unchanged fallback).
+    ///   * a `sip:`/`sips:` URI that already has a user → kept verbatim.
+    ///   * anything else (bare number, `user@host`, scheme-without-user, values
+    ///     with params) → the leading token is taken as the user and wrapped as
+    ///     `sip:<user>@<realm>`. Any scheme prefix is stripped case-insensitively
+    ///     and the token is cut at the first `@`/`;`/`?` so we never double-affix
+    ///     a host or leak params into the URI host.
+    fn normalize_originate_caller_id(caller_id: Option<&str>, realm: &str) -> String {
+        let raw = match caller_id.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(c) => c,
+            None => return format!("sip:rwi@{realm}"),
+        };
+
+        // Keep it as-is only if it's a sip/sips URI that already carries a user.
+        if let Ok(uri) = rsipstack::sip::Uri::try_from(raw) {
+            let has_scheme = matches!(
+                uri.scheme,
+                Some(rsipstack::sip::Scheme::Sip) | Some(rsipstack::sip::Scheme::Sips)
+            );
+            let has_user = uri.auth.as_ref().is_some_and(|a| !a.user.is_empty());
+            if has_scheme && has_user {
+                return raw.to_string();
+            }
+        }
+
+        // Otherwise treat the input as a bare user token: strip a leading sip/sips
+        // scheme (case-insensitive), cut at the first host/param/header delimiter.
+        let no_scheme = raw
+            .get(..4)
+            .filter(|p| p.eq_ignore_ascii_case("sip:"))
+            .map(|_| &raw[4..])
+            .or_else(|| {
+                raw.get(..5)
+                    .filter(|p| p.eq_ignore_ascii_case("sips:"))
+                    .map(|_| &raw[5..])
+            })
+            .unwrap_or(raw);
+        let user = no_scheme
+            .split(['@', ';', '?'])
+            .next()
+            .unwrap_or(no_scheme)
+            .trim();
+        // Degenerate inputs (`sip:`, `@host`, `;user=phone`, …) yield an empty
+        // user, which would produce `sip:@<realm>` — the very user-less From this
+        // helper exists to prevent. Fall back to the safe default instead.
+        if user.is_empty() {
+            return format!("sip:rwi@{realm}");
+        }
+        format!("sip:{user}@{realm}")
+    }
+
+    /// Resolve a named originate trunk to its config, rejecting unknown/unloaded
+    /// trunks and DISABLED trunks (apply_trunk_config only stamps routing fields and
+    /// does not enforce `disabled`). Shared by the apply helper and the parallel
+    /// pre-validation so an explicit trunk fails the same way in both — synchronously,
+    /// before any call is started.
+    fn resolve_originate_trunk(
+        server: &SipServerRef,
+        trunk_name: &str,
+    ) -> Result<crate::proxy::routing::TrunkConfig, String> {
+        let trunk = server
+            .data_context
+            .get_trunk(trunk_name)
+            .ok_or_else(|| format!("unknown or unloaded trunk: {}", trunk_name))?;
+        if trunk.disabled.unwrap_or(false) {
+            return Err(format!("trunk is disabled: {}", trunk_name));
+        }
+        Ok(trunk)
+    }
+
+    /// True when an originate is routed out an explicit named carrier trunk.
+    ///
+    /// Uses the SAME trim/non-empty rule as `apply_explicit_originate_trunk` (a
+    /// `Some("")`/whitespace trunk does NOT route to a trunk), so the two never
+    /// disagree about whether a leg is a PSTN-trunk originate. Used to gate the
+    /// PCMU-only SDP offer below.
+    fn is_trunk_originate(trunk_name: Option<&str>) -> bool {
+        trunk_name.map(str::trim).is_some_and(|s| !s.is_empty())
+    }
+
+    /// Apply an explicit carrier-trunk override to an originate's InviteOption.
+    ///
+    /// When `trunk_name` names a configured (and enabled) trunk, stamp that trunk's
+    /// destination next-hop, transport, digest credential, host rewrite, and
+    /// P-Asserted-Identity header onto `option` (the same pure mutator the inbound
+    /// proxy path uses), so the resulting INVITE goes straight to the carrier. When
+    /// `trunk_name` is None/blank the option is left untouched and the legacy
+    /// direct-to-callee behavior is preserved.
+    ///
+    /// Returns Err(message) on an unknown/unloaded/disabled trunk or an invalid trunk
+    /// destination — surfaced synchronously to the caller before any call is spawned.
+    fn apply_explicit_originate_trunk(
+        server: &SipServerRef,
+        invite_option: &mut rsipstack::dialog::invitation::InviteOption,
+        trunk_name: Option<&str>,
+        call_id: &str,
+    ) -> Result<(), String> {
+        let Some(trunk_name) = trunk_name.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+
+        let trunk = Self::resolve_originate_trunk(server, trunk_name)?;
+
+        crate::proxy::routing::matcher::apply_trunk_config(invite_option, &trunk)
+            .map_err(|e| format!("trunk config failed for '{}': {}", trunk_name, e))?;
+
+        tracing::info!(
+            call_id = %call_id,
+            trunk = %trunk_name,
+            dest = ?invite_option.destination,
+            has_cred = invite_option.credential.is_some(),
+            "originate routed direct-to-trunk"
+        );
+
+        Ok(())
+    }
+
     pub async fn originate_call(
         &self,
         req: OriginateRequest,
@@ -1125,10 +1250,7 @@ impl RwiCommandProcessor {
             .as_ref()
             .and_then(|v| v.first().cloned())
             .unwrap_or_else(|| server.proxy_config.addr.clone());
-        let caller_str = req
-            .caller_id
-            .clone()
-            .unwrap_or_else(|| format!("sip:rwi@{}", realm));
+        let caller_str = Self::normalize_originate_caller_id(req.caller_id.as_deref(), &realm);
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
 
@@ -1153,6 +1275,22 @@ impl RwiCommandProcessor {
                 .with_cname(server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
+        } else {
+            media_track
+        };
+        // PSTN carrier trunks are G.711, and the RWI conference bridge sends RTP
+        // with a fixed PCMU payload type (see start_peer_conference_bridge). The
+        // default offer advertises the full set (opus, G729, G722, PCMU, PCMA)
+        // with opus/G729 ahead of PCMU, so a carrier that can't do opus answers
+        // G.729 — which the PCMU bridge then mis-handles, garbling audio both
+        // ways. Offer PCMU ONLY when routing out a named trunk so negotiation can
+        // only converge on PCMU, matching the bridge. (PCMA is deliberately
+        // excluded: the bridge can't speak a-law either, so offering it would
+        // reintroduce the same mismatch if a trunk preferred a-law.) Non-trunk
+        // originates (registered/WebRTC agents, direct SIP URIs) keep the full
+        // codec set so opus still works.
+        let media_track = if Self::is_trunk_originate(req.trunk.as_deref()) {
+            media_track.with_codec_preference(vec![audio_codec::CodecType::PCMU])
         } else {
             media_track
         }
@@ -1180,10 +1318,17 @@ impl RwiCommandProcessor {
             }
         };
 
-        let invite_option = rsipstack::dialog::invitation::InviteOption {
+        let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
-            contact: caller_uri.clone(),
+            // Contact must be the proxy's OWN reachable address so the carrier
+            // routes in-dialog requests (BYE / re-INVITE) back here — not the
+            // caller-id URI, which is not a proxy endpoint (and whose host is
+            // rewritten to the carrier when a trunk override is applied). Falls
+            // back to the caller URI only if no local contact is available.
+            contact: server
+                .default_contact_uri()
+                .unwrap_or_else(|| caller_uri.clone()),
             content_type: Some("application/sdp".to_string()),
             offer: Some(sdp_offer.clone().into_bytes()),
             destination: None,
@@ -1192,6 +1337,40 @@ impl RwiCommandProcessor {
             call_id: Some(req.call_id.clone()),
             ..Default::default()
         };
+
+        // Direct-to-trunk routing. The base option above has destination:None, so
+        // rsipstack resolves the next hop from the callee request-URI — which only
+        // reaches a registered/reachable SIP URI (and self-INVITEs this proxy, which
+        // 407s a non-local callee). When the caller names a `trunk`, stamp that
+        // trunk's next-hop + credential + P-Asserted-Identity onto the option so
+        // rsipstack sends ONE INVITE straight to the carrier and auto-answers its
+        // 401/407 from the credential. When `trunk` is absent the option is left
+        // untouched and the legacy direct-to-callee behavior is preserved
+        // (byte-identical).
+        //
+        // Originate is an API command, so the caller declares which carrier gateway
+        // it wants by name; the named trunk's config is applied here. We deliberately
+        // do NOT consult the proxy route table here — that would duplicate
+        // CallModule's direction + admission semantics and drift.
+        //
+        // KNOWN LIMITATIONS on this direct path (vs. the inbound-proxy route path):
+        //   * Authorization: any RWI caller permitted to originate may select any
+        //     enabled trunk by name. There is no per-token trunk allowlist/scope; the
+        //     only gate is whatever authorizes the originate command itself.
+        //   * Admission: per-trunk CAC/CPS/max-duration and route-layer media policy
+        //     are NOT enforced here — the caller is responsible for pacing.
+        // Both are acceptable for a caller-driven control API but are documented so a
+        // deployment can add a trunk allowlist/scope if its threat model needs one.
+        //
+        // Runs synchronously (before the spawn below), so an unknown/disabled trunk
+        // returns an immediate failed ack rather than leaking a half-built call.
+        Self::apply_explicit_originate_trunk(
+            &server,
+            &mut invite_option,
+            req.trunk.as_deref(),
+            &req.call_id,
+        )
+        .map_err(CommandError::CommandFailed)?;
 
         let call_id = req.call_id.clone();
         let gateway = self.gateway.clone();
@@ -1953,6 +2132,16 @@ impl RwiCommandProcessor {
             return Err(CommandError::CommandFailed("No targets specified".into()));
         }
 
+        // Validate an explicit trunk override ONCE, synchronously, BEFORE emitting
+        // ParallelOriginateStarted or fanning out the legs — so an unknown/unloaded/
+        // disabled trunk surfaces as an immediate command failure rather than a
+        // "started" operation in which every leg then fails. Per-leg
+        // apply_explicit_originate_trunk re-resolves and applies it on each leg.
+        if let Some(trunk_name) = req.trunk.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Self::resolve_originate_trunk(&server, trunk_name)
+                .map_err(CommandError::CommandFailed)?;
+        }
+
         let operation_id = req.operation_id.clone();
         let targets = req.targets.clone();
         let leg_count = targets.len() as u32;
@@ -1994,6 +2183,7 @@ impl RwiCommandProcessor {
             let operation_id = operation_id.clone();
             let caller_id = req.caller_id.clone();
             let extra_headers = req.extra_headers.clone();
+            let trunk = req.trunk.clone();
             let target = target.clone();
             let cancel_token = cancel_token.clone();
 
@@ -2007,6 +2197,7 @@ impl RwiCommandProcessor {
                     &target,
                     caller_id,
                     extra_headers,
+                    trunk.as_deref(),
                     gateway,
                     registry,
                     &operation_id,
@@ -2158,6 +2349,7 @@ impl RwiCommandProcessor {
         target: &crate::rwi::session::OriginateTarget,
         caller_id: Option<String>,
         extra_headers: HashMap<String, String>,
+        trunk: Option<&str>,
         gateway: RwiGatewayRef,
         registry: Arc<ActiveProxyCallRegistry>,
         operation_id: &str,
@@ -2189,6 +2381,15 @@ impl RwiCommandProcessor {
             media_track.with_bind_ip(bind_ip)
         } else {
             media_track
+        };
+        // Same constraint as the single-originate path: a parallel leg routed out
+        // a named carrier trunk must offer PCMU only (PSTN is G.711 and the RWI
+        // conference bridge sends a fixed PCMU payload type), or the carrier can
+        // answer G.729/PCMA and the bridge mis-handles it. See is_trunk_originate.
+        let media_track = if Self::is_trunk_originate(trunk) {
+            media_track.with_codec_preference(vec![audio_codec::CodecType::PCMU])
+        } else {
+            media_track
         }
         .build();
 
@@ -2212,10 +2413,17 @@ impl RwiCommandProcessor {
             headers.push(rsipstack::sip::Header::Other(k, v));
         }
 
-        let invite_option = rsipstack::dialog::invitation::InviteOption {
+        let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
-            contact: caller_uri.clone(),
+            // Contact must be the proxy's OWN reachable address so the carrier
+            // routes in-dialog requests (BYE / re-INVITE) back here — not the
+            // caller-id URI, which is not a proxy endpoint (and whose host is
+            // rewritten to the carrier when a trunk override is applied). Falls
+            // back to the caller URI only if no local contact is available.
+            contact: server
+                .default_contact_uri()
+                .unwrap_or_else(|| caller_uri.clone()),
             content_type: Some("application/sdp".to_string()),
             offer: Some(sdp_offer.into_bytes()),
             destination: None,
@@ -2224,6 +2432,10 @@ impl RwiCommandProcessor {
             call_id: Some(call_id.clone()),
             ..Default::default()
         };
+
+        // Apply an explicit carrier-trunk override (same as single originate) so a
+        // parallel-originate leg can also be placed straight out a named trunk.
+        Self::apply_explicit_originate_trunk(&server, &mut invite_option, trunk, &call_id)?;
 
         let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
@@ -4705,6 +4917,7 @@ impl RwiCommandProcessor {
             ringback: None,
             ringback_target: None,
             extra_headers: Default::default(),
+            trunk: None,
         };
         // Fire-and-forget: origination runs in a background task
         let _ = self.originate_call(req).await;
@@ -4789,6 +5002,79 @@ mod tests {
     use crate::rwi::session::RwiCommandPayload;
     use parking_lot::RwLock;
     use std::sync::Arc;
+
+    // caller_id normalization — the From-URI validity contract for originate.
+    // A malformed From (e.g. a bare number -> user-less URI after a trunk host
+    // rewrite) is rejected by carriers with "400 Invalid From".
+    #[test]
+    fn normalize_originate_caller_id_shapes() {
+        use RwiCommandProcessor as P;
+        let realm = "pbx.example.com";
+        // Bare E.164 number: the common case — becomes sip:<num>@realm.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("+16142159851"), realm),
+            "sip:+16142159851@pbx.example.com"
+        );
+        // Number without '+'.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("16142159851"), realm),
+            "sip:16142159851@pbx.example.com"
+        );
+        // Full SIP URI with a user is preserved verbatim.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("sip:+18005550100@carrier.invalid"), realm),
+            "sip:+18005550100@carrier.invalid"
+        );
+        // sips: URI with a user is preserved verbatim.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("sips:alice@secure.invalid"), realm),
+            "sips:alice@secure.invalid"
+        );
+        // scheme present but NO user -> re-wrapped so From carries a user.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("sip:+16142159851"), realm),
+            "sip:+16142159851@pbx.example.com"
+        );
+        // Bare user@host (no scheme) must NOT double-affix into
+        // sip:user@host@realm — take the user token only.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("device@example.com"), realm),
+            "sip:device@pbx.example.com"
+        );
+        // Params on a bare token don't leak into the URI host.
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("+16142159851;user=phone"), realm),
+            "sip:+16142159851@pbx.example.com"
+        );
+        // None / blank -> the unchanged rwi fallback.
+        assert_eq!(
+            P::normalize_originate_caller_id(None, realm),
+            "sip:rwi@pbx.example.com"
+        );
+        assert_eq!(
+            P::normalize_originate_caller_id(Some("  "), realm),
+            "sip:rwi@pbx.example.com"
+        );
+        // Degenerate inputs that would extract an EMPTY user must fall back to
+        // the safe default, never `sip:@realm`.
+        for degenerate in ["sip:", "sips:", "@example.com", ";user=phone", "?x=1"] {
+            assert_eq!(
+                P::normalize_originate_caller_id(Some(degenerate), realm),
+                "sip:rwi@pbx.example.com",
+                "degenerate caller_id {degenerate:?} must fall back, not sip:@realm"
+            );
+        }
+        // Every result must parse as a URI whose From would carry a user.
+        for input in ["+16142159851", "sip:+16142159851", "device@example.com"] {
+            let out = P::normalize_originate_caller_id(Some(input), realm);
+            let uri = rsipstack::sip::Uri::try_from(out.as_str())
+                .unwrap_or_else(|_| panic!("normalized caller_id must parse: {out}"));
+            assert!(
+                uri.auth.as_ref().is_some_and(|a| !a.user.is_empty()),
+                "normalized From URI must carry a user; input={input} out={out}"
+            );
+        }
+    }
 
     fn create_test_processor() -> (Arc<RwiCommandProcessor>, Arc<ConferenceManager>) {
         let registry = Arc::new(ActiveProxyCallRegistry::new());
@@ -5298,6 +5584,7 @@ mod tests {
                     ringback: None,
                     ringback_target: None,
                     extra_headers: std::collections::HashMap::new(),
+                    trunk: None,
                 },
             ))
             .await;
@@ -5325,6 +5612,7 @@ mod tests {
                     ringback: None,
                     ringback_target: None,
                     extra_headers: std::collections::HashMap::new(),
+                    trunk: None,
                 },
             ))
             .await;
