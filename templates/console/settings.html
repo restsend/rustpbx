@@ -836,84 +836,6 @@
 
                         <hr class="border-slate-100">
 
-                        <!-- JWT Authentication -->
-                        <div class="space-y-4">
-                            <div>
-                                <h3 class="text-sm font-semibold text-slate-900">JWT Authentication</h3>
-                                <p class="text-xs text-slate-500">Allow SIP endpoints to authenticate by presenting a signed JWT token instead of a password.</p>
-                            </div>
-                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <div>
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">Enable JWT auth</label>
-                                </div>
-                                <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                    <input type="checkbox"
-                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                        x-model="proxyDraft.jwt_auth.enabled" :disabled="proxyProcessing">
-                                    <span class="text-xs">Enabled</span>
-                                </label>
-                            </div>
-                            <div x-show="proxyDraft.jwt_auth.enabled" x-cloak
-                                class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                                <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret *</label>
-                                    <input type="password" x-model="proxyDraft.jwt_auth.secret" :disabled="proxyProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="Enter shared secret for signing tokens">
-                                    <p class="mt-1 text-[11px] text-slate-400">Leave empty to keep current secret. Clear and save with disabled toggle to remove.</p>
-                                </div>
-                                <div class="grid gap-4 md:grid-cols-2">
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">User ID claim</label>
-                                        <input type="text" x-model="proxyDraft.jwt_auth.user_id_claim" :disabled="proxyProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="userId">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">SIP header name</label>
-                                        <input type="text" x-model="proxyDraft.jwt_auth.sip_header_name" :disabled="proxyProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="X-Auth-Token">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Issuer (optional)</label>
-                                        <input type="text" x-model="proxyDraft.jwt_auth.issuer" :disabled="proxyProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="rustpbx">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Audience (optional)</label>
-                                        <input type="text" x-model="proxyDraft.jwt_auth.audience" :disabled="proxyProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="sip.rustpbx.com">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">WS token param</label>
-                                        <input type="text" x-model="proxyDraft.jwt_auth.ws_token_param" :disabled="proxyProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="token">
-                                    </div>
-                                </div>
-                                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
-                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="proxyDraft.jwt_auth.check_local_user" :disabled="proxyProcessing">
-                                        <span class="text-xs">Check local user backend</span>
-                                    </label>
-                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="proxyDraft.jwt_auth.dev_mint_enabled" :disabled="proxyProcessing">
-                                        <span class="text-xs">Enable dev token mint</span>
-                                    </label>
-                                </div>
-                                <p class="text-[11px] text-amber-600">⚠ Dev token mint (POST /cc/dev/jwt-preview) should be disabled in production.</p>
-                            </div>
-                        </div>
-
-                        <hr class="border-slate-100">
-
                         <!-- HTTP Call Router -->
                         <div class="space-y-4">
                             <div>
@@ -983,171 +905,255 @@
         <section x-show="activeTab === 'recording_storage'" x-cloak x-transition.opacity class="space-y-6"
             id="settings-tab-recording-storage" role="tabpanel" tabindex="0">
             <div class="space-y-6">
+
                 <!-- Card 1: Recording Engine -->
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-                        <div>
-                            <h2 class="text-base font-semibold text-slate-900">Recording Engine</h2>
-                            <p class="text-xs text-slate-500">Select recording engine for SIP+RTP media capture.</p>
-                        </div>
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            Engine · <span
-                                :class="recordingEngine !== 'local' ? 'text-emerald-600' : 'text-slate-400'"
-                                x-text="recordingEngine === 'local' ? 'Local (Legacy WAV)' : 'SipFlow'"></span>
-                        </span>
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Recording Engine</h2>
+                        <p class="text-xs text-slate-500">Choose the recording backend. SipFlow is the recommended modern engine with optional S3 upload.</p>
                     </div>
+
                     <div class="mt-4 space-y-4">
+                        <!-- Engine choice: radio buttons -->
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recording Engine</label>
-                            <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                                <label class="flex cursor-pointer items-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition"
-                                    :class="recordingEngine === 'local' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
-                                    <input type="radio" name="recording_engine" value="local" class="sr-only"
-                                        x-model="recordingEngine">
-                                    <div>
-                                        <div class="font-semibold">Local</div>
-                                        <div class="text-[11px] text-slate-400">Legacy WAV recorder</div>
-                                    </div>
-                                </label>
-                                <label class="flex cursor-pointer items-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition"
-                                    :class="recordingEngine !== 'local' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
-                                    <input type="radio" name="recording_engine" value="sipflow" class="sr-only"
-                                        x-model="recordingEngine">
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Engine type</label>
+                            <div class="grid gap-2 sm:grid-cols-2">
+                                <label class="flex cursor-pointer items-center gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="recordingMode === 'sipflow' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                    <input type="radio" name="recording_mode" value="sipflow" x-model="recordingMode"
+                                        class="sr-only">
                                     <div>
                                         <div class="font-semibold">SipFlow</div>
-                                        <div class="text-[11px] text-slate-400">Unified SIP+RTP engine</div>
+                                        <div class="text-[11px] opacity-70">High-performance SIP+RTP capture</div>
+                                    </div>
+                                </label>
+                                <label class="flex cursor-pointer items-center gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="recordingMode === 'filerecorder' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                    <input type="radio" name="recording_mode" value="filerecorder" x-model="recordingMode"
+                                        class="sr-only">
+                                    <div>
+                                        <div class="font-semibold">File Recorder</div>
+                                        <div class="text-[11px] opacity-70">Classic local WAV files</div>
                                     </div>
                                 </label>
                             </div>
                         </div>
 
-                        <!-- SipFlow Backend Config -->
-                        <div x-show="recordingEngine !== 'local'" x-cloak
-                            class="border-t border-slate-200 pt-4 space-y-4">
+                        <!-- SipFlow configuration panel -->
+                        <div x-show="recordingMode === 'sipflow'" x-cloak
+                            class="rounded-lg border border-sky-100 bg-sky-50/50 p-4 space-y-4">
                             <div class="rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-xs text-sky-700">
-                                <div class="flex items-start gap-2">
-                                    <svg class="h-4 w-4 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
-                                    <div>
-                                        <p class="font-semibold">{{ "settings_page.better_io_performance" | t }}</p>
-                                        <p class="mt-1">{{ "settings_page.concurrent_calls_support" | t }}</p>
-                                        <p class="mt-1">When Recording policy is enabled, SipFlow handles both SIP signalling and media capture.</p>
-                                    </div>
-                                </div>
-                            </div>
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">SipFlow Backend</label>
-                                <select x-model="sipflowDraft.backend_type" :disabled="recordingStorageProcessing"
-                                    class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="local">{{ "settings_page.local_backend_opt" | t }}</option>
-                                    <option value="remote">{{ "settings_page.remote_backend_opt" | t }}</option>
-                                </select>
-                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.select_backend" | t }}</p>
-                            </div>
-                            <div x-show="sipflowDraft.backend_type === 'local'"
-                                class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                                <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                        "settings_page.data_dir" | t }}</label>
-                                    <input type="text" x-model="sipflowDraft.local_root" :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="./config/sipflow">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.data_dir_hint" | t }}</p>
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                        "settings_page.subdirectories" | t }}</label>
-                                    <select x-model="sipflowDraft.local_subdirs" :disabled="recordingStorageProcessing"
-                                        class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                        <option value="none">{{ "settings_page.flat_structure" | t }}</option>
-                                        <option value="daily">{{ "settings_page.daily" | t }}</option>
-                                        <option value="hourly">{{ "settings_page.hourly" | t }}</option>
-                                    </select>
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.subdir_desc" | t }}</p>
-                                </div>
-                                <div class="grid gap-4 md:grid-cols-2">
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                            "settings_page.flush_count_label" | t }}</label>
-                                        <input type="number" x-model.number="sipflowDraft.local_flush_count"
-                                            :disabled="recordingStorageProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="1000" min="1">
-                                        <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_buffer_desc_short" |
-                                            t }}</p>
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                            "settings_page.flush_interval_label" | t }}</label>
-                                        <input type="number" x-model.number="sipflowDraft.local_flush_interval_secs"
-                                            :disabled="recordingStorageProcessing"
-                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="5" min="1">
-                                        <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_timeout_desc_short" |
-                                            t }}</p>
-                                    </div>
-                                </div>
+                                <p class="font-semibold">{{ "settings_page.better_io_performance" | t }}</p>
+                                <p class="mt-1">{{ "settings_page.concurrent_calls_support" | t }}</p>
                             </div>
 
-                            <!-- Remote Backend Config -->
-                            <div x-show="sipflowDraft.backend_type === 'remote'"
-                                class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                                <div>
-                                    <div class="flex items-center justify-between">
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                            "settings_page.sipflow_nodes" | t }}</label>
-                                        <button type="button" @click="sipflowDraft.remote_nodes.push({ udp: '', http: '' })"
-                                            :disabled="recordingStorageProcessing"
-                                            class="inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-sky-600 shadow-sm ring-1 ring-sky-200 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50">
-                                            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                    d="M12 4v16m8-8H4" />
-                                            </svg>
-                                            {{ "settings_page.sipflow_add_node" | t }}
-                                        </button>
-                                    </div>
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}</p>
-                                </div>
-                                <template x-for="(node, idx) in sipflowDraft.remote_nodes" :key="idx">
-                                    <div class="flex items-start gap-2 rounded-md border border-slate-200 bg-white p-3">
-                                        <div class="flex-1 space-y-2">
-                                            <div class="grid gap-2 md:grid-cols-2">
-                                                <div>
-                                                    <label class="block text-xs font-medium text-slate-500">{{
-                                                        "settings_page.udp_address" | t }}</label>
-                                                    <input type="text" x-model="node.udp" :disabled="recordingStorageProcessing"
-                                                        class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                        placeholder="192.168.1.100:3000">
-                                                </div>
-                                                <div>
-                                                    <label class="block text-xs font-medium text-slate-500">{{
-                                                        "settings_page.http_address" | t }}</label>
-                                                    <input type="text" x-model="node.http" :disabled="recordingStorageProcessing"
-                                                        class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                        placeholder="http://192.168.1.100:3001">
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <button type="button" @click="sipflowDraft.remote_nodes.splice(idx, 1)"
-                                            :disabled="recordingStorageProcessing || sipflowDraft.remote_nodes.length <= 1"
-                                            class="mt-5 inline-flex flex-none items-center justify-center rounded-md border border-red-200 bg-white px-2 py-1.5 text-xs font-medium text-red-500 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">
-                                            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                            </svg>
-                                        </button>
-                                    </div>
-                                </template>
+                            <form @submit.prevent="saveSipFlowSettings" class="space-y-4">
+                                <!-- Backend type -->
                                 <div>
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                        "settings_page.timeout_label" | t }}</label>
-                                    <input type="number" x-model.number="sipflowDraft.remote_timeout_secs"
-                                        :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="10" min="1">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.connection_timeout_hint" | t }}</p>
+                                        "settings_page.recording_backend" | t }}</label>
+                                    <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
+                                        class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="none">{{ "settings_page.disabled" | t }}</option>
+                                        <option value="local">{{ "settings_page.local_backend_opt" | t }}</option>
+                                        <option value="remote">{{ "settings_page.remote_backend_opt" | t }}</option>
+                                    </select>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.select_backend" | t }}</p>
+                                </div>
+
+                                <!-- Backend-specific config -->
+                                <div x-show="sipflowDraft.backend_type !== 'none'" x-cloak class="space-y-4">
+                                    <!-- Local -->
+                                    <div x-show="sipflowDraft.backend_type === 'local'"
+                                        class="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Data directory</label>
+                                            <input type="text" x-model="sipflowDraft.local_root" :disabled="sipflowProcessing"
+                                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                placeholder="./config/sipflow">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Subdirectory layout</label>
+                                            <select x-model="sipflowDraft.local_subdirs" :disabled="sipflowProcessing"
+                                                class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                <option value="none">Flat</option>
+                                                <option value="daily">Daily</option>
+                                                <option value="hourly">Hourly</option>
+                                            </select>
+                                        </div>
+                                        <div class="grid gap-3 md:grid-cols-2">
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush count</label>
+                                                <input type="number" x-model.number="sipflowDraft.local_flush_count"
+                                                    :disabled="sipflowProcessing" min="1"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="1000">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush interval (s)</label>
+                                                <input type="number" x-model.number="sipflowDraft.local_flush_interval_secs"
+                                                    :disabled="sipflowProcessing" min="1"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="5">
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Remote -->
+                                    <div x-show="sipflowDraft.backend_type === 'remote'"
+                                        class="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
+                                        <div>
+                                            <div class="flex items-center justify-between">
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">SipFlow nodes</label>
+                                                <button type="button" @click="sipflowDraft.remote_nodes.push({ udp: '', http: '' })"
+                                                    :disabled="sipflowProcessing"
+                                                    class="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50">
+                                                    <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                                                    Add node
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <template x-for="(node, idx) in sipflowDraft.remote_nodes" :key="idx">
+                                            <div class="flex items-start gap-2 rounded-md border border-slate-200 p-3">
+                                                <div class="flex-1 grid gap-2 md:grid-cols-2">
+                                                    <div>
+                                                        <label class="block text-xs font-medium text-slate-500">UDP address</label>
+                                                        <input type="text" x-model="node.udp" :disabled="sipflowProcessing"
+                                                            class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="192.168.1.100:3000">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-medium text-slate-500">HTTP address</label>
+                                                        <input type="text" x-model="node.http" :disabled="sipflowProcessing"
+                                                            class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="http://192.168.1.100:3001">
+                                                    </div>
+                                                </div>
+                                                <button type="button" @click="sipflowDraft.remote_nodes.splice(idx, 1)"
+                                                    :disabled="sipflowProcessing || sipflowDraft.remote_nodes.length <= 1"
+                                                    class="mt-5 flex-none rounded-md border border-red-200 bg-white px-2 py-1.5 text-xs font-medium text-red-500 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">Remove</button>
+                                            </div>
+                                        </template>
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Connection timeout (s)</label>
+                                            <input type="number" x-model.number="sipflowDraft.remote_timeout_secs"
+                                                :disabled="sipflowProcessing" min="1"
+                                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="10">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Media recording toggle -->
+                                <div class="flex items-center gap-3 border-t border-slate-200 pt-4">
+                                    <input type="checkbox" id="sf_media_recording" x-model="sipflowDraft.media_recording_enabled"
+                                        :disabled="sipflowProcessing"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                    <div>
+                                        <label for="sf_media_recording" class="text-sm font-semibold text-slate-700">Enable media recording</label>
+                                        <p class="text-[11px] text-slate-400">Capture RTP audio alongside SIP signalling. Disable for signalling-only mode.</p>
+                                    </div>
+                                </div>
+
+                                <!-- S3 upload after recording -->
+                                <div class="space-y-3">
+                                    <div class="flex items-center gap-3">
+                                        <input type="checkbox" id="sf_s3_upload" x-model="sipflowDraft.s3_upload_enabled"
+                                            :disabled="sipflowProcessing"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                        <div>
+                                            <label for="sf_s3_upload" class="text-sm font-semibold text-slate-700">Upload recordings to S3 after completion</label>
+                                            <p class="text-[11px] text-slate-400">Automatically push recorded files to cloud storage.</p>
+                                        </div>
+                                    </div>
+
+                                    <div x-show="sipflowDraft.s3_upload_enabled" x-cloak
+                                        class="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
+                                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-400">Upload content</p>
+                                        <div class="flex flex-wrap gap-4">
+                                            <label class="flex items-center gap-2 text-sm text-slate-600">
+                                                <input type="checkbox" x-model="sipflowDraft.s3_upload_media"
+                                                    :disabled="sipflowProcessing"
+                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                                Media files (audio)
+                                            </label>
+                                            <label class="flex items-center gap-2 text-sm text-slate-600">
+                                                <input type="checkbox" x-model="sipflowDraft.s3_upload_signaling"
+                                                    :disabled="sipflowProcessing"
+                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                                Signaling records (SIP metadata)
+                                            </label>
+                                        </div>
+
+                                        <div class="grid gap-3 md:grid-cols-2">
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">S3 Vendor</label>
+                                                <select x-model="storageDraft.callrecord_s3_vendor" :disabled="sipflowProcessing"
+                                                    class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                    <option value="aws">AWS S3</option>
+                                                    <option value="gcp">Google Cloud Storage</option>
+                                                    <option value="azure">Azure Blob Storage</option>
+                                                    <option value="minio">MinIO</option>
+                                                    <option value="digitalocean">DigitalOcean Spaces</option>
+                                                    <option value="aliyun">Aliyun OSS</option>
+                                                    <option value="tencent">Tencent COS</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
+                                                <input type="text" x-model="storageDraft.callrecord_s3_region" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="us-east-1">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
+                                                <input type="text" x-model="storageDraft.callrecord_s3_bucket" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="my-recordings">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint (optional)</label>
+                                                <input type="text" x-model="storageDraft.callrecord_s3_endpoint" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="https://s3.amazonaws.com">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
+                                                <input type="password" x-model="storageDraft.callrecord_s3_access_key" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
+                                                <input type="password" x-model="storageDraft.callrecord_s3_secret_key" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                                    <span>{{ "settings_page.restart_required_apply" | t }}</span>
+                                    <div class="flex gap-2">
+                                        <button type="button"
+                                            class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                            @click="resetSipFlowDraft" :disabled="sipflowProcessing">
+                                            {{ "common.reset" | t }}
+                                        </button>
+                                        <button type="submit"
+                                            class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                            :disabled="sipflowProcessing">
+                                            <span x-text="sipflowProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+
+                        <!-- File Recorder info panel -->
+                        <div x-show="recordingMode === 'filerecorder'" x-cloak
+                            class="rounded-lg border border-slate-200 bg-white p-4">
+                            <div class="flex items-start gap-3">
+                                <svg class="h-5 w-5 flex-none text-slate-400 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"
+                                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                <div>
+                                    <p class="font-semibold text-sm text-slate-700">Legacy WAV File Recorder</p>
+                                    <p class="text-xs text-slate-500 mt-1">Uses the built-in WAV recorder to write audio files locally. Recording policy and storage paths below apply.</p>
                                 </div>
                             </div>
                         </div>
@@ -1160,7 +1166,7 @@
                         <div>
                             <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.recording_policy" | t }}</h2>
                             <p class="text-xs text-slate-500">{{ "settings_page.recording_policy_desc" | t }}</p>
-                            <template x-if="recordingEngine !== 'local'">
+                            <template x-if="sipflowSettings?.backend_type !== 'none'">
                                 <div class="mt-2 rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-700">
                                     SipFlow backend is active. Enable <strong>Force file recorder</strong>
                                     below to record audio to WAV files via the legacy recorder while
@@ -1170,7 +1176,7 @@
                             </template>
                         </div>
                     </div>
-                    <div class="mt-4 space-y-4">
+                    <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
@@ -1180,7 +1186,7 @@
                             <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
                                 <input type="checkbox"
                                     class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                    x-model="storageDraft.recording_enabled" :disabled="recordingStorageProcessing">
+                                    x-model="storageDraft.recording_enabled" :disabled="storageProcessing">
                                 <span>{{ "settings_page.enable_recording" | t }}</span>
                             </label>
                         </div>
@@ -1190,16 +1196,17 @@
                                 <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                                     <input type="checkbox"
                                         class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                        x-model="storageDraft.recording_auto_start" :disabled="recordingStorageProcessing">
+                                        x-model="storageDraft.recording_auto_start" :disabled="storageProcessing">
                                     <span>{{ "settings_page.auto_start" | t }}</span>
                                 </label>
-                                <label class="flex items-center gap-2 text-sm font-semibold text-slate-600"
-                                    x-show="recordingEngine !== 'local'">
+                                <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                                     <input type="checkbox"
                                         class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                        x-model="storageDraft.recording_force_file" :disabled="recordingStorageProcessing">
+                                        x-model="storageDraft.recording_force_file" :disabled="storageProcessing">
                                     <span>Force file recorder</span>
-                                    <span class="text-[11px] text-slate-400">(WAV file for media, SipFlow for signalling only)</span>
+                                    <template x-if="sipflowSettings?.backend_type !== 'none'">
+                                        <span class="text-[11px] text-slate-400">(WAV file for media, SipFlow for signalling only)</span>
+                                    </template>
                                 </label>
                             </div>
                             <div>
@@ -1210,21 +1217,21 @@
                                         <input type="checkbox"
                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                             x-model="storageDraft.recording_direction_inbound"
-                                            :disabled="recordingStorageProcessing">
+                                            :disabled="storageProcessing">
                                         <span>{{ "settings_page.inbound" | t }}</span>
                                     </label>
                                     <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
                                         <input type="checkbox"
                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                             x-model="storageDraft.recording_direction_outbound"
-                                            :disabled="recordingStorageProcessing">
+                                            :disabled="storageProcessing">
                                         <span>{{ "settings_page.outbound" | t }}</span>
                                     </label>
                                     <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
                                         <input type="checkbox"
                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                             x-model="storageDraft.recording_direction_internal"
-                                            :disabled="recordingStorageProcessing">
+                                            :disabled="storageProcessing">
                                         <span>{{ "settings_page.internal" | t }}</span>
                                     </label>
                                 </div>
@@ -1234,7 +1241,7 @@
                                 <div>
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                         "settings_page.caller_allow_list" | t }}</label>
-                                    <textarea x-model="storageDraft.recording_caller_allow" :disabled="recordingStorageProcessing"
+                                    <textarea x-model="storageDraft.recording_caller_allow" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         rows="3" placeholder="alice@rustpbx.com"></textarea>
                                     <p class="mt-1 text-[11px] text-slate-400">{{ "settings_page.pattern_glob_hint" | t }}</p>
@@ -1242,7 +1249,7 @@
                                 <div>
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                         "settings_page.caller_deny_list" | t }}</label>
-                                    <textarea x-model="storageDraft.recording_caller_deny" :disabled="recordingStorageProcessing"
+                                    <textarea x-model="storageDraft.recording_caller_deny" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         rows="3" placeholder="sales@*"></textarea>
                                 </div>
@@ -1251,14 +1258,14 @@
                                 <div>
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                         "settings_page.callee_allow_list" | t }}</label>
-                                    <textarea x-model="storageDraft.recording_callee_allow" :disabled="recordingStorageProcessing"
+                                    <textarea x-model="storageDraft.recording_callee_allow" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         rows="3" placeholder="support@rustpbx.com"></textarea>
                                 </div>
                                 <div>
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                         "settings_page.callee_deny_list" | t }}</label>
-                                    <textarea x-model="storageDraft.recording_callee_deny" :disabled="recordingStorageProcessing"
+                                    <textarea x-model="storageDraft.recording_callee_deny" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         rows="3" placeholder="test-*"></textarea>
                                 </div>
@@ -1268,29 +1275,26 @@
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                         "settings_page.sample_rate" | t }}</label>
                                     <input type="number" min="8000" step="1000" x-model="storageDraft.recording_samplerate"
-                                        :disabled="recordingStorageProcessing"
+                                        :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="16000" />
                                     <p class="mt-1 text-[11px] text-sky-600">8000 for PSTN, 16000 for wideband, 48000 for Opus</p>
                                 </div>
                                 <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Packet
-                                        time (ms)</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Packet time (ms)</label>
                                     <input type="number" min="10" step="10" x-model="storageDraft.recording_ptime"
-                                        :disabled="recordingStorageProcessing"
+                                        :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="200" />
                                     <p class="mt-1 text-[11px] text-sky-600">Duration of each recorded audio packet. 20ms recommended for PSTN</p>
                                 </div>
                                 <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Filename
-                                        pattern</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Filename pattern</label>
                                     <input type="text" x-model="storageDraft.recording_filename_pattern"
-                                        :disabled="recordingStorageProcessing"
+                                        :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="{timestamp}_{caller}_{callee}" />
-                                    <p class="mt-1 text-[11px] text-slate-400">Tokens: {session_id}, {caller}, {callee},
-                                        {direction}, {timestamp}</p>
+                                    <p class="mt-1 text-[11px] text-slate-400">Tokens: {session_id}, {caller}, {callee}, {direction}, {timestamp}</p>
                                 </div>
                             </div>
                         </div>
@@ -1299,98 +1303,102 @@
                                 Recording is currently disabled. Enable the policy to configure capture rules.
                             </div>
                         </template>
-                    </div>
+                    </form>
                 </div>
 
                 <!-- Card 3: Storage Paths -->
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5"
-                    x-show="recordingEngine === 'local'">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Storage Paths</h2>
-                        <p class="text-xs text-slate-500">Configure file system paths for recorder output, media cache, and call record storage.</p>
+                        <h3 class="text-sm font-semibold text-slate-800">Recorder storage paths</h3>
+                        <p class="text-xs text-slate-500">Manage recorder output paths and call record storage targets.</p>
                     </div>
-                    <div class="mt-4 space-y-4 border-t border-slate-200 pt-4">
+                    <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                    "settings_page.recorder_path" | t }}</label>
-                                <input type="text" x-model="storageDraft.recorder_path" :disabled="recordingStorageProcessing"
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder root path</label>
+                                <input type="text" x-model="storageDraft.recorder_path" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/tmp/recorder" />
                             </div>
                             <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call record root path</label>
+                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/tmp/cdr" />
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Media cache path</label>
-                                <input type="text" x-model="storageDraft.media_cache_path" :disabled="recordingStorageProcessing"
+                                <input type="text" x-model="storageDraft.media_cache_path" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/tmp/mediacache" />
                             </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder format</label>
+                                <select x-model="storageDraft.recorder_format" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Default</option>
+                                    <option value="wav">WAV (PCM)</option>
+                                </select>
+                            </div>
                         </div>
-                        <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder
-                                format</label>
-                            <select x-model="storageDraft.recorder_format" :disabled="recordingStorageProcessing"
-                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="">Default</option>
-                                <option value="wav">WAV (PCM)</option>
-                            </select>
+                        <div class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                            <span>{{ "settings_page.restart_required_apply" | t }}</span>
+                            <div class="flex gap-2">
+                                <button type="button"
+                                    class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                    @click="resetStorageDraft" :disabled="storageProcessing">
+                                    Reset
+                                </button>
+                                <button type="submit"
+                                    class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    :disabled="storageProcessing">
+                                    <span x-text="storageProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                </button>
+                            </div>
                         </div>
-                    </div>
+                    </form>
                 </div>
 
-                <!-- Card 4: Generate CDR -->
+                <!-- Card 4: Call Record Storage Destination -->
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Generate CDR</h2>
-                            <p class="text-xs text-slate-500">Choose where to send call detail records (CDR).</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.storage_destinations" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.storage_destinations_desc" | t }}</p>
                         </div>
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
                             {{ "common.active" | t }} · <span class="text-sky-600"
                                 x-text="selectedStorageProfileData?.label || storageModeLabel(server.storage?.mode)"></span>
                         </span>
                     </div>
-                    <div class="mt-4 space-y-4">
+                    <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">CDR Destination</label>
-                            <select x-model="storageDraft.callrecord_mode" :disabled="recordingStorageProcessing"
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.storage_backend" | t }}</label>
+                            <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
                                 class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="disabled">{{ "settings_page.disabled" | t }}</option>
-                                <option value="http">Sent via HTTP</option>
-                                <option value="s3">Sent via S3 Compatible</option>
                                 <option value="local">{{ "settings_page.local_filesystem" | t }}</option>
+                                <option value="s3">S3 Compatible Object Store</option>
                             </select>
                         </div>
-
-                        <div x-show="storageDraft.callrecord_mode === 'http'" class="space-y-4">
+                        <div x-show="storageDraft.callrecord_mode === 'local'" class="space-y-3">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">URL</label>
-                                <input type="url" x-model="storageDraft.callrecord_http_url" :disabled="recordingStorageProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="https://hooks.example.com/cdr">
-                            </div>
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Headers (one per line, key: value)</label>
-                                <textarea x-model="storageDraft.callrecord_http_headers" :disabled="recordingStorageProcessing"
-                                    rows="2"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Authorization: Bearer ...&#10;X-Tenant: acme"></textarea>
-                            </div>
-                        </div>
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
-                                    Path</label>
-                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="recordingStorageProcessing"
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root Path</label>
+                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/var/lib/rustpbx/recordings">
                             </div>
                         </div>
-
                         <div x-show="storageDraft.callrecord_mode === 's3'" class="space-y-4">
+                            <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                                S3 credentials (vendor, region, bucket, access keys) are configured in the Recording Engine card above. Configure SipFlow with S3 upload enabled, or use the fields below for direct call record storage.
+                            </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Vendor</label>
-                                    <select x-model="storageDraft.callrecord_s3_vendor" :disabled="recordingStorageProcessing"
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Vendor</label>
+                                    <select x-model="storageDraft.callrecord_s3_vendor" :disabled="storageProcessing"
                                         class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                         <option value="aws">AWS S3</option>
                                         <option value="gcp">Google Cloud Storage</option>
@@ -1402,104 +1410,62 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
-                                    <input type="text" x-model="storageDraft.callrecord_s3_region"
-                                        :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="us-east-1">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_region" :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="us-east-1">
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
-                                    <input type="text" x-model="storageDraft.callrecord_s3_bucket"
-                                        :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="my-recordings-bucket">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_bucket" :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="my-recordings-bucket">
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint
-                                        (Optional)</label>
-                                    <input type="text" x-model="storageDraft.callrecord_s3_endpoint"
-                                        :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="https://s3.amazonaws.com">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint (optional)</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_endpoint" :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="https://s3.amazonaws.com">
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access
-                                        Key</label>
-                                    <input type="password" x-model="storageDraft.callrecord_s3_access_key"
-                                        :disabled="recordingStorageProcessing"
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
+                                    <input type="password" x-model="storageDraft.callrecord_s3_access_key" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret
-                                        Key</label>
-                                    <input type="password" x-model="storageDraft.callrecord_s3_secret_key"
-                                        :disabled="recordingStorageProcessing"
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
+                                    <input type="password" x-model="storageDraft.callrecord_s3_secret_key" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
-                                        Path (Prefix)</label>
-                                    <input type="text" x-model="storageDraft.callrecord_s3_root"
-                                        :disabled="recordingStorageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="recordings/">
-                                </div>
-                                <div class="col-span-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
-                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="storageDraft.callrecord_s3_with_media"
-                                            :disabled="recordingStorageProcessing">
-                                        <span>{{ "settings_page.upload_media" | t }}</span>
-                                    </label>
-                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                        <input type="checkbox"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                            x-model="storageDraft.callrecord_s3_keep_media_copy"
-                                            :disabled="recordingStorageProcessing">
-                                        <span>{{ "settings_page.keep_local_copy" | t }}</span>
-                                    </label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root Path (Prefix)</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_root" :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="recordings/">
                                 </div>
                             </div>
                             <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
                                 <button type="button"
                                     class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                                    @click="testStorageConnection()" :disabled="recordingStorageProcessing">
-                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.6">
-                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                            d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    @click="testStorageConnection()" :disabled="storageProcessing">
+                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
                                     </svg>
                                     <span>{{ "settings_page.test_connection_btn" | t }}</span>
                                 </button>
                             </div>
                         </div>
-                    </div>
+                        <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                            <button type="button"
+                                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                @click="resetStorageDraft()" :disabled="storageProcessing">
+                                {{ "common.reset" | t }}
+                            </button>
+                            <button type="submit"
+                                class="inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="storageProcessing">
+                                {{ "common.save" | t }}
+                            </button>
+                        </div>
+                    </form>
                 </div>
 
-                <!-- Unified Save / Reset -->
-                <div class="flex items-center justify-between gap-2 text-xs text-slate-500">
-                    <span>{{ "settings_page.restart_required_apply" | t }}</span>
-                    <div class="flex gap-2">
-                        <button type="button"
-                            class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-                            @click="resetRecordingStorage" :disabled="recordingStorageProcessing">
-                            {{ "common.reset" | t }}
-                        </button>
-                        <button type="button"
-                            class="inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                            @click="saveRecordingStorage" :disabled="recordingStorageProcessing">
-                            <span x-text="recordingStorageProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
-                        </button>
-                    </div>
-                </div>
             </div>
         </section>
 
@@ -2997,17 +2963,6 @@
                     headers: '',
                 },
                 user_backends: [],
-                jwt_auth: {
-                    enabled: false,
-                    secret: '',
-                    user_id_claim: 'userId',
-                    issuer: '',
-                    audience: '',
-                    sip_header_name: 'X-Auth-Token',
-                    check_local_user: false,
-                    ws_token_param: 'token',
-                    dev_mint_enabled: false,
-                },
             },
             proxyProcessing: false,
             storageDraft: {
@@ -3031,6 +2986,7 @@
                 recording_filename_pattern: '',
             },
             storageProcessing: false,
+            recordingMode: 'sipflow',
             sipflowDraft: {
                 backend_type: 'none',
                 dir_root: '',
@@ -3040,9 +2996,12 @@
                 local_flush_interval_secs: 5,
                 remote_nodes: [{ udp: '', http: '' }],
                 remote_timeout_secs: 10,
+                media_recording_enabled: true,
+                s3_upload_enabled: false,
+                s3_upload_media: true,
+                s3_upload_signaling: true,
             },
             sipflowProcessing: false,
-            recordingStorageProcessing: false,
             sipflowSettings: { backend_type: 'none', config: {} },
             securityDraft: {
                 acl_rules: '',
@@ -3286,6 +3245,7 @@
                 this.initProxyDraft();
                 this.initStorageDraft();
                 this.initSecurityDraft();
+                this.recordingMode = data.recording_mode || 'sipflow';
                 this.fetchSipFlowSettings();
                 this.initClusterDraft();
                 this.directory = { departments: [], users: [], pending_invites: [] };
@@ -3332,16 +3292,6 @@
                     }
                     return true;
                 });
-            },
-            get recordingEngine() {
-                return this.sipflowDraft.backend_type === 'none' ? 'local' : 'sipflow';
-            },
-            set recordingEngine(val) {
-                if (val === 'local') {
-                    this.sipflowDraft.backend_type = 'none';
-                } else if (this.sipflowDraft.backend_type === 'none') {
-                    this.sipflowDraft.backend_type = 'local';
-                }
             },
             setActiveTab(tabId) {
                 if (this.activeTab === tabId) {
@@ -5070,17 +5020,6 @@
                         headers: this.formatHeaders(proxy.http_router?.headers),
                     },
                     user_backends: JSON.parse(JSON.stringify(proxy.user_backends || [])),
-                    jwt_auth: {
-                        enabled: !!proxy.jwt_auth?.enabled,
-                        secret: '',
-                        user_id_claim: proxy.jwt_auth?.user_id_claim || 'userId',
-                        issuer: proxy.jwt_auth?.issuer || '',
-                        audience: proxy.jwt_auth?.audience || '',
-                        sip_header_name: proxy.jwt_auth?.sip_header_name || 'X-Auth-Token',
-                        check_local_user: !!proxy.jwt_auth?.check_local_user,
-                        ws_token_param: proxy.jwt_auth?.ws_token_param || 'token',
-                        dev_mint_enabled: !!proxy.jwt_auth?.dev_mint_enabled,
-                    },
                 };
             },
             resetProxyDraft() {
@@ -5124,23 +5063,6 @@
                     headers: this.parseHeaders(this.proxyDraft.http_router.headers),
                 };
 
-                const jwt = this.proxyDraft.jwt_auth;
-                if (jwt.enabled) {
-                    body.jwt_auth = {
-                        enabled: true,
-                        secret: jwt.secret,
-                        user_id_claim: jwt.user_id_claim || 'userId',
-                        issuer: jwt.issuer || null,
-                        audience: jwt.audience || null,
-                        sip_header_name: jwt.sip_header_name || 'X-Auth-Token',
-                        check_local_user: !!jwt.check_local_user,
-                        ws_token_param: jwt.ws_token_param || 'token',
-                        dev_mint_enabled: !!jwt.dev_mint_enabled,
-                    };
-                } else {
-                    body.jwt_auth = null;
-                }
-
                 this.proxyProcessing = true;
                 try {
                     const response = await fetch(`${this.apiBase}/settings/config/proxy`, {
@@ -5159,17 +5081,6 @@
                     this.proxyConfig.locator_webhook = body.locator_webhook;
                     this.proxyConfig.rwi_webhook = body.rwi_webhook;
                     this.proxyConfig.http_router = body.http_router;
-                    this.proxyConfig.jwt_auth = body.jwt_auth ? {
-                        enabled: body.jwt_auth.enabled,
-                        secret: body.jwt_auth.secret || this.proxyConfig.jwt_auth?.secret || '',
-                        user_id_claim: body.jwt_auth.user_id_claim,
-                        issuer: body.jwt_auth.issuer,
-                        audience: body.jwt_auth.audience,
-                        sip_header_name: body.jwt_auth.sip_header_name,
-                        check_local_user: body.jwt_auth.check_local_user,
-                        ws_token_param: body.jwt_auth.ws_token_param,
-                        dev_mint_enabled: body.jwt_auth.dev_mint_enabled,
-                    } : null;
                     this.initProxyDraft();
                 } catch (err) {
                     console.error(err);
@@ -5406,7 +5317,7 @@
                     ? this.server.storage_profiles.find(p => String(p?.id || '').startsWith('callrecord'))
                     : null;
                 const crConfig = crProfile?.config || {};
-                const crType = crConfig?.type || (meta?.mode === 'http' ? 'http' : (meta?.mode === 's3' ? 's3' : (meta?.mode === 'local' ? 'local' : 'disabled')));
+                const crType = crConfig?.type || (meta?.mode === 's3' ? 's3' : (meta?.mode === 'local' ? 'local' : 'disabled'));
 
                 this.storageDraft = {
                     recorder_path: recorderPath,
@@ -5414,8 +5325,6 @@
                     media_cache_path: mediaCache,
                     callrecord_mode: crType,
                     callrecord_root: crConfig?.root || '',
-                    callrecord_http_url: crConfig?.url || '',
-                    callrecord_http_headers: crConfig?.headers ? Object.entries(crConfig.headers).map(([k,v]) => `${k}: ${v}`).join('\n') : '',
                     callrecord_s3_vendor: crConfig?.vendor || 'aws',
                     callrecord_s3_bucket: crConfig?.bucket || '',
                     callrecord_s3_region: crConfig?.region || '',
@@ -5624,6 +5533,11 @@
                     // Remote backend
                     remote_nodes: remoteNodes,
                     remote_timeout_secs: backendType === 'remote' ? (config.timeout_secs || 10) : 10,
+                    // Media & S3 upload
+                    media_recording_enabled: config.media_recording_enabled !== false,
+                    s3_upload_enabled: config.s3_upload_enabled || false,
+                    s3_upload_media: config.s3_upload_media !== false,
+                    s3_upload_signaling: config.s3_upload_signaling !== false,
                 };
             },
             resetSipFlowDraft() {
@@ -5713,161 +5627,6 @@
                     });
                 } finally {
                     this.sipflowProcessing = false;
-                }
-            },
-            resetRecordingStorage() {
-                this.initStorageDraft();
-                this.initSipFlowDraft();
-            },
-            async saveRecordingStorage() {
-                if (this.recordingStorageProcessing) {
-                    return;
-                }
-                this.recordingStorageProcessing = true;
-                try {
-                    // --- Part 1: Save SipFlow engine settings ---
-                    const backendType = this.sipflowDraft.backend_type || 'none';
-                    let sipflowConfig = {};
-                    if (backendType === 'local') {
-                        const root = (this.sipflowDraft.local_root || '').trim();
-                        if (!root) {
-                            throw new Error(this.tt('settings_page.sipflow_data_dir_required'));
-                        }
-                        sipflowConfig = {
-                            root,
-                            subdirs: this.sipflowDraft.local_subdirs || 'daily',
-                            flush_count: this.sipflowDraft.local_flush_count || 1000,
-                            flush_interval_secs: this.sipflowDraft.local_flush_interval_secs || 5,
-                        };
-                    } else if (backendType === 'remote') {
-                        const nodes = (this.sipflowDraft.remote_nodes || [])
-                            .map(n => ({ udp: (n.udp || '').trim(), http: (n.http || '').trim() }))
-                            .filter(n => n.udp && n.http);
-                        if (nodes.length === 0) {
-                            throw new Error(this.tt('settings_page.sipflow_remote_required'));
-                        }
-                        sipflowConfig = {
-                            nodes,
-                            timeout_secs: this.sipflowDraft.remote_timeout_secs || 10,
-                        };
-                    }
-                    const sipflowResp = await fetch(`${this.apiBase}/sipflow/settings`, {
-                        method: 'PUT',
-                        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ enabled: backendType !== 'none', backend_type: backendType, config: sipflowConfig }),
-                    });
-                    const sipflowData = await sipflowResp.json().catch(() => ({}));
-                    if (!sipflowResp.ok) throw new Error(sipflowData?.message || sipflowData?.error || 'Failed to save recording engine');
-                    this.sipflowSettings = { backend_type: backendType, config: sipflowConfig };
-
-                    // --- Part 2: Save storage/policy/CDR settings ---
-                    let recorderFormat = this.normalizeOptionalString(this.storageDraft.recorder_format);
-                    if (recorderFormat) {
-                        recorderFormat = recorderFormat.toLowerCase();
-                        if (recorderFormat !== 'wav') throw new Error('Recorder format must be "wav".');
-                    }
-                    if (this.storageDraft.recording_enabled && !(this.storageDraft.recording_direction_inbound || this.storageDraft.recording_direction_outbound || this.storageDraft.recording_direction_internal)) {
-                        throw new Error('Choose at least one call direction when recording is enabled.');
-                    }
-                    const recordingDirections = [];
-                    if (this.storageDraft.recording_direction_inbound) recordingDirections.push('inbound');
-                    if (this.storageDraft.recording_direction_outbound) recordingDirections.push('outbound');
-                    if (this.storageDraft.recording_direction_internal) recordingDirections.push('internal');
-                    const recordingPayload = {
-                        enabled: !!this.storageDraft.recording_enabled,
-                        auto_start: !!this.storageDraft.recording_auto_start,
-                        force_file: !!this.storageDraft.recording_force_file,
-                        caller_allow: this.listFromTextarea(this.storageDraft.recording_caller_allow),
-                        caller_deny: this.listFromTextarea(this.storageDraft.recording_caller_deny),
-                        callee_allow: this.listFromTextarea(this.storageDraft.recording_callee_allow),
-                        callee_deny: this.listFromTextarea(this.storageDraft.recording_callee_deny),
-                        samplerate: this.normalizeOptionalNumber(this.storageDraft.recording_samplerate),
-                        ptime: this.normalizeOptionalNumber(this.storageDraft.recording_ptime),
-                        filename_pattern: this.normalizeOptionalString(this.storageDraft.recording_filename_pattern),
-                    };
-                    if (recordingDirections.length && recordingDirections.length < 3) {
-                        recordingPayload.directions = recordingDirections;
-                    }
-                    let callrecordPayload = null;
-                    const crMode = this.storageDraft.callrecord_mode || 'disabled';
-                    if (crMode === 'disabled') {
-                        callrecordPayload = { mode: 'disabled' };
-                    } else if (crMode === 'local') {
-                        callrecordPayload = { mode: 'local', root: this.normalizeOptionalString(this.storageDraft.callrecord_root) };
-                    } else if (crMode === 'http') {
-                        const httpUrl = this.normalizeOptionalString(this.storageDraft.callrecord_http_url);
-                        if (!httpUrl) {
-                            throw new Error('URL is required for HTTP CDR.');
-                        }
-                        const headerLines = this.listFromTextarea(this.storageDraft.callrecord_http_headers);
-                        const headers = {};
-                        headerLines.forEach(line => {
-                            const sep = line.indexOf(':');
-                            if (sep > 0) {
-                                const key = line.substring(0, sep).trim();
-                                const val = line.substring(sep + 1).trim();
-                                if (key) headers[key] = val;
-                            }
-                        });
-                        callrecordPayload = {
-                            mode: 'http',
-                            url: httpUrl,
-                            headers: Object.keys(headers).length ? headers : null,
-                        };
-                    } else if (crMode === 's3') {
-                        const s3Vendor = this.normalizeOptionalString(this.storageDraft.callrecord_s3_vendor);
-                        const s3Bucket = this.normalizeOptionalString(this.storageDraft.callrecord_s3_bucket);
-                        const s3Region = this.normalizeOptionalString(this.storageDraft.callrecord_s3_region);
-                        const s3AccessKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_access_key);
-                        const s3SecretKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_secret_key);
-                        if (!s3Vendor || !s3Bucket || !s3Region || !s3AccessKey || !s3SecretKey) {
-                            throw new Error('Vendor, bucket, region, access key, and secret key are required for S3.');
-                        }
-                        callrecordPayload = {
-                            mode: 's3', vendor: s3Vendor, bucket: s3Bucket, region: s3Region,
-                            access_key: s3AccessKey, secret_key: s3SecretKey,
-                            endpoint: this.normalizeOptionalString(this.storageDraft.callrecord_s3_endpoint),
-                            root: this.normalizeOptionalString(this.storageDraft.callrecord_s3_root),
-                            with_media: !!this.storageDraft.callrecord_s3_with_media,
-                            keep_media_copy: !!this.storageDraft.callrecord_s3_keep_media_copy,
-                        };
-                    }
-                    const storageResp = await fetch(`${this.apiBase}/settings/config/storage`, {
-                        method: 'PATCH',
-                        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            recorder_path: this.normalizeOptionalString(this.storageDraft.recorder_path),
-                            media_cache_path: this.normalizeOptionalString(this.storageDraft.media_cache_path),
-                            recorder_format: recorderFormat,
-                            recording_policy: recordingPayload,
-                            callrecord: callrecordPayload,
-                        }),
-                    });
-                    const storageData = await storageResp.json().catch(() => ({}));
-                    if (!storageResp.ok) throw new Error(storageData?.message || 'Failed to update storage settings');
-                    this.server.storage = storageData?.storage || {};
-                    this.server.storage_profiles = Array.isArray(storageData?.storage_profiles) ? storageData.storage_profiles : [];
-                    this.recordingPolicy = this.server.storage?.recording || null;
-                    const storageMeta = this.server.storage || {};
-                    this.selectedStorageProfile = storageMeta.active_profile || storageMeta.mode || (this.storageProfiles[0]?.id || '');
-                    this.initStorageDraft();
-                    this.$dispatch('toast', {
-                        title: this.tt('settings_page.settings_saved'),
-                        message: 'Recording & storage settings saved. Restart required to apply.',
-                    });
-                    this.lastOperation = {
-                        label: 'Recording & Storage',
-                        timestamp: new Date().toLocaleString(),
-                        status: this.tt('settings_page.restart_required_apply'),
-                    };
-                } catch (err) {
-                    console.error(err);
-                    this.$dispatch('toast', {
-                        title: this.tt('settings_page.update_failed'),
-                        message: err?.message || 'Unable to save recording settings.',
-                    });
-                } finally {
-                    this.recordingStorageProcessing = false;
                 }
             },
             async testStorageConnection() {
