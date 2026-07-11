@@ -6812,33 +6812,103 @@ impl SipSession {
         }
 
         let changed_profile = MediaNegotiator::extract_leg_profile(changed_leg_sdp);
-        let caller_peer = self.caller_peer().ok_or_else(|| anyhow!("Missing caller peer"))?;
+        let caller_peer = match self.caller_peer() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
         let caller_to_callee_forwarding =
-            Self::get_forwarding_track(caller_peer, Self::CALLER_FORWARDING_TRACK_ID)
-                .await
-                .ok_or_else(|| anyhow!("Missing caller forwarding track"))?;
-        let callee_peer = self.callee_peer().ok_or_else(|| anyhow!("Missing callee peer"))?;
+            Self::get_forwarding_track(caller_peer, Self::CALLER_FORWARDING_TRACK_ID).await;
+        let callee_peer = match self.callee_peer() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
         let callee_to_caller_forwarding =
-            Self::get_forwarding_track(callee_peer, Self::CALLEE_FORWARDING_TRACK_ID)
-                .await
-                .ok_or_else(|| anyhow!("Missing callee forwarding track"))?;
+            Self::get_forwarding_track(callee_peer, Self::CALLEE_FORWARDING_TRACK_ID).await;
 
-        match side {
-            DialogSide::Caller => {
-                // caller->callee track reads caller RTP, so caller-side re-INVITE updates ingress.
-                caller_to_callee_forwarding.stage_ingress_profile(changed_profile.clone());
-                // callee->caller track sends toward caller, so caller-side re-INVITE updates egress.
-                callee_to_caller_forwarding.stage_egress_profile(changed_profile.clone());
-            }
-            DialogSide::Callee => {
-                // caller->callee track sends toward callee, so callee-side re-INVITE updates egress.
-                caller_to_callee_forwarding.stage_egress_profile(changed_profile.clone());
-                // callee->caller track reads callee RTP, so callee-side re-INVITE updates ingress.
-                callee_to_caller_forwarding.stage_ingress_profile(changed_profile.clone());
+        match (caller_to_callee_forwarding, callee_to_caller_forwarding) {
+            (Some(a_to_b), Some(b_to_a)) => match side {
+                DialogSide::Caller => {
+                    a_to_b.stage_ingress_profile(changed_profile.clone());
+                    b_to_a.stage_egress_profile(changed_profile.clone());
+                }
+                DialogSide::Callee => {
+                    a_to_b.stage_egress_profile(changed_profile.clone());
+                    b_to_a.stage_ingress_profile(changed_profile.clone());
+                }
+            },
+            _ => {
+                // No forwarding tracks — the initial setup may have activated
+                // the RTP bridge fast-path (transport-level bridge via
+                // bridge_rtp_with_rewrite_to).  The re-INVITE changed the
+                // local SDP on the PeerConnection, so we must tear down and
+                // re-establish the bridge so it picks up the new transport /
+                // codec state.
+                self.rebuild_rtp_bridge().await;
             }
         }
 
         Ok(())
+    }
+
+    async fn rebuild_rtp_bridge(&self) {
+        let Some(caller_peer) = self.caller_peer() else {
+            debug!("Skipping RTP bridge rebuild: no caller peer");
+            return;
+        };
+        let Some(callee_peer) = self.callee_peer() else {
+            debug!("Skipping RTP bridge rebuild: no callee peer");
+            return;
+        };
+        let Some(caller_pc) = Self::get_peer_pc(caller_peer, Self::CALLER_TRACK_ID).await else {
+            debug!("Skipping RTP bridge rebuild: no caller PC");
+            return;
+        };
+        let Some(callee_pc) = Self::get_peer_pc(callee_peer, Self::CALLEE_TRACK_ID).await else {
+            debug!("Skipping RTP bridge rebuild: no callee PC");
+            return;
+        };
+
+        // Clear any existing bridge
+        caller_pc.clear_rtp_rewrite_bridge();
+        callee_pc.clear_rtp_rewrite_bridge();
+
+        let ready = caller_pc
+            .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
+            .await
+            .is_ok()
+            && callee_pc
+                .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
+                .await
+                .is_ok();
+
+        if ready {
+            let params = rustrtc::RtpRewriteBridgeParams {
+                ssrc_offset: 0,
+                payload_type: None,
+                initial_sequence_number: None,
+                initial_timestamp_offset: None,
+            };
+            let a_to_b = caller_pc.bridge_rtp_with_rewrite_to(&callee_pc, params);
+            let b_to_a = callee_pc.bridge_rtp_with_rewrite_to(&caller_pc, params);
+            if a_to_b.is_ok() && b_to_a.is_ok() {
+                info!(
+                    session_id = %self.context.session_id,
+                    "RTP bridge fast-path re-established after re-INVITE"
+                );
+            } else {
+                warn!(
+                    session_id = %self.context.session_id,
+                    a_err = ?a_to_b.err(),
+                    b_err = ?b_to_a.err(),
+                    "RTP bridge rebuild failed after re-INVITE"
+                );
+            }
+        } else {
+            debug!(
+                session_id = %self.context.session_id,
+                "RTP bridge rebuild: transport not ready after re-INVITE"
+            );
+        }
     }
 
     async fn build_local_dialog_answer(

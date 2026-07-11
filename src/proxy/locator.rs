@@ -813,10 +813,10 @@ mod tests {
         assert!(!is_location_expired(0, 100, 999_999));
         // not yet expired
         assert!(!is_location_expired(3600, 1000, 2000));
-        // exactly at expiry boundary
-        assert!(is_location_expired(3600, 1000, 4600));
+        // exactly at expiry + grace boundary (LOCATOR_EXPIRE_GRACE_SECS=30)
+        assert!(is_location_expired(3600, 1000, 4631));
         // long expired
-        assert!(is_location_expired(60, 1000, 999_999));
+        assert!(is_location_expired(60, 1000, 1091));
     }
 
     #[test]
