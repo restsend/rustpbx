@@ -16,6 +16,8 @@ pub(crate) mod dtmf;
 pub(crate) mod leg_registry;
 pub(crate) mod media_peer;
 pub(crate) mod media_state;
+pub(crate) mod mixer;
+pub(crate) mod mixer_registry;
 pub(crate) mod reporter;
 pub(crate) mod session_hooks;
 pub(crate) mod session_timer;

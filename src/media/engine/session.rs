@@ -69,11 +69,6 @@ pub struct MediaSession {
     /// and MCU mixing (needed for TTS injection, conference).
     pub mcu: McuSwitch,
 
-    // ── SipFlow capture ────────────────────────────────────────────────
-    /// Handle of the SipFlow capture task so it can be aborted when capture is
-    /// disabled (or when the session is destroyed), instead of running forever.
-    pub sipflow_task: Option<tokio::task::JoinHandle<()>>,
-
     // ── Reaper ─────────────────────────────────────────────────────────
     /// Wall-clock instant of the last engine command that touched this session.
     /// Updated by [`EngineCore::dispatch`] and checked by the periodic reaper
@@ -97,7 +92,6 @@ impl MediaSession {
             playback_tracks: HashMap::new(),
             bridge_playback_track_ids: Vec::new(),
             mcu,
-            sipflow_task: None,
             last_activity: std::time::Instant::now(),
         }
     }

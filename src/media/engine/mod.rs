@@ -27,7 +27,7 @@ pub mod transport;
 
 pub use command::{
     CodecProfile, InjectTarget, LegTransport, MediaCommand, PcmFrame, PlayOptions, PlaySource,
-    RecordConfig, SipFlowCaptureTx,
+    RecordConfig, SipFlowCaptureTx, SharedMediaSample,
 };
 pub use event::{MediaEvent, RecordResult};
 pub use transport::resolve_audio_path;
@@ -39,7 +39,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::media::Track as _;
 
@@ -199,19 +199,13 @@ impl EngineCore {
                         Some(cmd) => {
                             let cmd_name = cmd.name();
                             let session_id = cmd.session_id().map(|s| s.to_string());
-
-                            trace!(command = cmd_name, session = ?session_id, "MediaEngine command received");
-
-                            match self.dispatch(cmd).await {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    error!(command = cmd_name, error = %e, "MediaEngine command failed");
-                                    let _ = self.event_tx.send(MediaEvent::Error {
-                                        session_id: session_id.unwrap_or_default(),
-                                        command: cmd_name.to_string(),
-                                        error: e.to_string(),
-                                    });
-                                }
+                            if let Err(e) = self.dispatch(cmd).await {
+                                error!(command = cmd_name, error = %e, "MediaEngine command failed");
+                                let _ = self.event_tx.send(MediaEvent::Error {
+                                    session_id: session_id.unwrap_or_default(),
+                                    command: cmd_name.to_string(),
+                                    error: e.to_string(),
+                                });
                             }
                         }
                         None => break,
@@ -226,7 +220,20 @@ impl EngineCore {
         info!("MediaEngine command loop stopped");
     }
 
+    /// Dispatch a single [`MediaCommand`] — every execution is wrapped in a
+    /// [`tracing::Span`] keyed by `session_id` so all logs, events, and
+    /// child spans produced by the handler are grouped under one trace.
     async fn dispatch(&mut self, cmd: MediaCommand) -> Result<()> {
+        let cmd_name = cmd.name();
+        let sid = cmd.session_id().map(|s| s.to_string());
+
+        let span = tracing::info_span!(
+            "media_command",
+            command = cmd_name,
+            session_id = sid.as_deref().unwrap_or("-"),
+        );
+        let _guard = span.enter();
+
         // Blanket refresh of `last_activity` for every session-scoped command.
         // This keeps long-running sessions alive in the reaper even if the
         // session timer or DTMF path doesn't produce engine events.
@@ -242,8 +249,10 @@ impl EngineCore {
 
         match cmd {
             MediaCommand::CreateSession { session_id } => {
-                let entry = session::MediaSession::new(session_id.clone());
-                self.sessions.write().insert(session_id.clone(), entry);
+                self.sessions.write().insert(
+                    session_id.clone(),
+                    session::MediaSession::new(session_id.clone()),
+                );
                 info!(session_id = %session_id, "MediaEngine session created");
                 let _ = self
                     .event_tx
@@ -330,61 +339,6 @@ impl EngineCore {
                 sess.recorder = recorder;
                 sess.recording_paused = paused;
                 debug!(session_id = %session_id, "Recorder attached to engine session");
-            }
-
-            MediaCommand::SetSipFlowCapture {
-                session_id,
-                call_id,
-                backend,
-                receiver,
-            } => {
-                let mut sessions = self.sessions.write();
-                let Some(sess) = sessions.get_mut(&session_id) else {
-                    debug!(session_id = %session_id, "SipFlow capture skipped for missing session");
-                    return Ok(());
-                };
-
-                // Always abort any previously-running capture task first, so a
-                // stop (backend=None) or a restart actually halts the old task
-                // instead of letting it (and the backend it captured) run forever.
-                if let Some(handle) = sess.sipflow_task.take() {
-                    handle.abort();
-                }
-
-                if let (Some(backend), Some(mut rx)) = (backend, receiver) {
-                    let handle = crate::utils::media_spawn(async move {
-                        use crate::sipflow::{SipFlowItem, SipFlowMsgType};
-                        while let Some((leg, sample, received_at_micros)) = rx.recv().await {
-                            // `sample` is `Arc<MediaSample>`; deref to read.
-                            if let rustrtc::media::frame::MediaSample::Audio(frame) = &*sample
-                                && let Some(rtp_packet) = &frame.raw_packet
-                                && let Ok(rtp_bytes) = rtp_packet.marshal()
-                            {
-                                let leg_id = match leg {
-                                    crate::media::recorder::Leg::A => 0,
-                                    crate::media::recorder::Leg::B => 1,
-                                };
-                                let item = SipFlowItem {
-                                    timestamp: received_at_micros,
-                                    seq: frame.sequence_number.unwrap_or(0) as u64,
-                                    leg: Some(leg_id),
-                                    msg_type: SipFlowMsgType::Rtp,
-                                    src_addr: frame
-                                        .source_addr
-                                        .map(|addr| addr.to_string())
-                                        .unwrap_or_default(),
-                                    dst_addr: String::new(),
-                                    payload: bytes::Bytes::from(rtp_bytes),
-                                };
-                                let _ = backend.record(&call_id, item);
-                            }
-                        }
-                    });
-                    sess.sipflow_task = Some(handle);
-                    debug!(session_id = %session_id, "SipFlow capture started");
-                } else {
-                    debug!(session_id = %session_id, "SipFlow capture stopped");
-                }
             }
 
             MediaCommand::BridgeLegs {
@@ -634,46 +588,21 @@ impl EngineCore {
                     .send(MediaEvent::RecordingResumed { session_id });
             }
 
-            MediaCommand::StartSipFlow { session_id } => {
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::SipFlowStarted { session_id });
-            }
-
-            MediaCommand::StopSipFlow { session_id } => {
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::SipFlowStopped { session_id });
-            }
-
             MediaCommand::SendDtmf {
                 session_id,
                 leg_id,
                 digits,
             } => {
-                let (bridge_opt, endpoint_opt) = {
-                    let sessions = self.sessions.read();
-                    if let Some(sess) = sessions.get(&session_id) {
-                        let ep = sess.endpoint_for_leg(&leg_id);
-                        (sess.bridge.clone(), Some(ep))
-                    } else {
-                        (None, None)
-                    }
-                };
-                if let (Some(bridge), Some(endpoint)) = (bridge_opt, endpoint_opt) {
-                    if let Err(e) = bridge.send_dtmf_to_endpoint(endpoint, &digits).await {
-                        warn!(
-                            session_id = %session_id,
-                            leg = %leg_id,
-                            digits = %digits,
-                            error = %e,
-                            "SendDtmf failed"
-                        );
-                    } else {
-                        debug!(session_id = %session_id, leg = %leg_id, digits = %digits, "SendDtmf injected");
-                    }
-                } else {
+                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
+                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
+                }) else {
                     debug!(session_id = %session_id, leg = %leg_id, digits = %digits, "SendDtmf: no bridge, skipped");
+                    return Ok(());
+                };
+                if let Err(e) = bridge.send_dtmf_to_endpoint(endpoint, &digits).await {
+                    warn!(session_id = %session_id, leg = %leg_id, digits = %digits, error = %e, "SendDtmf failed");
+                } else {
+                    debug!(session_id = %session_id, leg = %leg_id, digits = %digits, "SendDtmf injected");
                 }
             }
 
@@ -861,36 +790,24 @@ impl EngineCore {
                     .send(MediaEvent::LegUnheld { session_id, leg_id });
             }
             MediaCommand::MuteLeg { session_id, leg_id } => {
-                let (bridge_opt, endpoint_opt) = {
-                    let sessions = self.sessions.read();
-                    sessions
-                        .get(&session_id)
-                        .map(|sess| (sess.bridge.clone(), sess.endpoint_for_leg(&leg_id)))
-                        .map(|(b, e)| (Some(b), Some(e)))
-                        .unwrap_or((None, None))
-                };
-                if let (Some(Some(bridge)), Some(endpoint)) = (bridge_opt, endpoint_opt) {
-                    bridge.mute_output(endpoint).await;
-                    debug!(session_id = %session_id, leg = %leg_id, "MuteLeg: bridge output muted");
-                } else {
+                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
+                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
+                }) else {
                     debug!(session_id = %session_id, leg = %leg_id, "MuteLeg: no bridge (signaling-layer hold)");
-                }
+                    return Ok(());
+                };
+                bridge.mute_output(endpoint).await;
+                debug!(session_id = %session_id, leg = %leg_id, "MuteLeg: bridge output muted");
             }
             MediaCommand::UnmuteLeg { session_id, leg_id } => {
-                let (bridge_opt, endpoint_opt) = {
-                    let sessions = self.sessions.read();
-                    sessions
-                        .get(&session_id)
-                        .map(|sess| (sess.bridge.clone(), sess.endpoint_for_leg(&leg_id)))
-                        .map(|(b, e)| (Some(b), Some(e)))
-                        .unwrap_or((None, None))
-                };
-                if let (Some(Some(bridge)), Some(endpoint)) = (bridge_opt, endpoint_opt) {
-                    bridge.replace_output_with_peer(endpoint).await;
-                    debug!(session_id = %session_id, leg = %leg_id, "UnmuteLeg: bridge output restored");
-                } else {
+                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
+                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
+                }) else {
                     debug!(session_id = %session_id, leg = %leg_id, "UnmuteLeg: no bridge (signaling-layer hold)");
-                }
+                    return Ok(());
+                };
+                bridge.replace_output_with_peer(endpoint).await;
+                debug!(session_id = %session_id, leg = %leg_id, "UnmuteLeg: bridge output restored");
             }
         }
 
@@ -903,9 +820,8 @@ impl EngineCore {
     /// Shared by `DestroySession` dispatch and the periodic reaper so both
     /// paths produce identical cleanup.
     async fn finalize_session_resources(mut sess: session::MediaSession) {
-        // Stop playback tracks.
-        let tracks: Vec<_> = sess.playback_tracks.values().cloned().collect();
-        for track in tracks {
+        // Stop playback tracks (drain avoids cloning each FileTrack).
+        for (_, track) in sess.playback_tracks.drain() {
             track.stop().await;
         }
 
@@ -921,12 +837,6 @@ impl EngineCore {
                 let _ = rec.finalize();
             }
             *guard = None;
-        }
-
-        // Abort SipFlow capture task (dropping the JoinHandle alone does not
-        // abort it).
-        if let Some(handle) = sess.sipflow_task.take() {
-            handle.abort();
         }
 
         // Drop the bridge reference. BridgePeer::Drop calls close_sync() which
@@ -1033,7 +943,7 @@ mod tests {
         h
     }
 
-    fn setup_engine() -> (MediaEngine, broadcast::Receiver<MediaEvent>) {
+    pub fn setup_engine() -> (MediaEngine, broadcast::Receiver<MediaEvent>) {
         let (engine, handle) = MediaEngine::new(MediaEngineConfig {
             command_channel_capacity: 64,
             event_channel_capacity: 64,
@@ -1541,24 +1451,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
-    }
-
-    // ── SipFlow capture ─────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_set_sipflow_capture_disable() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "sf1").await;
-        let _ = event_rx.recv().await;
-
-        engine
-            .send(MediaCommand::SetSipFlowCapture {
-                session_id: "sf1".into(),
-                call_id: "test-call-1".into(),
-                backend: None,
-                receiver: None,
-            })
-            .unwrap();
     }
 
     #[tokio::test]

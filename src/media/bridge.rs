@@ -62,7 +62,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
@@ -107,7 +107,7 @@ pub struct PeerEntry {
     pub dtmf_payload_type: Option<u8>,
     pub dtmf_sink: Option<Arc<dyn Fn(char) + Send + Sync + 'static>>,
     /// Output state for file/peer/mute
-    _output_state: Arc<AsyncMutex<OutputState>>,
+    _output_state: Arc<parking_lot::Mutex<OutputState>>,
 }
 
 /// One media endpoint owned by a BridgePeer. Kept for backward compat;
@@ -243,56 +243,7 @@ impl std::fmt::Display for ForwardPath {
     }
 }
 
-type DtmfHandler = Arc<dyn Fn(char) + Send + Sync + 'static>;
-
-#[derive(Clone)]
-struct BridgeDtmfSink {
-    endpoint: BridgeEndpoint,
-    payload_types: Vec<u8>,
-    handler: DtmfHandler,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BridgePayloadMapping {
-    source_pt: u8,
-    target_pt: u8,
-    source_clock_rate: u32,
-    target_clock_rate: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BridgeDtmfEventKey {
-    digit_code: u8,
-    rtp_timestamp: u32,
-}
-
-#[derive(Debug, Default)]
-struct BridgeDtmfDetector {
-    last_event: Option<BridgeDtmfEventKey>,
-}
-
-impl BridgeDtmfDetector {
-    fn observe(&mut self, payload: &[u8], rtp_timestamp: u32) -> Option<char> {
-        if payload.len() < 4 {
-            return None;
-        }
-
-        let digit_code = payload[0];
-        let digit = crate::media::telephone_event::dtmf_code_to_char(digit_code)?;
-
-        let event = BridgeDtmfEventKey {
-            digit_code,
-            rtp_timestamp,
-        };
-
-        if self.last_event == Some(event) {
-            return None;
-        }
-
-        self.last_event = Some(event);
-        Some(digit)
-    }
-}
+use crate::media::dtmf::{DtmfSink, PayloadMapping, DtmfDetector};
 
 fn output_mode_name(mode: u8) -> &'static str {
     match mode {
@@ -315,10 +266,47 @@ fn scale_rtp_timestamp(rtp_timestamp: u32, source_rate: u32, target_rate: u32) -
     }
 }
 
-/// BridgePeer manages PeerConnections to bridge media between endpoints.
-///
-/// Supports N peers (2+). For the common 2-peer caller↔callee case,
-/// fast-path fields (`caller_pc`, `callee_pc`, etc.) are kept as aliases.
+/// Per-side state for one endpoint of the bridge (Caller or Callee).
+struct BridgeSideState {
+    pc: PeerConnection,
+    send: Arc<parking_lot::Mutex<Option<MediaSender>>>,
+    output_state: Arc<parking_lot::Mutex<OutputState>>,
+    output_mode: Arc<AtomicU8>,
+    video_send: Arc<parking_lot::Mutex<Option<MediaSender>>>,
+    track: parking_lot::Mutex<Option<Arc<SampleStreamTrack>>>,
+    sender_codec: Option<RtpCodecParameters>,
+    video_codec: Option<RtpCodecParameters>,
+    video_sender: parking_lot::Mutex<Option<Arc<RtpSender>>>,
+    video_payload_type: Arc<AtomicU8>,
+    video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+}
+
+impl BridgeSideState {
+    fn new(pc: PeerConnection) -> Self {
+        Self {
+            pc,
+            send: Arc::new(parking_lot::Mutex::new(None)),
+            output_state: Arc::new(parking_lot::Mutex::new(OutputState {
+                mode: BRIDGE_OUTPUT_PEER,
+                file_source: None,
+                next_rtp_timestamp: None,
+                next_sequence_number: None,
+                active_rtp_offset: None,
+                active_seq_offset: None,
+                marker_pending: false,
+            })),
+            output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
+            video_send: Arc::new(parking_lot::Mutex::new(None)),
+            track: parking_lot::Mutex::new(None),
+            sender_codec: None,
+            video_codec: None,
+            video_sender: parking_lot::Mutex::new(None),
+            video_payload_type: Arc::new(AtomicU8::new(96)),
+            video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        }
+    }
+}
+
 /// Identifies which side of the bridge to operate on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeSide {
@@ -329,14 +317,12 @@ pub enum BridgeSide {
 pub struct BridgePeer {
     pub(crate) id: String,
     pub(crate) session_id: Option<String>,
-    /// Caller-side PeerConnection — fast-path alias for peers["caller"]
-    caller_pc: PeerConnection,
-    /// Callee-side PeerConnection (plain RTP) — fast-path alias for peers["callee"]
-    callee_pc: PeerConnection,
+    /// Per-side state indexed by BridgeEndpoint (0=Caller, 1=Callee).
+    sides: [BridgeSideState; 2],
     /// Bridge task handles (main forwarding loops)
-    bridge_tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
+    bridge_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Sub-task handles spawned from inside bridge tasks (forward_track_to_sender, pli_forwarder, etc.)
-    sub_tasks: Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    sub_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     /// Cancellation token
     cancel_token: CancellationToken,
     forwarding_started: AtomicBool,
@@ -350,45 +336,15 @@ pub struct BridgePeer {
     /// Non-blocking RTP capture tee for SipFlow.
     sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
     receive_clock: ReceiveTimestampClock,
-    dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
-    /// Audio sender channels for forwarding — fast-path aliases
-    caller_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    callee_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    /// Output state (mode + file source) — both fields protected by a single Mutex.
-    caller_output_state: Arc<AsyncMutex<OutputState>>,
-    callee_output_state: Arc<AsyncMutex<OutputState>>,
-    /// Fast-path mode check for bidirectional forwarder (atomic, no source needed).
-    caller_output_mode: Arc<AtomicU8>,
-    callee_output_mode: Arc<AtomicU8>,
-    /// Video sender channels for forwarding
-    caller_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    callee_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    /// Stored sample tracks for test-mode direct forwarding
-    caller_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
-    callee_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
-    /// Sender codec parameters (set by builder, used by setup_bridge)
-    caller_sender_codec: Option<RtpCodecParameters>,
-    callee_sender_codec: Option<RtpCodecParameters>,
-    /// Video codec parameters (set by builder, used by setup_bridge)
-    caller_video_codec: Option<RtpCodecParameters>,
-    callee_video_codec: Option<RtpCodecParameters>,
-    /// RtpSender handles for video — used to subscribe to PLI/FIR RTCP feedback
-    caller_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
-    callee_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
-    /// Target payload type stamped by rustpbx onto pass-through video RTP.
-    caller_video_payload_type: Arc<AtomicU8>,
-    callee_video_payload_type: Arc<AtomicU8>,
-    /// Per-source-payload video remapping. Caller map targets WebRTC, callee map targets RTP.
-    caller_video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
-    callee_video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+    dtmf_sink: Arc<parking_lot::RwLock<Option<DtmfSink>>>,
     /// Per-direction media forwarding stats (cumulative)
     caller_to_callee_stats: Arc<LegStats>,
     callee_to_caller_stats: Arc<LegStats>,
 
     /// N-peer: all peers indexed by PeerId (includes "webrtc"/"rtp" for fast path)
-    peers: Arc<AsyncMutex<std::collections::HashMap<PeerId, PeerEntry>>>,
+    peers: Arc<parking_lot::Mutex<std::collections::HashMap<PeerId, PeerEntry>>>,
     /// N-peer: routing table (source_peer_id → set of destination peer ids)
-    routes: Arc<AsyncMutex<std::collections::HashMap<PeerId, std::collections::HashSet<PeerId>>>>,
+    routes: Arc<parking_lot::Mutex<std::collections::HashMap<PeerId, std::collections::HashSet<PeerId>>>>,
 
     /// Optional transcoder for RTP→WebRTC direction (e.g. G.729→PCMU).
     /// Set dynamically via set_transcoder() when caller and callee codecs differ.
@@ -400,9 +356,9 @@ pub struct BridgePeer {
     /// Optional RTP timestamp/sequence rewriter for WebRTC→RTP direction.
     caller_to_callee_timing: Arc<parking_lot::Mutex<Option<RtpTiming>>>,
     /// Optional telephone-event mapping for RTP→WebRTC direction.
-    callee_to_caller_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+    callee_to_caller_dtmf_mapping: Arc<parking_lot::RwLock<Option<PayloadMapping>>>,
     /// Optional telephone-event mapping for WebRTC→RTP direction.
-    caller_to_callee_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+    caller_to_callee_dtmf_mapping: Arc<parking_lot::RwLock<Option<PayloadMapping>>>,
     /// RTP timeout per direction — if no packets received for this duration, notify via rtp_timeout_tx.
     rtp_timeout: Option<std::time::Duration>,
     /// Sender to notify session when RTP timeout is detected.
@@ -415,10 +371,9 @@ impl BridgePeer {
         Self {
             session_id: None,
             id,
-            caller_pc,
-            callee_pc,
-            bridge_tasks: AsyncMutex::new(Vec::new()),
-            sub_tasks: Arc::new(AsyncMutex::new(Vec::new())),
+            sides: [BridgeSideState::new(caller_pc), BridgeSideState::new(callee_pc)],
+            bridge_tasks: parking_lot::Mutex::new(Vec::new()),
+            sub_tasks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
             forwarding_started: AtomicBool::new(false),
             caller_gate: Arc::new(AtomicBool::new(false)),
@@ -427,46 +382,10 @@ impl BridgePeer {
             sipflow_tx: None,
             receive_clock: ReceiveTimestampClock::new(),
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
-            caller_send: Arc::new(AsyncMutex::new(None)),
-            callee_send: Arc::new(AsyncMutex::new(None)),
-            caller_output_state: Arc::new(AsyncMutex::new(OutputState {
-                mode: BRIDGE_OUTPUT_PEER,
-                file_source: None,
-                next_rtp_timestamp: None,
-                next_sequence_number: None,
-                active_rtp_offset: None,
-                active_seq_offset: None,
-                marker_pending: false,
-            })),
-            callee_output_state: Arc::new(AsyncMutex::new(OutputState {
-                mode: BRIDGE_OUTPUT_PEER,
-                file_source: None,
-                next_rtp_timestamp: None,
-                next_sequence_number: None,
-                active_rtp_offset: None,
-                active_seq_offset: None,
-                marker_pending: false,
-            })),
-            caller_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
-            callee_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
-            caller_video_send: Arc::new(AsyncMutex::new(None)),
-            callee_video_send: Arc::new(AsyncMutex::new(None)),
-            caller_track: AsyncMutex::new(None),
-            callee_track: AsyncMutex::new(None),
-            caller_sender_codec: None,
-            callee_sender_codec: None,
-            caller_video_codec: None,
-            callee_video_codec: None,
-            caller_video_sender: AsyncMutex::new(None),
-            callee_video_sender: AsyncMutex::new(None),
-            caller_video_payload_type: Arc::new(AtomicU8::new(96)),
-            callee_video_payload_type: Arc::new(AtomicU8::new(96)),
-            caller_video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
-            callee_video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             caller_to_callee_stats: LegStats::new(),
             callee_to_caller_stats: LegStats::new(),
-            peers: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
-            routes: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            peers: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            routes: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             callee_to_caller_transcoder: Arc::new(parking_lot::Mutex::new(None)),
             callee_to_caller_timing: Arc::new(parking_lot::Mutex::new(None)),
             caller_to_callee_transcoder: Arc::new(parking_lot::Mutex::new(None)),
@@ -499,40 +418,50 @@ impl BridgePeer {
     ///
     /// `caller_params`: Codec parameters for the caller-side track (e.g. Opus 48kHz)
     /// `callee_params`: Codec parameters for the callee-side track (e.g. PCMU 8kHz or Opus 48kHz)
+    /// Register an audio sample track on one bridge side.
+    fn setup_audio_side(&self, side: usize, params: RtpCodecParameters) {
+        let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Audio, 100);
+        *self.sides[side].track.lock() = Some(track.clone());
+        let pc = self.sides[side].pc.clone();
+        {
+            let _g = crate::utils::media_enter();
+            let _ = pc.add_track(track, params);
+        }
+        *self.sides[side].send.lock() = Some(tx);
+    }
+
+    /// Register a video sample track on one bridge side (if not already present).
+    fn setup_video_side(&self, side: usize, params: &RtpCodecParameters) -> Result<()> {
+        if self.sides[side].video_send.lock().is_some() {
+            return Ok(());
+        }
+        self.sides[side].video_payload_type.store(params.payload_type, Ordering::Relaxed);
+        let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
+        let pc = self.sides[side].pc.clone();
+        let sender = {
+            let _g = crate::utils::media_enter();
+            pc.add_track(track, params.clone())?
+        };
+        *self.sides[side].video_sender.lock() = Some(sender);
+        *self.sides[side].video_send.lock() = Some(tx);
+        Ok(())
+    }
+
     pub async fn setup_bridge_with_codecs(
         &self,
         caller_params: RtpCodecParameters,
         callee_params: RtpCodecParameters,
     ) -> Result<()> {
-        // Setup caller side: create sample track and register with PC
-        let (caller_tx, caller_track, _) =
-            rustrtc::media::track::sample_track(MediaKind::Audio, 100);
+        self.setup_audio_side(0, caller_params);
+        self.setup_audio_side(1, callee_params);
 
-        *self.caller_track.lock().await = Some(caller_track.clone());
-        {
-            let _g = crate::utils::media_enter();
-            let _ = self.caller_pc().add_track(caller_track, caller_params);
-        }
-        *self.caller_send.lock().await = Some(caller_tx);
-
-        // Setup callee side: create sample track and register with PC
-        let (callee_tx, callee_track, _) =
-            rustrtc::media::track::sample_track(MediaKind::Audio, 100);
-
-        *self.callee_track.lock().await = Some(callee_track.clone());
-        {
-            let _g = crate::utils::media_enter();
-            let _ = self.callee_pc().add_track(callee_track, callee_params);
-        }
-        *self.callee_send.lock().await = Some(callee_tx);
-
-        let mut tasks = self.bridge_tasks.lock().await;
+        let mut tasks = self.bridge_tasks.lock();
         tasks.push(Self::spawn_file_output_clock(
             self.id.clone(),
             BridgeEndpoint::Caller,
-            self.caller_send.lock().await.clone(),
-            Arc::clone(&self.caller_output_state),
-            Arc::clone(&self.caller_output_mode),
+            self.sides[0].send.lock().clone(),
+            Arc::clone(&self.sides[0].output_state),
+            Arc::clone(&self.sides[0].output_mode),
             self.cancel_token.clone(),
             self.recorder.clone(),
             self.recording_paused.clone(),
@@ -540,9 +469,9 @@ impl BridgePeer {
         tasks.push(Self::spawn_file_output_clock(
             self.id.clone(),
             BridgeEndpoint::Callee,
-            self.callee_send.lock().await.clone(),
-            Arc::clone(&self.callee_output_state),
-            Arc::clone(&self.callee_output_mode),
+            self.sides[1].send.lock().clone(),
+            Arc::clone(&self.sides[1].output_state),
+            Arc::clone(&self.sides[1].output_mode),
             self.cancel_token.clone(),
             self.recorder.clone(),
             self.recording_paused.clone(),
@@ -550,42 +479,11 @@ impl BridgePeer {
         drop(tasks);
 
         // Setup video senders if video codecs are configured
-        if let Some(ref caller_video_params) = self.caller_video_codec {
-            self.caller_video_payload_type
-                .store(caller_video_params.payload_type, Ordering::Relaxed);
-            let (caller_video_tx, caller_video_track, _) =
-                rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = {
-                let _g = crate::utils::media_enter();
-                self.caller_pc()
-                    .add_track(caller_video_track, caller_video_params.clone())
-            };
-            if let Ok(sender) = sender
-            {
-                *self.caller_video_sender.lock().await = Some(sender);
+        for side in 0..2 {
+            if let Some(ref p) = self.sides[side].video_codec {
+                self.setup_video_side(side, p)?;
+                debug!(bridge_id = %self.id, pt = p.payload_type, clock_rate = p.clock_rate, "Side {side} video sender setup complete");
             }
-            *self.caller_video_send.lock().await = Some(caller_video_tx);
-            debug!(bridge_id = %self.id, pt = caller_video_params.payload_type, clock_rate = caller_video_params.clock_rate, "Caller video sender setup complete");
-        } else {
-            debug!(bridge_id = %self.id, "Caller video sender NOT configured (no video codec)");
-        }
-
-        if let Some(ref callee_video_params) = self.callee_video_codec {
-            self.callee_video_payload_type
-                .store(callee_video_params.payload_type, Ordering::Relaxed);
-            let (callee_video_tx, callee_video_track, _) =
-                rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = {
-                let _g = crate::utils::media_enter();
-                self.callee_pc()
-                    .add_track(callee_video_track, callee_video_params.clone())
-            };
-            if let Ok(sender) = sender
-            {
-                *self.callee_video_sender.lock().await = Some(sender);
-            }
-            *self.callee_video_send.lock().await = Some(callee_video_tx);
-            debug!(bridge_id = %self.id, pt = callee_video_params.payload_type, clock_rate = callee_video_params.clock_rate, "Callee video sender setup complete");
         }
         Ok(())
     }
@@ -595,46 +493,17 @@ impl BridgePeer {
     /// Caller side determines the codec PT/clock-rate from its offer;
     /// the same params are used on the opposite side for symmetric video.
     pub async fn add_video_track(&self, pt: u8, clock_rate: u32) -> Result<()> {
-        let params = RtpCodecParameters {
-            payload_type: pt,
-            clock_rate,
-            channels: 0,
-        };
-
-        self.caller_video_payload_type
-            .store(params.payload_type, Ordering::Relaxed);
-        self.callee_video_payload_type
-            .store(params.payload_type, Ordering::Relaxed);
-
-        // Caller side
-        if self.caller_video_send.lock().await.is_none() {
-            let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = self.caller_pc().add_track(track, params.clone())?;
-            *self.caller_video_sender.lock().await = Some(sender);
-            *self.caller_video_send.lock().await = Some(tx);
+        let params = RtpCodecParameters { payload_type: pt, clock_rate, channels: 0 };
+        for side in 0..2 {
+            self.setup_video_side(side, &params)?;
         }
-
-        // Callee side
-        if self.callee_video_send.lock().await.is_none() {
-            let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = self.callee_pc().add_track(track, params)?;
-            *self.callee_video_sender.lock().await = Some(sender);
-            *self.callee_video_send.lock().await = Some(tx);
-        }
-
-        debug!(
-            bridge_id = %self.id,
-            pt = pt,
-            clock_rate = clock_rate,
-            "Video tracks added dynamically to both bridge sides"
-        );
+        debug!(bridge_id = %self.id, pt = pt, clock_rate = clock_rate, "Video tracks added to both bridge sides");
         Ok(())
     }
 
-    /// Check whether video senders have been configured on this bridge.
     pub async fn has_video(&self) -> bool {
-        self.caller_video_send.lock().await.is_some()
-            && self.callee_video_send.lock().await.is_some()
+        self.sides[0].video_send.lock().is_some()
+            && self.sides[1].video_send.lock().is_some()
     }
 
     /// Update target payload types stamped onto pass-through video frames.
@@ -644,7 +513,7 @@ impl BridgePeer {
         callee_params: Option<RtpCodecParameters>,
     ) {
         if let Some(params) = caller_params.as_ref() {
-            self.caller_video_payload_type
+            self.sides[0].video_payload_type
                 .store(params.payload_type, Ordering::Relaxed);
             debug!(
                 bridge_id = %self.id,
@@ -655,7 +524,7 @@ impl BridgePeer {
             );
         }
         if let Some(params) = callee_params.as_ref() {
-            self.callee_video_payload_type
+            self.sides[1].video_payload_type
                 .store(params.payload_type, Ordering::Relaxed);
             debug!(
                 bridge_id = %self.id,
@@ -705,16 +574,16 @@ impl BridgePeer {
             .find_map(|cap| webrtc_to_rtp.get(&cap.payload_type).copied());
 
         if let Some(pt) = caller_fallback {
-            self.caller_video_payload_type.store(pt, Ordering::Relaxed);
+            self.sides[0].video_payload_type.store(pt, Ordering::Relaxed);
         }
         if let Some(pt) = callee_fallback {
-            self.callee_video_payload_type.store(pt, Ordering::Relaxed);
+            self.sides[1].video_payload_type.store(pt, Ordering::Relaxed);
         }
 
-        *self.caller_video_payload_map.write() = rtp_to_webrtc;
-        *self.callee_video_payload_map.write() = webrtc_to_rtp;
-        let caller_map = self.caller_video_payload_map.read().clone();
-        let callee_map = self.callee_video_payload_map.read().clone();
+        *self.sides[0].video_payload_map.write() = rtp_to_webrtc;
+        *self.sides[1].video_payload_map.write() = webrtc_to_rtp;
+        let caller_map = self.sides[0].video_payload_map.read().clone();
+        let callee_map = self.sides[1].video_payload_map.read().clone();
 
         debug!(
             bridge_id = %self.id,
@@ -730,7 +599,8 @@ impl BridgePeer {
     /// Uses sender codecs from builder if set, otherwise falls back to defaults.
     pub async fn setup_bridge(&self) -> Result<()> {
         let caller_params = self
-            .caller_sender_codec
+            .sides[0]
+            .sender_codec
             .clone()
             .unwrap_or(RtpCodecParameters {
                 payload_type: 111,
@@ -738,7 +608,8 @@ impl BridgePeer {
                 channels: 2,
             });
         let callee_params = self
-            .callee_sender_codec
+            .sides[1]
+            .sender_codec
             .clone()
             .unwrap_or(RtpCodecParameters {
                 payload_type: 0,
@@ -855,7 +726,7 @@ impl BridgePeer {
             })
         };
 
-        let mut tasks = self.bridge_tasks.lock().await;
+        let mut tasks = self.bridge_tasks.lock();
         tasks.push(bidirectional_task);
         tasks.push(stats_task);
         tasks.push(self.spawn_peer_forward_loops());
@@ -863,12 +734,12 @@ impl BridgePeer {
 
     /// Get the WebRTC-side sender (for test injection)
     pub async fn get_caller_sender(&self) -> Option<MediaSender> {
-        self.caller_send.lock().await.clone()
+        self.sides[0].send.lock().clone()
     }
 
     /// Get the RTP-side sender (for test injection)
     pub async fn get_callee_sender(&self) -> Option<MediaSender> {
-        self.callee_send.lock().await.clone()
+        self.sides[1].send.lock().clone()
     }
 
     pub fn set_dtmf_sink(
@@ -889,7 +760,7 @@ impl BridgePeer {
         }
 
         let mut sink = self.dtmf_sink.write();
-        *sink = Some(BridgeDtmfSink {
+        *sink = Some(DtmfSink {
             endpoint,
             payload_types: payload_types.clone(),
             handler,
@@ -903,10 +774,13 @@ impl BridgePeer {
         );
     }
 
-    pub async fn replace_output_with_file(
+    /// Shared state transition for file/silence output: reserve the sender,
+    /// install `FileTrackPlaybackSource`, set `BRIDGE_OUTPUT_FILE` mode.
+    async fn set_output_to_file_source(
         &self,
         endpoint: BridgeEndpoint,
-        track: &crate::media::FileTrack,
+        source: crate::media::FileTrackPlaybackSource,
+        log_msg: &str,
     ) -> Result<()> {
         match endpoint {
             BridgeEndpoint::Caller => self.get_caller_sender().await,
@@ -914,8 +788,7 @@ impl BridgePeer {
         }
         .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
 
-        let source = track.create_playback_source().await?;
-        let mut state = self.output_state(endpoint).lock().await;
+        let mut state = self.output_state(endpoint).lock();
         let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
         state.active_rtp_offset = None;
@@ -930,9 +803,19 @@ impl BridgePeer {
             bridge_id = %self.id,
             session_id = ?self.session_id,
             endpoint = ?endpoint,
-            "Bridge output replaced with file source"
+            "{}", log_msg,
         );
         Ok(())
+    }
+
+    pub async fn replace_output_with_file(
+        &self,
+        endpoint: BridgeEndpoint,
+        track: &crate::media::FileTrack,
+    ) -> Result<()> {
+        let source = track.create_playback_source().await?;
+        self.set_output_to_file_source(endpoint, source, "Bridge output replaced with file source")
+            .await
     }
 
     pub async fn replace_output_with_silence(
@@ -940,37 +823,16 @@ impl BridgePeer {
         endpoint: BridgeEndpoint,
         codec_info: crate::media::negotiate::CodecInfo,
     ) -> Result<()> {
-        match endpoint {
-            BridgeEndpoint::Caller => self.get_caller_sender().await,
-            BridgeEndpoint::Callee => self.get_callee_sender().await,
-        }
-        .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
-
         let track = crate::media::FileTrack::new(format!("{}-{:?}-silence", self.id, endpoint))
             .with_loop(true)
             .with_codec_info(codec_info);
         let source = track.create_playback_source().await?;
-        let mut state = self.output_state(endpoint).lock().await;
-        let old_source = state.file_source.replace(source);
-        state.mode = BRIDGE_OUTPUT_FILE;
-        state.active_rtp_offset = None;
-        state.active_seq_offset = None;
-        state.marker_pending = true;
-        self.output_mode(endpoint)
-            .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
-        drop(state);
-        drop(old_source);
-
-        info!(
-            bridge_id = %self.id,
-            endpoint = ?endpoint,
-            "Bridge output replaced with silence source"
-        );
-        Ok(())
+        self.set_output_to_file_source(endpoint, source, "Bridge output replaced with silence source")
+            .await
     }
 
     pub async fn replace_output_with_peer(&self, endpoint: BridgeEndpoint) {
-        let mut state = self.output_state(endpoint).lock().await;
+        let mut state = self.output_state(endpoint).lock();
         state.mode = BRIDGE_OUTPUT_PEER;
         let old_source = state.file_source.take();
         self.output_mode(endpoint)
@@ -985,7 +847,7 @@ impl BridgePeer {
     }
 
     pub async fn mute_output(&self, endpoint: BridgeEndpoint) {
-        let mut state = self.output_state(endpoint).lock().await;
+        let mut state = self.output_state(endpoint).lock();
         state.mode = BRIDGE_OUTPUT_MUTED;
         let old_source = state.file_source.take();
         self.output_mode(endpoint)
@@ -1002,7 +864,7 @@ impl BridgePeer {
     /// Expose the raw output-mode atomic for caller endpoint (tests only).
     #[cfg(test)]
     pub fn caller_output_mode_atomic(&self) -> &Arc<AtomicU8> {
-        &self.caller_output_mode
+        &self.sides[0].output_mode
     }
 
     #[cfg(test)]
@@ -1111,7 +973,7 @@ impl BridgePeer {
 
     /// Add a peer to the N-peer bridge.
     pub async fn add_peer(&self, peer_id: PeerId, entry: PeerEntry) -> Result<()> {
-        let mut peers = self.peers.lock().await;
+        let mut peers = self.peers.lock();
         if peers.contains_key(&peer_id) {
             return Err(anyhow::anyhow!(
                 "Peer {} already exists in bridge {}",
@@ -1125,8 +987,8 @@ impl BridgePeer {
 
     /// Remove a peer from the N-peer bridge.
     pub async fn remove_peer(&self, peer_id: &PeerId) -> Option<PeerEntry> {
-        let mut peers = self.peers.lock().await;
-        let mut routes = self.routes.lock().await;
+        let mut peers = self.peers.lock();
+        let mut routes = self.routes.lock();
         routes.remove(peer_id);
         // Remove this peer from all other routes
         for dests in routes.values_mut() {
@@ -1141,14 +1003,14 @@ impl BridgePeer {
         from_peer: PeerId,
         to_peers: std::collections::HashSet<PeerId>,
     ) -> Result<()> {
-        let peers = self.peers.lock().await;
+        let peers = self.peers.lock();
         for dest in &to_peers {
             if !peers.contains_key(dest) {
                 return Err(anyhow::anyhow!("Route destination peer {} not found", dest));
             }
         }
         drop(peers);
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.routes.lock();
         routes.insert(from_peer, to_peers);
         Ok(())
     }
@@ -1225,7 +1087,7 @@ impl BridgePeer {
             BridgeEndpoint::Caller => &self.caller_to_callee_dtmf_mapping,
         };
 
-        *mapping_slot.write() = Some(BridgePayloadMapping {
+        *mapping_slot.write() = Some(PayloadMapping {
             source_pt,
             target_pt,
             source_clock_rate,
@@ -1252,17 +1114,17 @@ impl BridgePeer {
         mapping_slot.write().take();
     }
 
-    fn output_state(&self, endpoint: BridgeEndpoint) -> &Arc<AsyncMutex<OutputState>> {
+    fn output_state(&self, endpoint: BridgeEndpoint) -> &Arc<parking_lot::Mutex<OutputState>> {
         match endpoint {
-            BridgeEndpoint::Caller => &self.caller_output_state,
-            BridgeEndpoint::Callee => &self.callee_output_state,
+            BridgeEndpoint::Caller => &self.sides[0].output_state,
+            BridgeEndpoint::Callee => &self.sides[1].output_state,
         }
     }
 
     fn output_mode(&self, endpoint: BridgeEndpoint) -> &Arc<AtomicU8> {
         match endpoint {
-            BridgeEndpoint::Caller => &self.caller_output_mode,
-            BridgeEndpoint::Callee => &self.callee_output_mode,
+            BridgeEndpoint::Caller => &self.sides[0].output_mode,
+            BridgeEndpoint::Callee => &self.sides[1].output_mode,
         }
     }
 
@@ -1270,7 +1132,7 @@ impl BridgePeer {
         bridge_id: String,
         endpoint: BridgeEndpoint,
         sender: Option<MediaSender>,
-        output_state: Arc<AsyncMutex<OutputState>>,
+        output_state: Arc<parking_lot::Mutex<OutputState>>,
         output_mode_atomic: Arc<AtomicU8>,
         cancel_token: CancellationToken,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
@@ -1296,7 +1158,7 @@ impl BridgePeer {
                     }
                     _ = interval.tick() => {
                             let sample = {
-                            let mut guard = output_state.lock().await;
+                            let mut guard = output_state.lock();
                             if guard.mode != BRIDGE_OUTPUT_FILE {
                                 continue;
                             }
@@ -1311,7 +1173,7 @@ impl BridgePeer {
                         };
 
                         let Some(mut sample) = sample else {
-                            let mut guard = output_state.lock().await;
+                            let mut guard = output_state.lock();
                             // Natural EOF: restore normal peer forwarding so both
                             // parties hear each other again after the announcement.
                             guard.mode = BRIDGE_OUTPUT_PEER;
@@ -1328,7 +1190,7 @@ impl BridgePeer {
                         };
 
                         if let MediaSample::Audio(frame) = &mut sample {
-                            let mut guard = output_state.lock().await;
+                            let mut guard = output_state.lock();
 
                             // RFC 3550 §5.1: set marker bit on the first frame
                             // after a source switch so the receiver resets its
@@ -1439,7 +1301,7 @@ impl BridgePeer {
         let _recording_paused = self.recording_paused.clone();
 
         crate::utils::media_spawn(async move {
-            let peers = peers_map.lock().await;
+            let peers = peers_map.lock();
             let extra_peers: Vec<(PeerId, PeerConnection)> = peers
                 .iter()
                 .filter(|(id, _)| *id != "webrtc" && *id != "rtp")
@@ -1466,7 +1328,7 @@ impl BridgePeer {
                                         if let Some(receiver) = transceiver.receiver() {
                                             let track = receiver.track();
                                             let _is_video = transceiver.kind() == rustrtc::MediaKind::Video;
-                                            let route_dests: Vec<PeerId> = routes.lock().await
+                                            let route_dests: Vec<PeerId> = routes.lock()
                                                 .get(&pid)
                                                 .cloned()
                                                 .unwrap_or_default()
@@ -1493,7 +1355,7 @@ impl BridgePeer {
                                                                 Err(_) => break,
                                                             },
                                                         };
-                                                        let guard = peers_for_forward.lock().await;
+                                                        let guard = peers_for_forward.lock();
                                                         for dest in &dests_for_forward {
                                                             if let Some(entry) = guard.get(dest) {
                                                                 if let Some(ref sender) = entry.audio_sender {
@@ -1524,21 +1386,21 @@ impl BridgePeer {
     }
 
     pub async fn get_caller_track(&self) -> Option<Arc<SampleStreamTrack>> {
-        self.caller_track.lock().await.clone()
+        self.sides[0].track.lock().clone()
     }
 
     /// Get the RTP-side track (for test consumption)
     pub async fn get_callee_track(&self) -> Option<Arc<SampleStreamTrack>> {
-        self.callee_track.lock().await.clone()
+        self.sides[1].track.lock().clone()
     }
 
     fn spawn_bidirectional_forwarder(&self) -> tokio::task::JoinHandle<()> {
-        let caller_pc = self.caller_pc.clone();
-        let callee_pc = self.callee_pc.clone();
-        let callee_send = Arc::downgrade(&self.callee_send);
-        let caller_send = Arc::downgrade(&self.caller_send);
-        let callee_output_mode = Arc::clone(&self.callee_output_mode);
-        let caller_output_mode = Arc::clone(&self.caller_output_mode);
+        let caller_pc = self.sides[0].pc.clone();
+        let callee_pc = self.sides[1].pc.clone();
+        let callee_send = Arc::downgrade(&self.sides[1].send);
+        let caller_send = Arc::downgrade(&self.sides[0].send);
+        let callee_output_mode = Arc::clone(&self.sides[1].output_mode);
+        let caller_output_mode = Arc::clone(&self.sides[0].output_mode);
         let cancel_token = self.cancel_token.clone();
         let bridge_id = self.id.clone();
         let w2r_stats = Arc::clone(&self.caller_to_callee_stats);
@@ -1554,10 +1416,10 @@ impl BridgePeer {
         let callee_to_caller_timing = Arc::clone(&self.callee_to_caller_timing);
         let caller_to_callee_dtmf_mapping = Arc::clone(&self.caller_to_callee_dtmf_mapping);
         let callee_to_caller_dtmf_mapping = Arc::clone(&self.callee_to_caller_dtmf_mapping);
-        let caller_video_payload_type = Arc::clone(&self.caller_video_payload_type);
-        let callee_video_payload_type = Arc::clone(&self.callee_video_payload_type);
-        let caller_video_payload_map = Arc::clone(&self.caller_video_payload_map);
-        let callee_video_payload_map = Arc::clone(&self.callee_video_payload_map);
+        let caller_video_payload_type = Arc::clone(&self.sides[0].video_payload_type);
+        let callee_video_payload_type = Arc::clone(&self.sides[1].video_payload_type);
+        let caller_video_payload_map = Arc::clone(&self.sides[0].video_payload_map);
+        let callee_video_payload_map = Arc::clone(&self.sides[1].video_payload_map);
         let caller_gate = Arc::clone(&self.caller_gate);
         let sub_tasks = self.sub_tasks.clone();
 
@@ -1629,7 +1491,7 @@ impl BridgePeer {
                                                     "Callee PLI -> Caller source",
                                                 );
                                                 Self::prune_sub_tasks(&sub_tasks).await;
-                                                sub_tasks.lock().await.push(h);
+                                                sub_tasks.lock().push(h);
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
                                                         bridge_id = %bridge_id,
@@ -1675,7 +1537,7 @@ impl BridgePeer {
                                         Some(Arc::clone(&caller_gate)),
                                     );
                                     Self::prune_sub_tasks(&sub_tasks).await;
-                                    sub_tasks.lock().await.push(h);
+                                    sub_tasks.lock().push(h);
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
@@ -1754,7 +1616,7 @@ impl BridgePeer {
                                                     "Caller PLI -> Callee source",
                                                 );
                                                 Self::prune_sub_tasks(&sub_tasks).await;
-                                                sub_tasks.lock().await.push(h);
+                                                sub_tasks.lock().push(h);
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
                                                         bridge_id = %bridge_id,
@@ -1800,7 +1662,7 @@ impl BridgePeer {
                                         None, // Callee→Caller is always allowed
                                     );
                                     Self::prune_sub_tasks(&sub_tasks).await;
-                                    sub_tasks.lock().await.push(h);
+                                    sub_tasks.lock().push(h);
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
@@ -1831,7 +1693,7 @@ impl BridgePeer {
     async fn run_forward_loop(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,
-        sender_weak: std::sync::Weak<AsyncMutex<Option<MediaSender>>>,
+        sender_weak: std::sync::Weak<parking_lot::Mutex<Option<MediaSender>>>,
         output_mode: Arc<AtomicU8>,
         cancel_token: CancellationToken,
         path: ForwardPath,
@@ -1841,15 +1703,15 @@ impl BridgePeer {
         sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
         receive_clock: ReceiveTimestampClock,
         recording_paused: Arc<AtomicBool>,
-        dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
+        dtmf_sink: Arc<parking_lot::RwLock<Option<DtmfSink>>>,
         transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::Mutex<Option<RtpTiming>>>>,
-        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
+        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<PayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) {
         // Get the sender channel from weak pointer
         let sender = if let Some(strong) = sender_weak.upgrade() {
-            let guard = strong.lock().await;
+            let guard = strong.lock();
             guard.clone()
         } else {
             warn!(bridge_id = %bridge_id, direction = %path, "Sender channel no longer available");
@@ -1863,7 +1725,7 @@ impl BridgePeer {
         let sender = sender.unwrap();
 
         let is_video = track.kind() == MediaKind::Video;
-        let mut dtmf_detector = BridgeDtmfDetector::default();
+        let mut dtmf_detector = DtmfDetector::default();
         let mut packet_count: u64 = 0;
         // Last seen RTP sequence number for loss estimation
         let mut last_seq: Option<u16> = None;
@@ -2138,7 +2000,7 @@ impl BridgePeer {
 
     fn rewrite_dtmf_sample(
         frame: &mut AudioFrame,
-        mapping_slot: Option<&parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+        mapping_slot: Option<&parking_lot::RwLock<Option<PayloadMapping>>>,
         timing_slot: Option<&parking_lot::Mutex<Option<RtpTiming>>>,
     ) -> bool {
         let Some(mapping_slot) = mapping_slot else {
@@ -2193,10 +2055,10 @@ impl BridgePeer {
     }
 
     fn observe_dtmf_sample(
-        dtmf_sink: &Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
+        dtmf_sink: &Arc<parking_lot::RwLock<Option<DtmfSink>>>,
         endpoint: BridgeEndpoint,
         sample: &MediaSample,
-        detector: &mut BridgeDtmfDetector,
+        detector: &mut DtmfDetector,
     ) {
         let guard = dtmf_sink.read();
         let Some(sink) = guard.as_ref() else {
@@ -2236,8 +2098,8 @@ impl BridgePeer {
     /// Remove finished sub-tasks and cap the total so that repeated
     /// renegotiations (each spawning fresh forwarder / PLI tasks) do not grow
     /// `sub_tasks` without bound. Stale tasks for superseded tracks are aborted.
-    async fn prune_sub_tasks(sub_tasks: &Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>) {
-        let mut st = sub_tasks.lock().await;
+    async fn prune_sub_tasks(sub_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>) {
+        let mut st = sub_tasks.lock();
         // Drop handles for tasks that have already finished.
         st.retain(|h| !h.is_finished());
         // If there are still many live tasks (typical of repeated re-INVITEs
@@ -2289,7 +2151,7 @@ impl BridgePeer {
     fn forward_track_to_sender(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,
-        sender_weak: std::sync::Weak<AsyncMutex<Option<MediaSender>>>,
+        sender_weak: std::sync::Weak<parking_lot::Mutex<Option<MediaSender>>>,
         output_mode: Arc<AtomicU8>,
         cancel_token: CancellationToken,
         path: ForwardPath,
@@ -2299,10 +2161,10 @@ impl BridgePeer {
         sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
         receive_clock: ReceiveTimestampClock,
         recording_paused: Arc<AtomicBool>,
-        dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
+        dtmf_sink: Arc<parking_lot::RwLock<Option<DtmfSink>>>,
         transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::Mutex<Option<RtpTiming>>>>,
-        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
+        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<PayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) -> tokio::task::JoinHandle<()> {
         crate::utils::media_spawn(async move {
@@ -2331,30 +2193,30 @@ impl BridgePeer {
 
     /// Get the WebRTC PeerConnection
     pub fn caller_pc(&self) -> &PeerConnection {
-        &self.caller_pc
+        &self.sides[0].pc
     }
 
     /// Get the RTP PeerConnection
     pub fn callee_pc(&self) -> &PeerConnection {
-        &self.callee_pc
+        &self.sides[1].pc
     }
 
     /// Stop the bridge (async — waits for forwarding tasks to finish)
     pub async fn stop(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge");
         self.cancel_token.cancel();
-        self.caller_pc.close();
-        self.callee_pc.close();
+        self.sides[0].pc.close();
+        self.sides[1].pc.close();
 
-        // Wait for main tasks to complete
-        let mut tasks = self.bridge_tasks.lock().await;
-        for task in tasks.drain(..) {
+        // Wait for main tasks to complete (drain while holding lock, then drop guard before .await)
+        let tasks = self.bridge_tasks.lock().drain(..).collect::<Vec<_>>();
+        for task in tasks {
             let _ = task.await;
         }
 
         // Wait for sub-tasks (forward_track_to_sender, pli_forwarder, etc.)
-        let mut sub = self.sub_tasks.lock().await;
-        for task in sub.drain(..) {
+        let sub = self.sub_tasks.lock().drain(..).collect::<Vec<_>>();
+        for task in sub {
             let _ = task.await;
         }
     }
@@ -2363,8 +2225,8 @@ impl BridgePeer {
     /// Forwarding tasks exit on their own via cancel_token.
     pub fn close_sync(&self) {
         self.cancel_token.cancel();
-        self.caller_pc.close();
-        self.callee_pc.close();
+        self.sides[0].pc.close();
+        self.sides[1].pc.close();
     }
 }
 
@@ -2673,8 +2535,8 @@ impl BridgePeerBuilder {
 
         let mut bridge = BridgePeer::new(self.bridge_id, caller_pc, callee_pc);
         bridge.session_id = self.session_id;
-        bridge.caller_sender_codec = self.caller_sender_codec;
-        bridge.callee_sender_codec = self.callee_sender_codec;
+        bridge.sides[0].sender_codec = self.caller_sender_codec;
+        bridge.sides[1].sender_codec = self.callee_sender_codec;
         bridge.recorder = self.recorder;
         bridge.recording_paused = self.recording_paused;
         bridge.sipflow_tx = self.sipflow_tx;
@@ -2682,24 +2544,13 @@ impl BridgePeerBuilder {
         bridge.rtp_timeout_tx = self.rtp_timeout_tx;
 
         // Store video codec params for setup_bridge to create video senders
-        bridge.caller_video_codec = self
-            .caller_video_capabilities
-            .as_ref()
-            .and_then(|caps| caps.first())
-            .map(|cap| RtpCodecParameters {
-                payload_type: cap.payload_type,
-                clock_rate: cap.clock_rate,
-                channels: 0,
-            });
-        bridge.callee_video_codec = self
-            .callee_video_capabilities
-            .as_ref()
-            .and_then(|caps| caps.first())
-            .map(|cap| RtpCodecParameters {
-                payload_type: cap.payload_type,
-                clock_rate: cap.clock_rate,
-                channels: 0,
-            });
+        let vid_codec = |caps: &Option<Vec<rustrtc::VideoCapability>>| {
+            caps.as_ref().and_then(|c| c.first()).map(|cap| RtpCodecParameters {
+                payload_type: cap.payload_type, clock_rate: cap.clock_rate, channels: 0,
+            })
+        };
+        bridge.sides[0].video_codec = vid_codec(&self.caller_video_capabilities);
+        bridge.sides[1].video_codec = vid_codec(&self.callee_video_capabilities);
 
         Arc::new(bridge)
     }
@@ -4021,7 +3872,7 @@ mod tests {
     /// Mock audio track that yields one pre-defined sample then blocks forever.
     /// The test uses the CancellationToken to stop the forwarding loop.
     struct OneShotAudioTrack {
-        sample: tokio::sync::Mutex<Option<MediaSample>>,
+        sample: parking_lot::Mutex<Option<MediaSample>>,
     }
 
     #[async_trait::async_trait]
@@ -4036,8 +3887,8 @@ mod tests {
             TrackState::Live
         }
         async fn recv(&self) -> MediaResult<MediaSample> {
-            let mut guard = self.sample.lock().await;
-            if let Some(s) = guard.take() {
+            let s = self.sample.lock().take();
+            if let Some(s) = s {
                 Ok(s)
             } else {
                 loop {
@@ -4115,14 +3966,14 @@ mod tests {
         };
 
         let mock_track: Arc<dyn MediaStreamTrack> = Arc::new(OneShotAudioTrack {
-            sample: tokio::sync::Mutex::new(Some(MediaSample::Audio(input_frame))),
+            sample: parking_lot::Mutex::new(Some(MediaSample::Audio(input_frame))),
         });
 
         // Output channel – run_forward_loop writes transcoded samples here
         // sample_track returns (source, track_a, feedback_rx).
         // track_a receives what source sends.
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(AsyncMutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         // Configure G.729 → PCMU transcoder
@@ -4136,7 +3987,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let stats: Arc<LegStats> = LegStats::new();
-        let dtmf: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>> =
+        let dtmf: Arc<parking_lot::RwLock<Option<DtmfSink>>> =
             Arc::new(parking_lot::RwLock::new(None));
 
         // Run the forwarding loop in a background task
@@ -4222,11 +4073,11 @@ mod tests {
         };
 
         let mock_track: Arc<dyn MediaStreamTrack> = Arc::new(OneShotAudioTrack {
-            sample: tokio::sync::Mutex::new(Some(MediaSample::Audio(input_frame))),
+            sample: parking_lot::Mutex::new(Some(MediaSample::Audio(input_frame))),
         });
 
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(AsyncMutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         let transcoder = Arc::new(parking_lot::Mutex::new(Some(Transcoder::new(
@@ -4234,7 +4085,7 @@ mod tests {
             CodecType::PCMA,
             8,
         ))));
-        let dtmf_mapping = Arc::new(parking_lot::RwLock::new(Some(BridgePayloadMapping {
+        let dtmf_mapping = Arc::new(parking_lot::RwLock::new(Some(PayloadMapping {
             source_pt: 110,
             target_pt: 126,
             source_clock_rate: 48_000,
@@ -4300,7 +4151,7 @@ mod tests {
     fn test_bridge_dtmf_mapping_uses_shared_timing_when_available() {
         use bytes::Bytes;
 
-        let dtmf_mapping = parking_lot::RwLock::new(Some(BridgePayloadMapping {
+        let dtmf_mapping = parking_lot::RwLock::new(Some(PayloadMapping {
             source_pt: 110,
             target_pt: 126,
             source_clock_rate: 48_000,
@@ -4549,11 +4400,11 @@ mod tests {
         };
 
         let mock_track: Arc<dyn MediaStreamTrack> = Arc::new(OneShotAudioTrack {
-            sample: tokio::sync::Mutex::new(Some(MediaSample::Audio(input_frame))),
+            sample: parking_lot::Mutex::new(Some(MediaSample::Audio(input_frame))),
         });
 
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(AsyncMutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         let cancel = CancellationToken::new();

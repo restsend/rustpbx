@@ -34,7 +34,7 @@ use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
-use crate::media::mixer::MediaMixer;
+use crate::proxy::proxy_call::mixer::MediaMixer;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
@@ -760,31 +760,45 @@ impl SipSession {
 
     fn setup_sipflow_capture(
         &self,
-        session_id: &str,
+        _session_id: &str,
         call_id: &str,
     ) -> Option<crate::media::engine::SipFlowCaptureTx> {
         let backend = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())?;
+        let call_id = call_id.to_string();
 
-        let (tx, rx) = tokio::sync::mpsc::channel(
+        let (tx, mut rx): (crate::media::engine::SipFlowCaptureTx, _) = tokio::sync::mpsc::channel(
             crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY,
         );
-        if let Err(e) =
-            self.server
-                .media_engine
-                .send(crate::media::engine::MediaCommand::SetSipFlowCapture {
-                    session_id: session_id.to_string(),
-                    call_id: call_id.to_string(),
-                    backend: Some(backend),
-                    receiver: Some(rx),
-                })
-        {
-            warn!(
-                session_id = %session_id,
-                error = %e,
-                "MediaEngine SipFlow capture command rejected"
-            );
-            return None;
-        }
+
+        // Spawn the drain task locally — no engine involvement needed.
+        // The task exits automatically when all senders (in ForwardingTrack) are dropped.
+        crate::utils::media_spawn(async move {
+            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+            while let Some((leg, sample, received_at_micros)) = rx.recv().await {
+                if let rustrtc::media::frame::MediaSample::Audio(frame) = &*sample
+                    && let Some(rtp_packet) = &frame.raw_packet
+                    && let Ok(rtp_bytes) = rtp_packet.marshal()
+                {
+                    let leg_id = match leg {
+                        crate::media::recorder::Leg::A => 0,
+                        crate::media::recorder::Leg::B => 1,
+                    };
+                    let item = SipFlowItem {
+                        timestamp: received_at_micros,
+                        seq: frame.sequence_number.unwrap_or(0) as u64,
+                        leg: Some(leg_id),
+                        msg_type: SipFlowMsgType::Rtp,
+                        src_addr: frame
+                            .source_addr
+                            .map(|addr| addr.to_string())
+                            .unwrap_or_default(),
+                        dst_addr: String::new(),
+                        payload: bytes::Bytes::from(rtp_bytes),
+                    };
+                    let _ = backend.record(&call_id, item);
+                }
+            }
+        });
 
         Some(tx)
     }

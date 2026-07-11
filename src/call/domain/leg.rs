@@ -5,44 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Audio frame for mixer input (PCM 16bit, 8kHz)
 pub type PcmAudioFrame = Vec<i16>;
 
-/// Unique identifier for a call leg (participant in a session)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LegId(pub String);
-
-impl LegId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for LegId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<String> for LegId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for LegId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-impl From<LegId> for String {
-    fn from(leg_id: LegId) -> Self {
-        leg_id.0
-    }
-}
+/// Re-exported from `media::leg_id` so the entire codebase uses one definition
+/// without circular dependencies.
+pub use crate::media::LegId;
 
 /// State of a single leg (participant) in a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

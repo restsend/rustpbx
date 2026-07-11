@@ -3,12 +3,12 @@
 //! This module provides real-time audio mixing for conference calls.
 //! It connects MediaPeers to the mixer and routes mixed audio back to participants.
 
-use crate::call::domain::LegId;
+use crate::media::LegId;
 use crate::media::mixer::AudioMixer;
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
+use dashmap::DashMap;
 use parking_lot::Mutex as ParkMutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -77,8 +77,8 @@ pub struct ConferenceParticipantAudio {
 pub struct ConferenceAudioMixer {
     /// Conference ID
     conf_id: String,
-    /// Participant audio channels
-    participants: Arc<tokio::sync::Mutex<HashMap<LegId, ConferenceParticipantAudio>>>,
+    /// Participant audio channels (DashMap for concurrent access)
+    participants: Arc<DashMap<LegId, ConferenceParticipantAudio>>,
     /// Cached participant count for sync access
     participant_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Audio sample rate
@@ -91,10 +91,10 @@ pub struct ConferenceAudioMixer {
     mixing_task: Arc<ParkMutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Per-(source, destination) gain overrides for supervisor modes.
     /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
-    route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
+    route_gains: Arc<DashMap<(LegId, LegId), f32>>,
     /// Optional recorder tap: each participant's input PCM is cloned here
     /// before mixing so the recorder can write per-leg audio.
-    recorder_sink: Arc<tokio::sync::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
+    recorder_sink: Arc<parking_lot::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
 }
 
 impl std::fmt::Debug for ConferenceAudioMixer {
@@ -123,14 +123,14 @@ impl ConferenceAudioMixer {
 
         Self {
             conf_id,
-            participants: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            participants: Arc::new(DashMap::new()),
             participant_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             sample_rate,
             frame_size,
             cancel_token: CancellationToken::new(),
             mixing_task: Arc::new(ParkMutex::new(None)),
-            route_gains: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            recorder_sink: Arc::new(tokio::sync::Mutex::new(None)),
+            route_gains: Arc::new(DashMap::new()),
+            recorder_sink: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -138,7 +138,7 @@ impl ConferenceAudioMixer {
     /// participant's raw input PCM to the provided channel **before**
     /// N-1 mixing, so the recorder can write per-leg audio.
     pub async fn set_recorder_sink(&self, sink: Option<mpsc::Sender<RecorderFrame>>) {
-        let mut guard = self.recorder_sink.lock().await;
+        let mut guard = self.recorder_sink.lock();
         *guard = sink;
     }
 
@@ -150,14 +150,11 @@ impl ConferenceAudioMixer {
         codec: CodecType,
     ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
         // Reject duplicate participants
-        {
-            let participants = self.participants.lock().await;
-            if participants.contains_key(&leg_id) {
-                return Err(anyhow!(
-                    "Participant {} already exists in conference",
-                    leg_id
-                ));
-            }
+        if self.participants.contains_key(&leg_id) {
+            return Err(anyhow!(
+                "Participant {} already exists in conference",
+                leg_id
+            ));
         }
 
         let (input_tx, input_rx) = mpsc::channel::<AudioFrame>(100);
@@ -171,10 +168,7 @@ impl ConferenceAudioMixer {
             muted: false,
         };
 
-        {
-            let mut participants = self.participants.lock().await;
-            participants.insert(leg_id.clone(), participant);
-        }
+        self.participants.insert(leg_id.clone(), participant);
 
         // Update cached count
         self.participant_count
@@ -194,10 +188,7 @@ impl ConferenceAudioMixer {
 
     /// Remove a participant from the conference
     pub async fn remove_participant(&self, leg_id: &LegId) -> Result<()> {
-        let was_present = {
-            let mut participants = self.participants.lock().await;
-            participants.remove(leg_id).is_some()
-        };
+        let was_present = self.participants.remove(leg_id).is_some();
 
         // Only adjust the count if the participant actually existed, to avoid
         // underflowing to usize::MAX on duplicate/erroneous remove calls (which
@@ -209,12 +200,10 @@ impl ConferenceAudioMixer {
             // Prune any route gains that referenced the leaving leg (as source
             // or destination), so the routing table does not grow monotonically
             // as participants churn through a long-running conference.
-            let mut gains = self.route_gains.lock().await;
-            let before = gains.len();
-            gains.retain(|(src, dst), _| src != leg_id && dst != leg_id);
-            let pruned = before - gains.len();
+            let before = self.route_gains.len();
+            self.route_gains.retain(|(src, dst), _| src != leg_id && dst != leg_id);
+            let pruned = before - self.route_gains.len();
             if pruned > 0 {
-                drop(gains);
                 debug!(
                     conf_id = %self.conf_id,
                     leg_id = %leg_id,
@@ -238,8 +227,7 @@ impl ConferenceAudioMixer {
 
     /// Mute/unmute a participant
     pub async fn set_muted(&self, leg_id: &LegId, muted: bool) -> Result<()> {
-        let mut participants = self.participants.lock().await;
-        if let Some(participant) = participants.get_mut(leg_id) {
+        if let Some(mut participant) = self.participants.get_mut(leg_id) {
             participant.muted = muted;
             info!(
                 conf_id = %self.conf_id,
@@ -254,11 +242,10 @@ impl ConferenceAudioMixer {
     /// Set per-route gain for supervisor modes.
     /// A gain of 0.0 means the source participant is silent for the destination.
     pub async fn set_route_gain(&self, src: &LegId, dst: &LegId, gain: f32) {
-        let mut gains = self.route_gains.lock().await;
         if (gain - 1.0).abs() < f32::EPSILON {
-            gains.remove(&(src.clone(), dst.clone()));
+            self.route_gains.remove(&(src.clone(), dst.clone()));
         } else {
-            gains.insert((src.clone(), dst.clone()), gain);
+            self.route_gains.insert((src.clone(), dst.clone()), gain);
         }
         info!(
             conf_id = %self.conf_id,
@@ -271,17 +258,14 @@ impl ConferenceAudioMixer {
 
     /// Clear all route gains (reset to default N-1 mixing).
     pub async fn clear_route_gains(&self) {
-        let mut gains = self.route_gains.lock().await;
-        gains.clear();
+        self.route_gains.clear();
         info!(conf_id = %self.conf_id, "Route gains cleared");
     }
 
     /// Update audio routing for all participants
     /// Each participant hears all other participants (N-1 mixing)
     async fn update_routing(&self) -> Result<()> {
-        let participants = self.participants.lock().await;
-        let leg_ids: Vec<LegId> = participants.keys().cloned().collect();
-        drop(participants);
+        let participant_count = self.participants.len();
 
         // ConferenceAudioMixer uses its own mixing loop (N-1 mixing)
         // Each participant receives mixed audio from all other participants
@@ -289,7 +273,7 @@ impl ConferenceAudioMixer {
 
         debug!(
             conf_id = %self.conf_id,
-            participant_count = leg_ids.len(),
+            participant_count,
             "Updated conference routing"
         );
 
@@ -346,12 +330,12 @@ impl ConferenceAudioMixer {
     /// Collects audio from all participants, mixes, and distributes
     async fn mixing_loop(
         conf_id: String,
-        participants: Arc<tokio::sync::Mutex<HashMap<LegId, ConferenceParticipantAudio>>>,
+        participants: Arc<DashMap<LegId, ConferenceParticipantAudio>>,
         cancel_token: CancellationToken,
         frame_size: usize,
         sample_rate: u32,
-        route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
-        recorder_sink: Arc<tokio::sync::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
+        route_gains: Arc<DashMap<(LegId, LegId), f32>>,
+        recorder_sink: Arc<parking_lot::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
     ) {
         let interval_ms = (frame_size as f64 / sample_rate as f64 * 1000.0) as u64;
         let interval = tokio::time::Duration::from_millis(interval_ms.max(1));
@@ -373,39 +357,28 @@ impl ConferenceAudioMixer {
                     break;
                 }
                 _ = tokio::time::sleep(interval) => {
-                    let participant_audio = {
-                        let mut participants_guard = participants.lock().await;
-                        let mut frames = HashMap::new();
-
-                        for (leg_id, participant) in participants_guard.iter_mut() {
-                            loop {
-                                match participant.input_rx.try_recv() {
-                                    Ok(frame) => {
-                                        if !participant.muted {
-                                            frames.insert(leg_id.clone(), frame);
-                                        }
-                                    }
-                                    Err(mpsc::error::TryRecvError::Empty) => {
-                                        break;
-                                    }
-                                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                                        break;
+                    // Phase 1: drain latest audio from every participant (no locks held across await)
+                    let mut participant_audio = std::collections::HashMap::new();
+                    for mut entry in participants.iter_mut() {
+                        loop {
+                            match entry.input_rx.try_recv() {
+                                Ok(frame) => {
+                                    if !entry.muted {
+                                        participant_audio.insert(entry.key().clone(), frame);
                                     }
                                 }
+                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                Err(mpsc::error::TryRecvError::Disconnected) => break,
                             }
                         }
+                    }
 
-                        frames
-                    };
-
-                    let gains_map = route_gains.lock().await;
-                    let participants_guard = participants.lock().await;
-                    let participant_ids: Vec<LegId> = participants_guard.keys().cloned().collect();
-                    drop(participants_guard);
+                    let participant_ids: Vec<LegId> =
+                        participants.iter().map(|e| e.key().clone()).collect();
 
                     // ── Recorder tap: forward raw per-leg PCM before mixing ─────
                     if !participant_audio.is_empty() {
-                        let sink_guard = recorder_sink.lock().await;
+                        let sink_guard = recorder_sink.lock();
                         if let Some(ref sink) = *sink_guard {
                             for (leg_id, frame) in &participant_audio {
                                 let rf = RecorderFrame {
@@ -427,9 +400,9 @@ impl ConferenceAudioMixer {
 
                             for (input_leg, frame) in &participant_audio {
                                 if input_leg != output_leg {
-                                    let gain = gains_map
+                                    let gain = route_gains
                                         .get(&(input_leg.clone(), output_leg.clone()))
-                                        .copied()
+                                        .map(|r| *r)
                                         .unwrap_or(1.0);
                                     if gain > 0.0 {
                                         input_frames.push(frame.samples.clone());
@@ -452,10 +425,10 @@ impl ConferenceAudioMixer {
 
                                 let output_frame = AudioFrame::new(mixed_samples, sample_rate);
 
-                                let output_tx = {
-                                    let participants_guard = participants.lock().await;
-                                    participants_guard.get(output_leg).map(|p| p.output_tx.clone())
-                                };
+                                // Get the output_tx with a short-lived DashMap lookup
+                                let output_tx = participants
+                                    .get(output_leg)
+                                    .map(|e| e.output_tx.clone());
 
                                 if let Some(tx) = output_tx
                                     && tx.send(output_frame).await.is_err() {

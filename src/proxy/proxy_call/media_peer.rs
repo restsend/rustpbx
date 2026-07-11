@@ -12,7 +12,9 @@ pub trait MediaPeer: Send + Sync {
     async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>>;
     async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()>;
     async fn remove_track(&self, track_id: &str, stop: bool);
+    #[allow(dead_code)]
     async fn serve(&self) -> Result<()>;
+    #[allow(dead_code)]
     fn stop(&self);
 
     /// Mute a track by ID

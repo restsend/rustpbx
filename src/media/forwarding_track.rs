@@ -386,13 +386,13 @@ mod tests {
 
     /// Minimal track that yields exactly one pre-defined sample then blocks.
     struct OneShotTrack {
-        sample: tokio::sync::Mutex<Option<MediaSample>>,
+        sample: parking_lot::Mutex<Option<MediaSample>>,
     }
 
     impl OneShotTrack {
         fn new(sample: MediaSample) -> Arc<Self> {
             Arc::new(Self {
-                sample: tokio::sync::Mutex::new(Some(sample)),
+                sample: parking_lot::Mutex::new(Some(sample)),
             })
         }
     }
@@ -410,12 +410,11 @@ mod tests {
         }
         async fn recv(&self) -> MediaResult<MediaSample> {
             loop {
-                let mut guard = self.sample.lock().await;
-                if let Some(s) = guard.take() {
+                let s = self.sample.lock().take();
+                if let Some(s) = s {
                     return Ok(s);
                 }
                 // Block until the test polls again — simulate a quiet stream.
-                drop(guard);
                 tokio::time::sleep(std::time::Duration::from_secs(999)).await;
             }
         }

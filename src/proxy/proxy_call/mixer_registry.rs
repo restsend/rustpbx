@@ -1,9 +1,14 @@
-use crate::media::mixer::{MediaMixer, SupervisorMixerMode};
+// Most items in this module are used by the supervisor / coaching feature
+// via `rwi::processor` and are declared here for future use.
+#![allow(dead_code)]
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{info, warn};
+
+use super::mixer::{MediaMixer, SupervisorMixerMode};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixerParticipantRole {
@@ -205,11 +210,6 @@ impl MixerRegistry {
                 let mut participants = self.participants.lock();
                 participants.remove(session_id);
 
-                // Auto-reap mixers that have no participants left, so the
-                // MediaMixer (and its background task) is stopped and dropped
-                // instead of accumulating for the process lifetime. This guards
-                // against supervisor sessions that hang up without issuing an
-                // explicit supervisor_stop.
                 if mixer_now_empty {
                     let entry_to_stop = {
                         let mut mixers = self.mixers.lock();

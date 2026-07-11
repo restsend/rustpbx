@@ -239,14 +239,6 @@ pub enum MediaCommand {
     ResumeRecording {
         session_id: String,
     },
-    StartSipFlow {
-        session_id: String,
-    },
-    StopSipFlow {
-        session_id: String,
-    },
-
-    // ── DTMF ─────────────────────────────────────────────────────────────
     SendDtmf {
         session_id: String,
         leg_id: String,
@@ -338,19 +330,6 @@ pub enum MediaCommand {
         paused: Arc<AtomicBool>,
     },
 
-    /// Enable SipFlow RTP capture for a session.
-    ///
-    /// The SIP session creates the channel and keeps the sender while the
-    /// engine drains this receiver into `backend`.
-    SetSipFlowCapture {
-        session_id: String,
-        /// The call-id used as the key in the SipFlow backend store.
-        call_id: String,
-        /// SipFlow storage backend.  `None` disables capture.
-        backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
-        /// Receiver side of the capture channel. Required when `backend` is set.
-        receiver: Option<SipFlowCaptureRx>,
-    },
 }
 
 impl MediaCommand {
@@ -370,9 +349,7 @@ impl MediaCommand {
             Self::StartRecording { session_id, .. }
             | Self::StopRecording { session_id, .. }
             | Self::PauseRecording { session_id }
-            | Self::ResumeRecording { session_id }
-            | Self::StartSipFlow { session_id }
-            | Self::StopSipFlow { session_id } => Some(session_id),
+            | Self::ResumeRecording { session_id } => Some(session_id),
             Self::SendDtmf { session_id, .. } | Self::CollectDtmf { session_id, .. } => {
                 Some(session_id)
             }
@@ -386,8 +363,7 @@ impl MediaCommand {
             }
             Self::AttachBridge { session_id, .. }
             | Self::DetachBridge { session_id }
-            | Self::AttachRecorder { session_id, .. }
-            | Self::SetSipFlowCapture { session_id, .. } => Some(session_id),
+            | Self::AttachRecorder { session_id, .. } => Some(session_id),
             // Commands that don't target a single session
             Self::SetRouteGain { .. } => None,
         }
@@ -408,8 +384,6 @@ impl MediaCommand {
             Self::StopRecording { .. } => "stop_recording",
             Self::PauseRecording { .. } => "pause_recording",
             Self::ResumeRecording { .. } => "resume_recording",
-            Self::StartSipFlow { .. } => "start_sipflow",
-            Self::StopSipFlow { .. } => "stop_sipflow",
             Self::SendDtmf { .. } => "send_dtmf",
             Self::CollectDtmf { .. } => "collect_dtmf",
             Self::JoinMixer { .. } => "join_mixer",
@@ -423,7 +397,6 @@ impl MediaCommand {
             Self::AttachBridge { .. } => "attach_bridge",
             Self::DetachBridge { .. } => "detach_bridge",
             Self::AttachRecorder { .. } => "attach_recorder",
-            Self::SetSipFlowCapture { .. } => "set_sipflow_capture",
         }
     }
 }
