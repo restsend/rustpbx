@@ -34,7 +34,7 @@ use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
-use crate::proxy::proxy_call::mixer::MediaMixer;
+use crate::proxy::proxy_call::session_registry::SupervisorSession;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
@@ -162,7 +162,7 @@ pub struct SipSession {
     pub server: SipServerRef,
     pub server_dialog: ServerInviteDialog,
     pub callee_dialogs: Arc<DashMap<DialogId, ()>>,
-    pub supervisor_mixer: Option<Arc<MediaMixer>>,
+    pub supervisor_mixer: Option<Arc<SupervisorSession>>,
 
     pub context: CallContext,
     pub call_record_sender: Option<CallRecordSender>,

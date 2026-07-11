@@ -185,6 +185,110 @@ impl ForwardingTrack {
         *self.dtmf_mapping.lock() = dtmf_mapping;
         *self.dtmf_timing.lock() = dtmf_timing;
     }
+
+    /// Tee the sample to recorder and/or SipFlow capture channels (non-blocking).
+    fn tee_sample_to_capture_channels(&self, sample: &MediaSample) {
+        let needs_recorder = self.recorder_tx.is_some();
+        let needs_sipflow = self.sipflow_tx.is_some();
+        let shared = if needs_recorder || needs_sipflow {
+            Some(Arc::new(sample.clone()))
+        } else {
+            None
+        };
+        let received_at_micros = self.receive_clock.now_micros();
+
+        if let (Some(tx), Some(shared)) = (&self.recorder_tx, &shared) {
+            if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared))) {
+                trace!(track_id = %self.track_id, "ForwardingTrack recorder channel full: {e}");
+            }
+        }
+        if let (Some(tx), Some(shared)) = (&self.sipflow_tx, &shared) {
+            if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros)) {
+                trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
+            }
+        }
+    }
+
+    /// Try to map a DTMF telephone-event frame to the egress payload type.
+    fn try_map_dtmf(
+        &self,
+        frame: &rustrtc::media::frame::AudioFrame,
+        dtmf_mapping: &Option<DtmfMapping>,
+        matched_dtmf: bool,
+    ) -> Option<MediaSample> {
+        let mapping = dtmf_mapping.as_ref().filter(|_| matched_dtmf)?;
+        let target_pt = mapping.target_pt?;
+
+        let mut dtmf_frame = frame.clone();
+        dtmf_frame.payload_type = Some(target_pt);
+
+        if let Some(target_clock_rate) = mapping.target_clock_rate
+            && mapping.source_clock_rate != target_clock_rate
+        {
+            dtmf_frame.data = rewrite_dtmf_duration(
+                &dtmf_frame.data,
+                mapping.source_clock_rate,
+                target_clock_rate,
+            );
+            let mut guard = self.dtmf_timing.lock();
+            if let Some(timing) = guard.as_mut() {
+                timing.rewrite(
+                    &mut dtmf_frame,
+                    mapping.source_clock_rate,
+                    target_clock_rate,
+                    target_pt,
+                );
+            }
+        }
+        Some(MediaSample::Audio(dtmf_frame))
+    }
+
+    /// Try to transcode or remap an audio frame to the egress codec/PT.
+    fn try_transcode_audio(
+        &self,
+        frame: &rustrtc::media::frame::AudioFrame,
+        audio_mapping: &Option<AudioMapping>,
+        matched_audio: bool,
+    ) -> Option<MediaSample> {
+        let audio_mapping = audio_mapping.as_ref().filter(|_| matched_audio)?;
+
+        let mut guard = self.transcoder.lock();
+        if let Some(transcoder) = guard.as_mut() {
+            let mut output = transcoder.transcode(frame);
+            let mut timing_guard = self.audio_timing.lock();
+            if let Some(timing) = timing_guard.as_mut() {
+                timing.rewrite(
+                    &mut output,
+                    audio_mapping.source_clock_rate,
+                    audio_mapping.target_clock_rate,
+                    audio_mapping.target_pt,
+                );
+            }
+            return Some(MediaSample::Audio(output));
+        }
+        drop(guard);
+
+        if frame.payload_type != Some(audio_mapping.target_pt)
+            || audio_mapping.source_clock_rate != audio_mapping.target_clock_rate
+        {
+            let mut output = frame.clone();
+            let mut timing_guard = self.audio_timing.lock();
+            if let Some(timing) = timing_guard.as_mut() {
+                timing.rewrite(
+                    &mut output,
+                    audio_mapping.source_clock_rate,
+                    audio_mapping.target_clock_rate,
+                    audio_mapping.target_pt,
+                );
+            } else {
+                output.payload_type = Some(audio_mapping.target_pt);
+                output.clock_rate = audio_mapping.target_clock_rate;
+            }
+            return Some(MediaSample::Audio(output));
+        }
+
+        None
+    }
 }
 
 #[async_trait]
@@ -254,35 +358,8 @@ impl MediaStreamTrack for ForwardingTrack {
             let audio_mapping = *self.audio_mapping.lock();
             let dtmf_mapping = *self.dtmf_mapping.lock();
             let sample = self.inner.recv().await?;
-            let received_at_micros = self.receive_clock.now_micros();
 
-            // Hot-path optimisation: when one or both capture tees are wired,
-            // wrap the sample in an `Arc` *once* and share it across channels
-            // instead of deep-cloning `MediaSample` (which deep-clones the
-            // `raw_packet.payload` `Vec<u8>`). At most one `MediaSample::clone`
-            // happens per packet (to construct the Arc) and the second
-            // `try_send` only bumps a refcount.
-            let needs_recorder = self.recorder_tx.is_some();
-            let needs_sipflow = self.sipflow_tx.is_some();
-            let shared = if needs_recorder || needs_sipflow {
-                Some(Arc::new(sample.clone()))
-            } else {
-                None
-            };
-            if let (Some(tx), Some(shared)) = (&self.recorder_tx, &shared) {
-                if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared))) {
-                    trace!(track_id = %self.track_id, "ForwardingTrack recorder channel full: {e}");
-                }
-            }
-
-            // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
-            if let (Some(tx), Some(shared)) = (&self.sipflow_tx, &shared) {
-                if let Err(e) =
-                    tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros))
-                {
-                    trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
-                }
-            }
+            self.tee_sample_to_capture_channels(&sample);
 
             if let MediaSample::Audio(ref frame) = sample {
                 let matched_dtmf = dtmf_mapping
@@ -299,73 +376,12 @@ impl MediaStreamTrack for ForwardingTrack {
                     continue;
                 }
 
-                if let Some(mapping) = dtmf_mapping.as_ref().filter(|_| matched_dtmf) {
-                    if let Some(target_pt) = mapping.target_pt {
-                        let mut dtmf_frame = frame.clone();
-                        dtmf_frame.payload_type = Some(target_pt);
-
-                        if let Some(target_clock_rate) = mapping.target_clock_rate
-                            && mapping.source_clock_rate != target_clock_rate
-                        {
-                            dtmf_frame.data = rewrite_dtmf_duration(
-                                &dtmf_frame.data,
-                                mapping.source_clock_rate,
-                                target_clock_rate,
-                            );
-                            let mut guard = self.dtmf_timing.lock();
-                            if let Some(timing) = guard.as_mut() {
-                                timing.rewrite(
-                                    &mut dtmf_frame,
-                                    mapping.source_clock_rate,
-                                    target_clock_rate,
-                                    target_pt,
-                                );
-                            }
-                        }
-
-                        return Ok(MediaSample::Audio(dtmf_frame));
-                    }
-
-                    return Ok(sample);
+                if let Some(result) = self.try_map_dtmf(frame, &dtmf_mapping, matched_dtmf) {
+                    return Ok(result);
                 }
 
-                if let Some(audio_mapping) = audio_mapping.as_ref().filter(|_| matched_audio) {
-                    let mut guard = self.transcoder.lock();
-                    if let Some(transcoder) = guard.as_mut() {
-                        let mut output = transcoder.transcode(frame);
-
-                        let mut timing_guard = self.audio_timing.lock();
-                        if let Some(timing) = timing_guard.as_mut() {
-                            timing.rewrite(
-                                &mut output,
-                                audio_mapping.source_clock_rate,
-                                audio_mapping.target_clock_rate,
-                                audio_mapping.target_pt,
-                            );
-                        }
-
-                        return Ok(MediaSample::Audio(output));
-                    }
-
-                    if frame.payload_type != Some(audio_mapping.target_pt)
-                        || audio_mapping.source_clock_rate != audio_mapping.target_clock_rate
-                    {
-                        let mut output = frame.clone();
-                        let mut timing_guard = self.audio_timing.lock();
-                        if let Some(timing) = timing_guard.as_mut() {
-                            timing.rewrite(
-                                &mut output,
-                                audio_mapping.source_clock_rate,
-                                audio_mapping.target_clock_rate,
-                                audio_mapping.target_pt,
-                            );
-                        } else {
-                            output.payload_type = Some(audio_mapping.target_pt);
-                            output.clock_rate = audio_mapping.target_clock_rate;
-                        }
-
-                        return Ok(MediaSample::Audio(output));
-                    }
+                if let Some(result) = self.try_transcode_audio(frame, &audio_mapping, matched_audio) {
+                    return Ok(result);
                 }
             }
 

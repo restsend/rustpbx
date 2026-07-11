@@ -8,7 +8,11 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use super::mixer::{MediaMixer, SupervisorMixerMode};
+use crate::rwi::SupervisorMode;
+
+/// Marker type — presence of `Arc<SupervisorSession>` indicates
+/// an active supervisor/coaching session.
+pub struct SupervisorSession;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixerParticipantRole {
@@ -29,7 +33,7 @@ pub struct MixerParticipant {
 
 #[derive(Clone)]
 pub struct MixerRegistryEntry {
-    pub mixer: Arc<MediaMixer>,
+    pub mixer: Arc<SupervisorSession>,
     pub participants: Vec<MixerParticipant>,
     pub mode: MixerMode,
     pub created_at: std::time::Instant,
@@ -40,7 +44,7 @@ pub enum MixerMode {
     Supervisor {
         supervisor_session_id: String,
         target_session_id: String,
-        mode: SupervisorMixerMode,
+        mode: SupervisorMode,
     },
     Conference {
         room_id: String,
@@ -65,11 +69,9 @@ impl MixerRegistry {
         mixer_id: String,
         supervisor_session_id: String,
         target_session_id: String,
-        mode: SupervisorMixerMode,
-    ) -> Arc<MediaMixer> {
-        let mixer = Arc::new(MediaMixer::new(mixer_id.clone(), 8000));
-
-        mixer.set_mode(mode.clone());
+        mode: SupervisorMode,
+    ) -> Arc<SupervisorSession> {
+        let mixer = Arc::new(SupervisorSession);
 
         let participants = vec![
             MixerParticipant {
@@ -121,8 +123,8 @@ impl MixerRegistry {
         mixer
     }
 
-    pub fn create_conference_mixer(&self, room_id: String, sample_rate: u32) -> Arc<MediaMixer> {
-        let mixer = Arc::new(MediaMixer::new(room_id.clone(), sample_rate));
+    pub fn create_conference_mixer(&self, room_id: String, _sample_rate: u32) -> Arc<SupervisorSession> {
+        let mixer = Arc::new(SupervisorSession);
 
         let entry = MixerRegistryEntry {
             mixer: mixer.clone(),
@@ -215,12 +217,11 @@ impl MixerRegistry {
                         let mut mixers = self.mixers.lock();
                         mixers.remove(&mixer_id)
                     };
-                    if let Some(entry) = entry_to_stop {
+                    if entry_to_stop.is_some() {
                         info!(
                             mixer_id = %mixer_id,
                             "Auto-removed empty mixer from registry"
                         );
-                        entry.mixer.stop();
                     }
                 } else {
                     info!(
@@ -237,12 +238,12 @@ impl MixerRegistry {
         }
     }
 
-    pub fn get_mixer(&self, mixer_id: &str) -> Option<Arc<MediaMixer>> {
+    pub fn get_mixer(&self, mixer_id: &str) -> Option<Arc<SupervisorSession>> {
         let mixers = self.mixers.lock();
         mixers.get(mixer_id).map(|e| e.mixer.clone())
     }
 
-    pub fn get_mixer_by_session(&self, session_id: &str) -> Option<Arc<MediaMixer>> {
+    pub fn get_mixer_by_session(&self, session_id: &str) -> Option<Arc<SupervisorSession>> {
         let mixer_id = {
             let participants = self.participants.lock();
             participants.get(session_id).cloned()
@@ -271,9 +272,6 @@ impl MixerRegistry {
     }
 
     pub fn remove_mixer(&self, mixer_id: &str) -> bool {
-        if let Some(mixer) = self.get_mixer(mixer_id) {
-            mixer.stop();
-        }
 
         let participant_ids: Vec<String> = {
             let mixers = self.mixers.lock();
@@ -396,7 +394,7 @@ mod tests {
             "test-mixer".to_string(),
             "supervisor-1".to_string(),
             "agent-1".to_string(),
-            SupervisorMixerMode::Listen,
+            SupervisorMode::Listen,
         );
 
         assert!(registry.get_mixer("test-mixer").is_some());
@@ -412,7 +410,7 @@ mod tests {
             "test-mixer".to_string(),
             "supervisor-1".to_string(),
             "agent-1".to_string(),
-            SupervisorMixerMode::Barge,
+            SupervisorMode::Barge,
         );
 
         let result = registry.add_participant(
@@ -437,7 +435,7 @@ mod tests {
             "test-mixer".to_string(),
             "supervisor-1".to_string(),
             "agent-1".to_string(),
-            SupervisorMixerMode::Whisper,
+            SupervisorMode::Whisper,
         );
 
         assert!(registry.get_mixer("test-mixer").is_some());

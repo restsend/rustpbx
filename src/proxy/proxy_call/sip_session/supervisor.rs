@@ -210,8 +210,7 @@ impl SipSession {
         self.require_leg(&supervisor_leg)?;
         self.require_leg(&target_leg)?;
 
-        if let Some(ref mixer) = self.supervisor_mixer.take() {
-            mixer.stop();
+        if self.supervisor_mixer.take().is_some() {
             info!(session_id = %self.id, "Stopped existing supervisor mixer for takeover");
         }
 
@@ -239,8 +238,7 @@ impl SipSession {
     pub(super) async fn handle_supervisor_stop(&mut self, supervisor_leg: LegId) -> Result<()> {
         self.require_leg(&supervisor_leg)?;
 
-        if let Some(ref mixer) = self.supervisor_mixer {
-            mixer.stop();
+        if self.supervisor_mixer.is_some() {
             info!(
                 session_id = %self.id,
                 "Supervisor mixer stopped"

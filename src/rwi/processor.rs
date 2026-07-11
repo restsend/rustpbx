@@ -6,7 +6,6 @@ use crate::call::runtime::conference_media_bridge::{
     AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
 };
 use crate::media::Track as MediaTrackTrait;
-use crate::proxy::proxy_call::mixer::SupervisorMixerMode;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
 use crate::proxy::proxy_call::sip_session::{PeerConnectionAudioReceiver, SipSessionHandle};
@@ -365,7 +364,7 @@ pub struct RwiCommandProcessor {
     supervisor_states: Arc<RwLock<HashMap<String, SupervisorState>>>,
     media_stream_states: Arc<RwLock<HashMap<String, MediaStreamState>>>,
     media_inject_states: Arc<RwLock<HashMap<String, MediaInjectState>>>,
-    mixer_registry: Arc<crate::proxy::proxy_call::mixer_registry::MixerRegistry>,
+    mixer_registry: Arc<crate::proxy::proxy_call::session_registry::MixerRegistry>,
     conference_manager: Arc<ConferenceManager>,
     transfer_controller: Arc<RwLock<TransferController>>,
     command_dedup_cache: CommandDeduplicationCache,
@@ -397,7 +396,7 @@ impl RwiCommandProcessor {
             supervisor_states: Arc::new(RwLock::new(HashMap::new())),
             media_stream_states: Arc::new(RwLock::new(HashMap::new())),
             media_inject_states: Arc::new(RwLock::new(HashMap::new())),
-            mixer_registry: Arc::new(crate::proxy::proxy_call::mixer_registry::MixerRegistry::new()),
+            mixer_registry: Arc::new(crate::proxy::proxy_call::session_registry::MixerRegistry::new()),
             conference_manager,
             transfer_controller,
             command_dedup_cache: CommandDeduplicationCache::with_default_ttl(),
@@ -4291,7 +4290,7 @@ impl RwiCommandProcessor {
             mixer_id.clone(),
             supervisor_call_id.to_string(),
             target_call_id.to_string(),
-            SupervisorMixerMode::Listen,
+            SupervisorMode::Listen,
         );
 
         if let Ok(handle) = self.get_handle(target_call_id).await {
@@ -4359,14 +4358,14 @@ impl RwiCommandProcessor {
             mixer_id.clone(),
             supervisor_call_id.to_string(),
             target_call_id.to_string(),
-            SupervisorMixerMode::Whisper,
+            SupervisorMode::Whisper,
         );
 
         if !agent_leg.is_empty() {
             self.mixer_registry.add_participant(
                 &mixer_id,
                 agent_leg.to_string(),
-                crate::proxy::proxy_call::mixer_registry::MixerParticipantRole::Customer,
+                crate::proxy::proxy_call::session_registry::MixerParticipantRole::Customer,
             );
         }
 
@@ -4445,14 +4444,14 @@ impl RwiCommandProcessor {
             mixer_id.clone(),
             supervisor_call_id.to_string(),
             target_call_id.to_string(),
-            SupervisorMixerMode::Barge,
+            SupervisorMode::Barge,
         );
 
         if !agent_leg.is_empty() {
             self.mixer_registry.add_participant(
                 &mixer_id,
                 agent_leg.to_string(),
-                crate::proxy::proxy_call::mixer_registry::MixerParticipantRole::Customer,
+                crate::proxy::proxy_call::session_registry::MixerParticipantRole::Customer,
             );
         }
 
@@ -4530,7 +4529,7 @@ impl RwiCommandProcessor {
             mixer_id.clone(),
             supervisor_call_id.to_string(),
             target_call_id.to_string(),
-            SupervisorMixerMode::Barge,
+            SupervisorMode::Barge,
         );
 
         if let Ok(handle) = self.get_handle(target_call_id).await {
