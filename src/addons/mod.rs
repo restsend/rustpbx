@@ -160,6 +160,10 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Shutdown the addon, releasing any resources (background tasks, connections, etc.).
+    /// Called during application shutdown after all servers have stopped.
+    async fn shutdown(&self) {}
+
     /// Return database migrations for this addon.
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         vec![]

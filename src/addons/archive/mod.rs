@@ -334,10 +334,20 @@ impl ArchiveAddon {
         Ok(())
     }
 
-    async fn run_scheduler(state: AppState, archive_state: ArchiveState) {
+    async fn run_scheduler(
+        state: AppState,
+        archive_state: ArchiveState,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
         let mut interval = time::interval(time::Duration::from_secs(60));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Archive scheduler stopped");
+                    return;
+                }
+                _ = interval.tick() => {}
+            }
 
             let archive_config = {
                 let guard = archive_state.config.read().unwrap();
@@ -560,8 +570,9 @@ impl Addon for ArchiveAddon {
         }
 
         let archive_state = self.state.clone();
+        let cancel = state.token().child_token();
         crate::utils::spawn(async move {
-            Self::run_scheduler(state, archive_state).await;
+            Self::run_scheduler(state, archive_state, cancel).await;
         });
         Ok(())
     }

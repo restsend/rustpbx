@@ -745,6 +745,10 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
             info!("Application shutting down due to cancellation");
         }
     }
+
+    // Shutdown addons (release background tasks, connections, etc.)
+    state.addon_registry.shutdown_all().await;
+
     Ok(())
 }
 

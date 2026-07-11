@@ -114,8 +114,9 @@ impl Addon for AcmeAddon {
         // Spawn background task for certificate expiry checking
         let state_clone = self.state.clone();
         let app_state = state.clone();
+        let cancel_token = state.token().child_token();
         crate::utils::spawn(async move {
-            handlers::spawn_auto_renew_checker(state_clone, app_state).await;
+            handlers::spawn_auto_renew_checker(state_clone, app_state, cancel_token).await;
         });
 
         tracing::info!("ACME Addon initialized");

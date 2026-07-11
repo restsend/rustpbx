@@ -725,11 +725,21 @@ fn get_cert_expiry(cert_path: &StdPath) -> anyhow::Result<std::time::SystemTime>
 // ============================================================================
 
 /// Spawn the background task that checks certificate expiry and triggers auto-renewal
-pub async fn spawn_auto_renew_checker(acme_state: super::AcmeState, app_state: AppState) {
+pub async fn spawn_auto_renew_checker(
+    acme_state: super::AcmeState,
+    app_state: AppState,
+    cancel: tokio_util::sync::CancellationToken,
+) {
     let check_interval = tokio::time::Duration::from_secs(3600); // Check every hour
 
     loop {
-        tokio::time::sleep(check_interval).await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("ACME auto-renew checker stopped");
+                return;
+            }
+            _ = tokio::time::sleep(check_interval) => {}
+        }
 
         let config = acme_state.auto_renew_config.read().await.clone();
 

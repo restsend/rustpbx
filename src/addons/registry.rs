@@ -419,6 +419,13 @@ impl AddonRegistry {
         }
     }
 
+    /// Shutdown all addons, releasing resources.
+    pub async fn shutdown_all(&self) {
+        for addon in &self.addons {
+            addon.shutdown().await;
+        }
+    }
+
     /// Run database migrations for all enabled addons.
     pub async fn run_migrations(&self, db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
         let manager = sea_orm_migration::SchemaManager::new(db);

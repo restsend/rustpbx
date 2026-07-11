@@ -12,7 +12,7 @@ use crate::proxy::locator::LocatorEvent;
 use crate::proxy::presence::{PresenceManager, PresenceState, PresenceStatus};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rsipstack::sip::Param;
 use rsipstack::sip::headers::typed::CSeq;
 use rsipstack::sip::headers::{CallId, ContentType};
@@ -251,6 +251,8 @@ pub struct ClusterEventHub {
     handlers: RwLock<Vec<Arc<dyn ClusterEventHandler>>>,
     /// Child of the SIP server's cancel token; used to stop the dispatcher.
     cancel: tokio_util::sync::CancellationToken,
+    /// Handle to the background dispatcher task (aborted on drop).
+    task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ClusterEventHub {
@@ -270,6 +272,7 @@ impl ClusterEventHub {
             peers,
             handlers: RwLock::new(Vec::new()),
             cancel,
+            task_handle: Mutex::new(None),
         }
     }
 
@@ -286,7 +289,7 @@ impl ClusterEventHub {
         let mut rx = self.locator_events.subscribe();
         let cancel = self.cancel.clone();
         let this = self.clone();
-        crate::utils::spawn(async move {
+        let handle = crate::utils::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -306,6 +309,7 @@ impl ClusterEventHub {
                 }
             }
         });
+        *self.task_handle.lock() = Some(handle);
     }
 
     async fn dispatch_local_locator_event(&self, event: LocatorEvent) {
@@ -539,6 +543,15 @@ impl ClusterEventHub {
             ),
         }
         Ok(())
+    }
+}
+
+impl Drop for ClusterEventHub {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.task_handle.lock().take() {
+            handle.abort();
+        }
     }
 }
 

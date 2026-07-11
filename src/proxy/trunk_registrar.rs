@@ -51,6 +51,12 @@ pub struct TrunkRegistrar {
     endpoint: RwLock<Option<EndpointInnerRef>>,
 }
 
+impl Drop for TrunkRegistrar {
+    fn drop(&mut self) {
+        self.parent_cancel.cancel();
+    }
+}
+
 impl Default for TrunkRegistrar {
     fn default() -> Self {
         Self::new()
