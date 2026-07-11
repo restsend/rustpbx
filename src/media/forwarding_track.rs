@@ -187,6 +187,7 @@ impl ForwardingTrack {
     }
 
     /// Tee the sample to recorder and/or SipFlow capture channels (non-blocking).
+    #[inline]
     fn tee_sample_to_capture_channels(&self, sample: &MediaSample) {
         let needs_recorder = self.recorder_tx.is_some();
         let needs_sipflow = self.sipflow_tx.is_some();
@@ -210,6 +211,7 @@ impl ForwardingTrack {
     }
 
     /// Try to map a DTMF telephone-event frame to the egress payload type.
+    #[inline]
     fn try_map_dtmf(
         &self,
         frame: &rustrtc::media::frame::AudioFrame,
@@ -244,6 +246,7 @@ impl ForwardingTrack {
     }
 
     /// Try to transcode or remap an audio frame to the egress codec/PT.
+    #[inline]
     fn try_transcode_audio(
         &self,
         frame: &rustrtc::media::frame::AudioFrame,

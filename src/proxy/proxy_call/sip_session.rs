@@ -4011,6 +4011,22 @@ impl SipSession {
             bridge_builder = bridge_builder.with_rtp_port_range(start, end);
         }
 
+        if !caller_is_webrtc {
+            let app_caller_mode = Self::sdp_transport_mode(caller_offer);
+            let caller_config = rustrtc::RtcConfiguration {
+                transport_mode: app_caller_mode,
+                rtp_start_port: self.context.dialplan.media.rtp_start_port,
+                rtp_end_port: self.context.dialplan.media.rtp_end_port,
+                enable_latching: self.context.dialplan.media.enable_latching,
+                probation_max_packets: self.context.dialplan.media.probation_max_packets,
+                external_ip: self.context.dialplan.media.external_ip.clone(),
+                bind_ip: self.context.dialplan.media.bind_ip.clone(),
+                cname: Some(self.server.rtc_cname.clone()),
+                ..Default::default()
+            };
+            bridge_builder = bridge_builder.with_caller_config(caller_config);
+        }
+
         if !caller_is_webrtc && caller_offer.contains("a=group:BUNDLE") {
             bridge_builder = bridge_builder
                 .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
@@ -6194,6 +6210,21 @@ impl SipSession {
                 .with_cname(self.server.rtc_cname.clone());
 
             // Configure the non-WebRTC bridge side's transport mode to match the leg using it.
+            // When the caller is not WebRTC, set caller_config to avoid unnecessary DTLS cert generation.
+            if !caller_is_webrtc {
+                let caller_config = rustrtc::RtcConfiguration {
+                    transport_mode: caller_mode.clone(),
+                    rtp_start_port: self.context.dialplan.media.rtp_start_port,
+                    rtp_end_port: self.context.dialplan.media.rtp_end_port,
+                    enable_latching: self.context.dialplan.media.enable_latching,
+                    probation_max_packets: self.context.dialplan.media.probation_max_packets,
+                    external_ip: self.context.dialplan.media.external_ip.clone(),
+                    bind_ip: self.context.dialplan.media.bind_ip.clone(),
+                    cname: Some(self.server.rtc_cname.clone()),
+                    ..Default::default()
+                };
+                bridge_builder = bridge_builder.with_caller_config(caller_config);
+            }
             // bridge.caller_pc() is always WebRTC, bridge.callee_pc() handles both RTP and SRTP.
             let non_webrtc_mode = if caller_is_webrtc {
                 callee_mode

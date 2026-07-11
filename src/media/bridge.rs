@@ -2761,6 +2761,61 @@ mod tests {
         );
     }
 
+    /// Verify that a SIP-to-SIP bridge (both legs RTP) does not generate
+    /// DTLS / WebRTC artefacts on either side.
+    #[tokio::test]
+    async fn test_sip_to_sip_bridge_has_no_webrtc() {
+        let caller_config = rustrtc::RtcConfiguration {
+            transport_mode: TransportMode::Rtp,
+            rtp_start_port: Some(26000),
+            rtp_end_port: Some(26100),
+            ..Default::default()
+        };
+        let bridge = BridgePeerBuilder::new("sip2sip-test".to_string())
+            .with_rtp_port_range(26000, 26100)
+            .with_caller_config(caller_config)
+            .build();
+
+        // Both sides must be RTP — no WebRTC negotiation should occur.
+        assert_eq!(
+            bridge.caller_pc().config().transport_mode,
+            TransportMode::Rtp,
+            "SIP caller side must use RTP transport"
+        );
+        assert_eq!(
+            bridge.callee_pc().config().transport_mode,
+            TransportMode::Rtp,
+            "SIP callee side must use RTP transport"
+        );
+
+        bridge.setup_bridge().await.unwrap();
+
+        // Neither SDP offer should contain DTLS fingerprint or SAVPF.
+        let caller_offer = bridge.caller_pc().create_offer().await.unwrap();
+        let callee_offer = bridge.callee_pc().create_offer().await.unwrap();
+
+        let _ = bridge.caller_pc().set_local_description(caller_offer);
+        let _ = bridge.callee_pc().set_local_description(callee_offer);
+
+        let caller_sdp = bridge.caller_pc().local_description().unwrap().to_sdp_string();
+        let callee_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
+
+        for (label, sdp) in [("caller", &caller_sdp), ("callee", &callee_sdp)] {
+            assert!(
+                !sdp.contains("fingerprint"),
+                "SIP-to-SIP {label} SDP must not contain DTLS fingerprint"
+            );
+            assert!(
+                !sdp.contains("UDP/TLS/RTP/SAVPF"),
+                "SIP-to-SIP {label} SDP must not contain SAVPF profile"
+            );
+            assert!(
+                sdp.contains("RTP/AVP"),
+                "SIP-to-SIP {label} SDP should use plain RTP/AVP"
+            );
+        }
+    }
+
     use crate::media::Track;
 
     /// Test bridge setup with external RTP track
