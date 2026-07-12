@@ -52,6 +52,7 @@ use crate::proxy::proxy_call::{
     },
     state::{CallContext, CallSessionRecordSnapshot},
 };
+use crate::proxy::proxy_call::media_state::AnchoredMediaMode;
 use crate::proxy::server::SipServerRef;
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
@@ -5445,8 +5446,6 @@ impl SipSession {
     ) {
         self.stop_caller_ingress_monitor().await;
 
-        use crate::media::recorder::Leg;
-
         let session_id = &self.context.session_id;
 
         let caller_pc = if self.media.caller_answer_uses_media_bridge {
@@ -5548,6 +5547,7 @@ impl SipSession {
                         session_id = %session_id,
                         "Anchored media: RTP bridge fast-path activated (transport-level relay, ForwardingTrack bypassed)"
                     );
+                    self.media.anchored_mode = AnchoredMediaMode::RelayOnly;
                     return;
                 }
                 warn!(
@@ -5566,18 +5566,51 @@ impl SipSession {
             }
         }
 
+        self.wire_both_forwarding_tracks(
+            &caller_pc,
+            &callee_pc,
+            caller_profile,
+            callee_profile,
+            shared_recorder,
+            sipflow_tx,
+        )
+        .await;
+        self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
+    }
+
+    /// Wire the ForwardingTrack "slow path" for both directions
+    /// (caller→callee and callee→caller) and install the resulting
+    /// [`ForwardingTrackHandle`]s on each leg's MediaPeer.
+    ///
+    /// This is the per-packet depacketize → (transcode/record) → re-packetize
+    /// chain, used when the RTP fast-path is ineligible OR has been downgraded
+    /// on demand by [`Self::ensure_media_anchored`]. Extracted from
+    /// `start_anchored_media_forwarding` so the downgrade path reuses the exact
+    /// same wiring without duplication.
+    async fn wire_both_forwarding_tracks(
+        &self,
+        caller_pc: &rustrtc::PeerConnection,
+        callee_pc: &rustrtc::PeerConnection,
+        caller_profile: crate::media::negotiate::NegotiatedLegProfile,
+        callee_profile: crate::media::negotiate::NegotiatedLegProfile,
+        shared_recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
+        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
+    ) {
+        use crate::media::recorder::Leg;
+        let session_id = self.context.session_id.clone();
+        // The same sipflow capture sink feeds both directions.
         let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
-            &caller_pc,
-            &callee_pc,
+            caller_pc,
+            callee_pc,
             caller_profile.clone(),
             callee_profile.clone(),
             shared_recorder.clone(),
             Leg::A,
             caller_sipflow_tx,
-            session_id,
+            &session_id,
             "caller→callee",
         ) {
             Ok(forwarding) => {
@@ -5599,14 +5632,14 @@ impl SipSession {
 
         match Self::wire_with_forwarding_track(
             Self::CALLEE_FORWARDING_TRACK_ID,
-            &callee_pc,
-            &caller_pc,
+            callee_pc,
+            caller_pc,
             callee_profile,
             caller_profile,
             shared_recorder,
             Leg::B,
             callee_sipflow_tx,
-            session_id,
+            &session_id,
             "callee→caller",
         ) {
             Ok(forwarding) => {
@@ -5639,6 +5672,94 @@ impl SipSession {
             }
         }
         None
+    }
+
+    /// Ensure anchored media flows through the ForwardingTrack slow path,
+    /// downgrading from the RTP fast-path on demand if necessary.
+    ///
+    /// Idempotent and cheap to call:
+    /// - If an app `media_bridge` is active, the call is already anchored —
+    ///   return immediately.
+    /// - If [`AnchoredMediaMode::ForwardingTrack`] is already wired — return.
+    /// - Only when the RTP fast-path relay (`RelayOnly`) is active do we tear
+    ///   down the transport-level rewrite bridge and wire the ForwardingTrack
+    ///   chain for both legs. No re-INVITE is needed: clearing the rewrite
+    ///   hook restores the normal demux → depacketizer → track flow, and the
+    ///   ForwardingTrack reuses the already-negotiated transceivers/senders.
+    ///
+    /// Called by features that need to read or inject per-packet media
+    /// (currently VoipBridge; Play will follow).
+    pub(crate) async fn ensure_media_anchored(&mut self) -> Result<()> {
+        if !crate::proxy::proxy_call::media_state::needs_fast_path_downgrade(
+            self.media.media_bridge.is_some(),
+            self.media.anchored_mode,
+        ) {
+            return Ok(());
+        }
+        self.downgrade_fast_path_to_forwarding_track().await
+    }
+
+    /// Tear down the RTP fast-path relay and wire the ForwardingTrack slow
+    /// path for both legs. Called only by [`ensure_media_anchored`] when the
+    /// fast-path is active.
+    async fn downgrade_fast_path_to_forwarding_track(&mut self) -> Result<()> {
+        let (caller_pc, callee_pc) = {
+            let caller_peer = self
+                .caller_peer()
+                .ok_or_else(|| anyhow!("downgrade: no caller peer"))?;
+            let callee_peer = self
+                .callee_peer()
+                .ok_or_else(|| anyhow!("downgrade: no callee peer"))?;
+            let caller_pc = Self::get_peer_pc(caller_peer, Self::CALLER_TRACK_ID)
+                .await
+                .ok_or_else(|| anyhow!("downgrade: no caller PeerConnection"))?;
+            let callee_pc = Self::get_peer_pc(callee_peer, Self::CALLEE_TRACK_ID)
+                .await
+                .ok_or_else(|| anyhow!("downgrade: no callee PeerConnection"))?;
+            (caller_pc, callee_pc)
+        };
+
+        // Tear down the transport-level rewrite bridge on both legs so RTP
+        // flows back through the depacketizer → track path.
+        caller_pc.clear_rtp_rewrite_bridge();
+        callee_pc.clear_rtp_rewrite_bridge();
+
+        // Re-extract leg profiles from the stored answer SDPs (same source
+        // start_anchored_media_forwarding uses).
+        let caller_profile = self
+            .media
+            .answer
+            .as_deref()
+            .map(MediaNegotiator::extract_leg_profile)
+            .unwrap_or_default();
+        let callee_profile = self
+            .media
+            .callee_answer_sdp
+            .as_deref()
+            .map(MediaNegotiator::extract_leg_profile)
+            .unwrap_or_default();
+
+        // Recording / sipflow are never enabled together with the fast-path
+        // (fast-path eligibility requires !recording.enabled), so we pass None
+        // here — no recording is lost by the downgrade.
+        let recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>> =
+            self.recorder.clone();
+        self.wire_both_forwarding_tracks(
+            &caller_pc,
+            &callee_pc,
+            caller_profile,
+            callee_profile,
+            recorder,
+            None,
+        )
+        .await;
+        self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
+
+        info!(
+            session_id = %self.context.session_id,
+            "Anchored media downgraded from RTP fast-path to ForwardingTrack on demand"
+        );
+        Ok(())
     }
 
     async fn find_audio_receiver_track(
@@ -6896,6 +7017,16 @@ impl SipSession {
     }
 
     async fn rebuild_rtp_bridge(&self) {
+        // If media was deliberately downgraded to the ForwardingTrack slow path
+        // (e.g. by VoipBridge), do NOT re-activate the fast-path on re-INVITE —
+        // that would tear down the anchoring the consumer relies on.
+        if self.media.anchored_mode.is_anchored_slow_path() {
+            debug!(
+                session_id = %self.context.session_id,
+                "Skipping RTP fast-path rebuild: media is anchored on ForwardingTrack"
+            );
+            return;
+        }
         let Some(caller_peer) = self.caller_peer() else {
             debug!("Skipping RTP bridge rebuild: no caller peer");
             return;

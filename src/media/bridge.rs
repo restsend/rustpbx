@@ -2258,6 +2258,19 @@ impl BridgePeer {
         &self.callee.pc
     }
 
+    /// Stop the bridge's forwarding loops WITHOUT closing the PeerConnections.
+    ///
+    /// Used when a leg is taken over by another media consumer (e.g. VoipBridge)
+    /// that needs to read from the same audio track the bridge is consuming.
+    /// `track.recv()` is single-consumer, so the bridge's forward loops must be
+    /// stopped to avoid stealing packets from the new consumer. The
+    /// PeerConnections (and their RTP receivers/tracks) stay alive — only the
+    /// forwarding tasks are cancelled.
+    pub fn stop_forwarding(&self) {
+        debug!(bridge_id = %self.id, "Stopping bridge forwarding (PeerConnections kept alive)");
+        self.cancel_token.cancel();
+    }
+
     /// Stop the bridge (async — waits for forwarding tasks to finish)
     pub async fn stop(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge");

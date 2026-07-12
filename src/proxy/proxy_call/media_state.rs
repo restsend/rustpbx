@@ -91,6 +91,57 @@ pub struct MediaState {
     pub media_bridge_started: bool,
     pub bridge_playback_track_ids: HashMap<String, String>,
     pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
+    /// How anchored media is currently forwarded between the two legs.
+    ///
+    /// `RelayOnly` = the RTP fast-path (transport-level rewrite bridge) is
+    /// active, so no ForwardingTrack exists. `ForwardingTrack` = the per-leg
+    /// depacketize → (transcode/record) → re-packetize chain is wired. Some
+    /// operations (VoipBridge, and in future Play) need to read/inject media
+    /// and call [`SipSession::ensure_media_anchored`] to downgrade from
+    /// `RelayOnly` to `ForwardingTrack` on demand, without a re-INVITE.
+    pub anchored_mode: AnchoredMediaMode,
+}
+
+/// Which path anchored media takes between the caller and callee legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnchoredMediaMode {
+    /// RTP fast-path: transport-level rewrite bridge, ForwardingTrack bypassed.
+    /// This is the default while no forwarding has been set up yet, and the
+    /// state held while the fast-path relay is active.
+    #[default]
+    RelayOnly,
+    /// Slow path: ForwardingTrack chain wired for both directions.
+    ForwardingTrack,
+}
+
+impl AnchoredMediaMode {
+    /// True when media already flows through ForwardingTracks (or an app
+    /// media_bridge) and therefore does not need a fast-path downgrade.
+    pub fn is_anchored_slow_path(self) -> bool {
+        matches!(self, AnchoredMediaMode::ForwardingTrack)
+    }
+}
+
+/// Decide whether [`ensure_media_anchored`](super::sip_session::SipSession::ensure_media_anchored)
+/// would attempt a fast-path → ForwardingTrack downgrade, given the current
+/// [`AnchoredMediaMode`] and whether an app `media_bridge` is active.
+///
+/// Extracted as a free function so the full truth table is unit-testable
+/// without constructing a `SipSession`.
+pub(crate) fn needs_fast_path_downgrade(
+    media_bridge_active: bool,
+    mode: AnchoredMediaMode,
+) -> bool {
+    // App media_bridge path is already anchored — never downgrade.
+    if media_bridge_active {
+        return false;
+    }
+    // Already on the slow path — nothing to do.
+    if mode.is_anchored_slow_path() {
+        return false;
+    }
+    // RelayOnly with no app bridge → downgrade is required.
+    true
 }
 
 impl MediaState {
@@ -110,6 +161,7 @@ impl MediaState {
             media_bridge_started: false,
             bridge_playback_track_ids: HashMap::new(),
             rtp_timeout_tx: None,
+            anchored_mode: AnchoredMediaMode::default(),
         }
     }
 }
@@ -226,5 +278,44 @@ mod tests {
         // Cleanup clears everything.
         state.bridge_playback_track_ids.clear();
         assert!(state.bridge_playback_track_ids.is_empty());
+    }
+
+    // ── AnchoredMediaMode + fast-path downgrade logic ───────────────────────
+
+    #[test]
+    fn test_anchored_mode_defaults_to_relay_only() {
+        // Before any forwarding is set up the mode is RelayOnly (the fast-path
+        // is the implicit default for plain RTP relay).
+        assert_eq!(AnchoredMediaMode::default(), AnchoredMediaMode::RelayOnly);
+        // And a freshly-built MediaState starts in that mode.
+        assert_eq!(MediaState::new(None).anchored_mode, AnchoredMediaMode::RelayOnly);
+    }
+
+    #[test]
+    fn test_only_forwarding_track_counts_as_slow_path() {
+        assert!(!AnchoredMediaMode::RelayOnly.is_anchored_slow_path());
+        assert!(AnchoredMediaMode::ForwardingTrack.is_anchored_slow_path());
+    }
+
+    /// Full truth table for the downgrade decision — the one piece of control
+    /// logic that guards VoipBridge (and future Play) from touching media that
+    /// isn't anchored the way it needs.
+    #[test]
+    fn test_needs_fast_path_downgrade_truth_table() {
+        use AnchoredMediaMode::*;
+        // (media_bridge_active, mode) → expected
+        let cases: [(bool, AnchoredMediaMode, bool); 4] = [
+            (false, RelayOnly, true),       // fast-path active → MUST downgrade
+            (false, ForwardingTrack, false), // already slow → idempotent no-op
+            (true, RelayOnly, false),        // app bridge anchors media → skip
+            (true, ForwardingTrack, false),  // app bridge + slow → skip
+        ];
+        for (bridge, mode, expected) in cases {
+            assert_eq!(
+                needs_fast_path_downgrade(bridge, mode),
+                expected,
+                "bridge={bridge}, mode={mode:?}"
+            );
+        }
     }
 }
