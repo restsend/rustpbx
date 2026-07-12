@@ -2496,6 +2496,26 @@ mod tests {
         }
     }
 
+    struct RewrittenForwardRouteInvite;
+
+    #[async_trait]
+    impl RouteInvite for RewrittenForwardRouteInvite {
+        async fn route_invite(
+            &self,
+            mut option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            option.caller = rsipstack::sip::Uri::try_from(
+                "sip:rewritten-caller@source.example.com",
+            )?;
+            option.callee =
+                rsipstack::sip::Uri::try_from("sip:001234@carrier.example.com:5060")?;
+            Ok(RouteResult::Forward(option, Some(Default::default())))
+        }
+    }
+
     struct RecordingHintsRouteInvite {
         recording: Option<RecordingPolicy>,
         enable_recording: Option<bool>,
@@ -2581,6 +2601,46 @@ mod tests {
         assert!(
             result.is_ok(),
             "external callee should fall through, offline flag is ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_preserves_rewritten_route_uris_in_dialplan() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+        let request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "original-caller",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let caller = SipUser {
+            username: "original-caller".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RewrittenForwardRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("rewritten route should produce a dialplan");
+
+        assert_eq!(
+            dialplan.caller.as_ref().map(ToString::to_string).as_deref(),
+            Some("sip:rewritten-caller@source.example.com")
+        );
+        assert_eq!(
+            dialplan
+                .first_target()
+                .map(|target| target.aor.to_string())
+                .as_deref(),
+            Some("sip:001234@carrier.example.com:5060")
         );
     }
 

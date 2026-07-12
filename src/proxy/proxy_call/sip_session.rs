@@ -957,6 +957,13 @@ impl SipSession {
             })),
         );
 
+        let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::new();
+        meta.routed_caller = context.dialplan.caller.as_ref().map(|uri| uri.to_string());
+        meta.routed_callee = context
+            .dialplan
+            .first_target()
+            .map(|target| target.aor.to_string());
+
         let initial = server_dialog.initial_request();
         let caller_offer = Self::extract_sdp(initial.body());
 
@@ -992,7 +999,7 @@ impl SipSession {
             context,
             call_record_sender,
             cancel_token,
-            meta: crate::proxy::proxy_call::call_meta::CallMeta::new(),
+            meta,
             media: crate::proxy::proxy_call::media_state::MediaState::new(caller_offer),
             timers: HashMap::new(),
             update_refresh_disabled: HashSet::new(),
@@ -3647,6 +3654,14 @@ impl SipSession {
                                 "fork_targets_parallel: target answered first"
                             );
 
+                            self.meta.routed_caller = self
+                                .context
+                                .dialplan
+                                .caller
+                                .as_ref()
+                                .map(|uri| uri.to_string());
+                            self.meta.routed_callee = Some(callee_uri.to_string());
+
                             // Cancel all remaining forks
                             fork_cancel.cancel();
 
@@ -4477,6 +4492,9 @@ impl SipSession {
 
         let (mut invite_option, callee_uri, callee_call_id) =
             self.build_target_invite_option(target, None).await?;
+
+        self.meta.routed_caller = Some(invite_option.caller.to_string());
+        self.meta.routed_callee = Some(invite_option.callee.to_string());
 
         if let Some(home_proxy) = target.home_proxy.as_ref() {
             info!(
