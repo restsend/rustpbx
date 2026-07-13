@@ -796,7 +796,7 @@ fn apply_form_to_active_model(
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_list_field(
+pub(crate) fn parse_list_field(
     value: &Option<String>,
     field: &str,
     preferred_keys: &[&str],

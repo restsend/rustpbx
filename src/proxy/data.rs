@@ -966,7 +966,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     }
 }
 
-fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
+pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     let dest = model
         .sip_server
         .clone()
