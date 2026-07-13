@@ -3,7 +3,7 @@ use crate::{
     config::RecordingPolicy,
 };
 use anyhow::{Result, anyhow};
-use ipnetwork::IpNetwork;
+use ipnet::IpNet;
 use regex::Regex;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::{StatusCode, Uri};
@@ -938,8 +938,8 @@ async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {
         return false;
     }
 
-    if let Ok(network) = trimmed.parse::<IpNetwork>() {
-        return network.contains(*addr);
+    if let Ok(network) = trimmed.parse::<IpNet>() {
+        return network.contains(addr);
     }
 
     if let Ok(socket) = trimmed.parse::<SocketAddr>() {
@@ -982,8 +982,8 @@ async fn host_matches(host: &str, addr: &IpAddr) -> bool {
         return false;
     }
 
-    if let Ok(network) = cleaned.parse::<IpNetwork>() {
-        return network.contains(*addr);
+    if let Ok(network) = cleaned.parse::<IpNet>() {
+        return network.contains(addr);
     }
 
     if let Ok(socket) = cleaned.parse::<SocketAddr>() {

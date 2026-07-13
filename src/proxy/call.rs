@@ -14,10 +14,6 @@ use crate::proxy::proxy_call::sip_session::SipSession;
 use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, match_invite},
-    source_addr_ip,
-};
-use crate::proxy::routing::{
-    extract_from_user as routing_extract_from_user, extract_to_user as routing_extract_to_user,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -180,7 +176,6 @@ pub trait QueueLocationEnricher: Send + Sync {
 pub struct DefaultRouteInvite {
     pub routing_state: Arc<RoutingState>,
     pub data_context: Arc<ProxyDataContext>,
-    pub source_trunk_hint: Option<String>,
 }
 
 #[async_trait]
@@ -193,55 +188,7 @@ impl RouteInvite for DefaultRouteInvite {
         cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
-            self.build_context(direction, cookie).await;
-        if matches!(direction, DialDirection::Inbound)
-            && let Some(source) = source_trunk.as_ref()
-            && let Some(trunk_cfg) = trunks_snapshot.get(&source.name)
-        {
-            let from_user = extract_from_user(origin);
-            let to_user = extract_to_user(origin);
-            match trunk_cfg.matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    let detail = format!(
-                        "caller='{}', callee='{}' rejected by prefix policy",
-                        from_user.as_deref().unwrap_or(""),
-                        to_user.as_deref().unwrap_or("")
-                    );
-                    let reason =
-                        q850_reason_value(&rsipstack::sip::StatusCode::Forbidden, Some(&detail));
-                    warn!(
-                        trunk = %source.name,
-                        from = from_user.as_deref().unwrap_or(""),
-                        to = to_user.as_deref().unwrap_or(""),
-                        reason = %reason,
-                        "dropping inbound INVITE due to SIP trunk user prefix mismatch",
-                    );
-                    return Ok(RouteResult::Abort(
-                        rsipstack::sip::StatusCode::Forbidden,
-                        Some(reason),
-                    ));
-                }
-                Err(mismatch) => {
-                    let reason = q850_reason_value(
-                        &rsipstack::sip::StatusCode::Forbidden,
-                        Some(&mismatch.to_string()),
-                    );
-                    warn!(
-                        trunk = %source.name,
-                        from = from_user.as_deref().unwrap_or(""),
-                        to = to_user.as_deref().unwrap_or(""),
-                        reason = %reason,
-                        "dropping inbound INVITE due to SIP trunk user prefix mismatch",
-                    );
-                    return Ok(RouteResult::Abort(
-                        rsipstack::sip::StatusCode::Forbidden,
-                        Some(reason),
-                    ));
-                }
-            }
-        }
+            self.build_context(direction, cookie);
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing
         if let Some(callee_user) = origin.uri.user() {
@@ -285,7 +232,7 @@ impl RouteInvite for DefaultRouteInvite {
         cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
-            self.build_context(direction, cookie).await;
+            self.build_context(direction, cookie);
 
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing (preview mode)
@@ -324,7 +271,7 @@ impl RouteInvite for DefaultRouteInvite {
 }
 
 impl DefaultRouteInvite {
-    async fn build_context(
+    fn build_context(
         &self,
         direction: &DialDirection,
         cookie: &TransactionCookie,
@@ -335,47 +282,19 @@ impl DefaultRouteInvite {
     ) {
         let trunks_snapshot = self.data_context.trunks_snapshot();
         let routes_snapshot = self.data_context.routes_snapshot();
-        let source_trunk = self
-            .resolve_source_trunk(&trunks_snapshot, direction, cookie)
-            .await;
+        let source_trunk = if matches!(direction, DialDirection::Inbound) {
+            cookie
+                .get_extension::<TrunkContext>()
+                .and_then(|context| {
+                    trunks_snapshot
+                        .get(&context.name)
+                        .and_then(|config| build_source_trunk(context.name, config, direction))
+                })
+        } else {
+            None
+        };
         (trunks_snapshot, routes_snapshot, source_trunk)
     }
-
-    async fn resolve_source_trunk(
-        &self,
-        trunks: &HashMap<String, TrunkConfig>,
-        direction: &DialDirection,
-        cookie: &TransactionCookie,
-    ) -> Option<SourceTrunk> {
-        if !matches!(direction, DialDirection::Inbound) {
-            return None;
-        }
-
-        if let Some(name) = self.source_trunk_hint.as_ref()
-            && let Some(config) = trunks.get(name)
-        {
-            return build_source_trunk(name.clone(), config, direction);
-        }
-
-        let source_addr = cookie.get_extension::<SourceAddress>()?;
-        let source_ip = source_addr_ip(&source_addr.0)?;
-        let name = self
-            .data_context
-            .find_trunks_by_ip(&source_ip)
-            .await
-            .into_iter()
-            .next()?;
-        let config = trunks.get(&name)?;
-        build_source_trunk(name, config, direction)
-    }
-}
-
-fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {
-    routing_extract_from_user(origin)
-}
-
-fn extract_to_user(origin: &rsipstack::sip::Request) -> Option<String> {
-    routing_extract_to_user(origin)
 }
 
 fn resolve_callee_uri(origin: &rsipstack::sip::Request) -> Result<rsipstack::sip::Uri> {
@@ -734,45 +653,18 @@ impl CallModule {
             }
         }
 
-        let mut source_trunk_lookup = None;
-        if matches!(direction, DialDirection::Inbound)
-            && let Some(source_addr) = cookie.get_extension::<SourceAddress>()
-            && let Some(source_ip) = source_addr_ip(&source_addr.0)
-        {
-            let source_trunks = self
-                .inner
-                .server
-                .data_context
-                .find_trunks_by_ip(&source_ip)
-                .await;
-            if !source_trunks.is_empty() {
-                source_trunk_lookup = Some((source_ip, source_trunks));
-            }
-        }
-
         if callee_is_same_realm
             && !always_forwarding
             && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await
         {
             internal_lookup_empty = results.is_empty();
             if internal_lookup_empty {
-                if let Some((source_ip, source_trunks)) = source_trunk_lookup.as_ref() {
-                    debug!(
-                        callee_uri = %callee_uri,
-                        callee_realm = %callee_realm,
-                        caller_realm = ?caller.realm,
-                        %source_ip,
-                        source_trunks = ?source_trunks,
-                        "locator lookup returned empty results for same-realm callee; source trunk routing may handle call"
-                    );
-                } else {
-                    warn!(
-                        callee_uri = %callee_uri,
-                        callee_realm = %callee_realm,
-                        caller_realm = ?caller.realm,
-                        "locator lookup returned empty results for same-realm callee"
-                    );
-                }
+                warn!(
+                    callee_uri = %callee_uri,
+                    callee_realm = %callee_realm,
+                    caller_realm = ?caller.realm,
+                    "locator lookup returned empty results for same-realm callee"
+                );
             } else if !results.is_empty() {
                 // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
                 // so SipSession can route cross-node calls via remote home_proxy.
@@ -1406,9 +1298,6 @@ impl CallModule {
             cookie.insert_extension(SourceAddress(source_addr));
         }
 
-        let trunk_context = cookie.get_extension::<TrunkContext>();
-        let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
-
         let route_invite: Box<dyn RouteInvite> = {
             let mut fns = self.inner.server.create_route_invites.iter();
             if let Some(f) = fns.next() {
@@ -1428,7 +1317,6 @@ impl CallModule {
                 Box::new(DefaultRouteInvite {
                     routing_state: self.inner.routing_state.clone(),
                     data_context: self.inner.server.data_context.clone(),
-                    source_trunk_hint,
                 })
             }
         };
@@ -1509,13 +1397,8 @@ impl CallModule {
             )));
         }
 
-        // Optimization: skip callee lookup for wholesale (trunk-originated) calls.
-        let has_tenant_id = cookie
-            .get_extension::<TrunkContext>()
-            .map(|ctx| ctx.tenant_id.is_some())
-            .unwrap_or(false);
-
-        if !has_tenant_id {
+        #[cfg(not(feature = "addon-wholesale"))]
+        {
             match self.resolve_callee_user(&tx.original).await {
                 Ok(Some(callee)) => {
                     // Apply call-forwarding only when no custom resolver already set it.
@@ -2821,7 +2704,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_resolve_wholesale_trunk_gets_marker_and_empty_targets() {
-        // Wholesale trunks: same-realm, locator empty, with TrunkContext + tenant_id.
+        // Wholesale trunks: same-realm, locator empty, with TrunkContext.
         // resolve_unhandled_targets returns empty targets (not 480), and offline marker is set.
         // This is correct — build_dialplan will let inspectors fill targets later.
         let (server, config) = create_test_server().await;
@@ -2852,7 +2735,6 @@ mod tests {
         cookie.insert_extension(TrunkContext {
             id: Some(1),
             name: "wholesale-trunk".to_string(),
-            tenant_id: Some(100),
             did_numbers: vec![],
         });
 
@@ -2911,7 +2793,6 @@ mod tests {
         cookie.insert_extension(TrunkContext {
             id: None,
             name: "inbound_192_168_3_7".to_string(),
-            tenant_id: None,
             did_numbers: vec![],
         });
 
@@ -3054,7 +2935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_route_uses_real_source_ip_for_source_trunk() {
+    async fn default_route_uses_acl_context_for_source_trunk() {
         let mut proxy_config = ProxyConfig::default();
         proxy_config.generated_dir =
             format!("target/test-generated/source-route-{}", std::process::id());
@@ -3125,7 +3006,6 @@ mod tests {
         let route_invite = DefaultRouteInvite {
             routing_state: std::sync::Arc::new(RoutingState::default()),
             data_context: server.data_context.clone(),
-            source_trunk_hint: None,
         };
 
         let mut request = crate::proxy::tests::common::create_test_request(
@@ -3153,12 +3033,11 @@ mod tests {
             ..Default::default()
         };
         let cookie = TransactionCookie::default();
-        cookie.insert_extension(SourceAddress(
-            "1.2.3.4:5060"
-                .parse::<std::net::SocketAddr>()
-                .unwrap()
-                .into(),
-        ));
+        cookie.insert_extension(TrunkContext {
+            id: None,
+            name: "real_source".to_string(),
+            did_numbers: vec![],
+        });
 
         let result = route_invite
             .route_invite(option, &request, &DialDirection::Inbound, &cookie)

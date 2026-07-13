@@ -1,14 +1,17 @@
 use anyhow::{Context, Result, anyhow};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use glob::glob;
+use ipnet::IpNet;
+use prefix_trie::joint::JointPrefixMap;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
     io::ErrorKind,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -21,7 +24,7 @@ use crate::{
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
-        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
+        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, TrunkDirection, VideoPolicy,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -29,6 +32,7 @@ use crate::{
 pub struct ProxyDataContext {
     config: RwLock<Arc<ProxyConfig>>,
     trunks: RwLock<HashMap<String, TrunkConfig>>,
+    pub(crate) acl_inbound_trunks: ArcSwap<JointPrefixMap<IpNet, Vec<String>>>,
     queues: RwLock<HashMap<String, RouteQueueConfig>>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
@@ -69,6 +73,7 @@ impl ProxyDataContext {
         let ctx = Self {
             config: RwLock::new(config.clone()),
             trunks: RwLock::new(HashMap::new()),
+            acl_inbound_trunks: ArcSwap::from_pointee(JointPrefixMap::new()),
             queues: RwLock::new(HashMap::new()),
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
@@ -205,21 +210,6 @@ impl ProxyDataContext {
         }
     }
 
-    pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {
-        self.find_trunks_by_ip(addr).await.into_iter().next()
-    }
-
-    pub async fn find_trunks_by_ip(&self, addr: &IpAddr) -> Vec<String> {
-        let trunks = self.trunks_snapshot();
-        let mut matches = Vec::new();
-        for (name, trunk) in trunks.iter() {
-            if trunk.matches_inbound_source_ip(addr).await {
-                matches.push(name.clone());
-            }
-        }
-        matches
-    }
-
     pub async fn reload_trunks(
         &self,
         generated_toml: bool,
@@ -290,7 +280,43 @@ impl ProxyDataContext {
         }
 
         let len = trunks.len();
+        let mut acl_inbound_trunks: JointPrefixMap<IpNet, Vec<String>> =
+            JointPrefixMap::new();
+        for (name, trunk) in &trunks {
+            if matches!(trunk.direction, Some(TrunkDirection::Outbound)) {
+                continue;
+            }
+
+            for host in &trunk.inbound_hosts {
+                let host = host.trim().trim_matches(|c| c == '<' || c == '>');
+                if host.is_empty() {
+                    continue;
+                }
+
+                let network = if let Ok(network) = host.parse::<IpNet>() {
+                    Some(network.trunc())
+                } else if let Ok(socket) = host.parse::<SocketAddr>() {
+                    Some(IpNet::from(socket.ip()))
+                } else if let Ok(ip) = host.parse::<IpAddr>() {
+                    Some(IpNet::from(ip))
+                } else {
+                    None
+                };
+
+                let Some(network) = network else {
+                    warn!(trunk = %name, host, "inbound host is not an IP address or CIDR");
+                    continue;
+                };
+                let candidates = acl_inbound_trunks.entry(network).or_default();
+                if !candidates.contains(name) {
+                    candidates.push(name.clone());
+                }
+            }
+        }
+        // Publish the backing trunk repository before its ACL name index.
         *self.trunks.write().unwrap() = trunks.clone();
+        self.acl_inbound_trunks
+            .store(Arc::new(acl_inbound_trunks));
 
         let acl_enabled = config
             .modules
@@ -966,7 +992,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     }
 }
 
-fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
+pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     let dest = model
         .sip_server
         .clone()

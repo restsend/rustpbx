@@ -49,7 +49,6 @@ addon-acme = ["instant-acme"]
 addon-wholesale = [
     "dep:async-stream",
     "dep:async-compression",
-    "dep:arc-swap",
     "dep:country-emoji",
     "dep:crossbeam-utils",
     "dep:hex",
@@ -170,7 +169,8 @@ once_cell = "1.21.4"
 regex = "1.12.4"
 http = "1.4.2"
 urlencoding = "2.1.3"
-ipnetwork = "0.21.1"
+ipnet = "2.11.0"
+prefix-trie = "0.8.4"
 sqlx = { version = "0.9.0", features = [
     "runtime-tokio",
     "tls-rustls-ring",
@@ -252,7 +252,7 @@ ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
-arc-swap = { version = "1.7.1", optional = true }
+arc-swap = "1.7.1"
 iso_currency = { version = "0.5.3", default-features = false, features = ["iterator"], optional = true }
 flowdb = { version = "0.7.4", default-features = false }
 
