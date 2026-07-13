@@ -209,6 +209,10 @@ pub enum CallRecordHangupReason {
     Rejected,
     Failed,
     RtpTimeout,
+    /// Caller hung up while waiting in a queue (before any agent connected).
+    /// Distinct from `Canceled` (generic SIP 487) and `ByCaller` (normal caller
+    /// hangup on a connected call).
+    Abandoned,
     Other(String),
 }
 
@@ -295,6 +299,7 @@ impl std::str::FromStr for CallRecordHangupReason {
             "canceled" => Ok(Self::Canceled),
             "rejected" => Ok(Self::Rejected),
             "failed" => Ok(Self::Failed),
+            "abandoned" => Ok(Self::Abandoned),
             _ => Ok(Self::Other(s.to_string())),
         }
     }
@@ -316,6 +321,7 @@ impl std::fmt::Display for CallRecordHangupReason {
             Self::Rejected => write!(f, "rejected"),
             Self::Failed => write!(f, "failed"),
             Self::RtpTimeout => write!(f, "rtpTimeout"),
+            Self::Abandoned => write!(f, "abandoned"),
             Self::Other(s) => write!(f, "{}", s),
         }
     }

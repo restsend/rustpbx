@@ -24,6 +24,7 @@ fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
         "rejected" => Some(CallRecordHangupReason::Rejected),
         "canceled" => Some(CallRecordHangupReason::Canceled),
         "failed" => Some(CallRecordHangupReason::Failed),
+        "abandoned" => Some(CallRecordHangupReason::Abandoned),
         _ => None,
     })
 }

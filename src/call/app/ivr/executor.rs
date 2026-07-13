@@ -56,6 +56,10 @@ pub struct StepIvrApp {
     transferred_from: Option<String>,
     /// Last transfer target string (for EndReason classification).
     last_transfer_target: Option<String>,
+    /// Whether the last terminal action was caused by a DTMF timeout (max
+    /// retries exceeded). Used in `on_exit` to classify the end reason as
+    /// `Timeout` instead of the generic `Hangup`.
+    timeout_induced: bool,
     /// Current step start time (ISO UTC) — set when a step begins, used for step_start_time.
     current_step_start_time: Option<String>,
     /// Monotonic instant when the current step really started (edge-cli response received).
@@ -107,6 +111,7 @@ impl StepIvrApp {
             step_prev_duration_ms: 0,
             transferred_from: None,
             last_transfer_target: None,
+            timeout_induced: false,
             current_step_start_time: None,
             step_start_instant: None,
             pending_start_instant: None,
@@ -140,6 +145,7 @@ impl StepIvrApp {
             step_prev_duration_ms: 0,
             transferred_from: None,
             last_transfer_target: None,
+            timeout_induced: false,
             current_step_start_time: None,
             step_start_instant: None,
             pending_start_instant: None,
@@ -998,6 +1004,9 @@ impl CallApp for StepIvrApp {
         ctrl: &mut CallController,
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
+        // DTMF received — clear any stale timeout flag so a later hangup is
+        // not misclassified as timeout-induced.
+        self.timeout_induced = false;
         // Ignore DTMF that arrives before the IVR is ready to accept input
         // (e.g. a key pressed during a plain Prompt/Play step).  Forwarding
         // such early digits to the provider would derail the flow.
@@ -1009,25 +1018,45 @@ impl CallApp for StepIvrApp {
             return Ok(AppAction::Continue);
         }
 
-        // From here on we are consuming the DTMF, so clear the flag.
-        self.awaiting_dtmf = false;
-
+        // A local DtmfMenu owns its own DTMF resolution: the digit must NEVER
+        // be forwarded to the provider. Otherwise a single unexpected key
+        // (e.g. one pressed while the greeting is still playing, or a key with
+        // no matching entry and no invalid_action) would be sent to the
+        // provider, which could return a terminal node and silently end the
+        // whole IVR flow. Only provider-driven menus (empty entries) delegate
+        // every digit.
         if self.pending_menu.is_some() {
-            ctrl.stop_audio().await.ok();
-            self.current_track_id = None;
-            self.interrupt_on_dtmf = false;
+            let is_provider_driven = self
+                .pending_menu
+                .as_ref()
+                .map_or(false, |m| m.entries.is_empty());
 
-            // Provider-driven menus (empty entries) forward any DTMF to provider
-            let is_provider_driven = self.pending_menu.as_ref().map_or(false, |m| m.entries.is_empty());
             if is_provider_driven {
+                self.awaiting_dtmf = false;
+                ctrl.stop_audio().await.ok();
+                self.current_track_id = None;
+                self.interrupt_on_dtmf = false;
                 self.pending_menu.take();
+                if let Some(ref mut t) = self.pending_trace {
+                    t.trigger = crate::rwi::TriggerInfo::with_detail(
+                        "dtmf",
+                        serde_json::json!({ "digit": digit }),
+                    );
+                }
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::Dtmf { digit })).await?,
                 );
                 return self.__exec_node(ctrl, context).await;
             }
 
+            // Resolve the digit WITHOUT touching playback first, so a
+            // non-matching key does not barge-in the greeting.
             if let Some(next) = self.handle_menu_dtmf(&digit) {
+                // Matched entry (or configured invalid_action): consume it.
+                self.awaiting_dtmf = false;
+                ctrl.stop_audio().await.ok();
+                self.current_track_id = None;
+                self.interrupt_on_dtmf = false;
                 self.provider.on_local_dtmf_match(&digit, &next).await;
                 let dtmf_detail = serde_json::json!({ "digit": digit.clone() });
                 self.current_trigger = Some(crate::rwi::TriggerInfo::with_detail(
@@ -1043,14 +1072,36 @@ impl CallApp for StepIvrApp {
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
+
+            // Non-matching key in a local menu with no invalid_action: keep
+            // the menu alive and do NOT forward the digit to the provider.
+            // If the greeting is still playing (`awaiting_dtmf == false`) we
+            // let it finish untouched; otherwise the menu stays in its waiting
+            // window and the existing `ivr_dtmf_timeout` timer keeps running,
+            // so the caller may press again.
+            tracing::info!(
+                digit = %digit,
+                awaiting_dtmf = self.awaiting_dtmf,
+                "StepIvrApp: ignoring non-matching DTMF in local menu"
+            );
+            return Ok(AppAction::Continue);
         }
 
+        // Interruptible Prompt barge-in: forward the digit to the provider
+        // (this is the explicit, intended interruption path).
+        self.awaiting_dtmf = false;
         if self.interrupt_on_dtmf {
             ctrl.stop_audio().await.ok();
             self.current_track_id = None;
             self.interrupt_on_dtmf = false;
         }
 
+        if let Some(ref mut t) = self.pending_trace {
+            t.trigger = crate::rwi::TriggerInfo::with_detail(
+                "dtmf",
+                serde_json::json!({ "digit": digit }),
+            );
+        }
         self.current_node = Some(
             self.request_next(Some(ProviderEvent::Dtmf { digit }))
                 .await?,
@@ -1130,6 +1181,10 @@ impl CallApp for StepIvrApp {
         }
 
         self.awaiting_dtmf = false;
+        // Mark that this step was exited due to a DTMF timeout. If the
+        // resulting provider action is Hangup, `on_exit` will classify the
+        // end reason as `Timeout` instead of the generic `Hangup`.
+        self.timeout_induced = true;
 
         if self.pending_menu.is_some() {
             // Provider-driven menus (empty entries) forward timeout to provider
@@ -1173,13 +1228,13 @@ impl CallApp for StepIvrApp {
             });
         }
 
-        let end_reason_label = Self::end_reason_label(&reason).to_string();
+        let mut end_reason_label = Self::end_reason_label(&reason).to_string();
         let skip_provider_end = matches!(
             reason,
             crate::call::app::ExitReason::RemoteHangup(_)
                 | crate::call::app::ExitReason::Cancelled
         );
-        let end_reason = match reason {
+        let mut end_reason = match reason {
             crate::call::app::ExitReason::Normal => EndReason::Normal,
             crate::call::app::ExitReason::Hangup => EndReason::Hangup,
             crate::call::app::ExitReason::RemoteHangup(_) => EndReason::UserHangup,
@@ -1198,6 +1253,14 @@ impl CallApp for StepIvrApp {
             crate::call::app::ExitReason::Cancelled => EndReason::Hangup,
             _ => EndReason::Normal,
         };
+
+        // If the exit was caused by a DTMF timeout (provider returned Hangup
+        // in response to a DtmfTimeout/DtmfMenuTimeout event), refine the end
+        // reason from `Hangup` to `Timeout`.
+        if self.timeout_induced && matches!(end_reason, EndReason::Hangup) {
+            end_reason = EndReason::Timeout;
+            end_reason_label = "timeout".to_string();
+        }
         let session_id = self
             .sess
             .variables
@@ -1603,6 +1666,279 @@ mod tests {
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
+    }
+
+    // ── Provider-driven menu (empty entries): DTMF must be forwarded to provider ──
+
+    struct EventCapturingProvider {
+        first_call: std::sync::atomic::AtomicBool,
+        captured_events: Arc<std::sync::Mutex<Vec<Option<ProviderEvent>>>>,
+    }
+
+    impl EventCapturingProvider {
+        fn new() -> Self {
+            Self {
+                first_call: std::sync::atomic::AtomicBool::new(false),
+                captured_events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ActionProvider for EventCapturingProvider {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            if !self
+                .first_call
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(ActionNode::new(EntryAction::DtmfMenu {
+                    greeting: Some("menu.wav".into()),
+                    greeting_text: None,
+                    greeting_record_list: None,
+                    greeting_voice: None,
+                    timeout_ms: 5000,
+                    max_retries: 3,
+                    entries: HashMap::new(),
+                    timeout_action: None,
+                    invalid_action: None,
+                    greeting_api_url: None,
+                }));
+            }
+            self.captured_events
+                .lock()
+                .unwrap()
+                .push(ctx.event.clone());
+            Ok(ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_driven_menu_dtmf_forwards_digit() {
+        let provider = EventCapturingProvider::new();
+        let events_handle = provider.captured_events.clone();
+        let app =
+            StepIvrApp::with_provider(Box::new(provider)).with_name("provider-driven-ivr");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events: Vec<String> = events_handle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Some(ProviderEvent::Dtmf { digit }) => Some(format!("dtmf:{digit}")),
+                Some(ProviderEvent::SessionStart) => Some("session_start".into()),
+                Some(ProviderEvent::AudioComplete { .. }) => Some("audio_complete".into()),
+                Some(other) => Some(format!("{:?}", other)),
+                None => Some("none".into()),
+            })
+            .collect();
+        assert!(
+            events.iter().any(|e| e == "dtmf:1"),
+            "provider should have received Dtmf{{digit:\"1\"}}, got: {:?}",
+            events
+        );
+    }
+
+    // ── Verify trace trigger for local-menu DTMF ──
+
+    #[tokio::test]
+    async fn test_local_menu_dtmf_trace_trigger() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+
+        let mut app: StepIvrApp = mock_app(vec![menu]);
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        let menu_entry = entries.iter().find(|e| e.action_type == "DtmfMenu");
+        assert!(
+            menu_entry.is_some(),
+            "expected a DtmfMenu trace entry, all entries: {:?}",
+            entries.iter().map(|e| (&e.action_type, &e.trigger.r#type)).collect::<Vec<_>>()
+        );
+        let menu_entry = menu_entry.unwrap();
+        assert_eq!(
+            menu_entry.trigger.r#type, "dtmf_menu",
+            "DtmfMenu step trigger should be 'dtmf_menu', got: {:?}",
+            menu_entry.trigger
+        );
+        assert_eq!(
+            menu_entry.trigger.detail.as_ref().and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+            Some("1"),
+            "DtmfMenu step trigger should contain digit '1'"
+        );
+    }
+
+    // ── Verify trace trigger for provider-driven menu DTMF ──
+
+    #[tokio::test]
+    async fn test_provider_driven_menu_dtmf_trace_trigger() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+        let provider = EventCapturingProvider::new();
+        let mut app: StepIvrApp =
+            StepIvrApp::with_provider(Box::new(provider)).with_name("provider-driven-trace-ivr");
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        let menu_entry = entries.iter().find(|e| e.action_type == "DtmfMenu");
+        assert!(
+            menu_entry.is_some(),
+            "expected a DtmfMenu trace entry, all entries: {:?}",
+            entries.iter().map(|e| (&e.action_type, &e.trigger.r#type)).collect::<Vec<_>>()
+        );
+        let menu_entry = menu_entry.unwrap();
+        assert_eq!(
+            menu_entry.trigger.r#type, "dtmf",
+            "provider-driven DtmfMenu step trigger should be 'dtmf' (after fix), got: {:?}",
+            menu_entry.trigger
+        );
+        assert_eq!(
+            menu_entry.trigger.detail.as_ref().and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+            Some("1"),
+            "provider-driven DtmfMenu step trigger should contain digit '1'"
+        );
+        let next_entry = entries
+            .iter()
+            .find(|e| e.action_type == "Transfer")
+            .expect("expected a Transfer trace entry");
+        assert_eq!(
+            next_entry.trigger.r#type, "dtmf",
+            "Transfer step (after provider-driven menu) should have trigger 'dtmf', got: {:?}",
+            next_entry.trigger
+        );
     }
 
     #[tokio::test]
@@ -2157,6 +2493,168 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         stack.dtmf("1");
 
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// Regression (bug): pressing a NON-matching key while a DtmfMenu greeting
+    /// is still playing must NOT stop the greeting and must NOT be forwarded to
+    /// the provider. Previously the unmatched digit fell through to the
+    /// provider, which could return a terminal node and silently end the IVR.
+    /// Here the provider's fallback node is a `Hangup` to simulate that
+    /// scenario — with the fix the flow stays alive and the greeting finishes.
+    #[tokio::test]
+    async fn test_non_matching_dtmf_during_menu_greeting_keeps_flow_alive() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        // Fallback provider node — would be executed only if the bug forwarded
+        // the stray digit to the provider.
+        let hangup = ActionNode::new(EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        // Press a non-matching key WHILE the greeting is still playing.
+        let _ = stack.drain_cmds();
+        stack.dtmf("5");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Nothing should have happened: no StopPlayback, no provider call, no
+        // Hangup. The greeting must continue uninterrupted.
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "non-matching DTMF during greeting must not stop playback or contact provider, got: {cmds:?}"
+        );
+
+        // Greeting finishes normally → menu enters the waiting state.
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A subsequent VALID key must still work — proving the flow survived.
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// Regression (bug): a non-matching key pressed while the menu is in its
+    /// waiting window (greeting finished) and no `invalid_action` is configured
+    /// must be ignored, keeping the flow alive for a subsequent valid key.
+    #[tokio::test]
+    async fn test_non_matching_dtmf_in_menu_waiting_keeps_flow_alive() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        let hangup = ActionNode::new(EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        // Greeting finished → waiting for input.
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Non-matching key during the waiting window — must NOT be forwarded.
+        stack.dtmf("5");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "non-matching DTMF in waiting window must not contact provider, got: {cmds:?}"
+        );
+
+        // Valid key still works → flow is alive.
+        stack.dtmf("1");
         stack
             .assert_cmd(200, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })

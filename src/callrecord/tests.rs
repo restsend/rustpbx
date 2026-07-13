@@ -353,3 +353,42 @@ fn test_call_record_filename_sanitization() {
     assert!(!filename.contains("/"));
     assert!(!filename.contains("|"));
 }
+
+// ── Abandoned variant tests ──────────────────────────────────────────────
+
+#[test]
+fn test_hangup_reason_abandoned_display() {
+    assert_eq!(
+        CallRecordHangupReason::Abandoned.to_string(),
+        "abandoned"
+    );
+}
+
+#[test]
+fn test_hangup_reason_abandoned_from_str() {
+    use std::str::FromStr;
+    let reason = CallRecordHangupReason::from_str("abandoned").unwrap();
+    assert_eq!(reason, CallRecordHangupReason::Abandoned);
+}
+
+#[test]
+fn test_hangup_reason_abandoned_distinct_from_canceled() {
+    // The two must NOT be equal — they represent different scenarios.
+    assert_ne!(
+        CallRecordHangupReason::Abandoned,
+        CallRecordHangupReason::Canceled
+    );
+    assert_ne!(
+        CallRecordHangupReason::Abandoned.to_string(),
+        CallRecordHangupReason::Canceled.to_string()
+    );
+}
+
+#[test]
+fn test_hangup_reason_abandoned_roundtrip() {
+    use std::str::FromStr;
+    let original = CallRecordHangupReason::Abandoned;
+    let s = original.to_string();
+    let parsed = CallRecordHangupReason::from_str(&s).unwrap();
+    assert_eq!(original, parsed);
+}

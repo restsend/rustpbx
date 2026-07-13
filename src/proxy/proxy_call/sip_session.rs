@@ -7722,6 +7722,10 @@ impl SipSession {
             }
         }
 
+        // Resolve final hangup reason: enrich with IVR end reason and queue
+        // abandon detection so the RWI webhook carries accurate context.
+        self.resolve_final_hangup_reason().await;
+
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
@@ -7740,6 +7744,69 @@ impl SipSession {
                 session_id: self.context.session_id.clone(),
             });
             self.engine_session_destroyed = true;
+        }
+    }
+
+    /// Enrich `meta.hangup_reason` with higher-level context before emitting
+    /// the `call_hangup` webhook.
+    ///
+    /// This bridges two dimensions that the raw SIP-layer reason cannot express:
+    ///
+    /// 1. **Queue abandon** — if the caller hung up while queued and no agent
+    ///    ever connected, the reason is refined from `ByCaller`/`Canceled` to
+    ///    `Abandoned`. This covers both the SIP-layer `execute_queue` path and
+    ///    the CallApp-based queue path.
+    ///
+    /// 2. **IVR end reason** — if an IVR app was the last thing controlling
+    ///    the call (terminal exit: hangup, user_hangup, timeout, error), the
+    ///    IVR dimension overrides the SIP reason so consumers can tell *why*
+    ///    the IVR ended the call.
+    async fn resolve_final_hangup_reason(&mut self) {
+        // ── 1. Queue abandon catch-all ──────────────────────────────
+        // Covers the CallApp-based queue path (where execute_queue is not
+        // called and meta.queue_name may not be set via the SIP layer).
+        let in_queue = self.meta.queue_name.is_some()
+            || self.app_runtime.get_queue_name().is_some();
+        if in_queue
+            && self.meta.connected_callee.is_none()
+            && matches!(
+                self.meta.hangup_reason,
+                Some(CallRecordHangupReason::ByCaller)
+                    | Some(CallRecordHangupReason::Canceled)
+                    | None
+            )
+        {
+            self.meta.hangup_reason = Some(CallRecordHangupReason::Abandoned);
+        }
+
+        // ── 2. IVR end reason bridge ────────────────────────────────
+        // Read ivr_end_reason from the shared session variables (written by
+        // StepIvrApp::on_exit). Only terminal IVR reasons override — transfer
+        // reasons are skipped because the call continued past the IVR.
+        if let Some(runtime) = self
+            .app_runtime
+            .as_any()
+            .downcast_ref::<DefaultAppRuntime>()
+        {
+            let ivr_end = runtime.context.get_var("ivr_end_reason").await;
+            let ivr_error = runtime.context.get_var("ivr_last_error").await;
+
+            let ivr_override = match ivr_end.as_deref() {
+                Some("hangup") => Some(CallRecordHangupReason::BySystem),
+                Some("remote_hangup") => Some(CallRecordHangupReason::ByCaller),
+                Some("timeout") => Some(CallRecordHangupReason::Autohangup),
+                Some("error") => {
+                    let msg = ivr_error.unwrap_or_else(|| "unknown ivr error".to_string());
+                    Some(CallRecordHangupReason::Other(format!("ivr_error: {}", msg)))
+                }
+                // normal / transferred / chained / cancelled — call may have
+                // continued; keep the SIP-layer reason.
+                _ => None,
+            };
+
+            if let Some(reason) = ivr_override {
+                self.meta.hangup_reason = Some(reason);
+            }
         }
     }
 

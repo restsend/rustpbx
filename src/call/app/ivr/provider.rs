@@ -154,6 +154,7 @@ pub enum ProviderEvent {
 /// | `TransferToIvr("main")` | `"transfer_to_ivr"` | `"main"` |
 /// | `Hangup` | `"hangup"` | `null` |
 /// | `UserHangup` | `"user_hangup"` | `null` |
+/// | `Timeout` | `"timeout"` | `null` |
 /// | `Error("...")` | `"error"` | `"..."` |
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionEndReason {
@@ -180,6 +181,8 @@ pub enum SessionEndTag {
     Hangup,
     /// User / remote party hung up.
     UserHangup,
+    /// IVR timed out (DTMF timeout / max retries exceeded with no fallback).
+    Timeout,
     /// Error during IVR execution.
     Error,
 }
@@ -202,6 +205,9 @@ pub enum EndReason {
     Hangup,
     /// User / remote party hung up.
     UserHangup,
+    /// IVR timed out (no DTMF input within the configured window, max retries
+    /// exceeded with no fallback action).
+    Timeout,
     /// Error during IVR execution.
     Error(String),
 }
@@ -234,6 +240,10 @@ impl EndReason {
                 reason: SessionEndTag::UserHangup,
                 detail: None,
             },
+            EndReason::Timeout => SessionEndReason {
+                reason: SessionEndTag::Timeout,
+                detail: None,
+            },
             EndReason::Error(msg) => SessionEndReason {
                 reason: SessionEndTag::Error,
                 detail: Some(msg.clone()),
@@ -248,6 +258,7 @@ impl From<&str> for EndReason {
             "hangup" => EndReason::Hangup,
             "normal" => EndReason::Normal,
             "user_hangup" => EndReason::UserHangup,
+            "timeout" => EndReason::Timeout,
             "transfer" => EndReason::Transfer(String::new()),
             "transfer_to_queue" => EndReason::TransferToQueue(String::new()),
             "transfer_to_ivr" => EndReason::TransferToIvr(String::new()),
@@ -721,12 +732,22 @@ mod tests {
     }
 
     #[test]
+    fn test_end_reason_to_session_end_reason_timeout() {
+        let r = EndReason::Timeout.to_session_end_reason();
+        assert_eq!(r.reason, SessionEndTag::Timeout);
+        assert!(r.detail.is_none());
+    }
+
+    #[test]
     fn test_session_end_tag_serializes_snake_case() {
         let json = serde_json::to_string(&SessionEndTag::TransferToQueue).unwrap();
         assert_eq!(json, "\"transfer_to_queue\"");
 
         let json = serde_json::to_string(&SessionEndTag::UserHangup).unwrap();
         assert_eq!(json, "\"user_hangup\"");
+
+        let json = serde_json::to_string(&SessionEndTag::Timeout).unwrap();
+        assert_eq!(json, "\"timeout\"");
     }
 
     #[test]
@@ -763,6 +784,7 @@ mod tests {
             EndReason::TransferToIvr(_)
         ));
         assert!(matches!(EndReason::from("error"), EndReason::Error(_)));
+        assert!(matches!(EndReason::from("timeout"), EndReason::Timeout));
     }
 
     #[test]

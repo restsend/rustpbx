@@ -141,6 +141,18 @@ impl SipSession {
 
         if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
             info!("Queue: caller ended, stopping queue execution");
+            // If no agent ever connected, this is a queue abandon (caller gave
+            // up while waiting). Mark it distinctly from a generic SIP cancel
+            // so downstream consumers (RWI webhook, CDR) can tell the difference.
+            if self.meta.connected_callee.is_none() {
+                info!(
+                    queue = ?self.meta.queue_name,
+                    "Queue: caller abandoned before any agent connected"
+                );
+                self.meta
+                    .hangup_reason
+                    .get_or_insert(crate::callrecord::CallRecordHangupReason::Abandoned);
+            }
             return Ok(());
         }
 
