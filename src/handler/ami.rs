@@ -327,7 +327,9 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
 }
 
 #[allow(clippy::result_large_err)]
-fn load_proxy_config_override(state: &AppState) -> Result<Option<Arc<ProxyConfig>>, Response> {
+pub(crate) fn load_proxy_config_override(
+    state: &AppState,
+) -> Result<Option<Arc<ProxyConfig>>, Response> {
     let Some(path) = state.config_path.as_ref() else {
         return Ok(None);
     };

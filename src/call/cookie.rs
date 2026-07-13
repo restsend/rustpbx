@@ -1,5 +1,5 @@
 use crate::call::SipUser;
-use rsipstack::{transaction::key::TransactionKey, transport::SipAddr};
+use rsipstack::transaction::key::TransactionKey;
 use std::{
     sync::{Arc, RwLock},
     time::Duration,
@@ -143,6 +143,3 @@ pub struct TrunkContext {
     pub name: String,
     pub did_numbers: Vec<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceAddress(pub SipAddr);

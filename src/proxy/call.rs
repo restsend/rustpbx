@@ -2,8 +2,7 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::runtime::SessionId;
 use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
-    Location, MediaConfig, RouteInvite, RoutingState, SipUser, SourceAddress, TransactionCookie,
-    TrunkContext,
+    Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::{Track, recorder::RecorderOption};
@@ -1290,14 +1289,6 @@ impl CallModule {
         cookie: TransactionCookie,
         caller: &SipUser,
     ) -> Result<Dialplan, RouteError> {
-        if let Some(source_addr) = tx
-            .connection
-            .as_ref()
-            .and_then(|conn| conn.get_remote_addr().cloned())
-        {
-            cookie.insert_extension(SourceAddress(source_addr));
-        }
-
         let route_invite: Box<dyn RouteInvite> = {
             let mut fns = self.inner.server.create_route_invites.iter();
             if let Some(f) = fns.next() {
