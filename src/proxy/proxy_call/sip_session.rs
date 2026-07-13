@@ -1034,7 +1034,7 @@ impl SipSession {
         // Save commonly-needed fields before consuming context
         let original_caller = context.original_caller.clone();
         let original_callee = context.original_callee.clone();
-        let dialplan_clone = context.dialplan.clone();
+        let max_ring_time = context.dialplan.max_ring_time;
 
         let local_contact = context
             .dialplan
@@ -1163,9 +1163,8 @@ impl SipSession {
                 .await
         });
 
-        let max_setup_duration = dialplan_clone
-            .max_ring_time
-            .clamp(Duration::from_secs(30), Duration::from_secs(120));
+        let max_setup_duration =
+            max_ring_time.clamp(Duration::from_secs(30), Duration::from_secs(120));
         let teardown_duration = Duration::from_secs(2);
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
         let mut cancelled = false;
