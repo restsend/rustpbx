@@ -797,4 +797,69 @@ mod tests {
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_answered"));
     }
+
+    /// `send_to_owner` must enrich the event payload with `agent_id` /
+    /// `agent_name` pulled from the [`CallMetaStore`] (populated on call
+    /// connected). This is the path that carries agent context into the
+    /// `record_end` / `recording_metadata_available` webhook events even
+    /// though those event structs have no agent fields of their own.
+    #[tokio::test]
+    async fn test_send_to_owner_enriches_agent_from_meta_store() {
+        let mut gw = RwiGateway::new();
+        let (tx, mut rx) = broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+
+        // Populate agent context as CcCallSessionHook does on call connected.
+        gw.meta_store
+            .update_agent(
+                "call-1",
+                Some("agent-42".to_string()),
+                Some("Alice".to_string()),
+            )
+            .await;
+
+        // RecordEnd has NO agent_id / agent_name fields on the struct itself.
+        gw.send_to_owner(&crate::rwi::RecordEnd {
+            call_id: "call-1".to_string(),
+            url: Some("https://example.com/rec.wav".to_string()),
+            duration_secs: 12,
+            file_size: 1024,
+        });
+
+        let entry = rx.recv().await.expect("webhook must receive record_end");
+        assert_eq!(entry.event.event_type, "record_end");
+        // Agent context injected by enrich_flat_event.
+        assert_eq!(entry.event.payload["agent_id"].as_str(), Some("agent-42"));
+        assert_eq!(entry.event.payload["agent_name"].as_str(), Some("Alice"));
+        // Original RecordEnd fields are preserved.
+        assert_eq!(
+            entry.event.payload["url"].as_str(),
+            Some("https://example.com/rec.wav")
+        );
+        assert_eq!(entry.event.payload["duration_secs"].as_u64(), Some(12));
+    }
+
+    /// When no agent context exists for a call, enrichment must leave the
+    /// payload untouched (no spurious null agent fields).
+    #[tokio::test]
+    async fn test_send_to_owner_no_enrichment_without_meta() {
+        let mut gw = RwiGateway::new();
+        let (tx, mut rx) = broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+
+        gw.send_to_owner(&crate::rwi::RecordEnd {
+            call_id: "call-unknown".to_string(),
+            url: None,
+            duration_secs: 0,
+            file_size: 0,
+        });
+
+        let entry = rx.recv().await.unwrap();
+        assert_eq!(entry.event.event_type, "record_end");
+        assert!(
+            entry.event.payload.get("agent_id").is_none(),
+            "no agent fields when meta absent, got: {}",
+            entry.event.payload
+        );
+    }
 }

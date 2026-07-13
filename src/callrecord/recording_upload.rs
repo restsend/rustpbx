@@ -251,6 +251,14 @@ impl CallRecordHook for RecordingUploadHook {
             // (e.g. MQ consumers) are notified that the recording is ready.
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
+                // Pull agent context from the RWI meta store (populated on call
+                // connected); fall back to CallRecord.details for agent_name.
+                let (meta_agent_id, meta_agent_name) = gw
+                    .read()
+                    .meta_store
+                    .get_sync(&record.call_id)
+                    .map(|m| (m.agent_id, m.agent_name))
+                    .unwrap_or((None, None));
                 let metadata = RecordingMetadata {
                     filename: record
                         .recorder
@@ -268,8 +276,8 @@ impl CallRecordHook for RecordingUploadHook {
                     callee_name: extract_sip_username(&record.callee),
                     called_phone: extract_sip_username(&record.callee),
                     call_type: record.details.direction.clone(),
-                    agent_id: None,
-                    agent_name: None,
+                    agent_id: meta_agent_id,
+                    agent_name: meta_agent_name.or_else(|| record.details.agent_name.clone()),
                     call_start_time: Some(record.start_time.to_rfc3339()),
                     call_end_time: Some(record.end_time.to_rfc3339()),
                     upload_time: Some(chrono::Utc::now().to_rfc3339()),
