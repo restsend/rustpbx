@@ -331,6 +331,30 @@ async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
 }
 
 #[tokio::test]
+async fn test_session_captures_rewritten_dialplan_uris_for_call_record() {
+    let caller = rsipstack::sip::Uri::try_from("sip:rewritten-caller@source.example.com").unwrap();
+    let callee = rsipstack::sip::Uri::try_from("sip:001234@carrier.example.com:5060").unwrap();
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_caller(caller)
+        .with_targets(DialStrategy::Sequential(vec![crate::call::Location {
+            aor: callee,
+            ..Default::default()
+        }]));
+
+    let session = build_session(dialplan).await;
+    let snapshot = session.record_snapshot();
+
+    assert_eq!(
+        snapshot.routed_caller.as_deref(),
+        Some("sip:rewritten-caller@source.example.com")
+    );
+    assert_eq!(
+        snapshot.routed_callee.as_deref(),
+        Some("sip:001234@carrier.example.com:5060")
+    );
+}
+
+#[tokio::test]
 async fn test_start_ivr_app_restarts_after_already_running() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),

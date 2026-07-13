@@ -60,13 +60,7 @@ impl CallSessionBuilder {
         server: SipServerRef,
         tx: &mut rsipstack::transaction::transaction::Transaction,
     ) -> Result<()> {
-        #[cfg(feature = "addon-wholesale")]
-        let mut dialplan = self.dialplan;
-        #[cfg(not(feature = "addon-wholesale"))]
         let dialplan = self.dialplan;
-        #[cfg(feature = "addon-wholesale")]
-        let wholesale_tenant_concurrency_hold =
-            dialplan.wholesale_tenant_concurrency_hold.take();
         let dialplan = Arc::new(dialplan);
         let cancel_token = self.cancel_token.unwrap_or_default();
         let session_id = dialplan
@@ -95,39 +89,37 @@ impl CallSessionBuilder {
             })
             .unwrap_or_default();
 
+        let metadata = dialplan
+            .first_target()
+            .and_then(|loc| loc.headers.as_ref())
+            .and_then(|hdrs| {
+                let meta: std::collections::HashMap<String, String> = hdrs
+                    .iter()
+                    .filter_map(|h| {
+                        let name = h.name().to_string();
+                        if name.starts_with("X-CRM-") || name.starts_with("X-CC-") {
+                            Some((name, h.value().to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if meta.is_empty() { None } else { Some(meta) }
+            });
+
         let context = CallContext {
             session_id,
-            dialplan: dialplan.clone(),
+            dialplan,
             cookie: self.cookie,
             start_time: Instant::now(),
             original_caller,
             original_callee,
             max_forwards: self.max_forwards,
             created_at: chrono::Utc::now().to_rfc3339(),
-            metadata: dialplan
-                .first_target()
-                .and_then(|loc| loc.headers.as_ref())
-                .and_then(|hdrs| {
-                    let meta: std::collections::HashMap<String, String> = hdrs
-                        .iter()
-                        .filter_map(|h| {
-                            let name = h.name().to_string();
-                            if name.starts_with("X-CRM-") || name.starts_with("X-CC-") {
-                                Some((name, h.value().to_string()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if meta.is_empty() { None } else { Some(meta) }
-                }),
+            metadata,
         };
 
-        let result =
-            SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await;
-        #[cfg(feature = "addon-wholesale")]
-        drop(wholesale_tenant_concurrency_hold);
-        result
+        SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
     }
 
     pub fn report_failure(

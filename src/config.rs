@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use clap::Parser;
-use ipnetwork::IpNetwork;
+use ipnet::IpNet;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::StatusCode;
 use rustrtc::IceServer;
@@ -1115,8 +1115,8 @@ impl AmiConfig {
                     || allow == "*"
                     || ip.is_some_and(|ip| {
                         allow
-                            .parse::<IpNetwork>()
-                            .is_ok_and(|network| network.contains(ip))
+                            .parse::<IpNet>()
+                            .is_ok_and(|network| network.contains(&ip))
                     })
             })
         } else {

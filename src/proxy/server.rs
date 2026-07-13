@@ -1216,7 +1216,13 @@ impl SipServer {
                         .unwrap_or_else(|| "unknown".to_string());
                     if tx.original.method == rsipstack::sip::Method::Options {
                         let is_trunk = if let Some(ref ip) = via_ip {
-                            self.inner.data_context.find_trunk_by_ip(ip).await.is_some()
+                            let inbound_trunks =
+                                self.inner.data_context.acl_inbound_trunks.load();
+                            let source_network = ipnet::IpNet::from(*ip);
+                            inbound_trunks
+                                .cover_values(&source_network)
+                                .next()
+                                .is_some()
                         } else {
                             false
                         };

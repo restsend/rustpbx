@@ -2,7 +2,11 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{TransactionCookie, TrunkContext};
 use crate::{
     config::ProxyConfig,
-    proxy::routing::{TrunkConfig, source_addr_ip},
+    proxy::{
+        routing::{
+            extract_from_user, extract_to_user, source_addr_ip,
+        },
+    },
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -253,40 +257,47 @@ impl AclModule {
         Ok(())
     }
 
-    pub async fn is_from_trunk_context(&self, addr: &IpAddr) -> Option<TrunkContext> {
-        if let Some(server) = &self.inner.server {
-            let trunks = server.data_context.trunks_snapshot();
-            for (name, trunk) in trunks.iter() {
-                if trunk.matches_inbound_source_ip(addr).await {
-                    return Some(TrunkContext {
-                        id: trunk.id,
-                        name: name.clone(),
-                        tenant_id: None,
-                        did_numbers: trunk.did_numbers.clone(),
-                    });
+    pub fn is_from_trunk_context(
+        &self,
+        addr: &IpAddr,
+        origin: &rsipstack::sip::Request,
+    ) -> Option<TrunkContext> {
+        let Some(server) = self.inner.server.as_ref() else {
+            return None;
+        };
+        let inbound_trunks = server.data_context.acl_inbound_trunks.load();
+        let source_network = ipnet::IpNet::from(*addr);
+        let invite_users = if matches!(&origin.method, rsipstack::sip::Method::Invite) {
+            Some((extract_from_user(origin), extract_to_user(origin)))
+        } else {
+            None
+        };
+        let mut matched = None;
+
+        for trunks in inbound_trunks.cover_values(&source_network) {
+            for name in trunks {
+                let Some(trunk) = server.data_context.get_trunk(name) else {
+                    continue;
+                };
+                if let Some((from_user, to_user)) = &invite_users
+                    && trunk
+                        .matches_incoming_user_prefixes(
+                            from_user.as_deref(),
+                            to_user.as_deref(),
+                        )
+                        .is_err()
+                {
+                    continue;
                 }
-            }
-        }
-
-        let trunks: Vec<(String, TrunkConfig)> = self
-            .inner
-            .config
-            .trunks
-            .iter()
-            .map(|(name, trunk)| (name.clone(), trunk.clone()))
-            .collect();
-
-        for (name, trunk) in trunks {
-            if trunk.matches_inbound_source_ip(addr).await {
-                return Some(TrunkContext {
+                matched = Some(TrunkContext {
                     id: trunk.id,
-                    name,
-                    tenant_id: None,
-                    did_numbers: trunk.did_numbers.clone(),
+                    name: name.clone(),
+                    did_numbers: trunk.did_numbers,
                 });
+                break;
             }
         }
-        None
+        matched
     }
 
     pub(crate) async fn is_ip_allowed(&self, addr: &IpAddr) -> bool {
@@ -442,10 +453,11 @@ impl ProxyModule for AclModule {
         // 4. IP ACL check (allow/deny with trunk bypass)
         let from_addr = Self::extract_ip(tx)
             .ok_or_else(|| anyhow::anyhow!("missing transport source address"))?;
-        if let Some(ctx) = self.is_from_trunk_context(&from_addr).await {
+        if let Some(ctx) = self.is_from_trunk_context(&from_addr, &tx.original) {
             debug!(
                 method = tx.original.method().to_string(),
                 source_ip = %from_addr,
+                trunk = %ctx.name,
                 "IP is from trunk, bypassing acl check"
             );
             cookie.insert_extension(ctx);
@@ -498,7 +510,10 @@ fn parse_rules(rules: Vec<String>) -> Vec<AclRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::routing::TrunkDirection;
+    use crate::proxy::routing::{TrunkConfig, TrunkDirection};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_config,
+    };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn create_test_config(rules: Vec<String>) -> Arc<ProxyConfig> {
@@ -549,10 +564,21 @@ mod tests {
             },
         );
 
-        let acl = AclModule::new(Arc::new(config));
+        config.generated_dir = format!(
+            "target/test-generated/acl-inbound-source-{}",
+            std::process::id()
+        );
+        let (server, config) = create_test_server_with_config(config).await;
+        let acl = AclModule::with_server(config, Some(server));
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "1000",
+            None,
+            "rustpbx.com",
+            None,
+        );
         let ctx = acl
-            .is_from_trunk_context(&source_ip)
-            .await
+            .is_from_trunk_context(&source_ip, &request)
             .expect("inbound trunk should match");
 
         assert_eq!(ctx.id, Some(144));
@@ -574,9 +600,164 @@ mod tests {
             },
         );
 
-        let acl = AclModule::new(Arc::new(config));
+        config.generated_dir = format!(
+            "target/test-generated/acl-inbound-dest-{}",
+            std::process::id()
+        );
+        let (server, config) = create_test_server_with_config(config).await;
+        let acl = AclModule::with_server(config, Some(server));
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "1000",
+            None,
+            "rustpbx.com",
+            None,
+        );
 
-        assert!(acl.is_from_trunk_context(&source_ip).await.is_none());
+        assert!(
+            acl.is_from_trunk_context(&source_ip, &request)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_trunk_index_matches_cidr_and_invite_prefix() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let mut config = ProxyConfig::default();
+        config.generated_dir = format!(
+            "target/test-generated/acl-trunk-index-{}",
+            std::process::id()
+        );
+        config.trunks.insert(
+            "broad-cidr".to_string(),
+            TrunkConfig {
+                id: Some(143),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["43.198.217.0/24".to_string()],
+                incoming_to_user_prefix: Some("44".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "prefix-8614".to_string(),
+            TrunkConfig {
+                id: Some(144),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["43.198.217.33:5060".to_string()],
+                incoming_to_user_prefix: Some("8614".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "prefix-86155".to_string(),
+            TrunkConfig {
+                id: Some(145),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["43.198.217.33".to_string()],
+                incoming_to_user_prefix: Some("86155".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "cidr".to_string(),
+            TrunkConfig {
+                id: Some(146),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["198.51.100.0/24".to_string()],
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "ipv6-cidr".to_string(),
+            TrunkConfig {
+                id: Some(147),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["2001:db8::/32".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let (server, config) = create_test_server_with_config(config).await;
+        let acl = AclModule::with_server(config.clone(), Some(server.clone()));
+        let matching_request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "861551234",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let ctx = acl
+            .is_from_trunk_context(&source_ip, &matching_request)
+            .expect("matching prefix should select a trunk");
+        assert_eq!(ctx.id, Some(145));
+        assert_eq!(ctx.name, "prefix-86155");
+
+        let broad_request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "441234",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let ctx = acl
+            .is_from_trunk_context(&source_ip, &broad_request)
+            .expect("broader CIDR should match after exact candidates reject the prefix");
+        assert_eq!(ctx.id, Some(143));
+
+        let unmatched_request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "331234",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        assert!(acl
+            .is_from_trunk_context(&source_ip, &unmatched_request)
+            .is_none());
+
+        let cidr_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 25));
+        assert_eq!(
+            acl.is_from_trunk_context(&cidr_ip, &matching_request)
+                .expect("IPv4 CIDR should match")
+                .id,
+            Some(146)
+        );
+        let ipv6_ip = IpAddr::V6(Ipv6Addr::from_str("2001:db8::1234").unwrap());
+        assert_eq!(
+            acl.is_from_trunk_context(&ipv6_ip, &matching_request)
+                .expect("IPv6 CIDR should match")
+                .id,
+            Some(147)
+        );
+
+        let reloaded_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let mut reloaded_config = config.as_ref().clone();
+        reloaded_config.trunks.clear();
+        reloaded_config.trunks.insert(
+            "reloaded".to_string(),
+            TrunkConfig {
+                id: Some(200),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![reloaded_ip.to_string()],
+                ..Default::default()
+            },
+        );
+        server
+            .data_context
+            .reload_trunks(false, Some(Arc::new(reloaded_config)))
+            .await
+            .expect("runtime trunk reload should succeed");
+        assert!(
+            acl.is_from_trunk_context(&source_ip, &matching_request)
+                .is_none(),
+            "server-backed ACL must not fall back to stale startup trunks"
+        );
+        assert_eq!(
+            acl.is_from_trunk_context(&reloaded_ip, &matching_request)
+                .expect("reloaded trunk should match")
+                .id,
+            Some(200)
+        );
     }
 
     #[test]
