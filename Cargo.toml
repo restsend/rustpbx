@@ -79,7 +79,7 @@ commerce = [
     "addon-telemetry",
     "addon-sbc",
 ]
-wholesale = ["commerce", "addon-wholesale", "dep:hex"]
+wholesale = ["addon-wholesale", "dep:hex"]
 contact-center = [
     "addon-cc",
     "addon-endpoint-manager",

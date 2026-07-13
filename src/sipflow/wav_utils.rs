@@ -21,6 +21,8 @@ struct RtpPacketView<'a> {
     leg: i32,
     payload_type: u8,
     capture_ts: u64,
+    rtp_timestamp: u32,
+    ssrc: u32,
     payload: &'a [u8],
 }
 
@@ -98,6 +100,8 @@ fn parse_borrowed_rtp_packet(
         leg,
         payload_type: raw[1] & 0x7f,
         capture_ts,
+        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
         payload: &raw[payload_offset..payload_end],
     })
 }
@@ -393,13 +397,6 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         return Err(anyhow!("No RTP packets found"));
     }
 
-    // Use the earliest capture timestamp as the common timeline origin for
-    // both legs.  Positioning audio by wall-clock capture time (instead of RTP
-    // timestamps) makes the output immune to SSRC changes, clock-rate
-    // mismatches, and RTP timestamp wraparound — all of which previously
-    // caused false gap-detection truncation or multi-GB silence padding.
-    let first_ts = packets.iter().map(|(_, ts, _)| *ts).min().unwrap_or(0);
-
     let mut parsed_packets = Vec::new();
     for (leg, capture_ts, raw_packet) in packets {
         if let Some(packet) = parse_borrowed_rtp_packet(*leg, *capture_ts, raw_packet) {
@@ -411,6 +408,11 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         return Err(anyhow!("No valid RTP packets found"));
     }
 
+    let first_ts = parsed_packets
+        .iter()
+        .map(|packet| packet.capture_ts)
+        .min()
+        .unwrap_or(0);
     parsed_packets.sort_by_key(|rtp| (rtp.leg, rtp.capture_ts));
 
     let mut legs_codecs: HashMap<i32, Vec<CodecType>> = HashMap::new();
@@ -470,15 +472,13 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
 
     let mut decoders: HashMap<(i32, u8), Box<dyn Decoder>> = HashMap::new();
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
+    let mut stream_rtp_bases: HashMap<(i32, u32), u32> = HashMap::new();
+    let mut stream_target_bases: HashMap<(i32, u32), u64> = HashMap::new();
 
     for rtp in &parsed_packets {
         let pt = rtp.payload_type;
         let payload = rtp.payload;
         let leg = rtp.leg;
-
-        // Position each packet on the shared wall-clock timeline.
-        let target_timestamp =
-            ((rtp.capture_ts - first_ts) * target_sample_rate as u64 / 1_000_000) as u32;
 
         let mut descriptor = payload_descriptor(pt, leg, payload_map, leg_payload_map);
         if descriptor.codec != CodecType::TelephoneEvent && looks_like_dtmf_payload(payload) {
@@ -488,6 +488,36 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
             };
         }
         let codec = descriptor.codec;
+        let capture_target = (rtp.capture_ts - first_ts)
+            .saturating_mul(target_sample_rate as u64)
+            / 1_000_000;
+        let aligned_capture_target = capture_target
+            .saturating_add(u64::from(step_samples / 2))
+            / u64::from(step_samples)
+            * u64::from(step_samples);
+        let stream_key = (leg, rtp.ssrc);
+        let base_rtp = stream_rtp_bases
+            .entry(stream_key)
+            .or_insert(rtp.rtp_timestamp);
+        let base_target = stream_target_bases
+            .entry(stream_key)
+            .or_insert(aligned_capture_target);
+        let rtp_delta = u64::from(rtp.rtp_timestamp.wrapping_sub(*base_rtp));
+        let mut timeline_target = base_target.saturating_add(
+            rtp_delta.saturating_mul(target_sample_rate as u64)
+                / u64::from(descriptor.clock_rate.max(1)),
+        );
+
+        // RTP timing removes capture-arrival jitter, while wall-clock capture
+        // remains the stream anchor and discontinuity guard. If a sender
+        // resets its RTP clock without changing SSRC, re-anchor it instead of
+        // creating a huge silence gap or an unbounded WAV.
+        if timeline_target.abs_diff(capture_target) > target_sample_rate as u64 {
+            *base_rtp = rtp.rtp_timestamp;
+            *base_target = aligned_capture_target;
+            timeline_target = aligned_capture_target;
+        }
+        let target_timestamp = timeline_target.min(u64::from(u32::MAX)) as u32;
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
@@ -549,6 +579,8 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     drop(parsed_packets);
     drop(decoders);
     drop(resamplers);
+    drop(stream_rtp_bases);
+    drop(stream_target_bases);
     drop(leg_audio_clock_rates);
     drop(legs_codecs);
 
@@ -866,6 +898,50 @@ mod tests {
             audible_windows >= 8,
             "RFC4733 payload without SDP mapping should still regenerate an audible tone, got {} windows",
             audible_windows
+        );
+    }
+
+    #[test]
+    fn test_wav_generation_uses_rtp_timing_for_bursty_capture_jitter() {
+        let mut payload_map = HashMap::new();
+        payload_map.insert(
+            8,
+            PayloadDescriptor {
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+            },
+        );
+
+        let audio_payload = create_encoder(CodecType::PCMA).encode(&vec![1000i16; 160]);
+        let packet_count = 144u32;
+        let packets: Vec<(i32, u64, Vec<u8>)> = (0..packet_count)
+            .map(|i| {
+                let pair_start = u64::from(i / 2) * 40_000;
+                let capture_ts = pair_start + if i % 2 == 0 { 0 } else { 9_000 };
+                (
+                    0,
+                    capture_ts,
+                    build_rtp_packet_with_ssrc(
+                        8,
+                        i * 160,
+                        0xB055_1E55,
+                        &audio_payload,
+                    ),
+                )
+            })
+            .collect();
+
+        let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
+            .expect("wav generation should succeed");
+        let left = left_channel_pcm_samples(&wav);
+        let audible_windows = left
+            .chunks(320)
+            .filter(|window| window.iter().any(|sample| *sample != 0))
+            .count();
+
+        assert_eq!(
+            audible_windows, packet_count as usize,
+            "continuous RTP timestamps must not become silence because capture delivery is bursty"
         );
     }
 
