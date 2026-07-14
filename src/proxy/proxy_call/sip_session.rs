@@ -190,6 +190,11 @@ pub struct SipSession {
 
     pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
 
+    /// Per-session typed extensions bag (session cookie) for cross-addon data
+    /// sharing. Cloned into every `CallSessionContext` so all hook callbacks
+    /// share the same underlying bag.
+    pub extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions,
+
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
 
     #[allow(dead_code)]
@@ -1012,6 +1017,7 @@ impl SipSession {
             recorder: Arc::new(RwLock::new(None)),
             recording_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             app_event_bridge: app_event_bridge.clone(),
+            extensions: Default::default(),
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
@@ -2234,6 +2240,7 @@ impl SipSession {
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             metadata: self.context.metadata.clone(),
+            extensions: self.extensions.clone(),
         }
     }
 

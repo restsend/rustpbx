@@ -9,10 +9,41 @@
 
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+/// Per-session typed extensions bag (like [`http::Extensions`]) wrapped in an
+/// [`Arc`] so it can be cheaply cloned (all clones share the same bag).
+/// Automatically cleaned up when the last reference is dropped (session ends).
+///
+/// Addons use this to pass typed data across [`CallSessionHook`] callbacks
+/// without resorting to a global key-value store.
+#[derive(Clone)]
+pub struct SessionExtensions(pub Arc<parking_lot::RwLock<http::Extensions>>);
+
+impl SessionExtensions {
+    /// Create a new empty session extensions bag.
+    pub fn new() -> Self {
+        Self(Arc::new(parking_lot::RwLock::new(http::Extensions::new())))
+    }
+}
+
+impl Default for SessionExtensions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for SessionExtensions {
+    type Target = Arc<parking_lot::RwLock<http::Extensions>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
-#[derive(Debug, Clone)]
 pub struct CallSessionContext {
     /// Unique session identifier (UUID string).
     pub session_id: String,
@@ -29,7 +60,44 @@ pub struct CallSessionContext {
     /// ISO-8601 timestamp when the session was created (before ringing).
     pub started_at: Option<String>,
     /// Application metadata injected by the routing layer (e.g. X-CRM-* / X-CC-*).
-    pub metadata: Option<std::collections::HashMap<String, String>>,
+    pub metadata: Option<HashMap<String, String>>,
+    /// Per-session typed extensions bag (session cookie). Any addon can
+    /// insert/read typed data here (e.g. `ctx.extensions.write().insert(MyData)`).
+    /// Clones share the same underlying bag. Automatically cleaned up when the
+    /// session ends.
+    pub extensions: SessionExtensions,
+}
+
+impl Clone for CallSessionContext {
+    fn clone(&self) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            caller: self.caller.clone(),
+            callee: self.callee.clone(),
+            connected_callee: self.connected_callee.clone(),
+            queue_name: self.queue_name.clone(),
+            direction: self.direction.clone(),
+            started_at: self.started_at.clone(),
+            metadata: self.metadata.clone(),
+            extensions: self.extensions.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for CallSessionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallSessionContext")
+            .field("session_id", &self.session_id)
+            .field("caller", &self.caller)
+            .field("callee", &self.callee)
+            .field("connected_callee", &self.connected_callee)
+            .field("queue_name", &self.queue_name)
+            .field("direction", &self.direction)
+            .field("started_at", &self.started_at)
+            .field("metadata", &self.metadata)
+            .field("extensions", &"<http::Extensions>")
+            .finish()
+    }
 }
 
 /// Observer trait for call-session lifecycle events.
