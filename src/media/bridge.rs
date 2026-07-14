@@ -1181,7 +1181,7 @@ impl BridgePeer {
                     source_addr: None,
                 };
 
-                if let Err(e) = sender.send(MediaSample::Audio(frame)).await {
+                if let Err(e) = sender.send(MediaSample::Audio(frame)) {
                     warn!(
                         bridge_id = %self.id,
                         endpoint = ?endpoint,
@@ -1476,7 +1476,7 @@ impl BridgePeer {
                         match sender.try_send(sample.clone()) {
                             Ok(()) => {}
                             Err(MediaError::WouldBlock) => {
-                                if let Err(error) = sender.send(sample).await {
+                                if let Err(error) = sender.send(sample) {
                                     warn!(
                                         bridge_id = %ctx.bridge_id,
                                         endpoint = ?ctx.endpoint,
@@ -2025,7 +2025,7 @@ impl BridgePeer {
                                     });
                                     let final_sample = transcoded
                                         .unwrap_or(MediaSample::Audio(a));
-                                    if let Err(e) = sender.send(final_sample).await {
+                                    if let Err(e) = sender.send(final_sample) {
                                         ctx.leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
                                         match e {
                                             MediaError::Closed | MediaError::KindMismatch { .. } => {
@@ -2071,7 +2071,7 @@ impl BridgePeer {
                                         vec![MediaSample::Video(v)]
                                     };
                                     for sample in video_samples {
-                                        if let Err(e) = sender.send(sample).await {
+                                        if let Err(e) = sender.send(sample) {
                                             ctx.leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
                                             match e {
                                                 MediaError::Closed | MediaError::KindMismatch { .. } => {

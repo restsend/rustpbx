@@ -722,7 +722,7 @@ impl SipSession {
                                             raw_packet: None,
                                             source_addr: None,
                                         };
-                                        if audio_sender.send(MediaSample::Audio(frame)).await.is_err() {
+                                        if audio_sender.send(MediaSample::Audio(frame)).is_err() {
                                             warn!(%leg_id, "VoipBridge forward: audio sender closed");
                                             return;
                                         }
