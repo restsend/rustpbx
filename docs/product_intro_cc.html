@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustPBX 呼叫中心平台</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --border: #334155;
+    --accent: #38bdf8;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --green: #4ade80;
+    --orange: #fb923c;
+    --purple: #a78bfa;
+    --red: #f87171;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "SF Pro Display", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* Hero */
+  .hero {
+    text-align: center; padding: 3rem 1rem 2rem;
+    border-bottom: 1px solid var(--border); margin-bottom: 2rem;
+  }
+  .hero h1 { font-size: 2.4rem; font-weight: 700; }
+  .hero h1 span { color: var(--accent); }
+  .hero .sub {
+    color: var(--dim); margin-top: 0.5rem; font-size: 1.1rem;
+    display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap;
+  }
+  .stat-bar {
+    display: flex; justify-content: center; gap: 3rem; margin-top: 2rem;
+    flex-wrap: wrap;
+  }
+  .stat { text-align: center; }
+  .stat b { font-size: 2rem; color: var(--accent); display: block; }
+  .stat span { color: var(--dim); font-size: 0.85rem; }
+
+  /* Sections */
+  h2 {
+    font-size: 1.6rem; margin: 2.5rem 0 1rem;
+    padding-bottom: 0.4rem; border-bottom: 2px solid var(--accent);
+    display: inline-block;
+  }
+  h3 { font-size: 1.15rem; margin: 1.5rem 0 0.6rem; color: var(--accent); }
+
+  /* Cards */
+  .grid { display: grid; gap: 1rem; }
+  .grid2 { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .grid3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid4 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1.2rem;
+  }
+  .card h4 { font-size: 1rem; margin-bottom: 0.5rem; }
+  .card p, .card li { font-size: 0.88rem; color: var(--dim); }
+  .card ul { padding-left: 1.2rem; }
+
+  /* Flow */
+  .flow {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0.5rem; flex-wrap: wrap; padding: 1rem 0;
+    font-size: 0.9rem;
+  }
+  .flow > * {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.5rem 1rem;
+  }
+  .flow .arrow { background: none; border: none; color: var(--accent); padding: 0.3rem; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; }
+  th, td { padding: 0.55rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+  td { color: var(--dim); }
+  td code {
+    background: rgba(56,189,248,0.12); color: var(--accent);
+    padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.82rem;
+  }
+
+  /* API group */
+  .api-group { margin-bottom: 1.5rem; }
+  .api-group h4 { color: var(--orange); margin-bottom: 0.5rem; }
+
+  /* Code block */
+  pre {
+    background: rgba(15,23,42,0.8); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem; overflow-x: auto;
+    font-size: 0.82rem; color: var(--dim);
+  }
+  pre .k { color: var(--purple); }
+  pre .s { color: var(--green); }
+  pre .n { color: var(--accent); }
+
+  /* Badge */
+  .badge {
+    display: inline-block; padding: 0.15rem 0.5rem;
+    border-radius: 20px; font-size: 0.75rem; font-weight: 600;
+  }
+  .badge-g { background: rgba(74,222,128,0.18); color: var(--green); }
+  .badge-o { background: rgba(251,146,60,0.18); color: var(--orange); }
+  .badge-p { background: rgba(167,139,250,0.18); color: var(--purple); }
+
+  /* Architecture diagram */
+  .arch {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1.5rem; text-align: center;
+    margin: 1rem 0;
+  }
+  .arch .layer {
+    border: 1px dashed var(--border); border-radius: 8px;
+    padding: 0.6rem; margin: 0.3rem auto;
+    max-width: 700px; font-size: 0.88rem;
+  }
+  .arch .layer.l1 { border-color: rgba(74,222,128,0.4); }
+  .arch .layer.l2 { border-color: rgba(251,146,60,0.4); }
+  .arch .layer.l3 { border-color: rgba(56,189,248,0.4); }
+
+  .topo {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 1rem; margin: 1rem 0;
+  }
+  .topo > div {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1rem; text-align: center;
+  }
+
+  /* Footer */
+  .foot {
+    text-align: center; color: var(--dim); font-size: 0.8rem;
+    margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ======= HERO ======= -->
+<div class="hero">
+  <h1><span>RustPBX</span> 呼叫中心平台</h1>
+  <div class="sub">
+    <span>AI-Native 通信平台</span>
+    <span>·</span>
+    <span>软件定义呼叫中心</span>
+    <span>·</span>
+    <span>高性能 · 可编程</span>
+  </div>
+  <div class="stat-bar">
+    <div class="stat"><b>5000+</b><span>单节点并发通话</span></div>
+    <div class="stat"><b>~3.8</b><span>核 CPU (5000路)</span></div>
+    <div class="stat"><b>0.076%</b><span>每路 CPU 开销</span></div>
+    <div class="stat"><b>75+</b><span>CTI REST 端点</span></div>
+  </div>
+</div>
+
+<!-- ======= 设计理念 ======= -->
+<h2>设计理念</h2>
+<div class="grid grid2">
+  <div class="card">
+    <h4>PBX 内核</h4>
+    <p>高实时、低延迟的通话执行与媒体桥接。负责能力执行层 —— "能做什么"</p>
+  </div>
+  <div class="card">
+    <h4>CC App / RWI</h4>
+    <p>WebSocket + REST 控制面，编排 IVR、ACD 策略。负责业务决策层 —— "何时做、对谁做"</p>
+  </div>
+</div>
+
+<!-- ======= 五大场景预览 ======= -->
+<h2>五大典型场景</h2>
+<div class="grid grid2">
+  <div class="card"><h4>1. 呼入全链路</h4><p>IVR → 队列 → ACD → Web坐席 → 评分</p></div>
+  <div class="card"><h4>2. CTI OpenAPI</h4><p>75+ REST 端点管理 Agent/SkillGroup/ACD</p></div>
+  <div class="card"><h4>3. Step IVR</h4><p>HTTP Provider 编程式 IVR，ActionNode 协议</p></div>
+  <div class="card"><h4>4. RWI 精细控制</h4><p>WebSocket 7类30+命令，逐路精确操控</p></div>
+  <div class="card"><h4>5. 集群模式</h4><p>双Proxy拓扑 + 全网格SIP MESSAGE状态同步</p></div>
+</div>
+
+<!-- ======= SCENE 1: 呼入全链路 ======= -->
+<h2>场景一：呼入全链路</h2>
+<div class="flow">
+  <span>客户来电</span><span class="arrow">→</span>
+  <span>IVR 导航</span><span class="arrow">→</span>
+  <span>DTMF 选择</span><span class="arrow">→</span>
+  <span>技能组匹配</span><span class="arrow">→</span>
+  <span>入队</span><span class="arrow">→</span>
+  <span>ACD 分配</span><span class="arrow">→</span>
+  <span>坐席接听</span><span class="arrow">→</span>
+  <span>CSAT 评分</span>
+</div>
+
+<div class="grid grid3" style="margin-top:1rem">
+  <div class="card">
+    <h4>ACD 分配策略</h4>
+    <table>
+      <tr><th>策略</th><th>逻辑</th></tr>
+      <tr><td><code>LongestIdle</code></td><td>最长空闲优先</td></tr>
+      <tr><td><code>LeastAnswered</code></td><td>接听最少优先</td></tr>
+      <tr><td><code>RoundRobin</code></td><td>轮询分配</td></tr>
+      <tr><td><code>SkillBased</code></td><td>技能+空闲+优先级打分</td></tr>
+      <tr><td><code>Random</code></td><td>随机分配</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>溢出降级链</h4>
+    <ol style="padding-left:1.2rem;color:var(--dim);font-size:0.88rem">
+      <li>同技能组重试</li>
+      <li>溢出到备用技能组</li>
+      <li>回到 IVR 二次路由</li>
+      <li>转语音信箱</li>
+      <li>创建回呼任务</li>
+      <li>播放提示后挂断</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h4>坐席状态机</h4>
+    <pre>Offline → Idle → Ringing
+              ↓        ↓
+            Away    Busy
+                     ↓
+                  WrapUp → Idle</pre>
+    <p style="margin-top:0.5rem">
+    <span class="badge badge-g">WrapUp</span> 话后整理，按技能组配置时长<br>
+    <span class="badge badge-o">Screen Pop</span> 接听时自动弹屏 CRM
+    </p>
+  </div>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <h4>CSAT 评分流程</h4>
+    <ol style="padding-left:1.2rem;color:var(--dim);font-size:0.88rem">
+      <li>挂断后判断: 接通坐席 + 通话 ≥ 20s + 去重(4h内1次)</li>
+      <li>转入评分 IVR → 播放提示音</li>
+      <li>DTMF 按键 1-5 分</li>
+      <li>落 <code>survey_result</code> (trace_id/agent/csat/talk_secs)</li>
+      <li>播感谢语 → 挂断</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h4>通话中操作</h4>
+    <div class="grid grid2" style="font-size:0.82rem">
+      <div><span class="badge badge-g">Hold</span> 保持</div>
+      <div><span class="badge badge-o">Blind</span> 盲转</div>
+      <div><span class="badge badge-p">Attended</span> 咨询转</div>
+      <div><span class="badge badge-g">Conference</span> 三方会议</div>
+      <div><span class="badge badge-o">Listen</span> 监听</div>
+      <div><span class="badge badge-p">Whisper</span> 耳语</div>
+      <div><span class="badge badge-g">Barge</span> 强插</div>
+      <div><span class="badge badge-o">Takeover</span> 强取</div>
+    </div>
+  </div>
+</div>
+
+<!-- ======= SCENE 2: CTI OpenAPI ======= -->
+<h2>场景二：CTI OpenAPI</h2>
+<p style="color:var(--dim);margin-bottom:1rem">OpenAPI 3.1.0 规范 · 75+ REST 端点 · Session/HMAC 双认证</p>
+
+<div class="grid grid2">
+  <div class="card">
+    <div class="api-group">
+      <h4>Agent 管理</h4>
+      <table>
+        <tr><th>端点</th><th>说明</th></tr>
+        <tr><td><code>POST   /cc/agents</code></td><td>注册坐席(技能/并发/优先级)</td></tr>
+        <tr><td><code>PUT    /cc/agents/{id}</code></td><td>更新坐席</td></tr>
+        <tr><td><code>PUT    /cc/agents/{id}/skill-levels</code></td><td>技能熟练度 1-10</td></tr>
+        <tr><td><code>PUT    /cc/agents/{id}/priority</code></td><td>ACD 优先级 0-100</td></tr>
+        <tr><td><code>POST   /cc/agents/{id}/status</code></td><td>状态: idle/away/dnd</td></tr>
+        <tr><td><code>POST   /cc/agents/batch</code></td><td>批量修改</td></tr>
+        <tr><td><code>GET    /cc/agents/{id}/dashboard</code></td><td>个人面板</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="api-group">
+      <h4>SkillGroup &amp; ACD</h4>
+      <table>
+        <tr><th>端点</th><th>说明</th></tr>
+        <tr><td><code>POST   /cc/skill-groups</code></td><td>创建技能组(技能/溢出链/SLA)</td></tr>
+        <tr><td><code>GET    /cc/skill-groups/{id}/metrics</code></td><td>实时队列指标</td></tr>
+        <tr><td><code>POST   /cc/skills</code></td><td>定义技能</td></tr>
+        <tr><td><code>POST   /cc/acd/policies</code></td><td>ACD 策略(优先级/分配/溢出/时段)</td></tr>
+        <tr><td><code>GET    /cc/acd/diagnostics</code></td><td>ACD 引擎健康检查</td></tr>
+        <tr><td><code>POST   /cc/acd/reload</code></td><td>热重载配置</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <div class="api-group"><h4>通话控制 &amp; 质检</h4></div>
+    <table>
+      <tr><th>端点</th><th>说明</th></tr>
+      <tr><td><code>POST   /cc/calls/originate</code></td><td>点击拨号</td></tr>
+      <tr><td><code>POST   /cc/calls/{id}/hold|unhold</code></td><td>保持/恢复</td></tr>
+      <tr><td><code>POST   /cc/calls/{id}/transfer</code></td><td>盲转</td></tr>
+      <tr><td><code>POST   /cc/calls/{id}/consult</code></td><td>咨询转(merge/complete)</td></tr>
+      <tr><td><code>POST   /cc/calls/{id}/record</code></td><td>录音控制</td></tr>
+      <tr><td><code>POST   /cc/calls/{id}/end</code></td><td>挂断</td></tr>
+      <tr><td><code>POST   /cc/supervisor/sessions</code></td><td>监听/耳语/强插/强取</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <div class="api-group"><h4>报表 &amp; CSAT</h4></div>
+    <table>
+      <tr><th>端点</th><th>说明</th></tr>
+      <tr><td><code>GET    /cc/stats</code></td><td>综合实时统计</td></tr>
+      <tr><td><code>GET    /cc/metrics/{queue_id}</code></td><td>队列指标</td></tr>
+      <tr><td><code>GET    /cc/sla</code></td><td>SLA 统计</td></tr>
+      <tr><td><code>GET    /cc/dashboard/summary</code></td><td>仪表盘汇总</td></tr>
+      <tr><td><code>GET    /cc/reports/calls</code></td><td>通话报表</td></tr>
+      <tr><td><code>POST   /cc/csat/{call_id}</code></td><td>提交评分 1-5</td></tr>
+      <tr><td><code>GET    /cc/csat/agent/{id}</code></td><td>坐席评分统计</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ======= SCENE 3: Step IVR ======= -->
+<h2>场景三：Step IVR 可编程模式</h2>
+
+<div class="flow">
+  <span>来电进入</span><span class="arrow">→</span>
+  <span>POST Provider</span><span class="arrow">→</span>
+  <span style="color:var(--purple)">ActionNode</span><span class="arrow">→</span>
+  <span>执行动作</span><span class="arrow">→</span>
+  <span>POST Provider(事件)</span><span class="arrow">→</span>
+  <span>下一 ActionNode...</span>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <h4>终端动作</h4>
+    <table>
+      <tr><th>type</th><th>作用</th></tr>
+      <tr><td><code>transfer</code></td><td>转接 SIP URI</td></tr>
+      <tr><td><code>queue</code></td><td>送入技能组队列</td></tr>
+      <tr><td><code>route_to_agent</code></td><td>转指定坐席</td></tr>
+      <tr><td><code>voicemail</code></td><td>转语音信箱</td></tr>
+      <tr><td><code>hangup</code></td><td>挂断 (可播报)</td></tr>
+      <tr><td><code>jump_ivr</code></td><td>跳转到另一 IVR</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>非终端动作</h4>
+    <table>
+      <tr><th>type</th><th>作用</th></tr>
+      <tr><td><code>prompt</code></td><td>播放/TTS 合成</td></tr>
+      <tr><td><code>dtmf_menu</code></td><td>DTMF 菜单(含分支表)</td></tr>
+      <tr><td><code>collect_dtmf</code></td><td>通用收号</td></tr>
+      <tr><td><code>input_phone</code></td><td>手机号采集</td></tr>
+      <tr><td><code>input_voice</code></td><td>ASR 语音识别</td></tr>
+      <tr><td><code>api</code></td><td>HTTP API 调用</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <h4>Provider 接口协议</h4>
+    <p style="font-size:0.82rem">每步 POST 携带完整上下文，Provider 返回 ActionNode:</p>
+    <pre>// 请求 POST {url}
+{
+  <span class="s">"session_id"</span>: <span class="s">"call_abc123"</span>,
+  <span class="s">"caller"</span>: <span class="s">"1001"</span>, <span class="s">"callee"</span>: <span class="s">"2000"</span>,
+  <span class="s">"variables"</span>: { <span class="s">"phone"</span>: <span class="s">"138..."</span> },
+  <span class="s">"event"</span>: { <span class="s">"type"</span>: <span class="s">"dtmf"</span>, <span class="s">"digit"</span>: <span class="s">"1"</span> }
+}
+
+// 响应
+{
+  <span class="s">"type"</span>: <span class="s">"dtmf_menu"</span>,
+  <span class="s">"greeting"</span>: <span class="s">"menu.wav"</span>,
+  <span class="s">"entries"</span>: {
+    <span class="s">"1"</span>: { <span class="s">"type"</span>: <span class="s">"transfer"</span>, <span class="s">"target"</span>: <span class="s">"2001"</span> },
+    <span class="s">"2"</span>: { <span class="s">"type"</span>: <span class="s">"queue"</span>, <span class="s">"target"</span>: <span class="s">"support"</span> }
+  }
+}</pre>
+  </div>
+  <div class="card">
+    <h4>IVR Editor 工具链</h4>
+    <ul>
+      <li><b>可视化配置</b> — 填写 Provider URL / Headers / 重试策略</li>
+      <li><b>一键发布</b> — 生成配置文件，路由层自动注入 StepIvrApp</li>
+      <li><b>实时 Trace</b> — 每步 action_type/耗时/错误 面板展示</li>
+      <li><b>诊断页测试</b> — Web Dialer + DTMF 键盘 + 2s 轮询 Trace</li>
+      <li><b>RWI 推送</b> — 步模式 IVR 实时推送 <code>ivr_step_trace</code> 事件</li>
+      <li><b>3次重试</b> — 全部失败播 error.wav → 挂断</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ======= SCENE 4: RWI ======= -->
+<h2>场景四：RWI 精细话务控制</h2>
+<p style="color:var(--dim);margin-bottom:1rem">JSON-over-WebSocket 控制面 · 异步事件驱动 · Bearer Token 认证 + RBAC Scope</p>
+
+<div class="grid grid3">
+  <div class="card">
+    <h4>呼叫控制</h4>
+    <p style="font-size:0.82rem">
+      <code>call.originate</code><br>
+      <code>call.answer / reject</code><br>
+      <code>call.hangup</code><br>
+      <code>call.bridge / unbridge</code><br>
+      <code>call.transfer</code> (blind)<br>
+      <code>call.transfer.attended</code><br>
+      <code>call.hold / unhold</code>
+    </p>
+  </div>
+  <div class="card">
+    <h4>媒体 &amp; 录音</h4>
+    <p style="font-size:0.82rem">
+      <code>media.play / stop</code><br>
+      <code>media.stream_start</code> (send/recv)<br>
+      <code>media.inject_start</code><br>
+      <code>record.start</code> (mixed/分离<br>
+      <code>record.pause / resume / stop</code><br>
+      <code>record.mask_segment</code> (PCI)
+    </p>
+  </div>
+  <div class="card">
+    <h4>队列 &amp; 质检 &amp; 会议</h4>
+    <p style="font-size:0.82rem">
+      <code>queue.enqueue / dequeue</code><br>
+      <code>queue.assign_agent</code><br>
+      <code>supervisor.listen</code> (无感知)<br>
+      <code>supervisor.whisper</code> (耳语)<br>
+      <code>supervisor.barge</code> (强插)<br>
+      <code>supervisor.takeover</code> (强取)<br>
+      <code>conference.create / add / remove</code>
+    </p>
+  </div>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <h4>异步事件模型</h4>
+    <pre>// Client → Server: 命令 + action_id
+{ <span class="s">"action"</span>: <span class="s">"call.answer"</span>, <span class="s">"action_id"</span>: <span class="s">"b0e31"</span> }
+
+// Server → Client: 事件结果
+{ <span class="s">"type"</span>: <span class="s">"command_completed"</span>, <span class="s">"action_id"</span>: <span class="s">"b0e31"</span>, <span class="s">"status"</span>: <span class="s">"success"</span> }
+
+// 失败
+{ <span class="s">"type"</span>: <span class="s">"command_failed"</span>, <span class="s">"error"</span>: <span class="s">"Call not found"</span> }</pre>
+  </div>
+  <div class="card">
+    <h4>三层高可用架构</h4>
+    <div class="arch">
+      <div class="layer l3"><b>Layer 3</b>: RWI Application — 业务逻辑/AI决策</div>
+      <div class="layer l2"><b>Layer 2</b>: Local Rule Engine — RWI断连自动降级</div>
+      <div class="layer l1"><b>Layer 1</b>: Realtime — DTMF/OPTIONS &lt;10ms</div>
+    </div>
+    <p style="font-size:0.82rem;margin-top:0.5rem">RWI 断开时 Layer 1/2 接管，自动执行降级规则</p>
+  </div>
+</div>
+
+<!-- ======= SCENE 5: Cluster ======= -->
+<h2>场景五：集群模式</h2>
+
+<div class="topo">
+  <div>
+    <h4 style="color:var(--accent)">Call Proxy</h4>
+    <p style="font-size:0.82rem;color:var(--dim)">
+      PSTN 接入 + 媒体锚定<br>
+      ConferenceManager 会议管理<br>
+      所有 leg 媒体汇聚
+    </p>
+  </div>
+  <div>
+    <h4 style="color:var(--orange)">CC Proxy</h4>
+    <p style="font-size:0.82rem;color:var(--dim)">
+      坐席侧接入 (WS/SIP-WS)<br>
+      有状态 (BC密语持有双Session)<br>
+      originate_call → Call Proxy
+    </p>
+  </div>
+</div>
+
+<div class="grid grid3" style="margin-top:1rem">
+  <div class="card">
+    <h4>全网格事件同步</h4>
+    <p style="font-size:0.82rem">通过 <b>SIP MESSAGE</b> 同步四类事件:</p>
+    <table>
+      <tr><td><code>Locator</code></td><td>注册信息跨节点同步</td></tr>
+      <tr><td><code>Presence</code></td><td>坐席状态一致性</td></tr>
+      <tr><td><code>AgentStatus</code></td><td>完整坐席快照(技能/优先级/instance_id)</td></tr>
+      <tr><td><code>QueueEvent</code></td><td>跨节点队列可见+原子抢占</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>Home Proxy 路由</h4>
+    <p style="font-size:0.82rem;color:var(--dim)">
+      每个注册记录 <code>home_proxy</code><br>
+      本节点 → 直接路由<br>
+      远程节点 → SIP 转发 INVITE<br>
+      坐席跨节点迁移自动跟随
+    </p>
+  </div>
+  <div class="card">
+    <h4>集群安全</h4>
+    <ul style="font-size:0.82rem;color:var(--dim)">
+      <li>Peer IP 豁免 SIP Auth (同域)</li>
+      <li>Peer IP 豁免 AMI 端点</li>
+      <li>集群 MESSAGE IP 白名单验证</li>
+      <li>自消息回环检测+丢弃</li>
+      <li>跨节点队列 <code>claimed_by</code> 原子抢占</li>
+    </ul>
+  </div>
+</div>
+
+<div class="grid grid2" style="margin-top:1rem">
+  <div class="card">
+    <h4>集群管理</h4>
+    <table>
+      <tr><th>端点</th><th>功能</th></tr>
+      <tr><td><code>POST /cluster/ping</code></td><td>探测 peer 健康 (延迟/uptime/呼叫数)</td></tr>
+      <tr><td><code>GET  /cluster/reload_config</code></td><td>SSE 串行重载所有节点</td></tr>
+      <tr><td><code>POST /cluster/dispatch_command</code></td><td>向 peer 转发呼叫控制指令</td></tr>
+      <tr><td><code>GET  /cluster/list_calls</code></td><td>汇总所有节点活跃通话</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>参考部署规模</h4>
+    <table>
+      <tr><th>集群</th><th>配置</th></tr>
+      <tr><td>Call Proxy</td><td>8C16G × 10 节点/DC</td></tr>
+      <tr><td>CC Proxy</td><td>4C8G × 7 节点/DC</td></tr>
+      <tr><td>SipFlow</td><td>4C8G × 4 节点/DC</td></tr>
+      <tr><td>TURN</td><td>4C8G × 4 节点/DC</td></tr>
+    </table>
+    <p style="font-size:0.82rem;color:var(--dim);margin-top:0.5rem">支持双数据中心部署，Call/Agent集群间事件同步</p>
+  </div>
+</div>
+
+<!-- ======= TECH ADVANTAGE ======= -->
+<h2>技术优势</h2>
+<table>
+  <tr><th>特性</th><th>RustPBX</th><th>传统方案</th></tr>
+  <tr><td>性能</td><td>5000 并发 @ ~3.8 核，每路 0.076% CPU</td><td>通常 200-300 并发</td></tr>
+  <tr><td>可编程性</td><td>RWI WebSocket + CTI REST 外部化全部控制</td><td>需编译或脚本</td></tr>
+  <tr><td>AI 原生</td><td>AI Agent 原生参与(听/说/强插/转接)</td><td>需额外集成</td></tr>
+  <tr><td>部署</td><td>单二进制，无外部依赖</td><td>通常依赖数据库/中间件</td></tr>
+  <tr><td>热加载</td><td>队列/路由/ACD/集群 peer 动态生效</td><td>通常需重启</td></tr>
+  <tr><td>集群</td><td>全网格 SIP MESSAGE 同步，跨节点一致</td><td>需外部消息队列</td></tr>
+</table>
+
+<div class="foot">
+  RustPBX Call Center Platform &copy; 2026
+</div>
+
+</div>
+</body>
+</html>

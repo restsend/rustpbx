@@ -699,7 +699,7 @@ impl SipSession {
                     biased;
                     _ = cancel.cancelled() => break,
                     sample = rx.recv() => match sample {
-                        Some(s) => if sender.send(s).await.is_err() { break; }
+                        Some(s) => if sender.send(s).is_err() { break; }
                         None => break,
                     }
                 }
@@ -5158,7 +5158,7 @@ impl SipSession {
                         bridge.set_video_payload_types(Some(params.clone()), Some(params));
                     }
 
-                    if let Some(pair) = callee_pc.ice_transport().get_selected_pair().await {
+                    if let Some(pair) = callee_pc.ice_transport().get_selected_pair() {
                         let payload_map = callee_pc
                             .get_transceivers()
                             .iter()
@@ -9714,7 +9714,7 @@ impl SipSession {
                     source_addr: None,
                     raw_packet: None,
                 };
-                let _ = sender.send(MediaSample::Audio(start_frame)).await;
+                let _ = sender.send(MediaSample::Audio(start_frame));
             }
             timestamp = timestamp.wrapping_add(TE_SAMPLES_PER_EVENT as u32);
             seq = seq.wrapping_add(1);
@@ -9737,7 +9737,7 @@ impl SipSession {
                     source_addr: None,
                     raw_packet: None,
                 };
-                let _ = sender.send(MediaSample::Audio(end_frame)).await;
+                let _ = sender.send(MediaSample::Audio(end_frame));
             }
             timestamp = timestamp.wrapping_add(TE_SAMPLES_PAUSE as u32);
             seq = seq.wrapping_add(1);

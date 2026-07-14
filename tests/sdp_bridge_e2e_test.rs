@@ -919,7 +919,7 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
         .unwrap();
 
     // Verify initial RTP remote address
-    let initial_pair = bridge.callee_pc().ice_transport().get_selected_pair().await;
+    let initial_pair = bridge.callee_pc().ice_transport().get_selected_pair();
     assert!(
         initial_pair.is_some(),
         "RTP side should have selected pair after 183"
@@ -972,7 +972,7 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
         .unwrap();
 
     // 8. Verify RTP remote address updated to 200 OK values
-    let updated_pair = bridge.callee_pc().ice_transport().get_selected_pair().await;
+    let updated_pair = bridge.callee_pc().ice_transport().get_selected_pair();
     assert!(
         updated_pair.is_some(),
         "RTP side should still have selected pair after 200 OK"

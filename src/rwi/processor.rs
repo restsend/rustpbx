@@ -159,7 +159,7 @@ async fn start_peer_conference_bridge(
                 _ = cancel.cancelled() => break,
                 sample = rx.recv() => match sample {
                     Some(s) => {
-                        if audio_sender.send(s).await.is_err() {
+                        if audio_sender.send(s).is_err() {
                             break;
                         }
                     }
@@ -1569,7 +1569,7 @@ impl RwiCommandProcessor {
                                     if let Some(sender) = audio_sender {
                                         crate::utils::spawn(async move {
                                             while let Some(sample) = rx.recv().await {
-                                                if sender.send(sample).await.is_err() {
+                                                if sender.send(sample).is_err() {
                                                     break;
                                                 }
                                             }

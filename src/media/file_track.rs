@@ -468,7 +468,7 @@ impl FileTrack {
                             rtp_timestamp.wrapping_add(frame_timing.rtp_ticks_per_frame);
                         sequence_number = sequence_number.wrapping_add(1);
 
-                        if let Err(e) = source_target.send(MediaSample::Audio(frame)).await {
+                        if let Err(e) = source_target.send(MediaSample::Audio(frame)) {
                             debug!("FileTrack source_target.send failed (receiver gone): {}", e);
                             if let Some(on_end) = on_end.take() {
                                 on_end(PlaybackEndReason::Interrupted);
