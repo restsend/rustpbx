@@ -125,6 +125,11 @@ impl RwiGateway {
         self.webhook_tx = Some(tx);
     }
 
+    /// Returns true if a webhook handler is configured and wired.
+    pub fn webhook_configured(&self) -> bool {
+        self.webhook_tx.is_some()
+    }
+
     pub fn remove_session(&mut self, session_id: &SessionId) -> Vec<CallId> {
         self.session_event_senders.remove(session_id);
         self.session_event_filters.remove(session_id);
