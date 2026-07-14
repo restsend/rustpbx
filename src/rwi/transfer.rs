@@ -1143,10 +1143,14 @@ impl TransferController {
             ).await;
 
             match result {
-                Ok(Ok((_, Some(resp))))
+                Ok(Ok((dialog, Some(resp))))
                     if resp.status_code().kind()
                         == rsipstack::sip::status_code::StatusCodeKind::Successful =>
                 {
+                    let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                        dialog_layer.clone(),
+                        dialog.id(),
+                    );
                     info!(%call_id_for_spawn, "3PCC originate answered, completing transfer");
 
                     // Record 3PCC success metrics

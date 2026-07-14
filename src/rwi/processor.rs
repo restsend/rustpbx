@@ -1696,7 +1696,10 @@ impl RwiCommandProcessor {
 
                                                         // Monitor dialog state
                                                         let dialog_cancel = cancel_token_clone.child_token();
+                                                        let dlg_id = dialog.id();
+                                                        let dlg_layer = dialog_layer_clone.clone();
                                                         crate::utils::spawn(async move {
+                                                            let _guard = crate::call::sip::ClientDialogGuard::new(dlg_layer, dlg_id);
                                                             loop {
                                                                 tokio::select! {
                                                                     biased;
@@ -2018,7 +2021,7 @@ impl RwiCommandProcessor {
                     }
                 } => {
                     match result {
-                        Ok((dialog_id, Some(resp))) if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful => {
+                        Ok((dialog, Some(resp))) if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful => {
 
                             cdr_answered.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -2053,7 +2056,10 @@ impl RwiCommandProcessor {
 
 
                             let _ = caller_peer;
-                            let _ = dialog_id;
+                            let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                                dialog_layer.clone(),
+                                dialog.id(),
+                            );
 
 
                             use crate::proxy::active_call_registry::ActiveProxyCallStatus;
@@ -2549,8 +2555,8 @@ impl RwiCommandProcessor {
         ).await;
 
         match result {
-            Ok(Ok((dialog_id, Some(resp))))
-                if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful =>
+            Ok(Ok((dialog, Some(resp))))
+                if resp.status_code().kind() == rsipstack::sip::StatusCodeKind::Successful =>
             {
                 let sdp_answer = if resp.body().is_empty() {
                     None
@@ -2592,7 +2598,10 @@ impl RwiCommandProcessor {
                 );
 
                 let _ = caller_peer;
-                let _ = dialog_id;
+                let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                    dialog_layer.clone(),
+                    dialog.id(),
+                );
 
                 Ok(call_id)
             }
