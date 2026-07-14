@@ -1109,6 +1109,7 @@ impl TransferController {
             registry.upsert(entry, handle.clone());
 
             // Wait for invitation result
+            let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
             let timeout_secs = 60;
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs),
@@ -1117,6 +1118,7 @@ impl TransferController {
                         tokio::select! {
                             res = &mut invitation => break res,
                             state = state_rx.recv() => {
+                                let _ = watch_tx.send(state.clone());
                                 if let Some(state) = state {
                                     match state {
                                         DialogState::Calling(_) => {
@@ -1147,9 +1149,10 @@ impl TransferController {
                     if resp.status_code().kind()
                         == rsipstack::sip::status_code::StatusCodeKind::Successful =>
                 {
-                    let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                    crate::call::sip::spawn_client_dialog_guard(
                         dialog_layer.clone(),
                         dialog.id(),
+                        watch_rx,
                     );
                     info!(%call_id_for_spawn, "3PCC originate answered, completing transfer");
 

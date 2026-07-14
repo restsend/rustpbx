@@ -2,6 +2,7 @@ use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 pub struct DialogStateReceiverGuard {
@@ -146,4 +147,23 @@ impl Drop for ClientDialogGuard {
             }
         });
     }
+}
+
+pub fn spawn_client_dialog_guard(
+    dialog_layer: Arc<DialogLayer>,
+    dialog_id: DialogId,
+    mut watch_rx: watch::Receiver<Option<DialogState>>,
+) {
+    crate::utils::spawn(async move {
+        let _guard = ClientDialogGuard::new(dialog_layer, dialog_id);
+        loop {
+            if watch_rx.changed().await.is_err() {
+                break;
+            }
+            let state = watch_rx.borrow();
+            if state.as_ref().map_or(true, |s| matches!(s, DialogState::Terminated(..))) {
+                break;
+            }
+        }
+    });
 }

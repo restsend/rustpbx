@@ -2532,6 +2532,8 @@ impl RwiCommandProcessor {
             registry.upsert(entry, handle);
         }
 
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
+
         let result = tokio::time::timeout(
             Duration::from_secs(60),
             async {
@@ -2541,6 +2543,7 @@ impl RwiCommandProcessor {
                             return res;
                         }
                         state = state_rx.recv() => {
+                            let _ = watch_tx.send(state.clone());
                             if let Some(rsipstack::dialog::dialog::DialogState::Calling(_)) = state {
                                 let gw = gateway.read();
                                 gw.send_event_to_call_owner(
@@ -2598,9 +2601,10 @@ impl RwiCommandProcessor {
                 );
 
                 let _ = caller_peer;
-                let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                crate::call::sip::spawn_client_dialog_guard(
                     dialog_layer.clone(),
                     dialog.id(),
+                    watch_rx,
                 );
 
                 Ok(call_id)

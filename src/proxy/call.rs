@@ -2011,6 +2011,7 @@ impl CallModule {
         registry.upsert(entry, new_handle.clone());
 
         // Wait for invitation result with timeout
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
         let timeout_secs = 60u64;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
@@ -2019,6 +2020,7 @@ impl CallModule {
                     tokio::select! {
                         res = &mut invitation => break res,
                         state = state_rx.recv() => {
+                            let _ = watch_tx.send(state.clone());
                             if let Some(ref state) = state {
                                 let state_str = match state {
                                     rsipstack::dialog::dialog::DialogState::Calling(_) => "Calling",
@@ -2043,9 +2045,10 @@ impl CallModule {
                 if resp.status_code().kind()
                     == rsipstack::sip::status_code::StatusCodeKind::Successful =>
             {
-                let _dialog_guard = crate::call::sip::ClientDialogGuard::new(
+                crate::call::sip::spawn_client_dialog_guard(
                     dialog_layer.clone(),
                     dialog.id(),
+                    watch_rx,
                 );
                 info!(%new_call_id, "Inbound REFER transfer target answered");
 
