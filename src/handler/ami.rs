@@ -77,6 +77,24 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
             "total".to_string(),
             serde_json::json!(crate::utils::active_task_count()),
         );
+        let metrics = crate::utils::task_metrics_snapshot();
+        if !metrics.is_empty() {
+            let sorted: std::collections::BTreeMap<usize, Vec<String>> = {
+                let mut m: std::collections::BTreeMap<usize, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for (loc, cnt) in &metrics {
+                    m.entry(*cnt).or_default().push(loc.clone());
+                }
+                m
+            };
+            let mut entries = Vec::new();
+            for (cnt, locs) in sorted.iter().rev() {
+                for loc in locs {
+                    entries.push(serde_json::json!({"loc": loc, "count": cnt}));
+                }
+            }
+            map.insert("by_location".to_string(), serde_json::json!(entries));
+        }
         map
     };
 

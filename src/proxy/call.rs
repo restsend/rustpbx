@@ -1228,35 +1228,23 @@ impl CallModule {
             .unwrap_or(70)
     }
 
-    /// Build a session cancel token linked to both the SIP server (for global
-    /// shutdown) and the incoming transport connection (so that a WebSocket
-    /// disconnect immediately cancels the session).
+    /// Build a session cancel token.
+    ///
+    /// For reliable transports (TCP/TLS/WS/WSS) the token is derived from the
+    /// transport's cancel token, so a connection drop automatically cancels
+    /// every session on that transport — no watcher task needed.
+    ///
+    /// For UDP (connectionless, shared socket) the token is derived from the
+    /// server's cancel token, matching pre-`bac8444` behaviour.
     fn build_session_token(&self, tx: &Transaction) -> CancellationToken {
-        let session_token = self.inner.server.cancel_token.child_token();
         if let Some(ref conn) = tx.connection {
-            if let Some(transport_token) = conn.cancel_token() {
-                let watch = session_token.clone();
-                let remote = conn.get_remote_addr().map(|a| a.to_string());
-                let transport = conn.transport().to_string();
-                let session_id = tx
-                    .original
-                    .call_id_header()
-                    .ok()
-                    .map(|c| c.to_string());
-                crate::utils::spawn(async move {
-                    transport_token.cancelled().await;
-                    info!(
-                        session_id = session_id.as_deref().unwrap_or("-"),
-                        leg = "caller",
-                        remote = remote.as_deref().unwrap_or("-"),
-                        transport,
-                        "Transport disconnected, cancelling call session",
-                    );
-                    watch.cancel();
-                });
+            if conn.is_reliable() {
+                if let Some(transport_token) = conn.cancel_token() {
+                    return transport_token.child_token();
+                }
             }
         }
-        session_token
+        self.inner.server.cancel_token.child_token()
     }
 
     async fn build_and_serve_dialplan(

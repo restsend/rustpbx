@@ -1,3 +1,7 @@
+#[cfg(all(unix, feature = "jemalloc"))]
+#[global_allocator]
+static JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 pub mod addons;
 #[cfg(feature = "console")]
 pub mod api;

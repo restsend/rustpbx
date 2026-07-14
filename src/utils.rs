@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 use tokio::runtime::Handle;
 
+use dashmap::DashMap;
+
 /// Strip control characters (`\r`, `\n`, `\0`, etc.) from a header value
 /// to prevent HTTP response splitting / header injection.
 pub fn sanitize_header_value(value: &str) -> String {
@@ -127,18 +129,35 @@ where
 /// Global active task counter (atomic, no lock contention).
 pub static GLOBAL_TASK_COUNT: AtomicI64 = AtomicI64::new(0);
 
-pub struct TaskGuard;
+/// Per-location active task counter for leak diagnostics.
+static TASK_LOCATIONS: std::sync::LazyLock<DashMap<String, AtomicI64>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+pub struct TaskGuard {
+    loc: String,
+}
 
 impl TaskGuard {
-    pub fn new(_loc: String) -> Self {
+    pub fn new(loc: String) -> Self {
         GLOBAL_TASK_COUNT.fetch_add(1, Ordering::Relaxed);
-        Self
+        if let Some(entry) = TASK_LOCATIONS.get(&loc) {
+            entry.fetch_add(1, Ordering::Relaxed);
+        } else {
+            TASK_LOCATIONS
+                .entry(loc.clone())
+                .or_insert_with(|| AtomicI64::new(0))
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Self { loc }
     }
 }
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         GLOBAL_TASK_COUNT.fetch_sub(1, Ordering::Relaxed);
+        if let Some(entry) = TASK_LOCATIONS.get(&self.loc) {
+            entry.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -222,9 +241,13 @@ pub fn active_task_count_by_prefix(_prefix: &str) -> usize {
     0
 }
 
-/// Get detailed task metrics (stub — returns empty map, kept for compat)
+/// Get detailed task metrics keyed by spawn location ("file:line").
 pub fn task_metrics_snapshot() -> std::collections::HashMap<String, usize> {
-    std::collections::HashMap::new()
+    TASK_LOCATIONS
+        .iter()
+        .filter(|e| e.value().load(Ordering::Relaxed) > 0)
+        .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed) as usize))
+        .collect()
 }
 
 /// Reset all metrics (useful for tests)
