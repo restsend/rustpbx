@@ -42,6 +42,12 @@ impl std::ops::Deref for SessionExtensions {
     }
 }
 
+/// Typed session extension for CRM headers injected by the routing layer
+/// (X-CRM-*, X-CC-*) during session creation. Replaces the old `metadata`
+/// field on [`CallSessionContext`].
+#[derive(Debug, Clone)]
+pub struct SessionCrmHeaders(pub HashMap<String, String>);
+
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
 pub struct CallSessionContext {
@@ -59,12 +65,14 @@ pub struct CallSessionContext {
     pub direction: String,
     /// ISO-8601 timestamp when the session was created (before ringing).
     pub started_at: Option<String>,
-    /// Application metadata injected by the routing layer (e.g. X-CRM-* / X-CC-*).
-    pub metadata: Option<HashMap<String, String>>,
     /// Per-session typed extensions bag (session cookie). Any addon can
     /// insert/read typed data here (e.g. `ctx.extensions.write().insert(MyData)`).
     /// Clones share the same underlying bag. Automatically cleaned up when the
     /// session ends.
+    ///
+    /// CRM headers from the routing layer are pre-populated as
+    /// [`SessionCrmHeaders`] — use
+    /// `ctx.extensions.read().get::<SessionCrmHeaders>()`.
     pub extensions: SessionExtensions,
 }
 
@@ -78,7 +86,6 @@ impl Clone for CallSessionContext {
             queue_name: self.queue_name.clone(),
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
-            metadata: self.metadata.clone(),
             extensions: self.extensions.clone(),
         }
     }
@@ -94,7 +101,6 @@ impl fmt::Debug for CallSessionContext {
             .field("queue_name", &self.queue_name)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
-            .field("metadata", &self.metadata)
             .field("extensions", &"<http::Extensions>")
             .finish()
     }
