@@ -8277,31 +8277,35 @@ impl SipSession {
     }
 
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
-        // Extract CC agent_id from connected_callee SIP URI
-        let cc_agent_id = self.meta.connected_callee.as_ref().map(|callee| {
-            let trimmed = callee
-                .strip_prefix("sips:")
-                .or_else(|| callee.strip_prefix("sip:"))
-                .unwrap_or(callee);
-            match trimmed.find('@') {
-                Some(at) => &trimmed[..at],
-                None => trimmed,
-            }
-            .to_string()
-        });
-
-        // Inject CC data into extensions so the reporter picks it up
+        // Merge agent + routing data into a HashMap so the reporter picks it up.
+        // Agent info was written into session extensions by CcCallSessionHook
+        // (as a HashMap<String, String>). Routing metadata comes from the
+        // dialplan extensions (also HashMap<String, String>).
         let mut extensions = self.context.dialplan.extensions.clone();
         {
-            let mut meta: std::collections::HashMap<String, String> = extensions
+            // Start with session extensions (CC agent info)
+            let mut meta: std::collections::HashMap<String, String> = self
+                .extensions
+                .read()
                 .get::<std::collections::HashMap<String, String>>()
                 .cloned()
                 .unwrap_or_default();
-            if let Some(aid) = &cc_agent_id {
-                meta.insert("agent_id".to_string(), aid.clone());
+            // Merge in dialplan extensions (routing metadata)
+            if let Some(route_meta) = extensions
+                .get::<std::collections::HashMap<String, String>>()
+                .cloned()
+            {
+                for (k, v) in route_meta {
+                    meta.entry(k).or_insert(v);
+                }
             }
             if let Some(ref qn) = self.meta.queue_name {
                 meta.insert("queue_name".to_string(), qn.clone());
+            }
+            // Always carry connected_callee so reporters can extract agent
+            // info via the old path until they migrate to agent_id from meta.
+            if let Some(ref callee) = self.meta.connected_callee {
+                meta.insert("connected_callee".to_string(), callee.clone());
             }
             extensions.insert(meta);
         }
