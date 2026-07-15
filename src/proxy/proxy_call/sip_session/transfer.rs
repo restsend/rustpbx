@@ -836,34 +836,38 @@ impl SipSession {
             conf_id: Some(format!("bridge-{}", self.id.0)),
         };
 
-        info!(%leg_id, endpoint = %endpoint, "Bridge established");
-
-        // ── 9. Wait for bridge to disconnect ─────────────────────────
-        let bridge_done = async {
-            let _ = forward_handle.await;
-            let _ = reverse_handle.await;
-        };
-        tokio::pin!(bridge_done);
-
-        tokio::select! {
-            _ = self.cancel_token.cancelled() => {
-                info!(%leg_id, "Session cancelled while bridge active");
-            }
-            _ = &mut bridge_done => {
-                info!(%leg_id, "Bridge disconnected");
-            }
-        }
-
-        self.conference_bridge.stop_bridge();
-
-        // ── 10. Return to IVR if configured ──────────────────────────
+        // ── 9. Spawn monitor for return_ivr if configured ────────────
         if let Some(ref ivr_name) = return_ivr {
-            if !self.cancel_token.is_cancelled() {
-                info!(%leg_id, ivr = %ivr_name, "Bridge disconnected; returning to IVR");
-                self.start_ivr_app(ivr_name, HashMap::new()).await?;
+            if let Some(ref cmd_tx) = self.cmd_tx {
+                let cancel = self.cancel_token.child_token();
+                let ivr_target = format!("ivr:{}", ivr_name);
+                let tx = cmd_tx.clone();
+                let mon_leg_id = leg_id.clone();
+                let mon = crate::utils::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {}
+                        _ = async {
+                            let _ = forward_handle.await;
+                            let _ = reverse_handle.await;
+                        } => {
+                            if !cancel.is_cancelled() {
+                                info!("Bridge disconnected; returning to IVR: {}", ivr_target);
+                                let cmd = CallCommand::Transfer {
+                                    leg_id: mon_leg_id,
+                                    target: ivr_target,
+                                    attended: false,
+                                };
+                                let _ = tx.send(cmd).await;
+                            }
+                        }
+                    }
+                });
+                self.legs.tasks.entry(leg_id.clone()).or_default().push(mon);
             }
         }
 
+        info!(%leg_id, endpoint = %endpoint, "Bridge established");
         Ok(())
     }
 
