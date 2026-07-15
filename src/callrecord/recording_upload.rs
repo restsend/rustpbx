@@ -251,8 +251,10 @@ impl CallRecordHook for RecordingUploadHook {
             // (e.g. MQ consumers) are notified that the recording is ready.
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
-                // Pull agent context from CallDetails.metadata (populated by
-                // CcCallSessionHook via extensions → record_snapshot → reporter).
+                // Pull agent context from CallDetails.metadata — populated by
+                // CcCallSessionHook via extensions → record_snapshot → reporter.
+                // Core does not know addon-specific field names — it reads from
+                // the generic HashMap that addons write into.
                 let (agent_id, agent_name) = record
                     .details
                     .metadata
