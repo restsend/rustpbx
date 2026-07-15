@@ -2231,10 +2231,21 @@ impl SipSession {
     }
 
     fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
-        // Pre-populate routing metadata (X-CRM-* / X-CC-*) into extensions.
+        // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
+        // Use entry() to avoid overwriting keys already set by addons (e.g.
+        // CcCallSessionHook writes agent_id/agent_name here).
         if let Some(ref m) = self.context.metadata {
             if !m.is_empty() {
-                self.extensions.write().insert(m.clone());
+                let mut ext = self.extensions.write();
+                if let Some(existing) =
+                    ext.get_mut::<std::collections::HashMap<String, String>>()
+                {
+                    for (k, v) in m {
+                        existing.entry(k.clone()).or_insert(v.clone());
+                    }
+                } else {
+                    ext.insert(m.clone());
+                }
             }
         }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
