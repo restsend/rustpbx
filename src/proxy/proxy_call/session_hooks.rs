@@ -9,7 +9,6 @@
 
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -42,12 +41,6 @@ impl std::ops::Deref for SessionExtensions {
     }
 }
 
-/// Typed session extension for CRM headers injected by the routing layer
-/// (X-CRM-*, X-CC-*) during session creation. Replaces the old `metadata`
-/// field on [`CallSessionContext`].
-#[derive(Debug, Clone)]
-pub struct SessionCrmHeaders(pub HashMap<String, String>);
-
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
 pub struct CallSessionContext {
@@ -70,9 +63,9 @@ pub struct CallSessionContext {
     /// Clones share the same underlying bag. Automatically cleaned up when the
     /// session ends.
     ///
-    /// CRM headers from the routing layer are pre-populated as
-    /// [`SessionCrmHeaders`] — use
-    /// `ctx.extensions.read().get::<SessionCrmHeaders>()`.
+    /// Routing-layer metadata (X-CRM-* / X-CC-* headers) is pre-populated as
+    /// `HashMap<String, String>` — read via
+    /// `ctx.extensions.read().get::<HashMap<String, String>>()`.
     pub extensions: SessionExtensions,
 }
 

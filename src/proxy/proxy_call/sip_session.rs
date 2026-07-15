@@ -2231,14 +2231,10 @@ impl SipSession {
     }
 
     fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
-        // Pre-populate CRM headers from routing metadata into extensions.
+        // Pre-populate routing metadata (X-CRM-* / X-CC-*) into extensions.
         if let Some(ref m) = self.context.metadata {
             if !m.is_empty() {
-                self.extensions
-                    .write()
-                    .insert(crate::proxy::proxy_call::session_hooks::SessionCrmHeaders(
-                        m.clone(),
-                    ));
+                self.extensions.write().insert(m.clone());
             }
         }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
