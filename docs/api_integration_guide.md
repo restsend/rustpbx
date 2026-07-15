@@ -122,12 +122,55 @@ Real-time notification when devices come online or go offline.
   "event": "registered",
   "timestamp": 1708201234,
   "location": {
-    "aor": "sip:1001@pbx.com",
-    "destination": "1.2.3.4:12345",
+    "aor": "sip:1001@1.2.3.4:12345",
+    "home_proxy": "10.0.0.12:5060",
+    "destination": "TLS 1.2.3.4:12345",
+    "supports_webrtc": false,
     "transport": "TLS",
     "user_agent": "MicroSIP/3.21.3",
     "expires": 3600
   }
+}
+```
+
+`registered` and `unregistered` events contain one `location`. An `offline`
+event contains a `locations` array because a transport close or expiry sweep
+can remove multiple bindings at once.
+
+| Field | Meaning |
+| --- | --- |
+| `event` | `registered`, `unregistered`, or `offline` |
+| `timestamp` | UNIX timestamp in seconds when RustPBX constructs the webhook payload |
+| `aor` | Device Contact URI from the REGISTER `Contact` header; this is not necessarily the user's canonical identity |
+| `home_proxy` | Advertised SIP address of the RustPBX node that accepted and owns the registration |
+| `destination` | Device network address observed by RustPBX, including transport when available |
+| `supports_webrtc` | Whether the registered device is treated as a WebRTC endpoint |
+| `transport` | SIP transport used by the registration, such as `UDP`, `TCP`, `TLS`, `WS`, or `WSS` |
+| `user_agent` | REGISTER `User-Agent` value when provided |
+| `expires` | Registration lifetime in seconds |
+
+The REGISTER Request-URI is not included in the locator webhook. It can be the
+same address as `home_proxy` in a direct, single-node deployment, but can differ
+when clients register through a domain, load balancer, SIP proxy, or NAT. Use
+`home_proxy` when identifying the RustPBX node that owns the registration.
+
+Example `offline` payload:
+
+```json
+{
+  "event": "offline",
+  "timestamp": 1708201294,
+  "locations": [
+    {
+      "aor": "sip:1001@1.2.3.4:12345",
+      "home_proxy": "10.0.0.12:5060",
+      "destination": "TLS 1.2.3.4:12345",
+      "supports_webrtc": false,
+      "transport": "TLS",
+      "user_agent": "MicroSIP/3.21.3",
+      "expires": 3600
+    }
+  ]
 }
 ```
 

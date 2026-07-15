@@ -37,6 +37,7 @@ impl LocatorWebhookSender {
 #[derive(Serialize)]
 pub struct LocationDto {
     pub aor: String,
+    pub home_proxy: Option<String>,
     pub expires: u32,
     pub destination: Option<String>,
     pub supports_webrtc: bool,
@@ -48,6 +49,7 @@ impl From<&Location> for LocationDto {
     fn from(loc: &Location) -> Self {
         Self {
             aor: loc.aor.to_string(),
+            home_proxy: loc.home_proxy.as_ref().map(|proxy| proxy.to_string()),
             expires: loc.expires,
             destination: loc.destination.as_ref().map(|d| d.to_string()),
             supports_webrtc: loc.supports_webrtc,
@@ -129,5 +131,35 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
         if let Err(e) = sender.send_payload(&dto).await {
             warn!("locator webhook send failed for {}: {}", sender.url, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_dto_includes_home_proxy() {
+        let home_proxy_uri: rsipstack::sip::Uri = "sip:pbx.example.com:5060"
+            .try_into()
+            .expect("valid home proxy URI");
+        let location = Location {
+            aor: "sip:device@192.0.2.10".try_into().expect("valid contact URI"),
+            home_proxy: Some(
+                rsipstack::transport::SipAddr::try_from(home_proxy_uri)
+                    .expect("valid home proxy address"),
+            ),
+            ..Default::default()
+        };
+        let expected_home_proxy = location
+            .home_proxy
+            .as_ref()
+            .map(ToString::to_string)
+            .expect("home proxy");
+
+        let payload = serde_json::to_value(LocationDto::from(&location))
+            .expect("serialize locator webhook location");
+
+        assert_eq!(payload["home_proxy"], expected_home_proxy);
     }
 }
