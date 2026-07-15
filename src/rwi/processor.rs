@@ -3632,14 +3632,12 @@ impl RwiCommandProcessor {
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         if has_recording {
             let meta = self.gateway.read().meta_store.get_sync(call_id);
-            let (ani, dnis, agent_id, agent_name) = match meta {
+            let (ani, dnis) = match meta {
                 Some(ref m) => (
                     m.caller_name.clone(),
                     m.callee_name.clone(),
-                    m.agent_id.clone(),
-                    m.agent_name.clone(),
                 ),
-                None => (None, None, None, None),
+                None => (None, None),
             };
             let event = crate::rwi::event::to_legacy_event(
                 &crate::rwi::RecordStopped {
@@ -3653,8 +3651,8 @@ impl RwiCommandProcessor {
                     callee_name: dnis,
                     called_phone: None,
                     call_type: None,
-                    agent_id,
-                    agent_name,
+                agent_id: None,
+                agent_name: None,
                     call_start_time: None,
                     call_end_time: None,
                     upload_time: None,

@@ -124,8 +124,6 @@ impl CallApp for RwiApp {
                     trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
                     app_id: None,
                     routing_target: None,
-                    agent_id: None,
-                    agent_name: None,
                 },
             )
             .await;

@@ -205,13 +205,11 @@ async fn do_upload(
     if let Some(url) = first_uploaded_url.as_ref() {
         if let Some(gw) = rwi_gateway {
             use crate::rwi::proto::RecordingMetadata;
-            // Pull agent context from the RWI meta store when available.
-            let (meta_agent_id, meta_agent_name) = gw
-                .read()
-                .meta_store
-                .get_sync(call_id)
-                .map(|m| (m.agent_id, m.agent_name))
-                .unwrap_or((None, None));
+            // Agent context is carried through CallDetails.metadata for
+            // regular calls; sipflow runs asynchronously without CallRecord
+            // access, so agent info is not available here.
+            let agent_id: Option<String> = None;
+            let agent_name: Option<String> = None;
             let metadata = RecordingMetadata {
                 filename: media_key.to_string(),
                 unique_id: call_id.to_string(),
@@ -221,8 +219,8 @@ async fn do_upload(
                 callee_name: None,
                 called_phone: None,
                 call_type: "".to_string(),
-                agent_id: meta_agent_id,
-                agent_name: meta_agent_name,
+                agent_id,
+                agent_name,
                 call_start_time: Some(start.to_rfc3339()),
                 call_end_time: Some(end.to_rfc3339()),
                 upload_time: Some(Utc::now().to_rfc3339()),

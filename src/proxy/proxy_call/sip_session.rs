@@ -921,10 +921,7 @@ impl SipSession {
                     .metadata
                     .as_ref()
                     .and_then(|m| m.get("trunk").cloned()),
-                app_id: None,
-                routing_target: None,
-                agent_id: None,
-                agent_name: None,
+                ..Default::default()
             };
             let store = gw.read().meta_store.clone();
             let sid = session_id_str.clone();

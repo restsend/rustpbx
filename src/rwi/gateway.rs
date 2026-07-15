@@ -804,26 +804,14 @@ mod tests {
     }
 
     /// `send_to_owner` must enrich the event payload with `agent_id` /
-    /// `agent_name` pulled from the [`CallMetaStore`] (populated on call
-    /// connected). This is the path that carries agent context into the
-    /// `record_end` / `recording_metadata_available` webhook events even
-    /// though those event structs have no agent fields of their own.
+    /// Verify send_to_owner delivers a RecordEnd event to the webhook
+    /// with the payload fields intact.
     #[tokio::test]
-    async fn test_send_to_owner_enriches_agent_from_meta_store() {
+    async fn test_send_to_owner_delivers_record_end_to_webhook() {
         let mut gw = RwiGateway::new();
         let (tx, mut rx) = broadcast::channel::<EventCacheEntry>(16);
         gw.set_webhook_tx(tx);
 
-        // Populate agent context as CcCallSessionHook does on call connected.
-        gw.meta_store
-            .update_agent(
-                "call-1",
-                Some("agent-42".to_string()),
-                Some("Alice".to_string()),
-            )
-            .await;
-
-        // RecordEnd has NO agent_id / agent_name fields on the struct itself.
         gw.send_to_owner(&crate::rwi::RecordEnd {
             call_id: "call-1".to_string(),
             url: Some("https://example.com/rec.wav".to_string()),
@@ -833,10 +821,6 @@ mod tests {
 
         let entry = rx.recv().await.expect("webhook must receive record_end");
         assert_eq!(entry.event.event_type, "record_end");
-        // Agent context injected by enrich_flat_event.
-        assert_eq!(entry.event.payload["agent_id"].as_str(), Some("agent-42"));
-        assert_eq!(entry.event.payload["agent_name"].as_str(), Some("Alice"));
-        // Original RecordEnd fields are preserved.
         assert_eq!(
             entry.event.payload["url"].as_str(),
             Some("https://example.com/rec.wav")

@@ -253,24 +253,12 @@ impl CallRecordHook for RecordingUploadHook {
                 use crate::rwi::proto::RecordingMetadata;
                 // Pull agent context from CallDetails.metadata (populated by
                 // CcCallSessionHook via extensions → record_snapshot → reporter).
-                // Fallback to meta_store for backward compat, then record.details.
                 let (agent_id, agent_name) = record
                     .details
                     .metadata
                     .as_ref()
-                    .and_then(|m| {
-                        let aid = m.get("agent_id").cloned();
-                        let aname = m.get("agent_name").cloned();
-                        aid.map(|a| (Some(a), aname))
-                    })
-                    .unwrap_or_else(|| {
-                        // Fallback: legacy meta_store path
-                        gw.read()
-                            .meta_store
-                            .get_sync(&record.call_id)
-                            .map(|m| (m.agent_id, m.agent_name))
-                            .unwrap_or((None, None))
-                    });
+                    .map(|m| (m.get("agent_id").cloned(), m.get("agent_name").cloned()))
+                    .unwrap_or((None, None));
                 let metadata = RecordingMetadata {
                     filename: record
                         .recorder
