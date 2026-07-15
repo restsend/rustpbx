@@ -69,6 +69,10 @@ pub struct StepIvrApp {
     pending_start_instant: Option<std::time::Instant>,
     /// Pending trace entry for a WaitFor step — finalized and recorded when the next event arrives.
     pending_trace: Option<IvrTraceEntry>,
+    /// Params passed from a previous IVR via JumpIvr query string, merged into
+    /// session variables on `on_enter` so the provider and variable substitution
+    /// can reference them.
+    ivr_params: Option<HashMap<String, String>>,
     /// Current step provider response metadata.
     current_step_id: Option<String>,
     current_step_name: Option<String>,
@@ -120,6 +124,7 @@ impl StepIvrApp {
             current_step_name: None,
             current_trigger: None,
             runtime_vars: None,
+            ivr_params: None,
         }
     }
 
@@ -154,6 +159,7 @@ impl StepIvrApp {
             current_step_name: None,
             current_trigger: None,
             runtime_vars: None,
+            ivr_params: None,
         }
     }
 
@@ -182,6 +188,21 @@ impl StepIvrApp {
     /// Set the IVR name for identification in traces.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.ivr_name = Some(name.into());
+        self
+    }
+
+    /// Set extra params passed from a previous IVR via JumpIvr query string.
+    /// These are merged into session variables on `on_enter`.
+    pub fn with_ivr_params(mut self, params: serde_json::Value) -> Self {
+        if let Some(obj) = params.as_object() {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                if let Some(vs) = v.as_str() {
+                    map.insert(k.clone(), vs.to_string());
+                }
+            }
+            self.ivr_params = Some(map);
+        }
         self
     }
 
@@ -376,7 +397,7 @@ impl StepIvrApp {
             EntryAction::Torecord { .. } => "Torecord",
             EntryAction::JumpIvr { .. } => "JumpIvr",
             EntryAction::RouteToAgent { .. } => "RouteToAgent",
-            EntryAction::VoipBridge { .. } => "VoipBridge",
+            EntryAction::Bridge { .. } => "Bridge",
         }
     }
 
@@ -958,6 +979,21 @@ impl CallApp for StepIvrApp {
 
         self.sess.sip_headers = headers.clone();
 
+        // Merge ivr_params (from JumpIvr query string) into session variables
+        // so they are available for $var$ substitution and sent to the provider.
+        if let Some(ref ivp) = self.ivr_params {
+            for (k, v) in ivp {
+                self.sess.variables.insert(k.clone(), v.clone());
+            }
+            // Also write to shared session_vars so the next chained app can see them.
+            if let Some(ref runtime) = self.runtime_vars {
+                let mut sv = runtime.write().await;
+                for (k, v) in ivp {
+                    sv.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
             caller: context.call_info.caller.clone(),
@@ -1477,6 +1513,7 @@ mod tests {
             self.release_next.notified().await;
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }))
         }
 
@@ -1504,6 +1541,7 @@ mod tests {
         let mut stack = MockCallStack::run(
             Box::new(mock_app(vec![ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             })])),
             "1001",
             "2000",
@@ -1533,6 +1571,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -1574,6 +1613,7 @@ mod tests {
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack =
@@ -1609,6 +1649,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
         entries.insert(
@@ -1710,6 +1751,7 @@ mod tests {
                 .push(ctx.event.clone());
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }))
         }
     }
@@ -1787,6 +1829,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -1981,12 +2024,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_voip_bridge() {
+    async fn test_bridge() {
         let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![ActionNode::new(EntryAction::VoipBridge {
+            Box::new(mock_app(vec![ActionNode::new(EntryAction::Bridge {
                 create_room_uri: "https://voip.example.com/rooms".into(),
                 headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
                 timeout_ms: Some(30000),
+                return_ivr: None,
                 success: None,
                 failure: None,
             })])),
@@ -1998,7 +2042,7 @@ mod tests {
             .await;
         stack
             .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("voip_bridge:"))
+                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("bridge:"))
             })
             .await;
     }
@@ -2010,6 +2054,7 @@ mod tests {
         let trace = IvrTraceCollector::new();
         let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         })]);
         app.trace = Some(trace.clone());
         app.ivr_name = Some("test-ivr".to_string());
@@ -2076,6 +2121,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2165,6 +2211,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
         let resp = serde_json::to_value(&entry).unwrap();
@@ -2207,6 +2254,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2281,6 +2329,7 @@ mod tests {
         });
         let transfer_resp = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let url = spawn_mock_provider(vec![
@@ -2346,6 +2395,7 @@ mod tests {
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack =
@@ -2406,6 +2456,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "3003".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2452,6 +2503,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2520,6 +2572,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2603,6 +2656,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
 
@@ -2684,6 +2738,7 @@ mod tests {
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack =
@@ -2758,6 +2813,7 @@ mod tests {
         let trace = IvrTraceCollector::new();
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         })]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
         app.trace = Some(trace.clone());
@@ -2892,6 +2948,7 @@ mod tests {
             state.release_step.notified().await;
             Json(serde_json::to_value(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }))
             .unwrap())
         }
@@ -2965,6 +3022,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack = MockCallStack::run(
@@ -3003,6 +3061,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack = MockCallStack::run(
@@ -3048,6 +3107,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            params: HashMap::new(),
         });
 
         let mut stack = MockCallStack::run(

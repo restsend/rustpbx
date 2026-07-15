@@ -117,6 +117,7 @@ Every response is a JSON object with a `"type"` field. Two categories:
 
 ```json
 { "type": "transfer",       "target": "2001" }
+{ "type": "transfer",       "target": "ivr:other_ivr", "params": {"order_id":"123"} }
 { "type": "hangup",         "prompt": null }
 { "type": "queue",          "target": "support" }
 { "type": "voicemail",      "target": "1001" }
@@ -198,14 +199,16 @@ RustPBX plays the prompt → on audio complete → automatically executes the dt
 
 | type | Purpose | Required | Optional | Notes |
 |------|---------|----------|----------|-------|
-| `transfer` | Blind‑transfer the call to a SIP URI or extension | `target: string` | — | The call leaves the IVR permanently |
+| `transfer` | Blind‑transfer the call to a SIP URI, extension, or another IVR | `target: string` | `params: Map<string,string>` | When `target` is an `ivr:` URI (e.g. `ivr:other_ivr`), `params` are encoded as query string and passed to the target IVR as session variables |
 | `queue` | Send the caller into an ACD queue | `target: string` | `return_to_ivr: bool` | When `return_to_ivr=true`, the call returns to IVR if no agent answers |
 | `voicemail` | Forward the caller to a user's voicemail | `target: string` | — | The call leaves the IVR |
 | `hangup` | Terminate the call | — | `prompt: string or null` | If `prompt` is set, plays audio before hanging up |
 | `play_and_hangup` | Play an announcement then hang up with a SIP status code | — | `prompt: string or null`, `code: u16 or null` | `code` is the SIP response code (e.g. 486 busy, 404 not found) |
-| `jump_ivr` | Jump to another named IVR route point | `route_point: string` | `params: Map<string,string>` | The new IVR receives `params` as session variables |
+| `jump_ivr` | Jump to another named IVR route point | `route_point: string` | `params: Map<string,string>` | Equivalent to `transfer` with `target="ivr:{route_point}"`. `params` are passed as session variables to the target IVR |
 | `route_to_agent` | Route the call to a human agent via skill‑based routing | `target: string` | `skill_group_id: string`, `key_id: string`, `channel_code: string` | Uses the contact‑center routing engine |
 | `voip_bridge` | Bridge call audio to an external WebSocket endpoint as raw PCM16 | `create_room_uri: string` | `headers: Map<string,string>`, `timeout_ms: u64` | See [voip_bridge_en.md](voip_bridge_en.md) |
+
+> **Passing data between IVRs**: Both `transfer` (with `target="ivr:other_ivr"`) and `jump_ivr` support a `params` field. These params are URL-encoded as a query string on the target URI (e.g. `ivr:other_ivr?order_id=123`) and parsed on the receiving end. The target IVR merges them into session variables, making them available for `$var$` substitution and included in `ProviderContext.variables` sent to the external step provider. This enables seamless IVR-to-IVR context propagation without external state management.
 
 ### Non-terminal actions
 
@@ -423,6 +426,8 @@ Any `$var_name$` in string fields is replaced from session variables:
 | `api_result` | Response body from `api` action |
 
 Any variables returned in `ProviderContext.variables` by the provider are also available.
+
+When an IVR is entered via `transfer` (with `target="ivr:other_ivr"`) or `jump_ivr`, any `params` from the source action are merged into session variables before the first `ProviderEvent::SessionStart` is sent. This means the target IVR's provider immediately sees these values in `ProviderContext.variables` and can use `$param_name$` substitution in its responses.
 
 ---
 

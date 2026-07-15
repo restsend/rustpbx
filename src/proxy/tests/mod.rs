@@ -35,4 +35,4 @@ mod test_sip_session_regressions;
 mod test_trunk_b2bua_e2e;
 mod test_trunk_e2e;
 mod test_trunk_options;
-mod test_voip_bridge_e2e;
+mod test_bridge_e2e;

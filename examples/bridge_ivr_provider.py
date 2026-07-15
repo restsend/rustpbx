@@ -1,18 +1,18 @@
 #! /usr/bin/env python3
-"""VoipBridge IVR Provider + WebSocket PCM16 echo server — stdlib only.
+"""Bridge IVR Provider + WebSocket PCM16 echo server — stdlib only.
 
-Demonstrates the full IVR → voip_bridge transfer flow:
+Demonstrates the full IVR → bridge transfer flow:
 
   1. IVR step provider exposes POST /ivr/step
      - session_start → welcome prompt → dtmf_menu
-     - press "1" → returns a TERMINAL ``voip_bridge`` ActionNode that bridges
+     - press "1" → returns a TERMINAL ``bridge`` ActionNode that bridges
        the call's audio to a WebSocket endpoint speaking raw PCM16
      - press "2" → announces current time (prompt)
      - press "0" → hangup
   2. A stdlib WebSocket server (raw socket, no third-party deps) acts as the
      "external VoIP service". It echoes any binary PCM16 frame back to the
      client — i.e. RustPBX receives its own audio. This is the same shape the
-     Rust E2E test (src/proxy/tests/test_voip_bridge_e2e.rs) uses.
+     Rust E2E test (src/proxy/tests/test_bridge_e2e.rs) uses.
 
 Topology once the bridge is up:
 
@@ -20,20 +20,20 @@ Topology once the bridge is up:
 
 Run (defaults: IVR HTTP on 8080, WS echo on 9090):
 
-    python3 examples/voip_bridge_ivr_provider.py
+    python3 examples/bridge_ivr_provider.py
 
 Run with custom ports:
 
-    python3 examples/voip_bridge_ivr_provider.py 8080 9090
+    python3 examples/bridge_ivr_provider.py 8080 9090
 
 Self-test (drives the IVR flow against the provider + pings the WS server
 with a PCM16 frame, printing a step-by-step trace — no SIP stack required):
 
-    python3 examples/voip_bridge_ivr_provider.py --self-test
+    python3 examples/bridge_ivr_provider.py --self-test
 
 Unit tests:
 
-    python3 -m unittest examples/voip_bridge_ivr_provider.py
+    python3 -m unittest examples/bridge_ivr_provider.py
 """
 
 import argparse
@@ -63,7 +63,7 @@ class IvrSession:
 
     rustpbx calls POST /ivr/step on every event; we reply with the next
     ActionNode. See docs/ivr_step_protocol_en.md for the protocol and
-    docs/voip_bridge.md for the voip_bridge terminal action.
+    docs/bridge.md for the bridge terminal action.
     """
 
     def __init__(self, caller: str, callee: str, ws_endpoint: str):
@@ -91,7 +91,7 @@ class IvrSession:
                     "timeout_ms": 8000,
                     "max_retries": 3,
                     "entries": {
-                        "1": action_voip_bridge(self.ws_endpoint),
+                        "1": action_bridge(self.ws_endpoint),
                         "2": {"type": "prompt", "tts_text": _time_text()},
                         "0": action_hangup(),
                     },
@@ -104,7 +104,7 @@ class IvrSession:
             if ev_type == "dtmf":
                 digit = event.get("digit", "")
                 if digit == "1":
-                    return action_voip_bridge(self.ws_endpoint)
+                    return action_bridge(self.ws_endpoint)
                 if digit == "2":
                     return action_prompt(tts_text=_time_text())
                 if digit == "0":
@@ -136,19 +136,19 @@ def action_hangup():
     return {"type": "hangup"}
 
 
-def action_voip_bridge(ws_endpoint: str, headers=None, timeout_ms=10000):
+def action_bridge(ws_endpoint: str, headers=None, timeout_ms=10000):
     """Terminal action: bridge call audio to a WebSocket endpoint as PCM16.
 
     rustpbx turns this into a blind transfer target
-    ``voip_bridge:<ws_endpoint>?codec=pcm&samplerate=8000&_hdr_*=&timeout_ms=``
-    and runs connect_voip_bridge() in src/proxy/proxy_call/sip_session/transfer.rs.
+    ``bridge:<ws_endpoint>?codec=pcm&samplerate=8000&_hdr_*=&timeout_ms=``
+    and runs connect_bridge() in src/proxy/proxy_call/sip_session/transfer.rs.
     """
     return {
-        "type": "voip_bridge",
+        "type": "bridge",
         "create_room_uri": ws_endpoint,
         "headers": headers or {"X-Source": "ivr-voip-bridge-example"},
         "timeout_ms": timeout_ms,
-        "step_id": "voip_bridge",
+        "step_id": "bridge",
         "step_name": "VoIP 桥接",
     }
 
@@ -432,7 +432,7 @@ def serve(ivrr_port: int, ws_port: int):
     start_ws_echo(ws_port)
     server = _ThreadedHTTPServer(("0.0.0.0", ivrr_port), IvrStepHandler)
     print(f"[IVR] step provider on http://0.0.0.0:{ivrr_port}/ivr/step")
-    print(f"[IVR] voip_bridge target = {IvrStepHandler.ws_endpoint}")
+    print(f"[IVR] bridge target = {IvrStepHandler.ws_endpoint}")
     print("[IVR] Endpoints:")
     print("  POST /ivr/step         — main provider endpoint")
     print("  POST /ivr/step/start   — session start (fire-and-forget)")
@@ -507,7 +507,7 @@ def _ws_client_echo(url: str, samples: list) -> list:
 def self_test(ivrr_port: int, ws_port: int):
     """Run provider + WS server in-process, drive the flow, print a trace."""
     print("=" * 72)
-    print("VoipBridge IVR self-test — no SIP stack needed")
+    print("Bridge IVR self-test — no SIP stack needed")
     print("=" * 72)
     IvrStepHandler.ws_endpoint = f"ws://127.0.0.1:{ws_port}"
     start_ws_echo(ws_port)
@@ -529,22 +529,22 @@ def self_test(ivrr_port: int, ws_port: int):
         trace.append((label, event.get("type"), resp.get("type"), resp))
         return resp
 
-    # 1. session_start → prompt + dtmf_menu (entries hold the voip_bridge)
+    # 1. session_start → prompt + dtmf_menu (entries hold the bridge)
     resp = step("initial", {"type": "session_start"})
     assert resp["type"] == "prompt", resp
     menu = resp.get("next", {})
     assert menu.get("type") == "dtmf_menu", menu
     entry1 = menu.get("entries", {}).get("1", {})
-    assert entry1.get("type") == "voip_bridge", entry1
+    assert entry1.get("type") == "bridge", entry1
     print(f"[trace] session_start -> {resp['type']} (next={menu['type']}, "
           f"entry['1']={entry1['type']} uri={entry1.get('create_room_uri')})")
 
-    # 2. Verify the voip_bridge ActionNode shape matches the protocol doc.
+    # 2. Verify the bridge ActionNode shape matches the protocol doc.
     uri = entry1.get("create_room_uri", "")
     if f":{ws_port}" not in uri:
         failures.append(f"ws port mismatch in create_room_uri: {uri}")
     if "timeout_ms" not in entry1:
-        failures.append("timeout_ms missing on voip_bridge node")
+        failures.append("timeout_ms missing on bridge node")
 
     # 3. Drive dtmf "2" through a fresh session to exercise the time branch.
     sid2 = sid + "_b"
@@ -580,7 +580,7 @@ def self_test(ivrr_port: int, ws_port: int):
     print("-" * 72)
     for label, ev, act, node in trace:
         note = ""
-        if act == "voip_bridge":
+        if act == "bridge":
             note = "→ " + node.get("create_room_uri", "")
         elif act == "prompt":
             note = (node.get("tts_text") or node.get("file") or "")[:40]
@@ -620,10 +620,10 @@ class TestIvrSession(unittest.TestCase):
         self.assertEqual(nxt["type"], "dtmf_menu")
         self.assertIn("1", nxt["entries"])
 
-    def test_menu_entry_1_is_voip_bridge(self):
+    def test_menu_entry_1_is_bridge(self):
         node = self.sess.next_action({"type": "session_start"})
         e1 = node["next"]["entries"]["1"]
-        self.assertEqual(e1["type"], "voip_bridge")
+        self.assertEqual(e1["type"], "bridge")
         self.assertEqual(e1["create_room_uri"], "ws://127.0.0.1:9090")
         self.assertGreater(e1["timeout_ms"], 0)
         self.assertIn("headers", e1)
@@ -632,7 +632,7 @@ class TestIvrSession(unittest.TestCase):
         node = self.sess.next_action({"type": "session_start"})
         self.assertEqual(node["next"]["entries"]["0"]["type"], "hangup")
 
-    def test_voip_bridge_uri_from_env_override(self):
+    def test_bridge_uri_from_env_override(self):
         s = IvrSession("1", "2", "wss://relay.example.com/ws")
         node = s.next_action({"type": "session_start"})
         self.assertEqual(
@@ -661,7 +661,7 @@ class TestWsFrames(unittest.TestCase):
 
 
 def main():
-    p = argparse.ArgumentParser(description="VoipBridge IVR provider + WS echo")
+    p = argparse.ArgumentParser(description="Bridge IVR provider + WS echo")
     p.add_argument("ivrr_port", nargs="?", type=int, default=8080)
     p.add_argument("ws_port", nargs="?", type=int, default=9090)
     p.add_argument("--self-test", action="store_true",

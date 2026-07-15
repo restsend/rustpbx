@@ -480,12 +480,22 @@ impl IvrApp {
             );
         }
         match action {
-            EntryAction::Transfer { target } => {
-                info!(ivr = %self.definition.name, target, "IVR transferring call");
-                self.ivr_flow_completed(ctx, "transferred", Some(target))
+            EntryAction::Transfer { target, params } => {
+                let mut t = target.clone();
+                if !params.is_empty() {
+                    t.push('?');
+                    for (i, (k, v)) in params.iter().enumerate() {
+                        if i > 0 {
+                            t.push('&');
+                        }
+                        t.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+                    }
+                }
+                info!(ivr = %self.definition.name, target = %t, "IVR transferring call");
+                self.ivr_flow_completed(ctx, "transferred", Some(t.as_str()))
                     .await;
                 self.state = IvrState::Done;
-                Ok(AppAction::Transfer(target.clone()))
+                Ok(AppAction::Transfer(t))
             }
             EntryAction::Queue {
                 target,
@@ -818,7 +828,7 @@ impl IvrApp {
             | EntryAction::Torecord { .. }
             | EntryAction::JumpIvr { .. }
             | EntryAction::RouteToAgent { .. }
-            | EntryAction::VoipBridge { .. } => {
+            | EntryAction::Bridge { .. } => {
                 error!(ivr = %self.definition.name, action = ?std::mem::discriminant(action),
                     "Tree mode IVR received unsupported step-mode action");
                 Err(anyhow::anyhow!("unsupported action type for tree mode"))

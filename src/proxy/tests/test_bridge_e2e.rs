@@ -1,9 +1,9 @@
-//! E2E test for VoipBridge: real SIP call + WS PCM16 bridge.
+//! E2E test for Bridge: real SIP call + WS PCM16 bridge.
 //!
 //! 1. Starts a real PBX server with two registered users (alice, bob)
 //! 2. Establishes a media call between them
 //! 3. Starts a WebSocket echo server for raw PCM16
-//! 4. Sends `CallCommand::Transfer` with a `voip_bridge:` target
+//! 4. Sends `CallCommand::Transfer` with a `bridge:` target
 //! 5. Verifies the WS server receives a connection
 //! 6. Exchanges raw PCM16 data and verifies round-trip
 
@@ -89,7 +89,7 @@ impl Drop for WsEchoServer {
 use test_helpers::pcmu_sdp;
 
 #[tokio::test]
-async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {
+async fn test_bridge_e2e_transfer_command() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_file(true)
         .with_line_number(true)
@@ -180,14 +180,14 @@ async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {
     let ws_server = WsEchoServer::start().await;
     let ws_url = format!("ws://127.0.0.1:{}", ws_server.addr.port());
 
-    // ── 5. Send VoipBridge transfer command ───────────────────────────
+    // ── 5. Send Bridge transfer command ───────────────────────────
     let handle = registry
         .get_handle(&session_id)
         .ok_or_else(|| anyhow!("No handle for session"))?;
 
     let caller_leg = LegId::new("caller");
-    let target = format!("voip_bridge:{ws_url}?samplerate=8000&codec=pcm&_hdr_X-Test=e2e");
-    info!(%target, "Sending VoipBridge transfer command");
+    let target = format!("bridge:{ws_url}?samplerate=8000&codec=pcm&_hdr_X-Test=e2e");
+    info!(%target, "Sending Bridge transfer command");
 
     handle
         .send_command(CallCommand::Transfer {
@@ -202,9 +202,9 @@ async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {
     let conn_count = ws_server.connection_count().await;
     assert!(
         conn_count >= 1,
-        "Expected at least 1 WS connection from VoipBridge, got {conn_count}"
+        "Expected at least 1 WS connection from Bridge, got {conn_count}"
     );
-    info!("VoipBridge WS connection confirmed ({conn_count})");
+    info!("Bridge WS connection confirmed ({conn_count})");
 
     // ── 7. Exchange PCM16 data via the WS echo server ─────────────────
     // Connect directly to the echo server and verify the bridge is alive
@@ -249,7 +249,7 @@ async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {
         .collect();
     assert_eq!(got_pcm, pcm, "Echoed PCM should match original");
 
-    info!("VoipBridge E2E test succeeded: WS connected + PCM echo verified");
+    info!("Bridge E2E test succeeded: WS connected + PCM echo verified");
 
     // ── 8. Clean up: close test WS, let the bridge disconnect gracefully
     test_write.close().await.ok();

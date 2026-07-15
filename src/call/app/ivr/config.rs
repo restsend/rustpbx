@@ -158,6 +158,8 @@ pub struct MenuEntry {
 pub enum EntryAction {
     Transfer {
         target: String,
+        #[serde(default)]
+        params: HashMap<String, String>,
     },
     Queue {
         target: String,
@@ -347,17 +349,30 @@ pub enum EntryAction {
         #[serde(default)]
         channel_code: Option<String>,
     },
-    VoipBridge {
+    #[serde(rename = "bridge", alias = "voip_bridge")]
+    Bridge {
         create_room_uri: String,
         #[serde(default)]
         headers: HashMap<String, String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
         #[serde(default)]
+        return_ivr: Option<String>,
+        #[serde(default)]
         success: Option<Box<ActionNode>>,
         #[serde(default)]
         failure: Option<Box<ActionNode>>,
     },
+}
+
+impl EntryAction {
+    /// Create a Transfer action with no extra params.
+    pub fn transfer(target: impl Into<String>) -> Self {
+        EntryAction::Transfer {
+            target: target.into(),
+            params: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,7 +472,7 @@ pub enum WebhookResponse {
 impl WebhookResponse {
     pub fn into_entry_action(self) -> EntryAction {
         match self {
-            WebhookResponse::Transfer { target } => EntryAction::Transfer { target },
+            WebhookResponse::Transfer { target } => EntryAction::Transfer { target, params: HashMap::new() },
             WebhookResponse::Queue {
                 target,
                 return_to_ivr,
@@ -705,6 +720,7 @@ action = { type = "menu", menu = "root" }
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                params: HashMap::new(),
             }),
         );
         let json = serde_json::to_value(&node).unwrap();
@@ -741,7 +757,7 @@ action = { type = "menu", menu = "root" }
         }
         let next = node.next.expect("expected next");
         match &next.action {
-            EntryAction::Transfer { target } => assert_eq!(target, "2001"),
+            EntryAction::Transfer { target, .. } => assert_eq!(target, "2001"),
             _ => panic!("expected Transfer"),
         }
     }
@@ -776,6 +792,7 @@ action = { type = "menu", menu = "root" }
                     "1".into(),
                     ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
+                        params: HashMap::new(),
                     }),
                 ),
                 (
@@ -798,18 +815,26 @@ action = { type = "menu", menu = "root" }
     }
 
     #[test]
-    fn test_voip_bridge_serialize() {
-        let node = ActionNode::new(EntryAction::VoipBridge {
+    fn test_bridge_serialize() {
+        let node = ActionNode::new(EntryAction::Bridge {
             create_room_uri: "https://voip.example.com/rooms".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer token123".into())]),
             timeout_ms: Some(30000),
+            return_ivr: None,
             success: None,
             failure: None,
         });
         let json = serde_json::to_value(&node).unwrap();
-        assert_eq!(json["type"], "voip_bridge");
+        assert_eq!(json["type"], "bridge");
         assert_eq!(json["create_room_uri"], "https://voip.example.com/rooms");
         assert_eq!(json["headers"]["Authorization"], "Bearer token123");
+    }
+
+    #[test]
+    fn test_voip_bridge_alias_deserialize() {
+        let json = r#"{"type":"voip_bridge","create_room_uri":"wss://voip.example.com/ws"}"#;
+        let node: ActionNode = serde_json::from_str(json).unwrap();
+        assert!(matches!(node.action, EntryAction::Bridge { .. }));
     }
 
     #[test]
@@ -935,10 +960,10 @@ action = { type = "menu", menu = "root" }
             EntryAction::Torecord { beep: true, .. }
         ));
 
-        // voip_bridge
-        let node: ActionNode = serde_json::from_str(r#"{"type":"voip_bridge","create_room_uri":"https://voip.example.com/room","headers":{"Authorization":"Bearer x"}}"#).unwrap();
+        // bridge (with legacy alias)
+        let node: ActionNode = serde_json::from_str(r#"{"type":"bridge","create_room_uri":"https://voip.example.com/room","headers":{"Authorization":"Bearer x"}}"#).unwrap();
         assert!(
-            matches!(node.action, EntryAction::VoipBridge { create_room_uri, headers, .. }
+            matches!(node.action, EntryAction::Bridge { create_room_uri, headers, .. }
             if create_room_uri == "https://voip.example.com/room"
             && headers.get("Authorization") == Some(&"Bearer x".into()))
         );

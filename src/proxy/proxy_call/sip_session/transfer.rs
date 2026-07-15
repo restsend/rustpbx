@@ -30,6 +30,7 @@ pub(crate) enum TransferTarget {
     },
     Ivr {
         name: String,
+        params: HashMap<String, String>,
     },
     Voicemail {
         extension: String,
@@ -37,13 +38,15 @@ pub(crate) enum TransferTarget {
     Conference {
         id: String,
     },
-    /// WebSocket + PCM real-time VoIP bridge.
-    VoipBridge {
+    /// WebSocket + PCM real-time bridge.
+    Bridge {
         endpoint: String,
         headers: HashMap<String, String>,
         sample_rate: u32,
         codec: String,
         timeout_ms: Option<u64>,
+        /// IVR name to return to when the bridge disconnects.
+        return_ivr: Option<String>,
     },
     Sip(String),
 }
@@ -54,13 +57,16 @@ pub(crate) enum TransferTarget {
 /// result with transfer‑specific data (queue query params, voip_bridge options).
 /// Bare strings without a recognised prefix get `sip:` prepended.
 pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
-    // 1. `voip_bridge:` is too complex for TransferEndpoint – parse inline.
-    if let Some(rest) = target.strip_prefix("voip_bridge:") {
+    // 1. `bridge:` is too complex for TransferEndpoint – parse inline.
+    if let Some(rest) = target.strip_prefix("bridge:")
+        .or_else(|| target.strip_prefix("voip_bridge:"))
+    {
         let raw = rest.trim();
         if !raw.is_empty() {
             let mut sample_rate = 8000u32;
             let mut codec = "pcm".to_string();
             let mut timeout_ms = None;
+            let mut return_ivr = None;
             let mut headers = HashMap::new();
             let mut passthrough_params = Vec::new();
 
@@ -88,6 +94,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             "timeout_ms" => {
                                 timeout_ms = value.parse().ok();
                             }
+                            "return_ivr" => {
+                                return_ivr = Some(decoded_val);
+                            }
                             _ => passthrough_params.push(pair.to_string()),
                         }
                     }
@@ -105,12 +114,13 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     ep.push('?');
                     ep.push_str(&passthrough_params.join("&"));
                 }
-                return TransferTarget::VoipBridge {
+                return TransferTarget::Bridge {
                     endpoint: ep,
                     headers,
                     sample_rate,
                     codec,
                     timeout_ms,
+                    return_ivr,
                 };
             }
         }
@@ -130,7 +140,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 if queue_name.is_empty() {
                     TransferTarget::Sip(format!("sip:{}", target))
                 } else {
-                    let mut return_ivr = None;
+            let mut return_ivr = None;
                     let mut target_overrides = Vec::new();
                     if let Some(ref query) = query_str {
                         for pair in query.split('&') {
@@ -155,7 +165,26 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     }
                 }
             }
-            crate::call::TransferEndpoint::Ivr(name) => TransferTarget::Ivr { name },
+            crate::call::TransferEndpoint::Ivr(mut raw_name) => {
+                let query_str = raw_name.find('?').map(|pos| {
+                    let qs = raw_name[pos + 1..].to_string();
+                    raw_name.truncate(pos);
+                    qs
+                });
+                let name = raw_name.trim().to_string();
+                let mut params = HashMap::new();
+                if let Some(ref query) = query_str {
+                    for pair in query.split('&') {
+                        if pair.is_empty() { continue; }
+                        let mut parts = pair.splitn(2, '=');
+                        let key = parts.next().unwrap_or("");
+                        let value = parts.next().unwrap_or("");
+                        let decoded = super::pct_decode_query(value);
+                        params.insert(key.to_string(), decoded);
+                    }
+                }
+                TransferTarget::Ivr { name, params }
+            }
             crate::call::TransferEndpoint::Voicemail(extension) => {
                 TransferTarget::Voicemail { extension }
             }
@@ -235,9 +264,9 @@ impl SipSession {
                 )
                 .await
             }
-            TransferTarget::Ivr { name } => {
+            TransferTarget::Ivr { name, params } => {
                 info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
-                self.start_ivr_app(&name).await
+                self.start_ivr_app(&name, params).await
             }
             TransferTarget::Voicemail { extension } => {
                 info!(%leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
@@ -247,21 +276,23 @@ impl SipSession {
                 info!(%leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
                 self.start_conference_app(&id).await
             }
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 endpoint,
                 headers,
                 sample_rate,
                 codec,
                 timeout_ms,
+                return_ivr,
             } => {
-                info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Handling VoipBridge transfer");
-                self.connect_voip_bridge(
+                info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_ivr, "Handling Bridge transfer");
+                self.connect_bridge(
                     leg_id,
                     endpoint.clone(),
                     headers.clone(),
                     sample_rate,
                     codec.clone(),
                     timeout_ms,
+                    return_ivr.clone(),
                 )
                 .await
             }
@@ -513,11 +544,18 @@ impl SipSession {
         }
     }
 
-    pub(crate) async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
+    pub(crate) async fn start_ivr_app(
+        &self,
+        ivr_name: &str,
+        query_params: HashMap<String, String>,
+    ) -> Result<()> {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name);
         info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
-        let params = Some(serde_json::json!({"file": ivr_file}));
-        self.ensure_app_running("ivr", params, &format!("IVR '{}'", ivr_name))
+        let mut app_params = serde_json::json!({"file": ivr_file});
+        if !query_params.is_empty() {
+            app_params["ivr_params"] = serde_json::json!(query_params);
+        }
+        self.ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
             .await
     }
 
@@ -554,7 +592,7 @@ impl SipSession {
     /// │  │ audio_receiver → resample → raw PCM16 → WS send           │  │
     /// │  └────────────────────────────────────────────────────────────┘  │
     /// └──────────────────────────────────────────────────────────────────┘
-    pub(crate) async fn connect_voip_bridge(
+    pub(crate) async fn connect_bridge(
         &mut self,
         leg_id: LegId,
         endpoint: String,
@@ -562,30 +600,31 @@ impl SipSession {
         sample_rate: u32,
         codec: String,
         timeout_ms: Option<u64>,
+        return_ivr: Option<String>,
     ) -> Result<()> {
-        info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting VoipBridge");
+        info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
 
-        // VoipBridge needs to read/inject per-packet media, which the RTP
+        // Bridge needs to read/inject per-packet media, which the RTP
         // fast-path relay bypasses. Downgrade to the ForwardingTrack path on
         // demand (no-op when already on the slow path or an app media_bridge).
         // Must happen before we read the leg's track sender / PeerConnection.
         self.ensure_media_anchored()
             .await
-            .map_err(|e| anyhow!("VoipBridge media anchor failed: {}", e))?;
+            .map_err(|e| anyhow!("Bridge media anchor failed: {}", e))?;
 
         // ── 1. Establish WebSocket connection ──────────────────────────
         let ws_connect = tokio_tungstenite::connect_async(&endpoint);
         let (ws_stream, _) = if let Some(ms) = timeout_ms {
             tokio::time::timeout(Duration::from_millis(ms), ws_connect)
                 .await
-                .map_err(|_| anyhow!("VoipBridge connection timed out after {}ms", ms))?
-                .map_err(|e| anyhow!("Failed to connect VoipBridge WebSocket: {}", e))?
+                .map_err(|_| anyhow!("Bridge connection timed out after {}ms", ms))?
+                .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
         } else {
             ws_connect
                 .await
-                .map_err(|e| anyhow!("Failed to connect VoipBridge WebSocket: {}", e))?
+                .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
         };
-        info!("VoipBridge WebSocket connected to {}", endpoint);
+        info!("Bridge WebSocket connected to {}", endpoint);
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
@@ -604,7 +643,7 @@ impl SipSession {
             // The app media_bridge has two sides: "caller" (WebRTC) and "callee"
             // (RTP). The SIP caller faces bridge.caller_pc when it is WebRTC, and
             // bridge.callee_pc when it is plain RTP (see prepare_bridge_caller_answer).
-            // VoipBridge must read from / inject into the SAME side the SIP leg
+            // Bridge must read from / inject into the SAME side the SIP leg
             // is anchored on. The callee leg (if any) is on the opposite side.
             let is_caller = leg_id == LegId::from("caller");
             let caller_is_webrtc = self.is_caller_webrtc();
@@ -617,7 +656,7 @@ impl SipSession {
                 pc = Some(bridge.callee_pc().clone());
                 audio_sender = bridge.get_callee_sender().await;
             }
-            info!(%leg_id, is_caller, sip_leg_is_webrtc, "VoipBridge sourcing media from app media_bridge");
+            info!(%leg_id, is_caller, sip_leg_is_webrtc, "Bridge sourcing media from app media_bridge");
         }
 
         // Fallback: leg's VoiceEnginePeer tracks (non-app B2BUA path).
@@ -640,8 +679,8 @@ impl SipSession {
                 }
             }
         }
-        let audio_sender = audio_sender.ok_or_else(|| anyhow!("No track sender for VoipBridge"))?;
-        let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for VoipBridge"))?;
+        let audio_sender = audio_sender.ok_or_else(|| anyhow!("No track sender for Bridge"))?;
+        let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
 
         // ── 3. Create audio receiver (call → raw PCM) ────────────────
         let decoder = self
@@ -689,7 +728,7 @@ impl SipSession {
                     tokio::select! {
                         biased;
                         _ = forward_cancel.cancelled() => {
-                            info!(%leg_id, "VoipBridge forward loop cancelled");
+                            info!(%leg_id, "Bridge forward loop cancelled");
                             break;
                         }
                         msg = ws_read.next() => {
@@ -723,7 +762,7 @@ impl SipSession {
                                             source_addr: None,
                                         };
                                         if audio_sender.send(MediaSample::Audio(frame)).is_err() {
-                                            warn!(%leg_id, "VoipBridge forward: audio sender closed");
+                                            warn!(%leg_id, "Bridge forward: audio sender closed");
                                             return;
                                         }
                                         rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
@@ -731,11 +770,11 @@ impl SipSession {
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) | None => {
-                                    info!(%leg_id, "VoipBridge WS closed remotely");
+                                    info!(%leg_id, "Bridge WS closed remotely");
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    warn!(%leg_id, "VoipBridge WS read error: {}", e);
+                                    warn!(%leg_id, "Bridge WS read error: {}", e);
                                     break;
                                 }
                                 _ => {}
@@ -755,7 +794,7 @@ impl SipSession {
                     tokio::select! {
                         biased;
                         _ = reverse_cancel.cancelled() => {
-                            info!(%leg_id, "VoipBridge reverse loop cancelled");
+                            info!(%leg_id, "Bridge reverse loop cancelled");
                             break;
                         }
                         pcm = audio_receiver.recv() => {
@@ -773,12 +812,12 @@ impl SipSession {
                                         bytes.extend_from_slice(&s.to_ne_bytes());
                                     }
                                     if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
-                                        warn!(%leg_id, "VoipBridge WS write failed");
+                                        warn!(%leg_id, "Bridge WS write failed");
                                         break;
                                     }
                                 }
                                 None => {
-                                    info!(%leg_id, "VoipBridge audio receiver closed");
+                                    info!(%leg_id, "Bridge audio receiver closed");
                                     break;
                                 }
                             }
@@ -788,28 +827,43 @@ impl SipSession {
             })
         };
 
-        // ── 8. Register tasks for session cleanup ────────────────────
-        self.legs
-            .tasks
-            .entry(leg_id.clone())
-            .or_default()
-            .push(forward_handle);
-        self.legs
-            .tasks
-            .entry(leg_id.clone())
-            .or_default()
-            .push(reverse_handle);
-
-        // ── 9. Store bridge reference on session ─────────────────────
+        // ── 8. Store bridge reference on session ─────────────────────
         self.conference_bridge = crate::call::runtime::SessionConferenceBridge {
             bridge_handle: Some(crate::call::runtime::ConferenceBridgeHandle {
                 _tasks: vec![],
                 cancel_token,
             }),
-            conf_id: Some(format!("voip-bridge-{}", self.id.0)),
+            conf_id: Some(format!("bridge-{}", self.id.0)),
         };
 
-        info!(%leg_id, endpoint = %endpoint, "VoipBridge established");
+        info!(%leg_id, endpoint = %endpoint, "Bridge established");
+
+        // ── 9. Wait for bridge to disconnect ─────────────────────────
+        let bridge_done = async {
+            let _ = forward_handle.await;
+            let _ = reverse_handle.await;
+        };
+        tokio::pin!(bridge_done);
+
+        tokio::select! {
+            _ = self.cancel_token.cancelled() => {
+                info!(%leg_id, "Session cancelled while bridge active");
+            }
+            _ = &mut bridge_done => {
+                info!(%leg_id, "Bridge disconnected");
+            }
+        }
+
+        self.conference_bridge.stop_bridge();
+
+        // ── 10. Return to IVR if configured ──────────────────────────
+        if let Some(ref ivr_name) = return_ivr {
+            if !self.cancel_token.is_cancelled() {
+                info!(%leg_id, ivr = %ivr_name, "Bridge disconnected; returning to IVR");
+                self.start_ivr_app(ivr_name, HashMap::new()).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1203,7 +1257,8 @@ mod tests {
         assert_eq!(
             t,
             TransferTarget::Ivr {
-                name: "main".to_string()
+                name: "main".to_string(),
+                params: HashMap::new(),
             }
         );
     }
@@ -1214,7 +1269,8 @@ mod tests {
         assert_eq!(
             t,
             TransferTarget::Ivr {
-                name: "welcome".to_string()
+                name: "welcome".to_string(),
+                params: HashMap::new(),
             }
         );
     }
@@ -1317,14 +1373,14 @@ mod tests {
         assert_eq!(rx.recv().await, Some(42));
     }
 
-    // ── VoipBridge parsing ─────────────────────────────────────────────────
+    // ── Bridge parsing ─────────────────────────────────────────────────
 
     #[test]
     fn test_parse_voip_bridge() {
         let target = "voip_bridge:wss://voip.example.com/rooms";
         let parsed = super::parse_transfer_target(target);
         match parsed {
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 endpoint,
                 sample_rate,
                 codec,
@@ -1334,7 +1390,7 @@ mod tests {
                 assert_eq!(sample_rate, 8000);
                 assert_eq!(codec, "pcm");
             }
-            _ => panic!("expected VoipBridge, got {:?}", parsed),
+            _ => panic!("expected Bridge, got {:?}", parsed),
         }
     }
 
@@ -1343,7 +1399,7 @@ mod tests {
         let target = "voip_bridge:wss://room.example.com/ws?token=abc&samplerate=16000&codec=opus&_hdr_Authorization=Bearer+xxx";
         let parsed = super::parse_transfer_target(target);
         match parsed {
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 endpoint,
                 headers,
                 sample_rate,
@@ -1358,7 +1414,7 @@ mod tests {
                     Some(&"Bearer xxx".to_string())
                 );
             }
-            _ => panic!("expected VoipBridge, got {:?}", parsed),
+            _ => panic!("expected Bridge, got {:?}", parsed),
         }
     }
 
@@ -1367,7 +1423,7 @@ mod tests {
         let target = "voip_bridge:wss://room.example.com/ws?_hdr_X-Custom=hello%20world%26more";
         let parsed = super::parse_transfer_target(target);
         match parsed {
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 headers, endpoint, ..
             } => {
                 assert_eq!(endpoint, "wss://room.example.com/ws");
@@ -1376,7 +1432,7 @@ mod tests {
                     Some(&"hello world&more".to_string())
                 );
             }
-            _ => panic!("expected VoipBridge, got {:?}", parsed),
+            _ => panic!("expected Bridge, got {:?}", parsed),
         }
     }
 
@@ -1385,7 +1441,7 @@ mod tests {
         let target = "voip_bridge:wss://room.example.com/ws?timeout_ms=5000";
         let parsed = super::parse_transfer_target(target);
         match parsed {
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 endpoint,
                 timeout_ms,
                 ..
@@ -1393,7 +1449,7 @@ mod tests {
                 assert_eq!(endpoint, "wss://room.example.com/ws");
                 assert_eq!(timeout_ms, Some(5000));
             }
-            _ => panic!("expected VoipBridge, got {:?}", parsed),
+            _ => panic!("expected Bridge, got {:?}", parsed),
         }
     }
 
@@ -1402,8 +1458,8 @@ mod tests {
         let target = "voip_bridge:wss://room.example.com/ws";
         let parsed = super::parse_transfer_target(target);
         assert!(
-            matches!(parsed, TransferTarget::VoipBridge { .. }),
-            "expected VoipBridge, got {:?}",
+            matches!(parsed, TransferTarget::Bridge { .. }),
+            "expected Bridge, got {:?}",
             parsed
         );
     }
@@ -1464,14 +1520,14 @@ mod tests {
         let target = format!("voip_bridge:{ws_url}?_hdr_X-Test=hello&samplerate=8000&codec=pcm");
         let parsed = super::parse_transfer_target(&target);
         let (endpoint, headers, sample_rate, codec) = match parsed {
-            TransferTarget::VoipBridge {
+            TransferTarget::Bridge {
                 endpoint,
                 headers,
                 sample_rate,
                 codec,
                 ..
             } => (endpoint, headers, sample_rate, codec),
-            other => panic!("expected VoipBridge, got {other:?}"),
+            other => panic!("expected Bridge, got {other:?}"),
         };
         // http::Uri::path() always returns at least "/", so the parsed
         // endpoint will have a trailing slash.

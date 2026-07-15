@@ -215,10 +215,11 @@ impl ThirdPartyTreeProvider {
                 timeout_ms: node.nodevalue.parse().unwrap_or(5000),
             },
 
-            "TransferBridgeVoip" => EntryAction::VoipBridge {
+            "TransferBridgeVoip" => EntryAction::Bridge {
                 create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
                 headers: HashMap::new(),
                 timeout_ms: None,
+                return_ivr: None,
                 success: None,
                 failure: None,
             },
@@ -234,10 +235,11 @@ impl ThirdPartyTreeProvider {
                     .get("1")
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
-                EntryAction::VoipBridge {
+                EntryAction::Bridge {
                     create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
                     headers: HashMap::new(),
                     timeout_ms: None,
+                    return_ivr: None,
                     success: if has_success {
                         Some(Box::new(ActionNode::new(EntryAction::Repeat)))
                     } else {
@@ -521,10 +523,11 @@ fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
             scene: node.nodename.clone(),
             timeout_ms: node.nodevalue.parse().unwrap_or(5000),
         },
-        "TransferBridgeVoip" | "TRouteBridge" => EntryAction::VoipBridge {
+        "TransferBridgeVoip" | "TRouteBridge" => EntryAction::Bridge {
             create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
             headers: HashMap::new(),
             timeout_ms: None,
+            return_ivr: None,
             success: None,
             failure: None,
         },

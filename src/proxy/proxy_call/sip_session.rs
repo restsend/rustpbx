@@ -406,6 +406,9 @@ impl AppFactory for BuiltinAppFactory {
                         }
                         app = app.with_rwi_gateway(context.rwi_gateway.clone());
                         app = app.with_trace(context.ivr_trace.clone());
+                        if let Some(ivp) = params.as_ref().and_then(|p| p.get("ivr_params")) {
+                            app = app.with_ivr_params(ivp.clone());
+                        }
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
                         // Tree mode from TOML

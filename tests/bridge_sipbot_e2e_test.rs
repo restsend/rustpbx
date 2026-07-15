@@ -1,28 +1,28 @@
-//! VoipBridge full E2E tests with real SIP/RTP via sipbot.
+//! Bridge full E2E tests with real SIP/RTP via sipbot.
 //!
-//! Two flows are covered, exercising the two media paths VoipBridge must
+//! Two flows are covered, exercising the two media paths Bridge must
 //! support:
 //!
 //! 1. `test_voip_bridge_sipbot_bidirectional_audio` — a plain B2BUA call
 //!    (alice→bob, same codec) where the **RTP fast-path relay activates** at
-//!    setup. VoipBridge then triggers `ensure_media_anchored` to downgrade to
+//!    setup. Bridge then triggers `ensure_media_anchored` to downgrade to
 //!    the ForwardingTrack slow path on demand (no re-INVITE), and verifies
 //!    bidirectional audio after the downgrade.
 //!
 //! 2. `test_voip_bridge_via_ivr_app_flow` — a call that enters an IVR app,
 //!    which anchors media via the **app media_bridge** (no fast-path). Verifies
-//!    VoipBridge reads the correct bridge side (RTP vs WebRTC) and that
+//!    Bridge reads the correct bridge side (RTP vs WebRTC) and that
 //!    bidirectional audio flows.
 //!
-//! Together these guard the two ways VoipBridge sources its media and prevent
+//! Together these guard the two ways Bridge sources its media and prevent
 //! regressions in the fast-path adaptive downgrade.
 //!
 //! ```text
 //!   alice (sipbot caller) ──INVITE──► RustPBX ──► bob / IVR app
 //!                                           │
-//!                                           │ Transfer leg="caller" → voip_bridge:ws://...
+//!                                           │ Transfer leg="caller" → bridge:ws://...
 //!                                           ▼
-//!                                       VoipBridge  ◄►  WS server (injects 440 Hz, counts frames)
+//!                                       Bridge  ◄►  WS server (injects 440 Hz, counts frames)
 //! ```
 
 mod helpers;
@@ -187,12 +187,12 @@ auto_answer = true
 
 /// Direct B2BUA call with the **RTP fast-path active** (alice & bob both PCMU,
 /// so `bridge_eligible` is true and the transport-level rewrite relay activates
-/// at call setup). VoipBridge must then call `ensure_media_anchored` to
+/// at call setup). Bridge must then call `ensure_media_anchored` to
 /// downgrade to the ForwardingTrack slow path on demand, after which
 /// bidirectional audio flows. This is the regression guard for the adaptive
 /// fast-path downgrade.
 #[tokio::test]
-async fn test_voip_bridge_sipbot_bidirectional_audio() {
+async fn test_bridge_sipbot_bidirectional_audio() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_new("rustpbx=info,voip_bridge=debug").unwrap(),
@@ -237,7 +237,7 @@ async fn test_voip_bridge_sipbot_bidirectional_audio() {
 
     // ── 2. bob: registered callee (echo + record) ──────────────────────────
     // Both legs use PCMU (same codec) so the RTP fast-path relay IS eligible
-    // and activates at call setup. VoipBridge must then downgrade from the
+    // and activates at call setup. Bridge must then downgrade from the
     // fast-path to the ForwardingTrack path on demand via ensure_media_anchored.
     let bob = TestUa::registered_callee_with_record(
         bob_port,
@@ -300,7 +300,7 @@ async fn test_voip_bridge_sipbot_bidirectional_audio() {
     // ── 5. Start the tone-injecting WS server ──────────────────────────────
     let ws_server = ToneWsServer::start(440.0, 0.4).await;
     let ws_url = format!("ws://127.0.0.1:{}", ws_server.addr.port());
-    let target_uri = format!("voip_bridge:{ws_url}?samplerate=8000&codec=pcm&_hdr_X-Test=sipbot");
+    let target_uri = format!("bridge:{ws_url}?samplerate=8000&codec=pcm&_hdr_X-Test=sipbot");
 
     // ── 6. Blind-transfer the caller leg to voip_bridge ────────────────────
     // alice is the caller leg; bridging it rewires alice's media to the WS.
@@ -316,7 +316,7 @@ async fn test_voip_bridge_sipbot_bidirectional_audio() {
         "alice audio quality BEFORE bridge: total={}, silence={}",
         q_before.total_frames, q_before.silence_frames
     );
-    info!(%target_uri, "sending VoipBridge transfer on caller leg");
+    info!(%target_uri, "sending Bridge transfer on caller leg");
     handle
         .send_command(CallCommand::Transfer {
             leg_id: LegId::new("caller"),
@@ -334,7 +334,7 @@ async fn test_voip_bridge_sipbot_bidirectional_audio() {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    assert!(connected, "VoipBridge never connected to the WS server");
+    assert!(connected, "Bridge never connected to the WS server");
 
     // ── 8. Let bidirectional audio flow ─────────────────────────────────────
     sleep(Duration::from_secs(5)).await;
@@ -421,19 +421,19 @@ async fn test_voip_bridge_sipbot_bidirectional_audio() {
     info!("test_voip_bridge_sipbot_bidirectional_audio PASSED");
 }
 
-/// IVR → VoipBridge flow (the production path).
+/// IVR → Bridge flow (the production path).
 ///
 /// alice dials into an IVR route (app = "ivr"). The IVR auto-answers via the
 /// **app media bridge** (`caller_answer_uses_media_bridge = true`), so the
 /// RTP fast-path relay (which requires `!caller_answer_uses_media_bridge`) is
-/// never eligible. We then blind-transfer the caller leg to `voip_bridge:`
+/// never eligible. We then blind-transfer the caller leg to `bridge:`
 /// and verify the reverse path delivers real PCM frames to the WS — using the
 /// SAME codec on both sides (no transcoding workaround).
 ///
 /// This confirms the user's hypothesis: the IVR/Queue → voip_bridge flow does
-/// not hit the fast-path, so VoipBridge's reverse audio works out of the box.
+/// not hit the fast-path, so Bridge's reverse audio works out of the box.
 #[tokio::test]
-async fn test_voip_bridge_via_ivr_app_flow() {
+async fn test_bridge_via_ivr_app_flow() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_new("rustpbx=info,voip_bridge=debug").unwrap(),
@@ -551,14 +551,14 @@ file = "{}"
     // Start the WS server (inject tone + count reverse frames).
     let ws_server = ToneWsServer::start(440.0, 0.4).await;
     let ws_url = format!("ws://127.0.0.1:{}", ws_server.addr.port());
-    let target_uri = format!("voip_bridge:{ws_url}?samplerate=8000&codec=pcm");
+    let target_uri = format!("bridge:{ws_url}?samplerate=8000&codec=pcm");
 
     let handle = pbx
         .registry
         .get_handle(&session_id)
         .expect("session handle must exist");
     let q_before = alice.audio_quality_summary();
-    info!(%target_uri, "sending VoipBridge transfer on caller leg (IVR flow)");
+    info!(%target_uri, "sending Bridge transfer on caller leg (IVR flow)");
     handle
         .send_command(CallCommand::Transfer {
             leg_id: LegId::new("caller"),
@@ -575,7 +575,7 @@ file = "{}"
         }
         sleep(Duration::from_millis(100)).await;
     }
-    assert!(connected, "VoipBridge never connected to the WS server (IVR flow)");
+    assert!(connected, "Bridge never connected to the WS server (IVR flow)");
 
     sleep(Duration::from_secs(5)).await;
 

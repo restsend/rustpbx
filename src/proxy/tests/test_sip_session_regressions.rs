@@ -15,6 +15,7 @@ use crate::proxy::routing::{
     RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueStrategyConfig, RouteQueueTargetConfig,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -367,7 +368,7 @@ async fn test_start_ivr_app_restarts_after_already_running() {
     session.app_runtime = runtime.clone();
 
     session
-        .start_ivr_app("hello")
+        .start_ivr_app("hello", HashMap::new())
         .await
         .expect("start_ivr_app should recover from AlreadyRunning");
 
@@ -388,7 +389,7 @@ async fn test_start_ivr_app_restarts_even_if_stop_reports_not_running() {
     session.app_runtime = runtime.clone();
 
     session
-        .start_ivr_app("hello")
+        .start_ivr_app("hello", HashMap::new())
         .await
         .expect("restart should continue when stop_app returns NotRunning");
 
@@ -408,7 +409,7 @@ async fn test_start_ivr_app_propagates_non_retryable_start_error() {
     session.app_runtime = Arc::new(AlwaysFailStartRuntime);
 
     let err = session
-        .start_ivr_app("hello")
+        .start_ivr_app("hello", HashMap::new())
         .await
         .expect_err("non-AlreadyRunning error should be returned");
     assert!(
@@ -431,7 +432,7 @@ async fn test_start_ivr_app_reports_restart_failure_when_second_start_fails() {
     session.app_runtime = runtime.clone();
 
     let err = session
-        .start_ivr_app("hello")
+        .start_ivr_app("hello", HashMap::new())
         .await
         .expect_err("second start failure should be surfaced");
     assert!(
