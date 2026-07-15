@@ -1612,6 +1612,7 @@ select_ivr = "Select IVR..."
 no_results = "No results"
 voicemail_extension = "Extension number"
 uri_placeholder = "sip:user@domain"
+clear = "Clear"
 
 [diagnostics]
 title = "Diagnostics"

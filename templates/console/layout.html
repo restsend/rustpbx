@@ -400,6 +400,30 @@
                 this.ivrOpen = false;
                 this.emitChange();
             },
+            clearExt() {
+                this.extSelected = null;
+                this.extQuery = '';
+                this.extIndex = -1;
+                this.extOpen = false;
+                this.targetValue = '';
+                this.emitChange();
+            },
+            clearQueue() {
+                this.queueSelected = null;
+                this.queueQuery = '';
+                this.queueIndex = -1;
+                this.queueOpen = false;
+                this.targetValue = '';
+                this.emitChange();
+            },
+            clearIvr() {
+                this.ivrSelected = null;
+                this.ivrQuery = '';
+                this.ivrIndex = -1;
+                this.ivrOpen = false;
+                this.targetValue = '';
+                this.emitChange();
+            },
             onTextInput() { this.targetValue = this.$el.value; this.emitChange(); },
             dropdownUp(el) {
                 if (!el) return false;

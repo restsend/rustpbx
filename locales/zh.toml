@@ -1597,6 +1597,7 @@ select_ivr = "选择 IVR..."
 no_results = "无结果"
 voicemail_extension = "分机号码"
 uri_placeholder = "sip:user@domain"
+clear = "清除"
 
 [diagnostics]
 title = "诊断"
