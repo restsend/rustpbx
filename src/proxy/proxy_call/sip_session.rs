@@ -4041,22 +4041,6 @@ impl SipSession {
             bridge_builder = bridge_builder.with_rtp_port_range(start, end);
         }
 
-        if !caller_is_webrtc {
-            let app_caller_mode = Self::sdp_transport_mode(caller_offer);
-            let caller_config = rustrtc::RtcConfiguration {
-                transport_mode: app_caller_mode,
-                rtp_start_port: self.context.dialplan.media.rtp_start_port,
-                rtp_end_port: self.context.dialplan.media.rtp_end_port,
-                enable_latching: self.context.dialplan.media.enable_latching,
-                probation_max_packets: self.context.dialplan.media.probation_max_packets,
-                external_ip: self.context.dialplan.media.external_ip.clone(),
-                bind_ip: self.context.dialplan.media.bind_ip.clone(),
-                cname: Some(self.server.rtc_cname.clone()),
-                ..Default::default()
-            };
-            bridge_builder = bridge_builder.with_caller_config(caller_config);
-        }
-
         if !caller_is_webrtc && caller_offer.contains("a=group:BUNDLE") {
             bridge_builder = bridge_builder
                 .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
@@ -11508,6 +11492,114 @@ mod tests {
         assert!(
             sdp.contains("UDP/TLS/RTP/SAVPF"),
             "WebRTC callee SDP must use UDP/TLS/RTP/SAVPF profile, got: {}",
+            sdp
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ivr_to_webrtc_transfer_callee_sdp_has_dtls_fingerprint() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-ivr-to-webrtc".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-ivr-to-webrtc".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            true, // use_media_proxy = true → Anchored
+            caller_peer,
+            callee_peer,
+        );
+
+        // RTP caller SDP (no ICE/DTLS)
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        // Step 1: IVR - create app caller media bridge (simulates early media / queue)
+        let answer = session
+            .prepare_app_caller_media_bridge()
+            .await
+            .expect("app caller bridge answer should be prepared");
+        assert!(answer.contains("RTP/AVP"));
+        assert!(session.media.media_bridge.is_some());
+        assert!(session.media.caller_answer_uses_media_bridge);
+        assert!(!session.media.callee_offer_uses_media_bridge);
+
+        // Step 2: Transfer to WebRTC agent - create callee track reusing the bridge
+        let sdp = session
+            .create_callee_track(true)
+            .await
+            .expect("create_callee_track should succeed for IVR->WebRTC transfer");
+
+        // The SDP sent to the WebRTC agent MUST contain DTLS fingerprint and ICE
+        assert!(
+            sdp.contains("a=fingerprint"),
+            "IVR->WebRTC callee SDP must contain DTLS fingerprint, got: {}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=ice-ufrag"),
+            "IVR->WebRTC callee SDP must contain ICE ufrag, got: {}",
+            sdp
+        );
+        assert!(
+            sdp.contains("UDP/TLS/RTP/SAVPF"),
+            "IVR->WebRTC callee SDP must use UDP/TLS/RTP/SAVPF profile, got: {}",
             sdp
         );
 
