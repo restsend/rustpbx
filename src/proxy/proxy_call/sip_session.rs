@@ -2368,35 +2368,31 @@ impl SipSession {
                         }
 
                         let name = header.name();
-                        ![
-                            "Accept",
-                            "Accept-Encoding",
-                            "Accept-Language",
-                            "Allow",
-                            "Authorization",
-                            "Call-ID",
-                            "Contact",
-                            "Content-Length",
-                            "Content-Type",
-                            "CSeq",
-                            "Expires",
-                            "From",
-                            "Max-Forwards",
-                            "Min-SE",
-                            "Path",
-                            "Proxy-Authorization",
-                            "Proxy-Require",
-                            "Record-Route",
-                            "Require",
-                            "Route",
-                            "Session-Expires",
-                            "Supported",
-                            "To",
-                            "User-Agent",
-                            "Via",
-                        ]
-                        .iter()
-                        .any(|excluded| name.eq_ignore_ascii_case(excluded))
+                        let is_content_header = name
+                            .get(..8)
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"));
+
+                        !is_content_header
+                            && ![
+                                "Via",
+                                "From",
+                                "To",
+                                "Call-ID",
+                                "CSeq",
+                                "Contact",
+                                "Route",
+                                "Record-Route",
+                                "Authorization",
+                                "Proxy-Authorization",
+                                "User-Agent",
+                                "Expires",
+                                "Min-Expires",
+                                "Path",
+                                "Service-Route",
+                                "Max-Forwards",
+                            ]
+                            .iter()
+                            .any(|excluded| name.eq_ignore_ascii_case(excluded))
                     })
                     .cloned(),
             );
