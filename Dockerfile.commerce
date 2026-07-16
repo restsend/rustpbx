@@ -1,0 +1,75 @@
+FROM docker.m.daocloud.io/library/debian:bookworm
+
+LABEL maintainer="shenjindi@miuda.ai"
+LABEL org.opencontainers.image.source="https://github.com/restsend/rustpbx"
+LABEL org.opencontainers.image.description="A SIP PBX implementation in Rust (Commerce Edition)"
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV TZ=UTC
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata
+
+WORKDIR /app
+RUN mkdir -p /app/config /app/sounds /app/templates
+
+ARG TARGETARCH
+COPY --chmod=0755 bin/${TARGETARCH}/rustpbx /app/rustpbx
+COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
+
+# Static resources
+COPY ./static /app/static
+
+# Templates
+COPY ./templates /app/templates
+
+# Locales
+COPY ./locales /app/locales
+
+# Sounds (config + voicemail)
+COPY ./config/sounds /app/sounds
+COPY ./src/addons/voicemail/sounds /app/sounds
+
+# --- Addon static ---
+COPY ./src/addons/acme/static /app/static/acme
+COPY ./src/addons/transcript/static /app/static/transcript
+COPY ./src/addons/queue/static /app/static/queue
+COPY ./src/addons/sbc/static /app/static/sbc
+COPY ./src/addons/cc/static /app/static/cc
+COPY ./src/addons/wholesale/static /app/static/wholesale
+COPY ./src/addons/voicemail/static /app/static/voicemail
+
+# --- Addon templates ---
+COPY ./src/addons/acme/templates /app/templates/acme
+COPY ./src/addons/archive/templates /app/templates/archive
+COPY ./src/addons/queue/templates /app/templates/queue
+COPY ./src/addons/transcript/templates /app/templates/transcript
+COPY ./src/addons/sbc/templates /app/templates/sbc
+COPY ./src/addons/cc/templates /app/templates/cc
+COPY ./src/addons/wholesale/templates /app/templates/wholesale
+COPY ./src/addons/endpoint_manager/templates /app/templates/endpoint_manager
+COPY ./src/addons/enterprise_auth/templates /app/templates/enterprise_auth
+COPY ./src/addons/ivr_editor/templates /app/templates/ivr_editor
+COPY ./src/addons/voicemail/templates /app/templates/voicemail
+
+# --- Addon locales ---
+COPY ./src/addons/acme/locales /app/locales/acme
+COPY ./src/addons/archive/locales /app/locales/archive
+COPY ./src/addons/queue/locales /app/locales/queue
+COPY ./src/addons/transcript/locales /app/locales/transcript
+COPY ./src/addons/sbc/locales /app/locales/sbc
+COPY ./src/addons/cc/locales /app/locales/cc
+COPY ./src/addons/wholesale/locales /app/locales/wholesale
+COPY ./src/addons/endpoint_manager/locales /app/locales/endpoint_manager
+COPY ./src/addons/enterprise_auth/locales /app/locales/enterprise_auth
+COPY ./src/addons/ivr_editor/locales /app/locales/ivr_editor
+COPY ./src/addons/voicemail/locales /app/locales/voicemail
+
+ARG GA_ID=G-BBGHM1J5Q9
+RUN find /app/templates /app/static -name '*.html' -exec sed -i -E "s|G-[A-Z0-9]+|${GA_ID}|g" {} \; ; \
+    find /app/templates /app/static -name '*.js' -exec sed -i -E "s|G-[A-Z0-9]{10}|${GA_ID}|g" {} \;
+
+ENTRYPOINT ["/app/rustpbx"]
