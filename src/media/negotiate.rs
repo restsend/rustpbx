@@ -566,6 +566,12 @@ impl MediaNegotiator {
                 .iter_mut()
                 .find(|section| section.kind == MediaKind::Video)
         {
+            if reference_video.port == 0 {
+                video_section.port = 0;
+                video_section.direction = rustrtc::Direction::Inactive;
+                return Some(desc.to_sdp_string());
+            }
+
             let accepted_by_reference: HashSet<(String, u32)> = reference_video_caps
                 .iter()
                 .map(|cap| (cap.codec_name.to_ascii_uppercase(), cap.clock_rate))
@@ -1822,6 +1828,54 @@ a=fmtp:103 profile-level-id=42801F; packetization-mode=1\r\n";
         assert!(!filtered.contains("a=rtpmap:96 VP8/90000"));
         assert!(!filtered.contains("a=rtpmap:97 rtx/90000"));
         assert!(!filtered.contains("profile-level-id=42801F"));
+    }
+
+    #[test]
+    fn test_restrict_sdp_to_reference_codecs_propagates_rejected_video() {
+        let answer_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111 9\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:0\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtpmap:9 G722/8000\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 103\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:103 H264/90000\r\n\
+a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n";
+
+        let callee_answer = "v=0\r\n\
+o=- 1 1 IN IP4 192.168.3.7\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 4012 RTP/AVP 9\r\n\
+c=IN IP4 192.168.3.7\r\n\
+a=sendrecv\r\n\
+a=rtpmap:9 G722/8000\r\n\
+m=video 0 RTP/AVP 103\r\n\
+c=IN IP4 127.0.0.1\r\n";
+
+        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            SdpType::Answer,
+            answer_sdp,
+            SdpType::Answer,
+            callee_answer,
+        )
+        .unwrap();
+
+        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 9"));
+        assert!(filtered.contains("m=video 0 UDP/TLS/RTP/SAVPF 103"));
+        assert!(filtered.contains("a=mid:1"));
+        assert!(filtered.contains("a=inactive"));
+        assert!(filtered.contains("a=rtpmap:103 H264/90000"));
     }
 
     #[test]

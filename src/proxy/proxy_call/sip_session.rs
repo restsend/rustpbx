@@ -5235,8 +5235,21 @@ impl SipSession {
             };
 
             let mut callee_video_caps = Vec::new();
+            let mut callee_video_rejected = false;
             if let Ok(desc) = SessionDescription::parse(callee_sdp_type, sdp) {
-                callee_video_caps = desc.to_video_capabilities();
+                callee_video_rejected = desc.media_sections.iter().any(|section| {
+                    section.kind == rustrtc::MediaKind::Video && section.port == 0
+                });
+                callee_video_caps = desc
+                    .media_sections
+                    .iter()
+                    .filter(|section| {
+                        section.kind == rustrtc::MediaKind::Video
+                            && section.port != 0
+                            && section.direction != rustrtc::Direction::Inactive
+                    })
+                    .flat_map(|section| section.to_video_capabilities())
+                    .collect();
 
                 if caller_is_webrtc {
                     let selected_video_params =
@@ -5289,7 +5302,19 @@ impl SipSession {
                 match SessionDescription::parse(SdpType::Offer, caller_offer) {
                     Ok(caller_desc) => match caller_pc.set_remote_description(caller_desc).await {
                         Ok(_) => match caller_pc.create_answer().await {
-                            Ok(answer) => {
+                            Ok(mut answer) => {
+                                if callee_video_rejected
+                                    && let Some(video_section) = answer
+                                        .media_sections
+                                        .iter_mut()
+                                        .find(|section| {
+                                            section.kind == rustrtc::MediaKind::Video
+                                        })
+                                {
+                                    video_section.port = 0;
+                                    video_section.direction = rustrtc::Direction::Inactive;
+                                }
+
                                 if let Err(e) = caller_pc.set_local_description(answer) {
                                     warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge local description");
                                     Some(callee_sdp.to_string())
@@ -5317,7 +5342,21 @@ impl SipSession {
 
                                         let caller_video_caps =
                                             SessionDescription::parse(SdpType::Answer, &answer_sdp)
-                                                .map(|desc| desc.to_video_capabilities())
+                                                .map(|desc| {
+                                                    desc.media_sections
+                                                        .iter()
+                                                        .filter(|section| {
+                                                            section.kind
+                                                                == rustrtc::MediaKind::Video
+                                                                && section.port != 0
+                                                                && section.direction
+                                                                    != rustrtc::Direction::Inactive
+                                                        })
+                                                        .flat_map(|section| {
+                                                            section.to_video_capabilities()
+                                                        })
+                                                        .collect()
+                                                })
                                                 .unwrap_or_default();
 
                                         let (webrtc_caps, rtp_caps) = if caller_is_webrtc {
