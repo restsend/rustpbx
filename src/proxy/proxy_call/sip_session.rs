@@ -2248,23 +2248,11 @@ impl SipSession {
                 }
             }
         }
-        let connected_callee = self
-            .meta
-            .routed_callee
-            .clone()
-            .or_else(|| self.meta.connected_callee.clone());
-        info!(
-            session_id = %self.context.session_id,
-            routed_callee = ?self.meta.routed_callee,
-            connected_callee = ?self.meta.connected_callee,
-            resolved = ?connected_callee,
-            "session_hook_ctx: connected_callee resolution"
-        );
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
-            connected_callee,
+            connected_callee: self.meta.connected_callee.clone(),
             queue_name: self.meta.queue_name.clone(),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
@@ -4407,17 +4395,32 @@ impl SipSession {
                             // of building a bare Location that defaults to RTP.
                             for agent_uri in agent_uris {
                                 if let Ok(uri) = rsipstack::sip::Uri::try_from(agent_uri.clone()) {
+                                    // Write the original agent AOR to session extensions
+                                    // so that CC hooks can identify the agent regardless
+                                    // of what routed_callee/connected_callee end up being.
+                                    {
+                                        use std::collections::HashMap;
+                                        let mut ext = self.extensions.write();
+                                        let user_part = uri.auth.as_ref()
+                                            .map(|a| a.user.clone())
+                                            .unwrap_or_default();
+                                        if !user_part.is_empty() {
+                                            if let Some(map) = ext.get_mut::<HashMap<String, String>>() {
+                                                map.entry("resolved_agent_id".to_string())
+                                                    .or_insert(user_part.clone());
+                                            } else {
+                                                let mut map = HashMap::new();
+                                                map.insert("resolved_agent_id".to_string(), user_part);
+                                                ext.insert(map);
+                                            }
+                                        }
+                                    }
+
                                     // Query the SIP registrar for this agent's live contact.
                                     let registered_locations =
                                         self.server.locator.lookup(&uri).await.unwrap_or_default();
 
-                                    if let Some(mut reg_loc) = registered_locations.into_iter().next() {
-                                        // Preserve the original AOR (e.g.
-                                        // "sip:1001@localhost") so that
-                                        // routed_callee carries the agent's
-                                        // extension, not the registrar contact
-                                        // (which may be a random WebRTC ID).
-                                        reg_loc.aor = uri.clone();
+                                    if let Some(reg_loc) = registered_locations.into_iter().next() {
                                         expanded.push(reg_loc);
                                     } else {
                                         // Agent not currently registered.
@@ -4531,9 +4534,6 @@ impl SipSession {
             self.build_target_invite_option(target, None).await?;
 
         self.meta.routed_caller = Some(invite_option.caller.to_string());
-        // Store the original target AOR (e.g. "sip:test001@localhost"), NOT
-        // the resolved contact URI (e.g. WebRTC contact "sip:abc123@...;transport=WS").
-        // This is used by session hooks to resolve agent identity.
         self.meta.routed_callee = Some(target.aor.to_string());
 
         if let Some(home_proxy) = target.home_proxy.as_ref() {

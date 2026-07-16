@@ -535,10 +535,22 @@ impl RwiGateway {
     /// Call-scoped events (with `call_id`) carry it in the envelope so webhook
     /// consumers can correlate. Truly global events (agent_state_changed, etc.)
     /// have `call_id = None` and the envelope field is empty.
+    ///
+    /// Each broadcast event gets a unique sequence number from a monotonic
+    /// counter so the webhook dedup logic doesn't drop consecutive CC events
+    /// (cc_ringing, cc_answered, call.ended) that share the same call_id.
     pub fn broadcast_event(&self, event: &RwiEvent) {
+        // Use a unique sequence so webhook dedup doesn't drop consecutive
+        // CC events with the same call_id.
+        let seq = {
+            let mut cache_state = self.event_cache.lock();
+            let s = cache_state.next_sequence;
+            cache_state.next_sequence += 1;
+            s
+        };
         if let Some(tx) = &self.webhook_tx {
             let entry = EventCacheEntry {
-                sequence: 0,
+                sequence: seq,
                 cached_at: chrono::Utc::now(),
                 call_id: event.call_id.clone().unwrap_or_default(),
                 event: event.clone(),
