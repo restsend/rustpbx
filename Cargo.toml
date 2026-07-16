@@ -280,6 +280,7 @@ codegen-units = 256
 
 [profile.release]
 strip = "symbols"
+lto = "thin"
 
 [[bin]]
 name = "rustpbx"
