@@ -85,7 +85,44 @@ pub(crate) struct MediaSourceRow {
     pub src: String,
 }
 
+/// Minimum payload size worth gzip-compressing.
+pub const COMPRESS_MIN_SIZE: usize = 96;
+
+/// Default gzip compression level for stored payloads.
+pub const DEFAULT_COMPRESS_LEVEL: u32 = 6;
+
+/// Gzip-compress `payload` at `level` (clamped to 0-9) when it is large
+/// enough and not already compressed (idempotent: gzip/zstd payloads pass
+/// through unchanged).
+///
+/// Callers may invoke this early — e.g. on receiver threads to spread
+/// compression across cores — and `process_packet` will not re-compress.
+pub fn maybe_compress_payload(payload: Bytes, level: u32) -> Bytes {
+    if payload.len() < COMPRESS_MIN_SIZE
+        || payload.starts_with(&GZIP_MAGIC)
+        || payload.starts_with(&ZSTD_MAGIC)
+    {
+        return payload;
+    }
+    let mut encoder =
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level.min(9)));
+    if encoder.write_all(&payload).is_ok()
+        && let Ok(data) = encoder.finish()
+    {
+        return data.into();
+    }
+    payload
+}
+
 pub fn process_packet(packet: Packet) -> ProcessedPacket {
+    process_packet_with(packet, Some(DEFAULT_COMPRESS_LEVEL))
+}
+
+/// Like [`process_packet`], with explicit compression control:
+/// `Some(level)` gzip-compresses large payloads at that level, `None`
+/// stores payloads uncompressed. Both forms are always readable — the read
+/// path auto-detects compression from magic bytes.
+pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPacket {
     let Packet {
         msg_type,
         src,
@@ -98,28 +135,17 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
     let mut callid = call_id;
     let src_addr = format!("{}:{}", src.0, src.1);
     let dst_addr = format!("{}:{}", dst.0, dst.1);
-    let payload = payload;
 
     if matches!(msg_type, MsgType::Sip) && callid.is_none() {
         callid = extract_callid(&payload);
     }
 
     let orig_size = payload.len();
-    let (payload, comp_size, _compressed) = if orig_size >= 96 {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        if encoder.write_all(&payload).is_ok() {
-            if let Ok(data) = encoder.finish() {
-                let size = data.len();
-                (data.into(), size, true)
-            } else {
-                (payload, orig_size, false)
-            }
-        } else {
-            (payload, orig_size, false)
-        }
-    } else {
-        (payload, orig_size, false)
+    let payload = match compress {
+        Some(level) => maybe_compress_payload(payload, level),
+        None => payload,
     };
+    let comp_size = payload.len();
 
     ProcessedPacket {
         msg_type,
@@ -713,51 +739,122 @@ impl StorageManager {
     }
 
     fn get_folders_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
-        let mut folders = Vec::new();
-        match self.subdirs {
-            SipFlowSubdirs::None => {
-                folders.push(self.base_path.clone());
-            }
-            SipFlowSubdirs::Daily => {
-                let mut curr = start.date_naive();
-                let end = end.date_naive();
-                while curr <= end {
-                    let subdir = format!("{:04}{:02}{:02}", curr.year(), curr.month(), curr.day());
-                    folders.push(self.base_path.join(subdir));
-                    curr += chrono::Duration::days(1);
-                }
-            }
-            SipFlowSubdirs::Hourly => {
-                let mut curr = start
-                    .with_minute(0)
-                    .unwrap()
-                    .with_second(0)
-                    .unwrap()
-                    .with_nanosecond(0)
-                    .unwrap();
-                let end = end
-                    .with_minute(0)
-                    .unwrap()
-                    .with_second(0)
-                    .unwrap()
-                    .with_nanosecond(0)
-                    .unwrap();
+        discover_data_dirs(&self.base_path, &self.subdirs, start, end)
+    }
+}
 
-                while curr <= end {
-                    let subdir = format!(
-                        "{:04}{:02}{:02}/{:02}",
-                        curr.year(),
-                        curr.month(),
-                        curr.day(),
-                        curr.hour()
-                    );
-                    folders.push(self.base_path.join(subdir));
-                    curr += chrono::Duration::hours(1);
+fn parse_day_dir_name(name: &str) -> Option<chrono::NaiveDate> {
+    if name.len() != 8 || !name.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(name, "%Y%m%d").ok()
+}
+
+fn parse_hour_dir_name(name: &str) -> Option<u32> {
+    if name.len() != 2 || !name.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    name.parse::<u32>().ok().filter(|h| *h < 24)
+}
+
+/// Discover on-disk data directories that may contain packets for
+/// `[start, end]`.
+///
+/// Unlike a purely computed date-range enumeration, this scans the actual
+/// directory tree. A bucket directory named for one day may contain data
+/// spanning several days (e.g. replayed traffic, delayed packets, or a
+/// changed `subdirs` layout), so directories outside the requested range are
+/// also returned — placed after the in-range ones. Every query filters rows
+/// by timestamp anyway, so scanning extra directories is safe.
+///
+/// Both daily (`YYYYMMDD`) and hourly (`YYYYMMDD/HH`) layouts are always
+/// discovered regardless of the configured `subdirs`, and the base directory
+/// itself is included last so data written with `subdirs = none` (or before a
+/// layout change) remains queryable.
+pub(crate) fn discover_data_dirs(
+    base: &Path,
+    subdirs: &SipFlowSubdirs,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+) -> Vec<PathBuf> {
+    if matches!(subdirs, SipFlowSubdirs::None) {
+        return vec![base.to_path_buf()];
+    }
+
+    let start_day = start.date_naive();
+    let end_day = end.date_naive();
+    let start_hour = start.hour();
+    let end_hour = end.hour();
+
+    let day_in_range = |d: chrono::NaiveDate| d >= start_day && d <= end_day;
+    let hour_in_range = |d: chrono::NaiveDate, h: u32| {
+        if d < start_day || d > end_day {
+            return false;
+        }
+        if d == start_day && h < start_hour {
+            return false;
+        }
+        if d == end_day && h > end_hour {
+            return false;
+        }
+        true
+    };
+
+    let mut in_range = Vec::new();
+    let mut out_of_range = Vec::new();
+
+    let mut days: Vec<(chrono::NaiveDate, PathBuf)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(base) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(date) = parse_day_dir_name(name) {
+                days.push((date, path));
+            }
+        }
+    }
+    days.sort_by_key(|(d, _)| *d);
+
+    for (date, day_path) in days {
+        if day_in_range(date) {
+            in_range.push(day_path.clone());
+        } else {
+            out_of_range.push(day_path.clone());
+        }
+
+        let mut hours: Vec<(u32, PathBuf)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&day_path) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if let Some(hour) = parse_hour_dir_name(name) {
+                    hours.push((hour, path));
                 }
             }
         }
-        folders
+        hours.sort_by_key(|(h, _)| *h);
+        for (hour, hour_path) in hours {
+            if hour_in_range(date, hour) {
+                in_range.push(hour_path);
+            } else {
+                out_of_range.push(hour_path);
+            }
+        }
     }
+
+    in_range.extend(out_of_range);
+    in_range.push(base.to_path_buf());
+    in_range
 }
 
 pub fn extract_callid(payload: &[u8]) -> Option<String> {
@@ -995,6 +1092,217 @@ mod tests {
         assert_eq!(sources.len(), 1, "expected one unique media source");
         assert_eq!(sources[0].leg, 0);
         assert_eq!(sources[0].src, "127.0.0.1:4000");
+    }
+
+    #[tokio::test]
+    async fn test_daily_dir_containing_other_days_data_is_still_queryable() {
+        // A "daily" bucket directory may contain data whose timestamps
+        // belong to other days (replayed traffic, delayed packets, moved
+        // data). Queries must still find it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+
+        // Write today's data into a bucket named for a completely
+        // different day, using a None-subdirs writer rooted at that bucket.
+        let stale_bucket = base.join("20200101");
+        std::fs::create_dir_all(&stale_bucket).expect("mkdir");
+        let mut writer = StorageManager::new(&stale_bucket, 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let call_id = "cross-day-test";
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        writer
+            .write_processed(make_sip_processed(ts, call_id))
+            .await
+            .expect("write");
+        writer.force_flush().await.expect("flush");
+
+        // Query with Daily subdirs for today's range — the 20200101 bucket
+        // is outside the computed range but must still be scanned.
+        let mut reader = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::Daily);
+        let items = reader
+            .query_flow(
+                call_id,
+                local_dt_from_micros(ts as i64 - 1),
+                local_dt_from_micros(ts as i64 + 1),
+            )
+            .await
+            .expect("query flow");
+
+        assert_eq!(items.len(), 1, "data in out-of-range day dir must be found");
+        assert_eq!(items[0].timestamp, ts);
+    }
+
+    #[tokio::test]
+    async fn test_daily_query_finds_legacy_data_in_base_dir() {
+        // Data written with subdirs=None lives directly in the base dir;
+        // after switching to Daily it must remain queryable.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+
+        let mut writer = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::None);
+        let call_id = "legacy-base-test";
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        writer
+            .write_processed(make_sip_processed(ts, call_id))
+            .await
+            .expect("write");
+        writer.force_flush().await.expect("flush");
+
+        let mut reader = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::Daily);
+        let items = reader
+            .query_flow(
+                call_id,
+                local_dt_from_micros(ts as i64 - 1),
+                local_dt_from_micros(ts as i64 + 1),
+            )
+            .await
+            .expect("query flow");
+
+        assert_eq!(items.len(), 1, "legacy base-dir data must be found");
+    }
+
+    #[test]
+    fn test_discover_data_dirs_orders_in_range_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("20200101")).unwrap();
+        std::fs::create_dir_all(base.join("20200102/05")).unwrap();
+        std::fs::create_dir_all(base.join("20200103")).unwrap();
+        std::fs::create_dir_all(base.join("not-a-date")).unwrap();
+
+        let start = Local.with_ymd_and_hms(2020, 1, 2, 0, 0, 0).unwrap();
+        let end = Local.with_ymd_and_hms(2020, 1, 2, 23, 59, 59).unwrap();
+
+        let dirs = discover_data_dirs(base, &SipFlowSubdirs::Daily, start, end);
+
+        assert_eq!(dirs[0], base.join("20200102"));
+        assert_eq!(dirs[1], base.join("20200102/05"));
+        assert!(dirs.contains(&base.join("20200101")));
+        assert!(dirs.contains(&base.join("20200103")));
+        assert_eq!(dirs.last().unwrap(), &base.to_path_buf());
+        assert!(!dirs.contains(&base.join("not-a-date")));
+    }
+
+    #[test]
+    fn test_maybe_compress_payload_is_idempotent() {
+        let original = Bytes::from(vec![b'a'; 500]);
+        let once = maybe_compress_payload(original.clone(), DEFAULT_COMPRESS_LEVEL);
+        assert!(once.starts_with(&GZIP_MAGIC), "large payload compressed");
+        let twice = maybe_compress_payload(once.clone(), DEFAULT_COMPRESS_LEVEL);
+        assert_eq!(once, twice, "already-compressed payload must pass through");
+
+        let small = Bytes::from_static(b"tiny");
+        assert_eq!(
+            maybe_compress_payload(small.clone(), DEFAULT_COMPRESS_LEVEL),
+            small
+        );
+    }
+
+    #[tokio::test]
+    async fn test_uncompressed_payload_roundtrips() {
+        // With compression disabled the payload is stored as-is and the
+        // read path must return it unchanged (magic-byte detection sees no
+        // gzip/zstd header and passes the raw bytes through).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let call_id = "no-compress-test";
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        let sip_payload = format!(
+            "INVITE sip:test@example.com SIP/2.0\r\nCall-ID: {}\r\nX-Pad: {}\r\n",
+            call_id,
+            "p".repeat(200)
+        );
+
+        let processed = process_packet_with(
+            Packet {
+                msg_type: MsgType::Sip,
+                src: (IpAddr::from([127, 0, 0, 1]), 5060),
+                dst: (IpAddr::from([127, 0, 0, 2]), 5060),
+                timestamp: ts,
+                call_id: None,
+                leg: None,
+                payload: Bytes::from(sip_payload.clone()),
+            },
+            None,
+        );
+        assert_eq!(processed.callid, Some(call_id.to_string()));
+        assert!(
+            !processed.payload.starts_with(&GZIP_MAGIC),
+            "payload must be stored uncompressed"
+        );
+        assert_eq!(processed.comp_size, processed.orig_size);
+
+        storage.write_processed(processed).await.expect("write");
+        storage.force_flush().await.expect("flush");
+
+        let items = storage
+            .query_flow(
+                call_id,
+                local_dt_from_micros(ts as i64 - 1),
+                local_dt_from_micros(ts as i64 + 1),
+            )
+            .await
+            .expect("query flow");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].payload, Bytes::from(sip_payload));
+    }
+
+    #[tokio::test]
+    async fn test_precompressed_sip_payload_with_explicit_callid_roundtrips() {
+        // Receiver threads may compress payloads before handing them to the
+        // storage path; the Call-ID is extracted before compression and
+        // passed explicitly. process_packet must not re-compress, and the
+        // read path must return the original uncompressed payload.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let call_id = "precompressed-test";
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        let sip_payload = format!(
+            "INVITE sip:test@example.com SIP/2.0\r\nCall-ID: {}\r\nX-Pad: {}\r\n",
+            call_id,
+            "p".repeat(200)
+        );
+
+        let compressed =
+            maybe_compress_payload(Bytes::from(sip_payload.clone()), DEFAULT_COMPRESS_LEVEL);
+        assert!(compressed.starts_with(&GZIP_MAGIC));
+
+        let processed = process_packet(Packet {
+            msg_type: MsgType::Sip,
+            src: (IpAddr::from([127, 0, 0, 1]), 5060),
+            dst: (IpAddr::from([127, 0, 0, 2]), 5060),
+            timestamp: ts,
+            call_id: Some(call_id.to_string()),
+            leg: None,
+            payload: compressed.clone(),
+        });
+        assert_eq!(processed.callid, Some(call_id.to_string()));
+        assert_eq!(
+            processed.payload, compressed,
+            "must not double-compress a pre-compressed payload"
+        );
+
+        storage.write_processed(processed).await.expect("write");
+        storage.force_flush().await.expect("flush");
+
+        let items = storage
+            .query_flow(
+                call_id,
+                local_dt_from_micros(ts as i64 - 1),
+                local_dt_from_micros(ts as i64 + 1),
+            )
+            .await
+            .expect("query flow");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].payload,
+            Bytes::from(sip_payload),
+            "read path must return the original payload"
+        );
     }
 
     /// Reproduction: `query_flow_in_range` loads ALL calls' SIP data in the time

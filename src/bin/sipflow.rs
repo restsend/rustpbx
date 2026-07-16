@@ -12,13 +12,12 @@ use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
     perf::{PerfCounters, PerfDumper},
     protocol::{MsgType, Packet, parse_datagram},
-    storage::extract_callid,
+    storage::{extract_callid, maybe_compress_payload},
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::net::UdpSocket;
 use tracing_appender::non_blocking;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -45,9 +44,36 @@ struct Args {
     #[arg(long, default_value = "sqlite")]
     engine: String,
 
+    /// Disable gzip compression of stored payloads (sqlite engine only —
+    /// flowdb has built-in compression). Uncompressed and compressed data
+    /// are both always readable.
+    #[arg(long, default_value_t = false)]
+    no_compress: bool,
+
+    /// Gzip compression level 0-9 for stored payloads (sqlite engine)
+    #[arg(long, default_value_t = 6)]
+    compress_level: u32,
+
+    /// Subdirectory layout for storage: "none", "daily" (YYYYMMDD) or
+    /// "hourly" (YYYYMMDD/HH)
+    #[arg(long, default_value = "daily")]
+    subdirs: String,
+
     /// Channel buffer size
     #[arg(long, default_value_t = 100000)]
     buffer_size: usize,
+
+    /// UDP receive buffer size in bytes (SO_RCVBUF). Larger buffers absorb
+    /// traffic bursts and reduce kernel-side drops under load. The kernel
+    /// caps this at net.core.rmem_max; a warning is logged when capped.
+    #[arg(long, default_value_t = 8 * 1024 * 1024)]
+    recv_buffer_size: usize,
+
+    /// Number of parallel UDP receiver tasks. Values > 1 bind extra
+    /// SO_REUSEPORT sockets so the kernel load-balances datagrams across
+    /// receivers. 0 = number of CPU cores.
+    #[arg(long, default_value_t = 0)]
+    recv_tasks: usize,
 
     // ── SQLite options ──
     /// Number of packets to batch before flushing (SQLite)
@@ -123,6 +149,61 @@ fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
     (call_id, item)
 }
 
+/// Bind a UDP socket with a custom SO_RCVBUF (and SO_REUSEPORT when
+/// several receiver sockets share one address).
+///
+/// A large kernel receive buffer absorbs traffic bursts while the userspace
+/// receiver is busy parsing or momentarily descheduled — with the default
+/// ~208 KB buffer a few milliseconds of stall at high packet rates already
+/// overflows the buffer and drops packets silently in the kernel.
+///
+/// The socket is left in blocking mode: receivers run on dedicated OS
+/// threads in a tight recv/parse loop, which avoids tokio scheduler and
+/// waker overhead on the hot path.
+fn bind_udp_socket(
+    addr: SocketAddr,
+    recv_buffer_size: usize,
+    reuse_port: bool,
+) -> Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+
+    #[cfg(unix)]
+    if reuse_port {
+        socket.set_reuse_port(true)?;
+    }
+
+    if let Err(e) = socket.set_recv_buffer_size(recv_buffer_size) {
+        tracing::warn!(
+            "failed to set SO_RCVBUF to {} bytes: {}",
+            recv_buffer_size,
+            e
+        );
+    }
+    socket.bind(&addr.into())?;
+
+    // Linux reports the doubled value; only warn when the kernel actually
+    // capped the buffer below what was requested (net.core.rmem_max).
+    let effective = socket.recv_buffer_size().unwrap_or(0);
+    if effective < recv_buffer_size {
+        tracing::warn!(
+            "SO_RCVBUF capped at {} bytes (requested {}); raise net.core.rmem_max to allow larger buffers",
+            effective,
+            recv_buffer_size
+        );
+    } else {
+        tracing::info!("UDP SO_RCVBUF effective size: {} bytes", effective);
+    }
+
+    Ok(socket.into())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -163,17 +244,24 @@ async fn main() -> Result<()> {
 
     let engine = match args.engine.as_str() {
         "flowdb" => SipFlowEngine::FlowDb,
-        "sqlite" | _ => SipFlowEngine::Sqlite,
+        _ => SipFlowEngine::Sqlite,
+    };
+    let subdirs = match args.subdirs.as_str() {
+        "none" => SipFlowSubdirs::None,
+        "hourly" => SipFlowSubdirs::Hourly,
+        _ => SipFlowSubdirs::Daily,
     };
     let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
 
     let config = SipFlowConfig::Local {
         root: args.root.clone(),
-        subdirs: SipFlowSubdirs::None,
+        subdirs,
         flush_count: args.flush_count,
         flush_interval_secs: args.flush_interval,
         id_cache_size: args.id_cache_size,
         engine,
+        compress: !args.no_compress,
+        compress_level: args.compress_level,
         ttl_secs,
         memtable_size_mb: args.memtable_size_mb,
         block_cache_capacity_mb: args.block_cache_capacity_mb,
@@ -188,55 +276,112 @@ async fn main() -> Result<()> {
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
-    let socket = UdpSocket::bind(udp_addr).await?;
-    tracing::info!("UDP server listening on {}", udp_addr);
+    let recv_tasks = if args.recv_tasks == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        args.recv_tasks
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Packet>(args.buffer_size);
 
-    // UDP Receiver Task
-    let perf_rx = perf_counters.clone();
-    rustpbx::utils::spawn(async move {
-        let mut buf = vec![0u8; 65535];
-        loop {
-            match socket.recv_from(&mut buf).await {
-                Ok((size, _)) => {
-                    // `parse_datagram` handles both legacy single-packet
-                    // datagrams and the new batched format transparently.
-                    match parse_datagram(&buf[..size]) {
-                        Ok(packets) => {
-                            perf_rx
-                                .packets_received
-                                .fetch_add(packets.len() as u64, Ordering::Relaxed);
-                            for packet in packets {
-                                let _ = tx.try_send(packet);
+    // UDP receiver threads. Receiving and parsing run on dedicated OS
+    // threads (blocking sockets — no async scheduler/waker overhead on the
+    // hot path); parsed packets are handed to the async storage worker
+    // through the channel. With more than one thread, each gets its own
+    // SO_REUSEPORT socket so the kernel load-balances datagrams across them.
+    // Pre-compress payloads on the receiver threads so gzip work is spread
+    // across all receiver cores instead of serializing on the single
+    // storage worker. Only the SQLite engine stores gzip-compressed
+    // payloads (`maybe_compress_payload` is idempotent, so the storage
+    // layer will not re-compress). FlowDB stores raw payloads.
+    let compress_early: Option<u32> =
+        (engine == SipFlowEngine::Sqlite && !args.no_compress).then_some(args.compress_level);
+
+    for i in 0..recv_tasks {
+        let socket = bind_udp_socket(udp_addr, args.recv_buffer_size, recv_tasks > 1)?;
+        if i == 0 {
+            tracing::info!(
+                "UDP server listening on {} ({} receiver thread(s))",
+                udp_addr,
+                recv_tasks
+            );
+        }
+        let tx = tx.clone();
+        let perf_rx = perf_counters.clone();
+        std::thread::Builder::new()
+            .name(format!("sipflow-recv-{i}"))
+            .spawn(move || {
+                let mut buf = vec![0u8; 65535];
+                loop {
+                    match socket.recv_from(&mut buf) {
+                        Ok((size, _)) => {
+                            // `parse_datagram` handles both legacy single-packet
+                            // datagrams and the new batched format transparently.
+                            match parse_datagram(&buf[..size]) {
+                                Ok(packets) => {
+                                    perf_rx
+                                        .packets_received
+                                        .fetch_add(packets.len() as u64, Ordering::Relaxed);
+                                    for mut packet in packets {
+                                        if let Some(level) = compress_early {
+                                            // The Call-ID header must be
+                                            // extracted before the payload is
+                                            // compressed.
+                                            if packet.msg_type == MsgType::Sip
+                                                && packet.call_id.is_none()
+                                            {
+                                                packet.call_id = extract_callid(&packet.payload);
+                                            }
+                                            packet.payload =
+                                                maybe_compress_payload(packet.payload, level);
+                                        }
+                                        if tx.try_send(packet).is_err() {
+                                            perf_rx.items_dropped.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("malformed datagram dropped: {}", e);
+                                }
                             }
                         }
                         Err(e) => {
-                            tracing::debug!("malformed datagram dropped: {}", e);
+                            tracing::error!("UDP recv error: {}", e);
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::error!("UDP recv error: {}", e);
-                }
-            }
-        }
-    });
+            })?;
+    }
 
-    // Storage Worker Task
+    // Storage Worker Task. `recv_many` drains packets in batches so a
+    // single wakeup processes up to `RECV_BATCH` packets instead of one.
+    // The periodic force-flush honors the CLI `--flush-interval`.
+    const RECV_BATCH: usize = 1024;
+    let flush_interval_secs = args.flush_interval.max(1);
     let storage_backend = backend.clone();
     let perf_worker = perf_counters.clone();
     rustpbx::utils::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
+        let mut batch = Vec::with_capacity(RECV_BATCH);
         loop {
             tokio::select! {
-                Some(packet) = rx.recv() => {
-                    let (call_id, item) = convert_packet_to_item(packet);
-                    if !call_id.is_empty() {
-                        let _ = storage_backend.record(&call_id, item);
-                        perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
+                n = rx.recv_many(&mut batch, RECV_BATCH) => {
+                    if n == 0 {
+                        // All senders dropped; nothing more will arrive.
+                        break;
+                    }
+                    for packet in batch.drain(..) {
+                        let (call_id, item) = convert_packet_to_item(packet);
+                        if !call_id.is_empty() {
+                            let _ = storage_backend.record(&call_id, item);
+                            perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     perf_worker.set_pending(rx.len() as i64);
                 }

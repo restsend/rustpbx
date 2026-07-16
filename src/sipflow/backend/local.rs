@@ -11,7 +11,7 @@ use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{MsgType, Packet};
-use crate::sipflow::storage::{StorageManager, process_packet};
+use crate::sipflow::storage::{StorageManager, process_packet_with};
 use crate::sipflow::wav_utils::generate_wav_to_writer;
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use std::sync::atomic::Ordering;
@@ -41,6 +41,7 @@ impl LocalBackend {
         flush_count: usize,
         flush_interval_secs: u64,
         id_cache_size: usize,
+        compress: Option<u32>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
 
@@ -104,10 +105,20 @@ impl LocalBackend {
                                     SipFlowMsgType::Sip => MsgType::Sip,
                                     SipFlowMsgType::Rtp => MsgType::Rtp,
                                 };
-                                let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
-                                    (Some(call_id), item.leg)
+                                // Pass the caller-provided call_id through for
+                                // both SIP and RTP; `process_packet` only falls
+                                // back to extracting the Call-ID header from
+                                // the payload when it is missing (the payload
+                                // may already be compressed at this point).
+                                let packet_call_id = if call_id.is_empty() {
+                                    None
                                 } else {
-                                    (None, None)
+                                    Some(call_id)
+                                };
+                                let packet_leg = if msg_type == MsgType::Rtp {
+                                    item.leg
+                                } else {
+                                    None
                                 };
 
                                 let packet = Packet {
@@ -120,7 +131,7 @@ impl LocalBackend {
                                     payload: item.payload,
                                 };
 
-                                let processed = process_packet(packet);
+                                let processed = process_packet_with(packet, compress);
                                 let _ = storage.write_processed(processed).await;
                             }
                             Command::Flush { done } => {

@@ -77,6 +77,8 @@ async fn get_settings(
                     flush_interval_secs,
                     id_cache_size,
                     engine,
+                    compress,
+                    compress_level,
                     ttl_secs,
                     memtable_size_mb,
                     block_cache_capacity_mb,
@@ -90,6 +92,8 @@ async fn get_settings(
                         "flush_interval_secs": flush_interval_secs,
                         "id_cache_size": id_cache_size,
                         "engine": engine,
+                        "compress": compress,
+                        "compress_level": compress_level,
                         "ttl_secs": ttl_secs,
                         "memtable_size_mb": memtable_size_mb,
                         "block_cache_capacity_mb": block_cache_capacity_mb

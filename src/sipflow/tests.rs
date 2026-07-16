@@ -33,6 +33,8 @@ mod tests {
             flush_interval_secs: 3600,
             id_cache_size: 64,
             engine: SipFlowEngine::Sqlite,
+            compress: true,
+            compress_level: 6,
             ttl_secs: None,
             memtable_size_mb: 64,
             block_cache_capacity_mb: 128,
@@ -55,6 +57,8 @@ mod tests {
             flush_interval_secs: 3600,
             id_cache_size: 64,
             engine: SipFlowEngine::Sqlite,
+            compress: true,
+            compress_level: 6,
             ttl_secs: None,
             memtable_size_mb: 64,
             block_cache_capacity_mb: 128,
@@ -175,6 +179,8 @@ mod tests {
             flush_interval_secs: 5,
             id_cache_size: 1024,
             engine: SipFlowEngine::FlowDb,
+            compress: true,
+            compress_level: 6,
             ttl_secs: None,
             memtable_size_mb: 1,
             block_cache_capacity_mb: 16,
@@ -198,6 +204,8 @@ mod tests {
             flush_interval_secs: 5,
             id_cache_size: 1024,
             engine: SipFlowEngine::FlowDb,
+            compress: true,
+            compress_level: 6,
             ttl_secs: None,
             memtable_size_mb: 1,
             block_cache_capacity_mb: 16,
@@ -374,8 +382,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
         let mut got_packets = 0u32;
         let mut datagram_count = 0u32;
         let mut buf = vec![0u8; 65535];
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
         while got_packets < N && tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, rx_sock.recv(&mut buf)).await {
@@ -393,19 +400,14 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             }
         }
 
-        assert_eq!(
-            got_packets, N,
-            "all {N} records should reach the receiver"
-        );
+        assert_eq!(got_packets, N, "all {N} records should reach the receiver");
         // The whole point: 50 records must arrive in fewer than 50 datagrams.
         assert!(
             datagram_count < N,
             "expected batching to coalesce records into fewer datagrams, \
              got {datagram_count} datagrams for {N} records"
         );
-        tracing::debug!(
-            "batch e2e: {N} records -> {datagram_count} datagrams"
-        );
+        tracing::debug!("batch e2e: {N} records -> {datagram_count} datagrams");
     }
 
     /// `batch_size = 0` disables batching: each record must arrive as its
@@ -448,8 +450,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
         let mut got_packets = 0u32;
         let mut datagram_count = 0u32;
         let mut buf = vec![0u8; 65535];
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
         while got_packets < N && tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, rx_sock.recv(&mut buf)).await {

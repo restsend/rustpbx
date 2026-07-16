@@ -1,3 +1,4 @@
+pub mod hybrid;
 pub mod local;
 pub mod remote;
 
@@ -5,8 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 
-use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowEngine};
-use crate::sipflow::flowdb_backend::FlowDbBackend;
+use crate::config::{SipFlowClusterNode, SipFlowConfig};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats};
 
 #[async_trait]
@@ -89,32 +89,30 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             flush_interval_secs,
             id_cache_size,
             engine,
+            compress,
+            compress_level,
             ttl_secs,
             memtable_size_mb,
             block_cache_capacity_mb,
             ..
         } => {
-            if *engine == SipFlowEngine::FlowDb {
-                FlowDbBackend::new(
-                    root.clone(),
-                    subdirs.clone(),
-                    *ttl_secs,
-                    *memtable_size_mb,
-                    *block_cache_capacity_mb,
-                    *flush_count,
-                    *flush_interval_secs,
-                )
-                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
-            } else {
-                local::LocalBackend::new(
-                    root.clone(),
-                    subdirs.clone(),
-                    *flush_count,
-                    *flush_interval_secs,
-                    *id_cache_size,
-                )
-                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
-            }
+            // Hybrid backend: writes go to the configured engine, while
+            // queries can open both SQLite and FlowDB buckets, using each
+            // subdirectory's contents as an engine hint.
+            let compress = compress.then_some(*compress_level);
+            hybrid::HybridLocalBackend::new(
+                root.clone(),
+                subdirs.clone(),
+                *engine,
+                *flush_count,
+                *flush_interval_secs,
+                *id_cache_size,
+                compress,
+                *ttl_secs,
+                *memtable_size_mb,
+                *block_cache_capacity_mb,
+            )
+            .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }
         SipFlowConfig::Remote {
             nodes,

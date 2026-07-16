@@ -596,6 +596,15 @@ pub enum SipFlowConfig {
         /// Storage engine: "flowdb" or "sqlite" (default).
         #[serde(default)]
         engine: SipFlowEngine,
+        /// Gzip-compress stored payloads (SQLite engine only — FlowDB has
+        /// built-in compression). Default true. Data written either way is
+        /// always readable: the read path detects compression from magic
+        /// bytes.
+        #[serde(default = "default_sipflow_compress")]
+        compress: bool,
+        /// Gzip compression level 0-9 for stored payloads (default 6).
+        #[serde(default = "default_sipflow_compress_level")]
+        compress_level: u32,
         /// TTL in seconds for FlowDB records (optional). When set,
         /// expired records are automatically garbage-collected.
         #[serde(default)]
@@ -679,6 +688,14 @@ fn default_sipflow_timeout() -> u64 {
 
 fn default_sipflow_id_cache_size() -> usize {
     8192
+}
+
+fn default_sipflow_compress() -> bool {
+    true
+}
+
+fn default_sipflow_compress_level() -> u32 {
+    6
 }
 
 fn default_flowdb_memtable_mb() -> usize {
@@ -973,21 +990,13 @@ fn available_parallelism() -> usize {
 
 fn default_sip_worker_threads() -> usize {
     let n = available_parallelism();
-    if n >= 8 {
-        4
-    } else {
-        (n + 1) / 2
-    }
+    if n >= 8 { 4 } else { (n + 1) / 2 }
 }
 
 fn default_media_worker_threads() -> usize {
     let n = available_parallelism();
     let sip = default_sip_worker_threads();
-    if n > sip {
-        n - sip
-    } else {
-        1
-    }
+    if n > sip { n - sip } else { 1 }
 }
 
 fn default_auth_cache_size() -> usize {
@@ -1460,7 +1469,6 @@ impl Config {
     pub fn static_path(&self) -> String {
         "/static".to_string()
     }
-
 }
 
 // ===================================================================
