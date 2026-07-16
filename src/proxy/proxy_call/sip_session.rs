@@ -4401,9 +4401,13 @@ impl SipSession {
                                     let registered_locations =
                                         self.server.locator.lookup(&uri).await.unwrap_or_default();
 
-                                    if let Some(reg_loc) = registered_locations.into_iter().next() {
-                                        // Use the full registered location (preserves
-                                        // supports_webrtc, destination, transport, etc.)
+                                    if let Some(mut reg_loc) = registered_locations.into_iter().next() {
+                                        // Preserve the original AOR (e.g.
+                                        // "sip:1001@localhost") so that
+                                        // routed_callee carries the agent's
+                                        // extension, not the registrar contact
+                                        // (which may be a random WebRTC ID).
+                                        reg_loc.aor = uri.clone();
                                         expanded.push(reg_loc);
                                     } else {
                                         // Agent not currently registered.
