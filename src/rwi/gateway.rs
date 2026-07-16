@@ -532,15 +532,15 @@ impl RwiGateway {
     }
 
     /// Send an event to every known session (broadcast).
-    /// Note: Broadcasting does not cache events as there's no specific call_id.
+    /// Call-scoped events (with `call_id`) carry it in the envelope so webhook
+    /// consumers can correlate. Truly global events (agent_state_changed, etc.)
+    /// have `call_id = None` and the envelope field is empty.
     pub fn broadcast_event(&self, event: &RwiEvent) {
-        // Forward to webhook handler (if configured).
-        // Use an empty call_id and zero sequence since broadcast events are not cached.
         if let Some(tx) = &self.webhook_tx {
             let entry = EventCacheEntry {
                 sequence: 0,
                 cached_at: chrono::Utc::now(),
-                call_id: String::new(),
+                call_id: event.call_id.clone().unwrap_or_default(),
                 event: event.clone(),
             };
             let _ = tx.send(entry);

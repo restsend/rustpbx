@@ -2248,11 +2248,23 @@ impl SipSession {
                 }
             }
         }
+        let connected_callee = self
+            .meta
+            .routed_callee
+            .clone()
+            .or_else(|| self.meta.connected_callee.clone());
+        info!(
+            session_id = %self.context.session_id,
+            routed_callee = ?self.meta.routed_callee,
+            connected_callee = ?self.meta.connected_callee,
+            resolved = ?connected_callee,
+            "session_hook_ctx: connected_callee resolution"
+        );
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
-            connected_callee: self.meta.connected_callee.clone(),
+            connected_callee,
             queue_name: self.meta.queue_name.clone(),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
@@ -3682,7 +3694,12 @@ impl SipSession {
                                 .caller
                                 .as_ref()
                                 .map(|uri| uri.to_string());
-                            self.meta.routed_callee = Some(callee_uri.to_string());
+                            // Store original target AOR, not resolved contact.
+                            let winner_aor = targets
+                                .get(winner_idx)
+                                .map(|t| t.aor.to_string())
+                                .unwrap_or_else(|| callee_uri.to_string());
+                            self.meta.routed_callee = Some(winner_aor);
 
                             // Cancel all remaining forks
                             fork_cancel.cancel();
@@ -4500,7 +4517,10 @@ impl SipSession {
             self.build_target_invite_option(target, None).await?;
 
         self.meta.routed_caller = Some(invite_option.caller.to_string());
-        self.meta.routed_callee = Some(invite_option.callee.to_string());
+        // Store the original target AOR (e.g. "sip:test001@localhost"), NOT
+        // the resolved contact URI (e.g. WebRTC contact "sip:abc123@...;transport=WS").
+        // This is used by session hooks to resolve agent identity.
+        self.meta.routed_callee = Some(target.aor.to_string());
 
         if let Some(home_proxy) = target.home_proxy.as_ref() {
             info!(
