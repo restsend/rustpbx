@@ -3643,6 +3643,16 @@ impl SipSession {
         }
 
         // Race the forked INVITEs – first 200 OK wins
+        // Fire on_call_ringing hooks now that callees are ringing.
+        // Use the first target's AOR for agent identity.
+        if !self.server.session_hooks.is_empty() && !targets.is_empty() {
+            self.meta.routed_callee = Some(targets[0].aor.to_string());
+            let ctx = self.session_hook_ctx();
+            for hook in self.server.session_hooks.iter() {
+                hook.on_call_ringing(&ctx).await;
+            }
+        }
+
         let mut failures = 0u32;
         let mut last_error = into_callee_err(
             &StatusCode::TemporarilyUnavailable,
