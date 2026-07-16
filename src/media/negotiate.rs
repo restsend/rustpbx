@@ -3,13 +3,15 @@ use audio_codec::CodecType;
 use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription};
 use std::collections::{HashMap, HashSet};
 
-/// Parsed RTP codec information from SDP
+/// Parsed RTP codec information from SDP, including payload-specific parameters.
 #[derive(Debug, Clone)]
 pub struct CodecInfo {
     pub payload_type: u8,
     pub codec: CodecType,
     pub clock_rate: u32,
     pub channels: u16,
+    /// SDP format parameters without the payload type prefix.
+    pub fmtp: Option<String>,
 }
 
 impl CodecInfo {
@@ -36,16 +38,13 @@ impl CodecInfo {
     /// Convert to rustrtc AudioCapability for use in RtcConfiguration.media_capabilities
     pub fn to_audio_capability(&self) -> Option<rustrtc::config::AudioCapability> {
         use rustrtc::config::AudioCapability;
-        let (codec_name, default_fmtp) = match self.codec {
-            CodecType::PCMU => ("PCMU".to_string(), None),
-            CodecType::PCMA => ("PCMA".to_string(), None),
-            CodecType::G722 => ("G722".to_string(), None),
-            CodecType::G729 => ("G729".to_string(), None),
-            CodecType::Opus => (
-                "opus".to_string(),
-                Some("minptime=10;useinbandfec=1".to_string()),
-            ),
-            CodecType::TelephoneEvent => ("telephone-event".to_string(), Some("0-16".to_string())),
+        let codec_name = match self.codec {
+            CodecType::PCMU => "PCMU".to_string(),
+            CodecType::PCMA => "PCMA".to_string(),
+            CodecType::G722 => "G722".to_string(),
+            CodecType::G729 => "G729".to_string(),
+            CodecType::Opus => "opus".to_string(),
+            CodecType::TelephoneEvent => "telephone-event".to_string(),
             #[allow(unreachable_patterns)]
             _ => return None,
         };
@@ -55,7 +54,7 @@ impl CodecInfo {
             codec_name,
             clock_rate: self.clock_rate,
             channels: Self::clamp_channels(self.channels),
-            fmtp: default_fmtp,
+            fmtp: self.fmtp.clone(),
             rtcp_fbs: vec![],
         })
     }
@@ -129,9 +128,27 @@ impl MediaNegotiator {
 
     fn parse_rtpmap_attributes(
         section: &rustrtc::MediaSection,
-    ) -> (HashMap<u8, CodecInfo>, HashSet<u8>) {
+    ) -> (
+        HashMap<u8, CodecInfo>,
+        HashSet<u8>,
+        HashMap<u8, String>,
+    ) {
         let mut codec_by_pt = HashMap::new();
         let mut unrecognized_pts = HashSet::new();
+        let mut fmtp_by_pt = HashMap::new();
+
+        for attr in &section.attributes {
+            if attr.key == "fmtp"
+                && let Some(ref value) = attr.value
+                && let Some((pt_str, fmtp)) = value.trim_start().split_once(' ')
+                && let Ok(pt) = pt_str.parse::<u8>()
+            {
+                let fmtp = fmtp.trim_start();
+                if !fmtp.is_empty() {
+                    fmtp_by_pt.insert(pt, fmtp.to_string());
+                }
+            }
+        }
 
         for attr in &section.attributes {
             if attr.key == "rtpmap"
@@ -164,16 +181,21 @@ impl MediaNegotiator {
                             codec: codec_type,
                             clock_rate,
                             channels,
+                            fmtp: fmtp_by_pt.get(&pt).cloned(),
                         },
                     );
                 }
             }
         }
 
-        (codec_by_pt, unrecognized_pts)
+        (codec_by_pt, unrecognized_pts, fmtp_by_pt)
     }
 
-    fn static_codec_for_payload(section: &rustrtc::MediaSection, pt: u8) -> Option<CodecInfo> {
+    fn static_codec_for_payload(
+        section: &rustrtc::MediaSection,
+        pt: u8,
+        fmtp: Option<String>,
+    ) -> Option<CodecInfo> {
         let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
             let (rate, chans) = match codec {
                 CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => (8000, 1),
@@ -194,11 +216,13 @@ impl MediaNegotiator {
             codec,
             clock_rate: rate,
             channels: chans,
+            fmtp,
         })
     }
 
     fn extract_ordered_codecs_from_section(section: &rustrtc::MediaSection) -> Vec<CodecInfo> {
-        let (mut codec_by_pt, unrecognized_pts) = Self::parse_rtpmap_attributes(section);
+        let (mut codec_by_pt, unrecognized_pts, fmtp_by_pt) =
+            Self::parse_rtpmap_attributes(section);
         let mut ordered_codecs = Vec::new();
         let mut seen_pts = HashSet::new();
 
@@ -216,7 +240,9 @@ impl MediaNegotiator {
 
             let codec = codec_by_pt
                 .remove(&pt)
-                .or_else(|| Self::static_codec_for_payload(section, pt));
+                .or_else(|| {
+                    Self::static_codec_for_payload(section, pt, fmtp_by_pt.get(&pt).cloned())
+                });
             if let Some(codec) = codec {
                 ordered_codecs.push(codec);
             }
@@ -364,6 +390,7 @@ impl MediaNegotiator {
             codec: codec_type,
             clock_rate: codec_type.clock_rate(),
             channels: codec_type.channels(),
+            fmtp: codec_type.fmtp().map(str::to_owned),
         }
     }
 
@@ -436,6 +463,7 @@ impl MediaNegotiator {
                     codec: CodecType::TelephoneEvent,
                     clock_rate,
                     channels: 1,
+                    fmtp: CodecType::TelephoneEvent.fmtp().map(str::to_owned),
                 });
             }
         }
@@ -645,6 +673,7 @@ impl MediaNegotiator {
                 | "rtcp-fb"
                 | "rid"
                 | "simulcast"
+                | "ssrc"
                 | "ssrc-group"
         )
     }
@@ -756,7 +785,7 @@ impl MediaNegotiator {
                     key: "rtpmap".to_string(),
                     value: Some(format!("{} {}", pt, Self::codec_info_rtpmap(info))),
                 });
-                if let Some(fmtp) = info.codec.fmtp() {
+                if let Some(fmtp) = info.fmtp.as_deref() {
                     section.attributes.push(Attribute {
                         key: "fmtp".to_string(),
                         value: Some(format!("{} {}", pt, fmtp)),
@@ -1081,12 +1110,14 @@ mod tests {
                 codec: CodecType::G722,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 0,
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
         ];
 
@@ -1122,18 +1153,21 @@ mod tests {
                 codec: CodecType::TelephoneEvent,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: Some("0-16".to_string()),
             },
             CodecInfo {
                 payload_type: 0,
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 8,
                 codec: CodecType::PCMA,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
         ];
 
@@ -1200,24 +1234,28 @@ mod tests {
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 8,
                 codec: CodecType::PCMA,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 9,
                 codec: CodecType::G722,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 18,
                 codec: CodecType::G729,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
         ];
 
@@ -1891,30 +1929,35 @@ a=rtpmap:126 telephone-event/8000\r\n";
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 8,
                 codec: CodecType::PCMA,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 9,
                 codec: CodecType::G722,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 18,
                 codec: CodecType::G729,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 101,
                 codec: CodecType::TelephoneEvent,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: Some("0-16".to_string()),
             },
         ];
         for ci in &codecs {
@@ -1924,6 +1967,27 @@ a=rtpmap:126 telephone-event/8000\r\n";
                 ci.codec
             );
         }
+    }
+
+    #[test]
+    fn test_codec_info_to_audio_capability_preserves_fmtp() {
+        let with_fmtp = CodecInfo {
+            payload_type: 96,
+            codec: CodecType::Opus,
+            clock_rate: 48000,
+            channels: 2,
+            fmtp: Some("useinbandfec=1".to_string()),
+        };
+        let without_fmtp = CodecInfo {
+            fmtp: None,
+            ..with_fmtp.clone()
+        };
+
+        assert_eq!(
+            with_fmtp.to_audio_capability().unwrap().fmtp.as_deref(),
+            Some("useinbandfec=1")
+        );
+        assert_eq!(without_fmtp.to_audio_capability().unwrap().fmtp, None);
     }
 
     /// PSTN caller offers AMR/EVS codecs at dynamic PTs 96/111.
@@ -2132,6 +2196,7 @@ a=fmtp:101 0-15\r\n";
             dtmf[0].payload_type, 101,
             "telephone-event must preserve caller's PT"
         );
+        assert_eq!(dtmf[0].fmtp.as_deref(), Some("0-15"));
     }
 
     /// Symmetric regression: final caller answer selection must
@@ -2170,6 +2235,7 @@ a=fmtp:101 0-15\r\n";
             dtmf[0].payload_type, 101,
             "telephone-event must preserve caller's PT"
         );
+        assert_eq!(dtmf[0].fmtp.as_deref(), Some("0-15"));
     }
 
     #[test]
@@ -2227,6 +2293,53 @@ a=rtpmap:8 PCMA/8000\r\n";
     }
 
     #[test]
+    fn test_rewrite_sdp_codec_list_preserves_offered_audio_fmtp() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.10\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.10\r\n\
+t=0 0\r\n\
+m=audio 10000 RTP/AVP 96 18 101\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+a=fmtp:96 useinbandfec=1\r\n\
+a=fmtp:18 annexb=no\r\n\
+a=rtpmap:101 telephone-event/8000\r\n\
+a=fmtp:101 0-15\r\n";
+
+        let selected = MediaNegotiator::build_codec_list_from_offer(
+            caller_sdp,
+            &[CodecType::Opus, CodecType::G729],
+        );
+        let rewritten = MediaNegotiator::rewrite_sdp_codec_list(caller_sdp, &selected)
+            .expect("rewrite must succeed");
+
+        assert!(rewritten.contains("a=fmtp:96 useinbandfec=1\r\n"));
+        assert!(rewritten.contains("a=fmtp:18 annexb=no\r\n"));
+        assert!(rewritten.contains("a=fmtp:101 0-15\r\n"));
+        assert!(!rewritten.contains("stereo=1"));
+        assert!(!rewritten.contains("a=fmtp:101 0-16\r\n"));
+    }
+
+    #[test]
+    fn test_rewrite_sdp_codec_list_does_not_invent_fmtp_for_offered_codec() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.10\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.10\r\n\
+t=0 0\r\n\
+m=audio 10000 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\n";
+
+        let selected =
+            MediaNegotiator::build_codec_list_from_offer(caller_sdp, &[CodecType::Opus]);
+        let rewritten = MediaNegotiator::rewrite_sdp_codec_list(caller_sdp, &selected)
+            .expect("rewrite must succeed");
+
+        assert!(rewritten.contains("a=rtpmap:96 opus/48000/2\r\n"));
+        assert!(!rewritten.contains("a=fmtp:96 "));
+    }
+
+    #[test]
     fn test_rewrite_sdp_codec_list_uses_dtmf_clock_rate() {
         let caller_sdp = "v=0\r\n\
 o=- 1 1 IN IP4 192.0.2.10\r\n\
@@ -2246,6 +2359,11 @@ a=rtpmap:0 PCMU/8000\r\n";
 
         assert!(rewritten.contains("a=rtpmap:101 telephone-event/8000"));
         assert!(rewritten.contains("a=rtpmap:102 telephone-event/48000"));
+        assert!(rewritten.contains(
+            "a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1\r\n"
+        ));
+        assert!(rewritten.contains("a=fmtp:101 0-16\r\n"));
+        assert!(rewritten.contains("a=fmtp:102 0-16\r\n"));
     }
 
     #[test]
@@ -2299,12 +2417,14 @@ a=rtpmap:0 PCMU/8000\r\n";
                 codec: CodecType::G722,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 0,
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
         ];
         let allowed: Vec<CodecType> = vec![];
@@ -2324,12 +2444,14 @@ a=rtpmap:0 PCMU/8000\r\n";
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
             CodecInfo {
                 payload_type: 18,
                 codec: CodecType::G729,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             },
         ];
         let allowed = vec![CodecType::G729];
@@ -2505,5 +2627,42 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(audio[0].codec, CodecType::PCMU);
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
+    }
+
+    #[test]
+    fn test_sanitize_sdp_for_rtp_peer_removes_webrtc_video_metadata() {
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=video 10000 RTP/AVP 96\r\n\
+            a=mid:1\r\n\
+            a=rtcp-mux\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
+            a=rtcp-fb:96 goog-remb\r\n\
+            a=rtcp-fb:96 transport-cc\r\n\
+            a=rtcp-fb:96 nack\r\n\
+            a=rtcp-fb:96 nack pli\r\n\
+            a=rtcp-fb:96 ccm fir\r\n\
+            a=ssrc:1234 cname:test\r\n\
+            a=ssrc-group:FID 1234 5678\r\n";
+
+        let sanitized = MediaNegotiator::sanitize_sdp_for_rtp_peer(
+            SdpType::Offer,
+            sdp,
+            "test RTP offer",
+        )
+        .unwrap();
+
+        assert!(sanitized.contains("a=rtpmap:96 H264/90000\r\n"));
+        assert!(sanitized.contains("a=fmtp:96 packetization-mode=1"));
+        assert!(!sanitized.contains("a=mid:"));
+        assert!(!sanitized.contains("a=rtcp-mux"));
+        assert!(!sanitized.contains("goog-remb"));
+        assert!(!sanitized.contains("transport-cc"));
+        assert!(!sanitized.contains("a=rtcp-fb:"));
+        assert!(!sanitized.contains("a=ssrc:"));
+        assert!(!sanitized.contains("a=ssrc-group:"));
     }
 }

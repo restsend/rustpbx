@@ -131,23 +131,34 @@ async fn test_media_track_preserves_custom_dtmf_rtpmap() {
                 codec: CodecType::Opus,
                 clock_rate: 48000,
                 channels: 2,
+                fmtp: Some("minptime=10;useinbandfec=1".to_string()),
             },
             negotiate::CodecInfo {
                 payload_type: 101,
                 codec: CodecType::TelephoneEvent,
                 clock_rate: 48000,
                 channels: 1,
+                fmtp: Some("0-16".to_string()),
             },
             negotiate::CodecInfo {
                 payload_type: 97,
                 codec: CodecType::TelephoneEvent,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: Some("0-16".to_string()),
             },
         ])
         .build();
 
     let offer_sdp = track.local_description().await.unwrap();
+    assert!(
+        offer_sdp.contains("a=fmtp:96 minptime=10;useinbandfec=1"),
+        "SDP should preserve the configured Opus fmtp"
+    );
+    assert!(
+        !offer_sdp.contains("stereo=1"),
+        "SDP must not append an unconfigured Opus fmtp parameter"
+    );
     assert!(
         offer_sdp.contains("a=rtpmap:101 telephone-event/48000"),
         "SDP should preserve telephone-event/48000"

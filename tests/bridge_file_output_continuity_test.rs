@@ -53,6 +53,7 @@ async fn test_bridge_file_output_preserves_rtp_continuity_across_replacement() {
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             })
     };
 

@@ -102,6 +102,7 @@ async fn test_file_track_start_playback_uses_codec_info_payload_type() {
             codec: CodecType::PCMU,
             clock_rate: 8000,
             channels: 1,
+            fmtp: None,
         });
 
     track.start_playback_on(Some(pc.clone())).await.unwrap();

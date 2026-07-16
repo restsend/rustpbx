@@ -1431,17 +1431,27 @@ impl SipSession {
             .find(|section| section.kind == rustrtc::MediaKind::Audio)
             .map(|section| section.direction);
 
-        // Bridged WebRTC/RTP renegotiation should use the RTP-safe video set
-        // consistently on both legs, otherwise the browser side can negotiate a
-        // codec the RTP peer was not answered with.
+        // Use one H264 configuration across the bridge. Keep feedback offered
+        // by the WebRTC source in its SAVPF answer, but omit it from the
+        // RTP/AVP-facing capability.
         let allowed_video_codecs = self
             .server
             .proxy_config
             .video_codecs
             .as_deref()
             .unwrap_or(&[]);
-        let bridged_video_caps =
+        let rtp_video_caps =
             Self::filter_video_caps_for_rtp(&source_video_caps, allowed_video_codecs);
+        let source_answer_video_caps = if source_is_webrtc {
+            source_video_caps
+                .iter()
+                .find(|cap| cap.codec_name.eq_ignore_ascii_case("H264"))
+                .cloned()
+                .into_iter()
+                .collect()
+        } else {
+            rtp_video_caps.clone()
+        };
 
         // Obtain bridge peer connections, adding a video track if this is a new video offer
         let (target_pc, source_pc) = {
@@ -1452,7 +1462,7 @@ impl SipSession {
                 .ok_or_else(|| anyhow!("No media bridge available for dialog offer"))?;
 
             if offer_video_active && !bridge.has_video().await {
-                let video_codec = bridged_video_caps
+                let video_codec = rtp_video_caps
                     .first()
                     .ok_or_else(|| anyhow!("Video re-INVITE offer has no video codec"))?;
                 bridge
@@ -1489,7 +1499,7 @@ impl SipSession {
         };
         let target_offer_sdp = Self::build_bridge_outbound_offer(
             &source_desc,
-            &bridged_video_caps,
+            &rtp_video_caps,
             &target_pc,
             offer_sdp,
             &target_offer_codecs,
@@ -1528,7 +1538,7 @@ impl SipSession {
             &source_pc,
             offer_sdp,
             &target_answer_sdp,
-            &bridged_video_caps,
+            &source_answer_video_caps,
             offer_has_video,
             source_is_webrtc,
             target_video_active,
@@ -1918,10 +1928,10 @@ impl SipSession {
 
     /// Filter video capabilities for sending to an RTP/PSTN/IMS leg.
     ///
-    /// - Keeps only codecs whose name (case-insensitive) appears in `allowed_codecs`.
-    ///   If `allowed_codecs` is empty the built-in default `["H264"]` is used.
-    /// - Clears all `rtcp-fb` entries on every kept capability; `RTP/AVP` peers
-    ///   (IMS, PSTN gateways) commonly reject `goog-remb`, `transport-cc`, etc.
+    /// - Keeps only the first H264 capability when H264 is allowed. If
+    ///   `allowed_codecs` is empty the built-in default `["H264"]` is used.
+    /// - Clears RTCP feedback because the generated RTP leg uses `RTP/AVP`,
+    ///   while `a=rtcp-fb` is negotiated by AVPF/SAVPF profiles.
     /// - If the filter produces an empty list, leave video unconfigured instead
     ///   of silently accepting a non-default codec.
     fn filter_video_caps_for_rtp(
@@ -1935,20 +1945,27 @@ impl SipSession {
             allowed_codecs
         };
 
-        caps.iter()
-            .filter(|cap| {
-                effective_allow
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&cap.codec_name))
-            })
-            .map(|cap| rustrtc::VideoCapability {
+        if !effective_allow
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case("H264"))
+        {
+            return vec![];
+        }
+
+        if let Some(cap) = caps
+            .iter()
+            .find(|cap| cap.codec_name.eq_ignore_ascii_case("H264"))
+        {
+            return vec![rustrtc::VideoCapability {
                 payload_type: cap.payload_type,
                 codec_name: cap.codec_name.clone(),
                 clock_rate: cap.clock_rate,
                 fmtp: cap.fmtp.clone(),
                 rtcp_fbs: vec![],
-            })
-            .collect()
+            }];
+        }
+
+        vec![]
     }
 
     fn apply_video_caps_from_source(
@@ -1964,28 +1981,30 @@ impl SipSession {
             .iter_mut()
             .find(|s| s.kind == rustrtc::MediaKind::Video)
         {
-            let mut ordered_caps = Vec::new();
-            let mut seen_pts = HashSet::new();
-
-            for source_cap in caps {
-                let mut matched_local = false;
-                for local_cap in &local_video_caps {
-                    if local_cap
-                        .codec_name
-                        .eq_ignore_ascii_case(&source_cap.codec_name)
-                        && local_cap.clock_rate == source_cap.clock_rate
-                    {
-                        matched_local = true;
-                        if seen_pts.insert(local_cap.payload_type) {
-                            ordered_caps.push(local_cap.clone());
+            let selected_cap = caps.iter().find_map(|source_cap| {
+                local_video_caps
+                    .iter()
+                    .find(|local_cap| {
+                        local_cap
+                            .codec_name
+                            .eq_ignore_ascii_case(&source_cap.codec_name)
+                            && local_cap.clock_rate == source_cap.clock_rate
+                    })
+                    .map(|local_cap| {
+                        if sdp_type == rustrtc::SdpType::Answer {
+                            source_cap.clone()
+                        } else {
+                            rustrtc::VideoCapability {
+                                payload_type: local_cap.payload_type,
+                                codec_name: source_cap.codec_name.clone(),
+                                clock_rate: source_cap.clock_rate,
+                                fmtp: source_cap.fmtp.clone(),
+                                rtcp_fbs: local_cap.rtcp_fbs.clone(),
+                            }
                         }
-                    }
-                }
-
-                if !matched_local && seen_pts.insert(source_cap.payload_type) {
-                    ordered_caps.push(source_cap.clone());
-                }
-            }
+                    })
+            });
+            let ordered_caps: Vec<_> = selected_cap.into_iter().collect();
 
             video_section.formats = ordered_caps
                 .iter()
@@ -2340,7 +2359,47 @@ impl SipSession {
         }
 
         if let Some(target_headers) = &target.headers {
-            headers.extend(target_headers.iter().cloned());
+            headers.extend(
+                target_headers
+                    .iter()
+                    .filter(|header| {
+                        if target.registered_aor.is_none() {
+                            return true;
+                        }
+
+                        let name = header.name();
+                        ![
+                            "Accept",
+                            "Accept-Encoding",
+                            "Accept-Language",
+                            "Allow",
+                            "Authorization",
+                            "Call-ID",
+                            "Contact",
+                            "Content-Length",
+                            "Content-Type",
+                            "CSeq",
+                            "Expires",
+                            "From",
+                            "Max-Forwards",
+                            "Min-SE",
+                            "Path",
+                            "Proxy-Authorization",
+                            "Proxy-Require",
+                            "Record-Route",
+                            "Require",
+                            "Route",
+                            "Session-Expires",
+                            "Supported",
+                            "To",
+                            "User-Agent",
+                            "Via",
+                        ]
+                        .iter()
+                        .any(|excluded| name.eq_ignore_ascii_case(excluded))
+                    })
+                    .cloned(),
+            );
         }
 
         let callee_is_webrtc = target.supports_webrtc;
@@ -6504,22 +6563,37 @@ impl SipSession {
                     Ok(caller_desc) => {
                         let caller_video_caps = caller_desc.to_video_capabilities();
                         if !caller_video_caps.is_empty() {
-                            let bridge_video_caps = if caller_is_webrtc != callee_is_webrtc {
+                            let (webrtc_video_caps, rtp_video_caps) = if caller_is_webrtc
+                                != callee_is_webrtc
+                            {
                                 let allowed_video_codecs = self
                                     .server
                                     .proxy_config
                                     .video_codecs
                                     .as_deref()
                                     .unwrap_or(&[]);
-                                Self::filter_video_caps_for_rtp(
+                                let rtp_video_caps = Self::filter_video_caps_for_rtp(
                                     &caller_video_caps,
                                     allowed_video_codecs,
-                                )
+                                );
+                                let webrtc_video_caps = if caller_is_webrtc {
+                                    caller_video_caps
+                                        .iter()
+                                        .find(|cap| {
+                                            cap.codec_name.eq_ignore_ascii_case("H264")
+                                        })
+                                        .cloned()
+                                        .into_iter()
+                                        .collect()
+                                } else {
+                                    rtp_video_caps.clone()
+                                };
+                                (webrtc_video_caps, rtp_video_caps)
                             } else {
-                                caller_video_caps.clone()
+                                (caller_video_caps.clone(), caller_video_caps.clone())
                             };
 
-                            if bridge_video_caps.is_empty() {
+                            if webrtc_video_caps.is_empty() || rtp_video_caps.is_empty() {
                                 warn!(
                                     session_id = %self.id,
                                     source_codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
@@ -6529,12 +6603,12 @@ impl SipSession {
                                 info!(
                                     session_id = %self.id,
                                     source_codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
-                                    bridge_codecs = ?bridge_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
+                                    bridge_codecs = ?rtp_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
                                     "Video capabilities configured from caller SDP"
                                 );
                                 bridge_builder = bridge_builder
-                                    .with_caller_video_capabilities(bridge_video_caps.clone())
-                                    .with_callee_video_capabilities(bridge_video_caps);
+                                    .with_caller_video_capabilities(webrtc_video_caps)
+                                    .with_callee_video_capabilities(rtp_video_caps);
                             }
                         }
                     }
@@ -6673,8 +6747,11 @@ impl SipSession {
                 if let Ok(caller_desc) =
                     rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer)
                 {
-                    let video_caps: Vec<rustrtc::config::VideoCapability> =
+                    let mut video_caps: Vec<rustrtc::config::VideoCapability> =
                         caller_desc.to_video_capabilities();
+                    if !callee_is_webrtc {
+                        video_caps = Self::filter_video_caps_for_rtp(&video_caps, &[]);
+                    }
                     if !video_caps.is_empty() {
                         track_builder = track_builder.with_video_capabilities(video_caps);
                         info!(
@@ -12273,7 +12350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_video_caps_from_source_keeps_source_order_with_target_payload_types() {
+    fn test_apply_video_caps_from_source_keeps_one_source_h264_configuration() {
         let generated_offer = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
@@ -12304,17 +12381,53 @@ a=rtcp-fb:104 nack\r\n";
         )
         .unwrap();
 
-        assert!(reordered.contains("m=video 9 UDP/TLS/RTP/SAVPF 103 107 96\r\n"));
+        assert!(reordered.contains("m=video 9 UDP/TLS/RTP/SAVPF 103\r\n"));
         assert!(reordered.contains("a=rtpmap:103 H264/90000\r\n"));
-        assert!(reordered.contains("a=rtpmap:107 H264/90000\r\n"));
-        assert!(reordered.contains("a=rtpmap:96 VP8/90000\r\n"));
-        assert!(reordered.contains("a=fmtp:103 "));
-        assert!(reordered.contains("a=fmtp:107 "));
+        assert!(reordered.contains("a=fmtp:103 profile-level-id=42801F\r\n"));
+        assert!(!reordered.contains("a=rtpmap:107 H264/90000\r\n"));
+        assert!(!reordered.contains("a=rtpmap:96 VP8/90000\r\n"));
         assert!(!reordered.contains("a=rtpmap:104 VP9/90000\r\n"));
         assert!(!reordered.contains("a=rtcp-fb:104 "));
     }
 
-    /// Default allowlist (empty slice) keeps only H264 and strips rtcp-fb.
+    #[test]
+    fn test_apply_video_caps_to_answer_preserves_offer_payload_and_fmtp() {
+        let generated_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 4000 UDP/TLS/RTP/SAVPF 96\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+        let source_caps = vec![
+            make_video_cap(96, "H265", None, &[]),
+            make_video_cap(
+                97,
+                "H264",
+                Some("profile-level-id=42801F"),
+                &["nack pli", "ccm fir"],
+            ),
+        ];
+
+        let answer = SipSession::apply_video_caps_from_source(
+            rustrtc::SdpType::Answer,
+            generated_answer,
+            "test answer",
+            &source_caps,
+        )
+        .unwrap();
+
+        assert!(answer.contains("m=video 4000 UDP/TLS/RTP/SAVPF 97\r\n"));
+        assert!(answer.contains("a=rtpmap:97 H264/90000\r\n"));
+        assert!(answer.contains("a=fmtp:97 profile-level-id=42801F\r\n"));
+        assert!(answer.contains("a=rtcp-fb:97 nack pli\r\n"));
+        assert!(answer.contains("a=rtcp-fb:97 ccm fir\r\n"));
+        assert!(!answer.contains("a=rtpmap:96 H264/90000\r\n"));
+        assert!(!answer.contains("packetization-mode=1"));
+    }
+
+    /// Default allowlist keeps one H264 and strips feedback from the RTP leg.
     #[test]
     fn test_filter_video_caps_default_keeps_h264_only() {
         let caps = vec![
@@ -12322,7 +12435,13 @@ a=rtcp-fb:104 nack\r\n";
                 96,
                 "H264",
                 Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
-                &["goog-remb", "transport-cc", "nack"],
+                &[
+                    "goog-remb",
+                    "transport-cc",
+                    "nack",
+                    "nack pli",
+                    "ccm fir",
+                ],
             ),
             make_video_cap(97, "VP8", None, &["goog-remb", "transport-cc"]),
             make_video_cap(98, "VP9", None, &["goog-remb"]),
@@ -12333,11 +12452,11 @@ a=rtcp-fb:104 nack\r\n";
         assert_eq!(result.len(), 1, "only H264 should survive");
         assert_eq!(result[0].codec_name, "H264");
         assert_eq!(result[0].payload_type, 96);
-        assert!(result[0].rtcp_fbs.is_empty(), "rtcp_fbs must be cleared");
+        assert!(result[0].rtcp_fbs.is_empty());
         assert!(result[0].fmtp.is_some(), "fmtp should be preserved");
     }
 
-    /// Explicit allowlist is respected (case-insensitive).
+    /// An explicit allowlist permits H264 but cannot enable another video codec.
     #[test]
     fn test_filter_video_caps_explicit_allowlist() {
         let caps = vec![
@@ -12346,18 +12465,30 @@ a=rtcp-fb:104 nack\r\n";
             make_video_cap(98, "H265", None, &[]),
         ];
 
-        let allowed = vec!["H264".to_string(), "h265".to_string()]; // mixed case
+        let allowed = vec!["h265".to_string(), "H264".to_string()];
         let result = SipSession::filter_video_caps_for_rtp(&caps, &allowed);
 
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
         assert_eq!(result[0].codec_name, "H264");
-        assert_eq!(result[1].codec_name, "H265");
         assert!(result.iter().all(|c| c.rtcp_fbs.is_empty()));
     }
 
-    /// All rtcp-fb attributes are always cleared regardless of allowlist.
     #[test]
-    fn test_filter_video_caps_rtcp_fb_always_cleared() {
+    fn test_filter_video_caps_rejects_allowlist_without_h264() {
+        let caps = vec![
+            make_video_cap(96, "H264", Some("profile-level-id=42e01f"), &[]),
+            make_video_cap(98, "H265", None, &[]),
+        ];
+        let allowed = vec!["H265".to_string()];
+
+        let result = SipSession::filter_video_caps_for_rtp(&caps, &allowed);
+
+        assert!(result.is_empty());
+    }
+
+    /// The RTP/AVP leg does not advertise AVPF feedback.
+    #[test]
+    fn test_filter_video_caps_strips_all_rtcp_feedback() {
         let caps = vec![make_video_cap(
             96,
             "H264",
@@ -12367,10 +12498,7 @@ a=rtcp-fb:104 nack\r\n";
 
         let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
 
-        assert!(
-            result[0].rtcp_fbs.is_empty(),
-            "every rtcp-fb must be stripped"
-        );
+        assert!(result[0].rtcp_fbs.is_empty());
     }
 
     /// Default allowlist does not fall back to non-H264 codecs.
@@ -12416,9 +12544,9 @@ a=rtcp-fb:104 nack\r\n";
         assert_eq!(result[0].fmtp.as_deref(), Some(fmtp));
     }
 
-    /// Multiple H264 profiles (e.g. different profile-level-id) are all kept.
+    /// Multiple H264 profiles are reduced to the first offered profile.
     #[test]
-    fn test_filter_video_caps_multiple_h264_profiles_all_kept() {
+    fn test_filter_video_caps_keeps_first_h264_profile_only() {
         let caps = vec![
             make_video_cap(96, "H264", Some("profile-level-id=42e01f"), &["goog-remb"]),
             make_video_cap(97, "VP8", None, &["transport-cc"]),
@@ -12426,9 +12554,10 @@ a=rtcp-fb:104 nack\r\n";
         ];
 
         let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
-        assert_eq!(result.len(), 2, "both H264 profiles should be kept");
-        assert!(result.iter().all(|c| c.codec_name == "H264"));
-        assert!(result.iter().all(|c| c.rtcp_fbs.is_empty()));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].payload_type, 96);
+        assert_eq!(result[0].fmtp.as_deref(), Some("profile-level-id=42e01f"));
+        assert!(result[0].rtcp_fbs.is_empty());
     }
 
     // ── DTMF payload building ─────────────────────────────────────────────

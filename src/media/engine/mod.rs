@@ -408,6 +408,7 @@ impl EngineCore {
                         codec: audio_codec::CodecType::PCMU,
                         clock_rate: 8000,
                         channels: 1,
+                        fmtp: None,
                     };
                     let codec = endpoint_codecs.first().cloned().unwrap_or(fallback);
                     (bridge, endpoint, codec)
@@ -708,6 +709,7 @@ impl EngineCore {
                         codec: audio_codec::CodecType::PCMU,
                         clock_rate: 8000,
                         channels: 1,
+                        fmtp: None,
                     };
                     let cc = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
                         fallback.clone()

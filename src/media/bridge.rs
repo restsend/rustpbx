@@ -1638,7 +1638,7 @@ impl BridgePeer {
     /// Handle a Track event for one direction.
     async fn process_track_event(
         bridge_id: &str,
-        _source_pc: &PeerConnection,
+        source_pc: &PeerConnection,
         dir: &DirectionParams,
         common: &ForwardTrackArgs,
         sub_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -1717,7 +1717,13 @@ impl BridgePeer {
             Self::prune_sub_tasks(sub_tasks).await;
             sub_tasks.lock().push(h);
 
-            if let Err(e) = track.request_key_frame().await {
+            let source_ready = if source_pc.config().transport_mode == TransportMode::WebRtc {
+                let state_rx = source_pc.subscribe_peer_state();
+                *state_rx.borrow() == rustrtc::PeerConnectionState::Connected
+            } else {
+                true
+            };
+            if source_ready && let Err(e) = track.request_key_frame().await {
                 debug!(
                     bridge_id = %bridge_id,
                     source_track = %track.id(),
@@ -2526,22 +2532,13 @@ impl BridgePeerBuilder {
     }
 
     fn default_video_capabilities() -> Vec<rustrtc::config::VideoCapability> {
-        vec![
-            rustrtc::config::VideoCapability {
-                payload_type: 96,
-                codec_name: "H264".to_string(),
-                clock_rate: 90000,
-                fmtp: Some("packetization-mode=1".to_string()),
-                rtcp_fbs: vec![],
-            },
-            rustrtc::config::VideoCapability {
-                payload_type: 97,
-                codec_name: "VP8".to_string(),
-                clock_rate: 90000,
-                fmtp: None,
-                rtcp_fbs: vec![],
-            },
-        ]
+        vec![rustrtc::config::VideoCapability {
+            payload_type: 96,
+            codec_name: "H264".to_string(),
+            clock_rate: 90000,
+            fmtp: Some("packetization-mode=1".to_string()),
+            rtcp_fbs: vec![],
+        }]
     }
 
     fn resolve_video_caps(
@@ -2673,6 +2670,15 @@ mod tests {
             .finalize()
             .map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn test_default_video_capabilities_do_not_add_rtcp_feedback() {
+        let caps = BridgePeerBuilder::default_video_capabilities();
+
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].codec_name, "H264");
+        assert!(caps[0].rtcp_fbs.is_empty());
     }
 
     #[test]
@@ -2925,6 +2931,7 @@ mod tests {
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             });
 
         bridge
@@ -2983,6 +2990,7 @@ mod tests {
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             });
 
         bridge
@@ -3042,6 +3050,7 @@ mod tests {
             codec: CodecType::PCMU,
             clock_rate: 8000,
             channels: 1,
+            fmtp: None,
         };
         let caller_track = FileTrack::new("bridge-eof-both-caller".to_string())
             .with_path(caller_file.to_string_lossy().to_string())
@@ -3116,6 +3125,7 @@ mod tests {
                 codec: CodecType::PCMU,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             });
 
         bridge

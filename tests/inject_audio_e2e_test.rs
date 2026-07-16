@@ -127,6 +127,7 @@ fn codec_info() -> CodecInfo {
         codec: CodecType::PCMU,
         clock_rate: 8000,
         channels: 1,
+        fmtp: None,
     }
 }
 
