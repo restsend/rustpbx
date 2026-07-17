@@ -587,7 +587,9 @@ impl ProxyModule for RegistrarModule {
                         .map(|t| matches!(t, Transport::Ws | Transport::Wss))
                         .unwrap_or(false);
                     let is_invalid = entry.uri().host().to_string().contains(".invalid");
-                    (is_ws && is_invalid) || user.is_support_webrtc
+                    let dest_is_ws =
+                        matches!(destination.r#type, Some(Transport::Ws | Transport::Wss));
+                    (is_ws && is_invalid) || dest_is_ws || user.is_support_webrtc
                 },
                 credential: None,
                 headers: Some(headers),

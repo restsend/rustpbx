@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trunk_context_does_not_match_inbound_dest_only() {
+    async fn trunk_context_matches_inbound_dest_only() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
         let mut config = ProxyConfig::default();
 
@@ -614,10 +614,11 @@ mod tests {
             None,
         );
 
-        assert!(
-            acl.is_from_trunk_context(&source_ip, &request)
-                .is_none()
-        );
+        let ctx = acl
+            .is_from_trunk_context(&source_ip, &request)
+            .expect("dest-only trunk should now match inbound source IP");
+        assert_eq!(ctx.id, Some(144));
+        assert_eq!(ctx.name, "inbound-dest-only");
     }
 
     #[tokio::test]

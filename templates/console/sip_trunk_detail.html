@@ -214,7 +214,7 @@ default('RustPBX') }}{% endblock %}
                             <textarea rows="4" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
-                            <p class="text-xs text-sky-600">One IP, CIDR range, or hostname per line. Leave empty to allow all</p>
+                            <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_allowed_ips_hint" | t }}</p>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_outbound_proxy" | t }}

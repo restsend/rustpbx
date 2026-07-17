@@ -901,6 +901,7 @@ field_to_prefix_hint = "Leave blank to accept all destinations."
 section_acl = "Access lists"
 field_allowed_ips = "Allowed IPs (one per line)"
 field_allowed_ips_placeholder = "203.0.113.10/32\n198.51.100.5/32"
+field_allowed_ips_hint = "One IP, CIDR range, or hostname per line. When empty, the trunk destination IP is also used for inbound matching."
 field_did_numbers = "DID numbers (one per line)"
 field_did_numbers_placeholder = "+85258001234\n+85258004567"
 

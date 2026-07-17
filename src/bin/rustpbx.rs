@@ -249,6 +249,12 @@ struct Cli {
 enum Commands {
     /// Validate configuration and exit without starting the server
     CheckConfig,
+    /// Dump database DDL schema to stdout
+    Dump {
+        /// Database URL (overrides the config's database_url)
+        #[clap(short, long)]
+        database_url: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -268,6 +274,16 @@ fn main() -> Result<()> {
         println!("Loading default config");
         Config::default()
     };
+
+    // ---- Handle one-shot commands before starting the server ----------------
+    if let Some(Commands::Dump { database_url }) = &cli.command {
+        let url = database_url
+            .clone()
+            .unwrap_or(config.database_url.clone());
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(dump_ddl(&url))?;
+        return Ok(());
+    }
 
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
@@ -650,6 +666,67 @@ fn main() -> Result<()> {
 
     eprintln!("Shutting down media runtime ...");
     media_runtime.shutdown_timeout(std::time::Duration::from_secs(10));
+
+    Ok(())
+}
+
+async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let db = rustpbx::models::create_db(database_url).await?;
+    let backend = db.get_database_backend();
+
+    let show_tables_sql = match backend {
+        sea_orm::DbBackend::MySql => "SHOW TABLES".to_string(),
+        sea_orm::DbBackend::Sqlite => {
+            "SELECT name FROM sqlite_master WHERE type='table' \
+             AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_sqlx_%'"
+                .to_string()
+        }
+        sea_orm::DbBackend::Postgres => {
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public'"
+                .to_string()
+        }
+    };
+
+    let rows = db
+        .query_all(Statement::from_string(backend.clone(), show_tables_sql))
+        .await?;
+
+    let mut tables: Vec<String> = Vec::new();
+    for row in &rows {
+        let name: String = row.try_get_by_index(0usize)?;
+        tables.push(name);
+    }
+    tables.sort();
+
+    for table in &tables {
+        let (ddl_sql, ddl_idx) = match backend {
+            sea_orm::DbBackend::MySql => (format!("SHOW CREATE TABLE `{}`", table), 1usize),
+            sea_orm::DbBackend::Sqlite => (
+                format!(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'",
+                    table
+                ),
+                0usize,
+            ),
+            sea_orm::DbBackend::Postgres => {
+                println!("-- TABLE: {} (not supported)", table);
+                continue;
+            }
+        };
+
+        let result = db
+            .query_one(Statement::from_string(backend.clone(), ddl_sql))
+            .await?;
+
+        if let Some(row) = result {
+            let ddl: String = row.try_get_by_index(ddl_idx)?;
+            if !ddl.is_empty() {
+                println!("{};\n", ddl);
+            }
+        }
+    }
 
     Ok(())
 }

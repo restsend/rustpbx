@@ -1355,9 +1355,14 @@ impl CallModule {
                                     debug!(
                                         aor = %target.aor,
                                         destination = %dest,
+                                        webrtc = loc.supports_webrtc,
                                         "resolved target destination via locator"
                                     );
                                     target.destination = Some(dest);
+                                    target.supports_webrtc = loc.supports_webrtc;
+                                    if target.transport.is_none() {
+                                        target.transport = loc.transport;
+                                    }
                                 }
                             }
                         }
@@ -3431,6 +3436,7 @@ mod tests {
                     aor: aor.clone(),
                     expires: 3600,
                     destination: Some(expected_destination.clone()),
+                    supports_webrtc: true,
                     last_modified: Some(std::time::Instant::now()),
                     ..Default::default()
                 },
@@ -3472,6 +3478,10 @@ mod tests {
                             if let Some(loc) = locs.first() {
                                 if let Some(dest) = loc.destination.clone() {
                                     target.destination = Some(dest);
+                                    target.supports_webrtc = loc.supports_webrtc;
+                                    if target.transport.is_none() {
+                                        target.transport = loc.transport;
+                                    }
                                 }
                             }
                         }
@@ -3494,6 +3504,10 @@ mod tests {
             .expect("destination should be resolved via locator");
         assert_eq!(resolved.addr.to_string(), "192.168.1.100:5060");
         assert_eq!(resolved.r#type, Some(rsipstack::sip::Transport::Udp));
+        assert!(
+            targets[0].supports_webrtc,
+            "supports_webrtc must propagate from locator result into target"
+        );
     }
 
     #[tokio::test]
@@ -3572,6 +3586,10 @@ mod tests {
                             if let Some(loc) = locs.first() {
                                 if let Some(dest) = loc.destination.clone() {
                                     target.destination = Some(dest);
+                                    target.supports_webrtc = loc.supports_webrtc;
+                                    if target.transport.is_none() {
+                                        target.transport = loc.transport;
+                                    }
                                 }
                             }
                         }

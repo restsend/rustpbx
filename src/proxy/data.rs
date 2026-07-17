@@ -210,6 +210,30 @@ impl ProxyDataContext {
         }
     }
 
+    /// Try to parse a trunk `dest` field into an `IpNet` for ACL inbound matching.
+    /// Handles bare IP, IP:port, CIDR, and `sip:`/`sips:` prefixed variants.
+    /// Returns `None` for hostnames (no DNS resolution during config reload).
+    fn dest_to_ipnet(dest: &str) -> Option<IpNet> {
+        let dest = dest.trim().trim_matches(|c| c == '<' || c == '>');
+        let dest = dest
+            .strip_prefix("sip:")
+            .or_else(|| dest.strip_prefix("sips:"))
+            .unwrap_or(dest);
+        if dest.is_empty() {
+            return None;
+        }
+        if let Ok(network) = dest.parse::<IpNet>() {
+            return Some(network.trunc());
+        }
+        if let Ok(socket) = dest.parse::<SocketAddr>() {
+            return Some(IpNet::from(socket.ip()));
+        }
+        if let Ok(ip) = dest.parse::<IpAddr>() {
+            return Some(IpNet::from(ip));
+        }
+        None
+    }
+
     pub async fn reload_trunks(
         &self,
         generated_toml: bool,
@@ -310,6 +334,24 @@ impl ProxyDataContext {
                 let candidates = acl_inbound_trunks.entry(network).or_default();
                 if !candidates.contains(name) {
                     candidates.push(name.clone());
+                }
+            }
+
+            // Also index the trunk's dest and backup_dest so that inbound
+            // traffic from those source IPs is recognised as trunk traffic
+            // even when inbound_hosts is not explicitly set.
+            if let Some(network) = Self::dest_to_ipnet(&trunk.dest) {
+                let candidates = acl_inbound_trunks.entry(network).or_default();
+                if !candidates.contains(name) {
+                    candidates.push(name.clone());
+                }
+            }
+            if let Some(ref backup) = trunk.backup_dest {
+                if let Some(network) = Self::dest_to_ipnet(backup) {
+                    let candidates = acl_inbound_trunks.entry(network).or_default();
+                    if !candidates.contains(name) {
+                        candidates.push(name.clone());
+                    }
                 }
             }
         }
@@ -1661,5 +1703,71 @@ mod tests {
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert!(trunk.ringback.is_none(), "no metadata → no ringback");
+    }
+
+    #[test]
+    fn dest_to_ipnet_bare_ip() {
+        let net = ProxyDataContext::dest_to_ipnet("192.168.1.1");
+        assert_eq!(net, Some("192.168.1.1/32".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_ip_with_port() {
+        let net = ProxyDataContext::dest_to_ipnet("61.169.80.210:7731");
+        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_cidr() {
+        let net = ProxyDataContext::dest_to_ipnet("10.0.0.0/24");
+        assert_eq!(net, Some("10.0.0.0/24".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_sip_prefix() {
+        let net = ProxyDataContext::dest_to_ipnet("sip:192.168.1.1");
+        assert_eq!(net, Some("192.168.1.1/32".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_sip_with_port() {
+        let net = ProxyDataContext::dest_to_ipnet("sip:61.169.80.210:7731");
+        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_sips_with_port() {
+        let net = ProxyDataContext::dest_to_ipnet("sips:61.169.80.210:5061");
+        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_hostname_returns_none() {
+        let net = ProxyDataContext::dest_to_ipnet("sip.provider.com");
+        assert_eq!(net, None);
+    }
+
+    #[test]
+    fn dest_to_ipnet_hostname_with_port_returns_none() {
+        let net = ProxyDataContext::dest_to_ipnet("sip.provider.com:5060");
+        assert_eq!(net, None);
+    }
+
+    #[test]
+    fn dest_to_ipnet_empty_returns_none() {
+        let net = ProxyDataContext::dest_to_ipnet("");
+        assert_eq!(net, None);
+    }
+
+    #[test]
+    fn dest_to_ipnet_ipv6() {
+        let net = ProxyDataContext::dest_to_ipnet("[::1]:5060");
+        assert_eq!(net, Some("::1/128".parse().unwrap()));
+    }
+
+    #[test]
+    fn dest_to_ipnet_sip_ipv6() {
+        let net = ProxyDataContext::dest_to_ipnet("sip:[::1]:5060");
+        assert_eq!(net, Some("::1/128".parse().unwrap()));
     }
 }

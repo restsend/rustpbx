@@ -901,6 +901,7 @@ field_to_prefix_hint = "留空则接受所有目的地。"
 section_acl = "访问控制列表"
 field_allowed_ips = "允许的IP（每行一个）"
 field_allowed_ips_placeholder = "203.0.113.10/32\n198.51.100.5/32"
+field_allowed_ips_hint = "每行一个 IP 地址、CIDR 范围或主机名。留空时，中继的目标 IP 也会用于入站匹配。"
 field_did_numbers = "DID号码（每行一个）"
 field_did_numbers_placeholder = "+85258001234\n+85258004567"
 

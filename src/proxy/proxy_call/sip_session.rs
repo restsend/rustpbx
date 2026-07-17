@@ -64,6 +64,7 @@ use rsipstack::dialog::{
     dialog::TransactionHandle, server_dialog::ServerInviteDialog,
 };
 use rsipstack::sip::StatusCode;
+use rsipstack::sip::Transport;
 use rsipstack::transport::SipAddr;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -2398,7 +2399,7 @@ impl SipSession {
             );
         }
 
-        let callee_is_webrtc = target.supports_webrtc;
+        let callee_is_webrtc = Self::callee_supports_webrtc(target);
         let leg_id = leg_id_override.unwrap_or("callee");
         self.legs.set_transport(
             crate::call::domain::LegId::from(leg_id),
@@ -4924,7 +4925,7 @@ impl SipSession {
         &mut self,
         target: &crate::call::Location,
     ) -> Option<Vec<u8>> {
-        let callee_is_webrtc = target.supports_webrtc;
+        let callee_is_webrtc = Self::callee_supports_webrtc(target);
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_sdp = if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
             self.media.callee_offer_uses_media_bridge = false;
@@ -5581,6 +5582,19 @@ impl SipSession {
 
     fn is_callee_webrtc(&self) -> bool {
         self.legs.callee_is_webrtc()
+    }
+
+    fn callee_supports_webrtc(target: &Location) -> bool {
+        if target.supports_webrtc {
+            return true;
+        }
+        if matches!(
+            target.destination.as_ref().and_then(|d| d.r#type),
+            Some(Transport::Ws | Transport::Wss)
+        ) {
+            return true;
+        }
+        matches!(target.transport, Some(Transport::Ws | Transport::Wss))
     }
 
     /// Resolve bridge endpoint for a leg from leg_transport.
@@ -10760,6 +10774,58 @@ mod tests {
             &local_addrs,
             true
         ));
+    }
+
+    #[test]
+    fn test_callee_supports_webrtc_fallbacks() {
+        fn loc(supports_webrtc: bool, dest_type: Option<rsipstack::sip::Transport>) -> Location {
+            Location {
+                supports_webrtc,
+                destination: dest_type.map(|t| SipAddr {
+                    r#type: Some(t),
+                    addr: rsipstack::sip::HostWithPort::try_from("198.51.100.10:5060").unwrap(),
+                }),
+                ..Default::default()
+            }
+        }
+
+        // Explicit flag wins regardless of transport.
+        assert!(SipSession::callee_supports_webrtc(&loc(true, None)));
+
+        // Regression: flag lost but resolved destination is WebSocket must still
+        // classify the leg as WebRTC (otherwise a WSS/WebRTC callee receives a
+        // plain RTP/AVP offer and rejects it with 488).
+        assert!(SipSession::callee_supports_webrtc(&loc(
+            false,
+            Some(rsipstack::sip::Transport::Wss)
+        )));
+        assert!(SipSession::callee_supports_webrtc(&loc(
+            false,
+            Some(rsipstack::sip::Transport::Ws)
+        )));
+
+        // Plain UDP/TCP destinations are not WebRTC.
+        assert!(!SipSession::callee_supports_webrtc(&loc(
+            false,
+            Some(rsipstack::sip::Transport::Udp)
+        )));
+        assert!(!SipSession::callee_supports_webrtc(&loc(
+            false,
+            Some(rsipstack::sip::Transport::Tcp)
+        )));
+
+        // No destination, but registered transport is WebSocket.
+        assert!(SipSession::callee_supports_webrtc(&Location {
+            supports_webrtc: false,
+            transport: Some(rsipstack::sip::Transport::Wss),
+            ..Default::default()
+        }));
+
+        // Nothing WebRTC at all.
+        assert!(!SipSession::callee_supports_webrtc(&Location {
+            supports_webrtc: false,
+            ..Default::default()
+        }));
     }
 
     #[test]
