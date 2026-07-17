@@ -48,6 +48,22 @@ fn archive_config_path(config_path: &Option<String>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("archive.toml"))
 }
 
+/// Encode the JSON columns (`tags`, `leg_timeline`, and `metadata`) as JSON text for CSV.
+fn archive_csv_record(
+    mut record: crate::models::call_record::Model,
+) -> crate::models::call_record::Model {
+    record.tags = record
+        .tags
+        .map(|value| serde_json::Value::String(value.to_string()));
+    record.leg_timeline = record
+        .leg_timeline
+        .map(|value| serde_json::Value::String(value.to_string()));
+    record.metadata = record
+        .metadata
+        .map(|value| serde_json::Value::String(value.to_string()));
+    record
+}
+
 impl Default for ArchiveAddon {
     fn default() -> Self {
         Self::new()
@@ -57,6 +73,75 @@ impl Default for ArchiveAddon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_csv_record_serializes_json_columns_as_text() {
+        let now = Utc::now();
+        let record = crate::models::call_record::Model {
+            id: 1,
+            call_id: "call-1".to_string(),
+            display_id: None,
+            direction: "inbound".to_string(),
+            status: "completed".to_string(),
+            started_at: now,
+            ended_at: Some(now),
+            duration_secs: 10,
+            from_number: Some("1001".to_string()),
+            to_number: Some("1002".to_string()),
+            caller_name: None,
+            agent_name: None,
+            queue: None,
+            department_id: None,
+            extension_id: None,
+            sip_trunk_id: None,
+            outbound_sip_trunk_id: None,
+            route_id: None,
+            sip_gateway: None,
+            rewrite_original_from: None,
+            rewrite_original_to: None,
+            caller_uri: None,
+            callee_uri: None,
+            recording_url: None,
+            recording_duration_secs: None,
+            has_transcript: false,
+            transcript_status: "none".to_string(),
+            transcript_language: None,
+            tags: Some(serde_json::json!(["customer", "priority"])),
+            leg_timeline: Some(serde_json::json!({"events": []})),
+            metadata: Some(serde_json::json!({"account_id": "123"})),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+
+        let mut old_writer = csv::Writer::from_writer(Vec::new());
+        let error = old_writer.serialize(&record).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("serializing maps is not supported")
+        );
+
+        let mut writer = csv::Writer::from_writer(Vec::new());
+        writer.serialize(archive_csv_record(record)).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        let mut reader = csv::Reader::from_reader(bytes.as_slice());
+        let headers = reader.headers().unwrap().clone();
+        let row = reader.records().next().unwrap().unwrap();
+
+        assert_eq!(
+            row.get(headers.iter().position(|h| h == "tags").unwrap()),
+            Some(r#"["customer","priority"]"#)
+        );
+        assert_eq!(
+            row.get(headers.iter().position(|h| h == "leg_timeline").unwrap()),
+            Some(r#"{"events":[]}"#)
+        );
+        assert_eq!(
+            row.get(headers.iter().position(|h| h == "metadata").unwrap()),
+            Some(r#"{"account_id":"123"}"#)
+        );
+    }
 
     #[test]
     fn archive_config_path_uses_main_config_directory() {
@@ -283,14 +368,15 @@ impl ArchiveAddon {
                     break;
                 }
 
+                let batch_len = batch.len();
                 let batch_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
                 last_id = *batch_ids.last().unwrap();
 
-                for record in &batch {
-                    wtr.serialize(record)?;
+                for record in batch {
+                    wtr.serialize(archive_csv_record(record))?;
                 }
-                day_archived += batch.len();
-                total_archived += batch.len();
+                day_archived += batch_len;
+                total_archived += batch_len;
 
                 call_record::Entity::delete_many()
                     .filter(call_record::Column::Id.is_in(batch_ids))
@@ -504,13 +590,14 @@ impl ArchiveAddon {
                     break;
                 }
 
+                let batch_len = batch.len();
                 let batch_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
                 last_id = *batch_ids.last().unwrap();
 
-                for record in &batch {
-                    wtr.serialize(record)?;
+                for record in batch {
+                    wtr.serialize(archive_csv_record(record))?;
                 }
-                total_archived += batch.len();
+                total_archived += batch_len;
 
                 // Delete this batch from DB immediately to keep memory bounded
                 call_record::Entity::delete_many()
