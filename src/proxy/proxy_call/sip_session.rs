@@ -1963,6 +1963,7 @@ impl SipSession {
                 clock_rate: cap.clock_rate,
                 fmtp: cap.fmtp.clone(),
                 rtcp_fbs: vec![],
+                ..Default::default()
             }];
         }
 
@@ -2001,6 +2002,7 @@ impl SipSession {
                                 clock_rate: source_cap.clock_rate,
                                 fmtp: source_cap.fmtp.clone(),
                                 rtcp_fbs: local_cap.rtcp_fbs.clone(),
+                                ..Default::default()
                             }
                         }
                     })

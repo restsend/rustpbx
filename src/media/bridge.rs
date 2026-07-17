@@ -2538,6 +2538,7 @@ impl BridgePeerBuilder {
             clock_rate: 90000,
             fmtp: Some("packetization-mode=1".to_string()),
             rtcp_fbs: vec![],
+            ..Default::default()
         }]
     }
 
