@@ -81,7 +81,7 @@ impl ProxyDataContext {
             trunk_registrar,
             debug_routes: RwLock::new(HashMap::new()),
         };
-        let _ = ctx.reload_trunks(false, None).await?;
+        let _ = ctx.reload_trunks(true, None).await?;
         let _ = ctx.reload_queues(false, None).await?;
         let _ = ctx.reload_routes(false, None).await?;
         let _ = ctx.reload_acl_rules(false, None)?;
@@ -1536,6 +1536,84 @@ fn extract_string_array(value: Option<serde_json::value::Value>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+
+    #[tokio::test]
+    async fn startup_generates_and_loads_active_trunks_from_database() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let manager = SchemaManager::new(&db);
+        sip_trunk::Migration
+            .up(&manager)
+            .await
+            .expect("create sip trunk table");
+
+        let active = sip_trunk::ActiveModel {
+            name: Set("database-inbound".to_string()),
+            direction: Set(sip_trunk::SipTrunkDirection::Inbound),
+            allowed_ips: Set(Some(serde_json::json!(["203.0.113.10"]))),
+            is_active: Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert active trunk");
+        sip_trunk::ActiveModel {
+            name: Set("inactive-database-inbound".to_string()),
+            direction: Set(sip_trunk::SipTrunkDirection::Inbound),
+            allowed_ips: Set(Some(serde_json::json!(["203.0.113.11"]))),
+            is_active: Set(false),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert inactive trunk");
+
+        let generated_dir = tempfile::tempdir().expect("create temporary generated config dir");
+        let mut config = ProxyConfig::default();
+        config.acl_rules = None;
+        config.generated_dir = generated_dir
+            .path()
+            .to_string_lossy()
+            .to_string();
+
+        let context = ProxyDataContext::new(Arc::new(config), Some(db))
+            .await
+            .expect("initialize proxy data without a generated trunk file");
+        let trunks = context.trunks_snapshot();
+
+        assert_eq!(
+            context.acl_rules_snapshot(),
+            vec!["allow all".to_string(), "deny all".to_string()]
+        );
+        assert_eq!(trunks.len(), 1);
+        let trunk = trunks
+            .get("database-inbound")
+            .expect("active database trunk should be loaded at startup");
+        assert_eq!(trunk.id, Some(active.id));
+        assert_eq!(trunk.inbound_hosts, vec!["203.0.113.10"]);
+        assert!(!trunks.contains_key("inactive-database-inbound"));
+        assert!(
+            generated_dir
+                .path()
+                .join("trunks/trunks.generated.toml")
+                .exists()
+        );
+        let source_network = IpNet::from(
+            "203.0.113.10"
+                .parse::<IpAddr>()
+                .expect("parse inbound source IP"),
+        );
+        assert!(
+            context
+                .acl_inbound_trunks
+                .load()
+                .cover_values(&source_network)
+                .any(|names| names.iter().any(|name| name == "database-inbound"))
+        );
+    }
 
     #[test]
     fn slugify_queue_name_strips_whitespace() {
