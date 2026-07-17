@@ -8,7 +8,7 @@
 
 mod helpers;
 
-use helpers::audio_verifier::{compute_rms, generate_sine_wav, has_audio_content, read_wav_mono};
+use helpers::audio_verifier::{generate_sine_wav, read_wav_mono};
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TestPbx, TestPbxInject};
 use rustpbx::call::SipUser;
