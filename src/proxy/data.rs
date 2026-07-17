@@ -8,6 +8,7 @@ use prefix_trie::joint::JointPrefixMap;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     fs,
     io::ErrorKind,
@@ -306,11 +307,33 @@ impl ProxyDataContext {
         let len = trunks.len();
         let mut acl_inbound_trunks: JointPrefixMap<IpNet, Vec<String>> =
             JointPrefixMap::new();
-        for (name, trunk) in &trunks {
-            if matches!(trunk.direction, Some(TrunkDirection::Outbound)) {
-                continue;
-            }
+        let mut inbound_trunks = trunks
+            .iter()
+            .filter(|(_, trunk)| !matches!(trunk.direction, Some(TrunkDirection::Outbound)))
+            .collect::<Vec<_>>();
+        // Candidate order is static: caller prefix, callee prefix, then database ID.
+        inbound_trunks.sort_by_key(|(_, trunk)| {
+            let from_len = trunk
+                .incoming_from_user_prefix
+                .as_deref()
+                .map(str::trim)
+                .map(str::len)
+                .unwrap_or(0);
+            let to_len = trunk
+                .incoming_to_user_prefix
+                .as_deref()
+                .map(str::trim)
+                .map(str::len)
+                .unwrap_or(0);
 
+            (
+                Reverse(from_len),
+                Reverse(to_len),
+                trunk.id.unwrap_or(i64::MAX),
+            )
+        });
+
+        for (name, trunk) in inbound_trunks {
             for host in &trunk.inbound_hosts {
                 let host = host.trim().trim_matches(|c| c == '<' || c == '>');
                 if host.is_empty() {

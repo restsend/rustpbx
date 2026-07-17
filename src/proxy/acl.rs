@@ -280,12 +280,10 @@ impl AclModule {
                     continue;
                 };
                 if let Some((from_user, to_user)) = &invite_users
-                    && trunk
-                        .matches_incoming_user_prefixes(
-                            from_user.as_deref(),
-                            to_user.as_deref(),
-                        )
-                        .is_err()
+                    && !trunk.matches_incoming_user_prefixes(
+                        from_user.as_deref(),
+                        to_user.as_deref(),
+                    )
                 {
                     continue;
                 }
@@ -759,6 +757,102 @@ mod tests {
                 .id,
             Some(200)
         );
+    }
+
+    #[tokio::test]
+    async fn trunk_context_prefers_longest_incoming_user_prefix_matches() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20));
+        let mut config = ProxyConfig::default();
+        config.generated_dir = format!(
+            "target/test-generated/acl-trunk-prefix-order-{}",
+            std::process::id()
+        );
+        config.trunks.insert(
+            "short-caller-long-callee".to_string(),
+            TrunkConfig {
+                id: Some(301),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![source_ip.to_string()],
+                incoming_from_user_prefix: Some("12".to_string()),
+                incoming_to_user_prefix: Some("123456".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "long-caller-no-callee".to_string(),
+            TrunkConfig {
+                id: Some(302),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![source_ip.to_string()],
+                incoming_from_user_prefix: Some("123".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "long-caller-long-callee".to_string(),
+            TrunkConfig {
+                id: Some(303),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![source_ip.to_string()],
+                incoming_from_user_prefix: Some("123".to_string()),
+                incoming_to_user_prefix: Some("1234".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "same-match-higher-id".to_string(),
+            TrunkConfig {
+                id: Some(304),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![source_ip.to_string()],
+                incoming_from_user_prefix: Some("123".to_string()),
+                incoming_to_user_prefix: Some("1234".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "same-match-no-id".to_string(),
+            TrunkConfig {
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec![source_ip.to_string()],
+                incoming_from_user_prefix: Some("123".to_string()),
+                incoming_to_user_prefix: Some("1234".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let (server, config) = create_test_server_with_config(config).await;
+        {
+            let inbound_trunks = server.data_context.acl_inbound_trunks.load();
+            let candidates = inbound_trunks
+                .get(&ipnet::IpNet::from(source_ip))
+                .expect("source IP should have inbound trunk candidates");
+            assert_eq!(
+                candidates.iter().map(String::as_str).collect::<Vec<_>>(),
+                vec![
+                    "long-caller-long-callee",
+                    "same-match-higher-id",
+                    "same-match-no-id",
+                    "long-caller-no-callee",
+                    "short-caller-long-callee",
+                ]
+            );
+        }
+        let acl = AclModule::with_server(config, Some(server));
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "123456789",
+            None,
+            "rustpbx.com",
+            None,
+        );
+
+        let context = acl
+            .is_from_trunk_context(&source_ip, &request)
+            .expect("the most specific trunk should match");
+
+        assert_eq!(context.id, Some(303));
+        assert_eq!(context.name, "long-caller-long-callee");
     }
 
     #[test]

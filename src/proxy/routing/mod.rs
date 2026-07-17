@@ -330,64 +330,26 @@ impl TrunkConfig {
         false
     }
 
-    pub fn matches_incoming_user_prefixes(
+    pub(crate) fn matches_incoming_user_prefixes(
         &self,
         from_user: Option<&str>,
         to_user: Option<&str>,
-    ) -> Result<bool, PrefixMismatch> {
-        if let Some(pattern) = &self.incoming_from_user_prefix {
-            let candidate = from_user.unwrap_or_default();
-            if pattern.trim().is_empty() {
-                // Treat empty string as unset
-            } else if !matches_user_prefix(pattern, candidate).map_err(|e| PrefixMismatch {
-                field: "from_user".to_string(),
-                expected: pattern.clone(),
-                actual: format!("{} (pattern error: {})", candidate, e),
-            })? {
-                return Err(PrefixMismatch {
-                    field: "from_user".to_string(),
-                    expected: pattern.clone(),
-                    actual: candidate.to_string(),
-                });
-            }
+    ) -> bool {
+        if let Some(pattern) = &self.incoming_from_user_prefix
+            && !pattern.trim().is_empty()
+            && !matches_user_prefix(pattern, from_user.unwrap_or_default())
+        {
+            return false;
         }
 
-        if let Some(pattern) = &self.incoming_to_user_prefix {
-            let candidate = to_user.unwrap_or_default();
-            if pattern.trim().is_empty() {
-                // Treat empty string as unset
-            } else if !matches_user_prefix(pattern, candidate).map_err(|e| PrefixMismatch {
-                field: "to_user".to_string(),
-                expected: pattern.clone(),
-                actual: format!("{} (pattern error: {})", candidate, e),
-            })? {
-                return Err(PrefixMismatch {
-                    field: "to_user".to_string(),
-                    expected: pattern.clone(),
-                    actual: candidate.to_string(),
-                });
-            }
+        if let Some(pattern) = &self.incoming_to_user_prefix
+            && !pattern.trim().is_empty()
+            && !matches_user_prefix(pattern, to_user.unwrap_or_default())
+        {
+            return false;
         }
 
-        Ok(true)
-    }
-}
-
-/// Detailed information about a prefix mismatch for SIP Reason header
-#[derive(Debug, Clone)]
-pub struct PrefixMismatch {
-    pub field: String,
-    pub expected: String,
-    pub actual: String,
-}
-
-impl std::fmt::Display for PrefixMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "prefix mismatch: {} expected '{}', got '{}'",
-            self.field, self.expected, self.actual
-        )
+        true
     }
 }
 
@@ -1024,10 +986,10 @@ fn split_host_port(input: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn matches_user_prefix(pattern: &str, value: &str) -> Result<bool> {
+fn matches_user_prefix(pattern: &str, value: &str) -> bool {
     let trimmed = pattern.trim();
     if trimmed.is_empty() {
-        return Ok(true);
+        return true;
     }
 
     let mut is_regex = false;
@@ -1042,12 +1004,12 @@ fn matches_user_prefix(pattern: &str, value: &str) -> Result<bool> {
     }
 
     if !is_regex {
-        return Ok(value.starts_with(trimmed));
+        return value.starts_with(trimmed);
     }
 
-    let regex =
-        Regex::new(trimmed).map_err(|err| anyhow!("invalid regex '{}': {}", trimmed, err))?;
-    Ok(regex.is_match(value))
+    Regex::new(trimmed)
+        .map(|regex| regex.is_match(value))
+        .unwrap_or(false)
 }
 
 /// Resolve a transport enum from a lowercase string (e.g. "udp", "tcp", "tls", "ws", "wss").
