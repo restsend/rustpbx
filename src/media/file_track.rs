@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use audio_codec::create_encoder;
 use rustrtc::{
-    Attribute, MediaKind, PeerConnection, RtcConfiguration,
+    Attribute, MediaKind, PeerConnection, RtcConfiguration, config::BufferDropStrategy,
     RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
     media::{AudioFrame, MediaSample},
 };
@@ -108,6 +108,7 @@ impl FileTrack {
     pub fn new(track_id: String) -> Self {
         let config = RtcConfiguration {
             transport_mode: TransportMode::Rtp,
+            buffer_drop_strategy: BufferDropStrategy::DropOldest,
             ..Default::default()
         };
 
@@ -223,6 +224,7 @@ impl FileTrack {
             bind_ip,
             ssrc_start: rand::random::<u32>(),
             cname: self.cname.clone(),
+            buffer_drop_strategy: BufferDropStrategy::DropOldest,
             ..Default::default()
         };
 

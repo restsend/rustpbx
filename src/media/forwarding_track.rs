@@ -46,6 +46,12 @@ pub struct ForwardingTrack {
     dtmf_timing: Mutex<Option<RtpTiming>>,
     recorder_tx: Option<mpsc::Sender<(Leg, SharedMediaSample)>>,
     sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
+    /// Optional egress capture for sipflow: captures the post-transcode/remap
+    /// sample (what the target side hears) instead of the ingress. Used for the
+    /// callee→caller direction to capture caller's egress as Leg::B.
+    egress_sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
+    /// Leg tag for egress sipflow capture.
+    egress_leg: Option<Leg>,
     receive_clock: ReceiveTimestampClock,
     recorder_leg: Leg,
     dtmf_mapping: Mutex<Option<DtmfMapping>>,
@@ -68,6 +74,37 @@ impl ForwardingTrack {
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
     ) -> Self {
+        Self::with_egress(
+            track_id,
+            inner,
+            recorder_tx,
+            sipflow_tx,
+            None,
+            None,
+            recorder_leg,
+            ingress_profile,
+            egress_profile,
+        )
+    }
+
+    /// Extended constructor with egress sipflow channel.
+    ///
+    /// When `egress_sipflow_tx` is `Some`, the post-transcode/remap sample
+    /// (output of `recv()`) is also teed to that channel with the given
+    /// `egress_leg` tag. This is used for the callee→caller direction to
+    /// capture the caller's egress (what caller hears) as Leg::B, instead
+    /// of the callee's raw ingress.
+    pub fn with_egress(
+        track_id: String,
+        inner: Arc<dyn MediaStreamTrack>,
+        recorder_tx: Option<mpsc::Sender<(Leg, SharedMediaSample)>>,
+        sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
+        egress_sipflow_tx: Option<mpsc::Sender<(Leg, SharedMediaSample, u64)>>,
+        egress_leg: Option<Leg>,
+        recorder_leg: Leg,
+        ingress_profile: NegotiatedLegProfile,
+        egress_profile: NegotiatedLegProfile,
+    ) -> Self {
         Self {
             track_id,
             inner,
@@ -81,6 +118,8 @@ impl ForwardingTrack {
             dtmf_timing: Mutex::new(None),
             recorder_tx,
             sipflow_tx,
+            egress_sipflow_tx,
+            egress_leg,
             receive_clock: ReceiveTimestampClock::new(),
             recorder_leg,
             dtmf_mapping: Mutex::new(None),
@@ -213,6 +252,22 @@ impl ForwardingTrack {
         if let (Some(tx), Some(shared)) = (&self.sipflow_tx, &shared) {
             if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros)) {
                 trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
+            }
+        }
+    }
+
+    /// Tee the post-transcode/remap sample (egress) to sipflow capture channels.
+    /// This captures what the target side hears (caller's egress) rather than the
+    /// source side's ingress.
+    #[inline]
+    fn tee_egress_to_capture_channels(&self, sample: &MediaSample) {
+        if !matches!(sample, MediaSample::Audio(_)) {
+            return;
+        }
+        if let (Some(tx), Some(leg)) = (&self.egress_sipflow_tx, self.egress_leg) {
+            let received_at_micros = self.receive_clock.now_micros();
+            if let Err(e) = tx.try_send((leg, Arc::new(sample.clone()), received_at_micros)) {
+                trace!(track_id = %self.track_id, "ForwardingTrack egress sipflow channel full: {e}");
             }
         }
     }
@@ -387,14 +442,21 @@ impl MediaStreamTrack for ForwardingTrack {
                 }
 
                 if let Some(result) = self.try_map_dtmf(frame, &dtmf_mapping, matched_dtmf) {
+                    // Capture the post-remap egress (caller's output)
+                    self.tee_egress_to_capture_channels(&result);
                     return Ok(result);
                 }
 
                 if let Some(result) = self.try_transcode_audio(frame, &audio_mapping, matched_audio) {
+                    // Capture the post-transcode egress (caller's output)
+                    self.tee_egress_to_capture_channels(&result);
                     return Ok(result);
                 }
             }
 
+            // No remap/transcode needed: the ingress is returned as the egress.
+            // Capture this as the egress for callee→caller direction.
+            self.tee_egress_to_capture_channels(&sample);
             return Ok(sample);
         }
     }
@@ -1170,5 +1232,117 @@ mod tests {
         if let MediaSample::Audio(f) = &*channel_sample {
             assert_eq!(f.payload_type, Some(0), "recorder channel PT should be ingress PCMU");
         }
+    }
+
+    // ── C8: egress sipflow captures post-transcode sample as Leg::B ────
+
+    #[tokio::test]
+    async fn egress_sipflow_captures_post_transcode_as_leg_b() {
+        use audio_codec::CodecType;
+
+        let (egress_sf_tx, mut egress_sf_rx) =
+            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+        let (_, mut ingress_sf_rx) =
+            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+
+        // PCMU ingress → PCMA egress (transcoding needed)
+        let ingress = make_profile_with_dtmf(CodecType::PCMU, 0, None);
+        let egress = make_profile_with_dtmf(CodecType::PCMA, 8, None);
+
+        let sample = audio_sample(0 /* PCMU */);
+        let track = OneShotTrack::new(sample);
+
+        // callee→caller direction: ingress sipflow = None, egress sipflow = Some
+        let ft = ForwardingTrack::with_egress(
+            "test-ft-c8".into(),
+            track,
+            None, // no recorder channel
+            None, // no ingress sipflow (callee ingress should NOT be captured)
+            Some(egress_sf_tx),
+            Some(Leg::B), // egress tagged as Leg::B (caller's output)
+            Leg::B,
+            ingress,
+            egress,
+        );
+
+        let result = ft.recv().await.unwrap();
+        // The returned sample is the transcoded egress.
+        if let MediaSample::Audio(f) = &result {
+            assert_eq!(f.payload_type, Some(8), "egress output PT should be PCMA");
+        }
+
+        // Ingress sipflow channel should NOT receive anything (set to None).
+        assert!(
+            ingress_sf_rx.try_recv().is_err(),
+            "ingress sipflow must be empty (None passed)"
+        );
+
+        // Egress sipflow channel must receive the post-transcode sample as Leg::B.
+        let (leg, sf_sample, received_at_micros) = egress_sf_rx
+            .try_recv()
+            .expect("egress sipflow channel must have sample");
+        assert_eq!(leg, Leg::B, "egress sipflow must be tagged Leg::B");
+        assert!(received_at_micros > 0);
+        if let MediaSample::Audio(f) = &*sf_sample {
+            assert_eq!(
+                f.payload_type, Some(8),
+                "egress sipflow sample PT should be PCMA (post-transcode)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn egress_sipflow_unset_does_not_capture() {
+        // Without egress_sipflow_tx, no egress capture should happen.
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+        let sample = audio_sample(0);
+        let track = OneShotTrack::new(sample);
+
+        // Using new() (not with_egress) → no egress capture configured
+        let ft = ForwardingTrack::new(
+            "test-ft-c8b".into(), track, None, Some(sf_tx), Leg::A,
+            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+        );
+
+        ft.recv().await.unwrap();
+
+        // Ingress sipflow should have captured the sample as Leg::A.
+        let (leg, _, _) = sf_rx.try_recv().expect("ingress sipflow must receive sample");
+        assert_eq!(leg, Leg::A);
+
+        // There should be only one sample in the sipflow channel (no duplicate egress).
+        assert!(sf_rx.try_recv().is_err(), "sipflow must not have a second sample from egress");
+    }
+
+    #[tokio::test]
+    async fn egress_sipflow_no_transcode_captures_unchanged_sample() {
+        // When no transcoding is needed, the egress is the same as the ingress.
+        let (egress_sf_tx, mut egress_sf_rx) =
+            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+
+        // Same codec → no transcoding needed
+        let profile = make_profile_with_dtmf(audio_codec::CodecType::PCMU, 0, None);
+
+        let sample = audio_sample(0 /* PCMU */);
+        let track = OneShotTrack::new(sample);
+
+        let ft = ForwardingTrack::with_egress(
+            "test-ft-c8c".into(),
+            track,
+            None,
+            None,
+            Some(egress_sf_tx),
+            Some(Leg::B),
+            Leg::B,
+            profile.clone(),
+            profile,
+        );
+
+        ft.recv().await.unwrap();
+
+        let (leg, _, _) = egress_sf_rx
+            .try_recv()
+            .expect("egress sipflow must receive sample even without transcoding");
+        assert_eq!(leg, Leg::B);
     }
 }

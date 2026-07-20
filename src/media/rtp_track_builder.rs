@@ -1,6 +1,6 @@
 use audio_codec::CodecType;
 use rustrtc::{
-    IceServer, IceTransportPolicy, TransportMode, RtcConfiguration,
+    IceServer, IceTransportPolicy, TransportMode, RtcConfiguration, config::BufferDropStrategy,
     config::VideoCapability,
 };
 use tokio_util::sync::CancellationToken;
@@ -178,6 +178,7 @@ impl RtpTrackBuilder {
             ssrc_start: rand::random::<u32>(),
             sdp_compatibility,
             cname: self.cname,
+            buffer_drop_strategy: BufferDropStrategy::DropOldest,
             ..Default::default()
         };
 

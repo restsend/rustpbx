@@ -1109,6 +1109,23 @@ impl SipServer {
             }
         });
 
+        // Spawn active_calls Prometheus gauge sampling task
+        let registry_for_metrics = self.inner.active_call_registry.clone();
+        let metrics_cancel = cancel_token.clone();
+        crate::utils::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = metrics_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let count = registry_for_metrics.count();
+                        crate::metrics::sip::set_active_dialogs(count);
+                    }
+                }
+            }
+        });
+
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!("cancelled");
@@ -1176,7 +1193,7 @@ impl SipServer {
             if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency
                 && runnings_tx.load(Ordering::Relaxed) >= max_concurrency
             {
-                info!(
+                warn!(
                     key = %tx.key,
                     runnings = runnings_tx.load(Ordering::Relaxed),
                     "max concurrency reached, not process this transaction"

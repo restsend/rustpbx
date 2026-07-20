@@ -224,15 +224,16 @@ fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
         }
     };
 
-    let (src_ip, src_port) = if !item.src_addr.is_empty() {
+    let is_synth = |s: &str| s.is_empty() || s == "synth";
+    let (src_ip, src_port) = if !is_synth(&item.src_addr) {
         parse_addr(&item.src_addr)
     } else {
-        (IpAddr::from([127, 0, 0, 1]), default_port)
+        (IpAddr::from([0, 0, 0, 0]), default_port)
     };
-    let (dst_ip, dst_port) = if !item.dst_addr.is_empty() {
+    let (dst_ip, dst_port) = if !is_synth(&item.dst_addr) {
         parse_addr(&item.dst_addr)
     } else {
-        (IpAddr::from([127, 0, 0, 1]), default_port)
+        (IpAddr::from([0, 0, 0, 0]), default_port)
     };
 
     let msg_type = match item.msg_type {

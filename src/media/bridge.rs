@@ -50,6 +50,7 @@ use anyhow::Result;
 use audio_codec::CodecType as AudioCodecType;
 use rustrtc::{
     IceServer, PeerConnection, PeerConnectionEvent, RtpCodecParameters, RtpSender, TransportMode,
+    config::BufferDropStrategy,
     media::{
         AudioFrame, MediaError, MediaKind, MediaSample, MediaStreamTrack, SampleStreamSource,
         SampleStreamTrack,
@@ -543,6 +544,15 @@ impl EgressTap {
                     self.synth_ssrc,
                 );
                 f.raw_packet = Some(RtpPacket::new(header, f.data.to_vec()));
+                // Stamp a sentinel source_addr for synthesized egress samples
+                // (e.g. IVR, DTMF, hold music) so sipflow export never shows
+                // 127.0.0.1:0.
+                if f.source_addr.is_none() {
+                    f.source_addr = Some(std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+                        1,
+                    ));
+                }
             }
             let _ = tx.try_send((leg, Arc::new(synth), self.receive_clock.now_micros()));
         }
@@ -2530,6 +2540,14 @@ pub struct BridgePeerBuilder {
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     recording_paused: Arc<AtomicBool>,
     sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
+    /// Extra receiver interceptors for the caller PC (recording/tapping).
+    caller_receiver_interceptors: Vec<Arc<dyn rustrtc::RtpReceiverInterceptor>>,
+    /// Extra sender interceptors for the caller PC.
+    caller_sender_interceptors: Vec<Arc<dyn rustrtc::RtpSenderInterceptor>>,
+    /// Extra receiver interceptors for the callee PC.
+    callee_receiver_interceptors: Vec<Arc<dyn rustrtc::RtpReceiverInterceptor>>,
+    /// Extra sender interceptors for the callee PC.
+    callee_sender_interceptors: Vec<Arc<dyn rustrtc::RtpSenderInterceptor>>,
     cname: Option<String>,
     rtp_timeout: Option<std::time::Duration>,
     rtp_timeout_tx: Option<mpsc::Sender<String>>,
@@ -2558,6 +2576,10 @@ impl BridgePeerBuilder {
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
             sipflow_tx: None,
+            caller_receiver_interceptors: Vec::new(),
+            caller_sender_interceptors: Vec::new(),
+            callee_receiver_interceptors: Vec::new(),
+            callee_sender_interceptors: Vec::new(),
             cname: None,
             rtp_timeout: None,
             rtp_timeout_tx: None,
@@ -2694,6 +2716,42 @@ impl BridgePeerBuilder {
         self
     }
 
+    /// Install a receiver interceptor on the caller PC (fires on incoming RTP).
+    pub fn with_caller_receiver_interceptor(
+        mut self,
+        i: Arc<dyn rustrtc::RtpReceiverInterceptor>,
+    ) -> Self {
+        self.caller_receiver_interceptors.push(i);
+        self
+    }
+
+    /// Install a sender interceptor on the caller PC (fires on outgoing RTP).
+    pub fn with_caller_sender_interceptor(
+        mut self,
+        i: Arc<dyn rustrtc::RtpSenderInterceptor>,
+    ) -> Self {
+        self.caller_sender_interceptors.push(i);
+        self
+    }
+
+    /// Install a receiver interceptor on the callee PC (fires on incoming RTP).
+    pub fn with_callee_receiver_interceptor(
+        mut self,
+        i: Arc<dyn rustrtc::RtpReceiverInterceptor>,
+    ) -> Self {
+        self.callee_receiver_interceptors.push(i);
+        self
+    }
+
+    /// Install a sender interceptor on the callee PC (fires on outgoing RTP).
+    pub fn with_callee_sender_interceptor(
+        mut self,
+        i: Arc<dyn rustrtc::RtpSenderInterceptor>,
+    ) -> Self {
+        self.callee_sender_interceptors.push(i);
+        self
+    }
+
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
@@ -2758,8 +2816,24 @@ impl BridgePeerBuilder {
                 sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
                 ice_servers: self.ice_servers,
                 cname: self.cname.clone(),
+                buffer_drop_strategy: BufferDropStrategy::DropOldest,
                 ..Default::default()
             });
+
+        // Inject caller-side recording interceptors into the caller PC config.
+        let mut caller_config = caller_config;
+        for i in &self.caller_receiver_interceptors {
+            caller_config
+                .recorder_interceptors
+                .receivers
+                .push(i.clone());
+        }
+        for i in &self.caller_sender_interceptors {
+            caller_config
+                .recorder_interceptors
+                .senders
+                .push(i.clone());
+        }
 
         let callee_media_caps =
             self.callee_audio_capabilities
@@ -2784,12 +2858,26 @@ impl BridgePeerBuilder {
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: self.rtp_sdp_compatibility,
                 cname: self.cname.clone(),
+                buffer_drop_strategy: BufferDropStrategy::DropOldest,
                 ..Default::default()
             });
 
-        let mut caller_config = caller_config;
-        caller_config.label = Some(format!("{}-caller", self.bridge_id));
+        // Inject callee-side recording interceptors into the callee PC config.
         let mut callee_config = callee_config;
+        for i in &self.callee_receiver_interceptors {
+            callee_config
+                .recorder_interceptors
+                .receivers
+                .push(i.clone());
+        }
+        for i in &self.callee_sender_interceptors {
+            callee_config
+                .recorder_interceptors
+                .senders
+                .push(i.clone());
+        }
+
+        caller_config.label = Some(format!("{}-caller", self.bridge_id));
         callee_config.label = Some(format!("{}-callee", self.bridge_id));
 
         let (caller_pc, callee_pc) = {
@@ -2972,6 +3060,7 @@ mod tests {
             transport_mode: TransportMode::Rtp,
             rtp_start_port: Some(26000),
             rtp_end_port: Some(26100),
+            buffer_drop_strategy: BufferDropStrategy::DropOldest,
             ..Default::default()
         };
         let bridge = BridgePeerBuilder::new("sip2sip-test".to_string())

@@ -801,7 +801,7 @@ impl SipSession {
                         src_addr: frame
                             .source_addr
                             .map(|addr| addr.to_string())
-                            .unwrap_or_default(),
+                            .unwrap_or_else(|| "synth".to_string()),
                         dst_addr: String::new(),
                         payload: bytes::Bytes::from(rtp_bytes),
                     };
@@ -811,6 +811,42 @@ impl SipSession {
         });
 
         Some(tx)
+    }
+
+    /// Build RecorderTap interceptors for the caller PC.
+    ///
+    /// Returns `(recv_tap, send_tap)` suitable for injection into
+    /// `BridgePeerBuilder::with_caller_receiver_interceptor` /
+    /// `with_caller_sender_interceptor`. The taps write directly to the file
+    /// recorder + sipflow backend — no channel, no drain task.
+    ///
+    /// Returns `None` when recording is disabled.
+    fn build_recorder_taps(
+        &self,
+    ) -> Option<(
+        std::sync::Arc<crate::media::recorder_tap::RecorderTap>,
+        std::sync::Arc<crate::media::recorder_tap::RecorderTap>,
+    )> {
+        if !self.context.dialplan.recording.enabled {
+            return None;
+        }
+
+        let call_id = self.context.session_id.clone();
+        let sipflow = if !self.context.dialplan.recording.force_file {
+            self.server
+                .sip_flow
+                .as_ref()
+                .and_then(|sf| sf.backend())
+        } else {
+            None
+        };
+
+        Some(crate::media::recorder_tap::build_caller_interceptors(
+            Some(self.recorder.clone()),
+            sipflow,
+            call_id,
+            self.recording_paused.clone(),
+        ))
     }
 
     #[inline]
@@ -4143,6 +4179,7 @@ impl SipSession {
                 external_ip: self.context.dialplan.media.external_ip.clone(),
                 bind_ip: self.context.dialplan.media.bind_ip.clone(),
                 cname: Some(self.server.rtc_cname.clone()),
+                buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
                 ..Default::default()
             };
             bridge_builder = bridge_builder.with_callee_config(callee_config);
@@ -4200,15 +4237,21 @@ impl SipSession {
             bridge_builder = bridge_builder.with_sender_codecs(caller_sender, callee_sender);
         }
 
-        if self.context.dialplan.recording.enabled {
-            bridge_builder =
-                bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
-        }
-        if self.context.dialplan.recording.enabled && !self.context.dialplan.recording.force_file {
-            if let Some(sipflow_tx) =
-                self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
-            {
-                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+        // Install interceptor-based recording on the SIP caller's bridge PC.
+        // Use `leg_bridge_endpoint` to determine which bridge side the SIP
+        // caller is on — avoids duplicating the webrtc/rtp mapping logic.
+        if let Some((recv_tap, send_tap)) = self.build_recorder_taps() {
+            match self.leg_bridge_endpoint(&LegId::from("caller")) {
+                BridgeEndpoint::Caller => {
+                    bridge_builder = bridge_builder
+                        .with_caller_receiver_interceptor(recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>)
+                        .with_caller_sender_interceptor(send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>);
+                }
+                BridgeEndpoint::Callee => {
+                    bridge_builder = bridge_builder
+                        .with_callee_receiver_interceptor(recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>)
+                        .with_callee_sender_interceptor(send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>);
+                }
             }
         }
 
@@ -4273,6 +4316,7 @@ impl SipSession {
             ssrc_start: rand::random::<u32>(),
             sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
             cname: Some(self.server.rtc_cname.clone()),
+            buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
             ..Default::default()
         };
         callee_config.label = Some(format!("{}-app-bridge-callee-webrtc", self.id));
@@ -5655,16 +5699,17 @@ impl SipSession {
 
         let session_id = &self.context.session_id;
 
-        // When the app media bridge is active (IVR / app calls), it handles
-        // all forwarding and recording via its own bidirectional forwarder +
-        // EgressTap. Skip the entire ForwardingTrack slow path to avoid
-        // recv() contention on the bridge's PeerConnection and duplicate
-        // sipflow capture (the bridge already created its own sipflow channel
-        // in create_app_caller_media_bridge).
-        if self.media.caller_answer_uses_media_bridge {
+        // When a media bridge (app bridge OR transport bridge) is active,
+        // it handles all forwarding and recording via its own bidirectional
+        // forwarder + EgressTap. Skip the entire ForwardingTrack slow path
+        // to avoid recv() contention on the bridge's PeerConnection and
+        // duplicate sipflow capture (the bridge already created its own
+        // sipflow channel in create_app_caller_media_bridge or
+        // create_callee_track).
+        if self.media.media_bridge.is_some() {
             info!(
                 session_id = %session_id,
-                "Anchored media: app bridge active, skipping ForwardingTrack"
+                "Anchored media: media bridge active, skipping ForwardingTrack"
             );
             self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
             return;
@@ -5805,8 +5850,12 @@ impl SipSession {
     ) {
         use crate::media::recorder::Leg;
         let session_id = self.context.session_id.clone();
-        // The same sipflow capture sink feeds both directions.
-        let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
+        // Only capture the caller→callee ingress (Leg::A = caller's mic) for
+        // the sipflow file channel. The callee→caller direction captures its
+        // egress (post-transcode output = what caller hears) as Leg::B instead
+        // of the callee's raw ingress. This matches the BridgePeer semantics
+        // where Leg::A = caller input, Leg::B = caller output.
+        let egress_sipflow_tx = sipflow_tx.clone();
 
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
@@ -5816,7 +5865,7 @@ impl SipSession {
             callee_profile.clone(),
             shared_recorder.clone(),
             Leg::A,
-            caller_sipflow_tx,
+            sipflow_tx,
             &session_id,
             "caller→callee",
         ) {
@@ -5837,7 +5886,7 @@ impl SipSession {
             }
         }
 
-        match Self::wire_with_forwarding_track(
+        match Self::wire_with_forwarding_track_egress(
             Self::CALLEE_FORWARDING_TRACK_ID,
             callee_pc,
             caller_pc,
@@ -5845,7 +5894,9 @@ impl SipSession {
             caller_profile,
             shared_recorder,
             Leg::B,
-            callee_sipflow_tx,
+            None, // No ingress sipflow capture for callee→caller
+            egress_sipflow_tx,
+            Some(Leg::B),
             &session_id,
             "callee→caller",
         ) {
@@ -6303,6 +6354,33 @@ impl SipSession {
         session_id: &str,
         direction: &str,
     ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
+        Self::wire_with_forwarding_track_egress(
+            track_id, source_pc, target_pc, ingress_profile, egress_profile,
+            recorder, leg, sipflow_tx, None, None, session_id, direction,
+        )
+    }
+
+    /// Extended variant that also wires an egress sipflow capture channel.
+    ///
+    /// When `egress_sipflow_tx` is `Some`, the post-transcode/remap sample
+    /// (what the target side hears) is captured to that channel tagged with
+    /// `egress_leg`. This is used for the callee→caller direction to capture
+    /// the caller's egress (Leg::B) instead of the callee's raw ingress.
+    #[allow(clippy::too_many_arguments)]
+    fn wire_with_forwarding_track_egress(
+        track_id: &str,
+        source_pc: &rustrtc::PeerConnection,
+        target_pc: &rustrtc::PeerConnection,
+        ingress_profile: crate::media::negotiate::NegotiatedLegProfile,
+        egress_profile: crate::media::negotiate::NegotiatedLegProfile,
+        recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
+        leg: crate::media::recorder::Leg,
+        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
+        egress_sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
+        egress_leg: Option<crate::media::recorder::Leg>,
+        session_id: &str,
+        direction: &str,
+    ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
         use crate::media::forwarding_track::ForwardingTrack;
 
         let source_transceiver = source_pc
@@ -6362,15 +6440,29 @@ impl SipSession {
             tx
         };
 
-        let forwarding = Arc::new(ForwardingTrack::new(
-            track_id.to_string(),
-            receiver_track,
-            Some(recorder_tx),
-            sipflow_tx,
-            leg,
-            ingress_profile,
-            egress_profile,
-        ));
+        let forwarding = if egress_sipflow_tx.is_some() {
+            Arc::new(ForwardingTrack::with_egress(
+                track_id.to_string(),
+                receiver_track,
+                Some(recorder_tx),
+                sipflow_tx,
+                egress_sipflow_tx,
+                egress_leg,
+                leg,
+                ingress_profile,
+                egress_profile,
+            ))
+        } else {
+            Arc::new(ForwardingTrack::new(
+                track_id.to_string(),
+                receiver_track,
+                Some(recorder_tx),
+                sipflow_tx,
+                leg,
+                ingress_profile,
+                egress_profile,
+            ))
+        };
 
         let mut sender_builder = rustrtc::RtpSender::builder(
             forwarding.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
@@ -6587,6 +6679,7 @@ impl SipSession {
                     external_ip: self.context.dialplan.media.external_ip.clone(),
                     bind_ip: self.context.dialplan.media.bind_ip.clone(),
                     cname: Some(self.server.rtc_cname.clone()),
+                    buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
                     ..Default::default()
                 };
                 bridge_builder = bridge_builder.with_callee_config(callee_config);
@@ -6754,18 +6847,19 @@ impl SipSession {
                 );
             }
 
-            // Attach recorder to bridge so audio is captured when recording starts
-            if self.context.dialplan.recording.enabled {
-                bridge_builder = bridge_builder
-                    .with_recorder(self.recorder.clone(), self.recording_paused.clone());
-            }
-            if self.context.dialplan.recording.enabled
-                && !self.context.dialplan.recording.force_file
-            {
-                if let Some(sipflow_tx) =
-                    self.setup_sipflow_capture(&self.context.session_id, &self.context.session_id)
-                {
-                    bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+            // Install interceptor-based recording on the SIP caller's bridge PC.
+            if let Some((recv_tap, send_tap)) = self.build_recorder_taps() {
+                match self.leg_bridge_endpoint(&LegId::from("caller")) {
+                    BridgeEndpoint::Caller => {
+                        bridge_builder = bridge_builder
+                            .with_caller_receiver_interceptor(recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>)
+                            .with_caller_sender_interceptor(send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>);
+                    }
+                    BridgeEndpoint::Callee => {
+                        bridge_builder = bridge_builder
+                            .with_callee_receiver_interceptor(recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>)
+                            .with_callee_sender_interceptor(send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>);
+                    }
                 }
             }
 
@@ -7088,6 +7182,9 @@ impl SipSession {
         }
 
         self.meta.answer_time = Some(Instant::now());
+
+        let elapsed = self.context.start_time.elapsed().as_secs_f64();
+        crate::metrics::sip::invite_latency_seconds(elapsed, "inbound");
 
         let session_id = self.id.to_string();
         let caller = self

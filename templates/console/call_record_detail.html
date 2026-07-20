@@ -246,9 +246,9 @@
                                         <span>Stream</span>
                                         <select
                                             class="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            x-model="playbackStream" @change="onRecordingStreamChange()">
+                                            @change="onRecordingStreamChange($event)">
                                             <template x-for="option in playbackStreamOptions" :key="option.value">
-                                                <option :value="option.value" x-text="option.label"></option>
+                                                <option :value="option.value" x-text="option.label" :selected="option.value === playbackStream"></option>
                                             </template>
                                         </select>
                                     </label>
@@ -863,7 +863,7 @@
             waveformOriginalBuffer: null,
             waveformSourceUrl: '',
             waveformTriedFallback: false,
-            playbackStream: 'A',
+            playbackStream: 'mixed',
             playbackStreamOptions: [
                 { value: 'A', label: 'Caller (A)' },
                 { value: 'B', label: 'Callee (B)' },
@@ -1851,10 +1851,10 @@
                 if (normalized === 'mixed') {
                     return 'mixed';
                 }
-                return 'A';
+                return 'mixed';
             },
-            onRecordingStreamChange() {
-                this.playbackStream = this.normalizePlaybackStream(this.playbackStream);
+            onRecordingStreamChange(e) {
+                this.playbackStream = this.normalizePlaybackStream(e && e.target ? e.target.value : this.playbackStream);
                 this.stopWaveform();
                 this.destroyWaveform();
                 if (this.record && this.record.recording && this.record.recording.url) {

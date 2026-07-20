@@ -7,7 +7,6 @@
 
 pub mod audio_source;
 pub mod bridge;
-pub mod capture;
 pub mod engine;
 pub mod forwarding_track;
 pub mod leg_id;
@@ -15,6 +14,7 @@ pub mod media_stream;
 pub mod mixer;
 pub mod negotiate;
 pub mod recorder;
+pub mod recorder_tap;
 pub mod rtc_track;
 pub mod rtp_track_builder;
 pub mod telephone_event;

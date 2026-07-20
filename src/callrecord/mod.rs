@@ -697,6 +697,7 @@ struct LocalCallRecordSaver {
 #[async_trait::async_trait]
 impl CallRecordSaver for LocalCallRecordSaver {
     async fn save(&self, record: &CallRecord) -> Result<String> {
+        let start = std::time::Instant::now();
         let file_content = format_call_record(record)?;
         let file_name = format_file_name(&self.root, record);
 
@@ -710,6 +711,11 @@ impl CallRecordSaver for LocalCallRecordSaver {
         })?;
         file.write_all(file_content.as_bytes()).await?;
         file.flush().await?;
+        let elapsed = start.elapsed().as_secs_f64();
+        crate::metrics::db::query_latency_seconds("local_cdr_save", elapsed);
+        if elapsed > 0.1 {
+            crate::metrics::db::slow_query_total("local_cdr_save", 100);
+        }
         Ok(file_name.to_string())
     }
 }
@@ -790,6 +796,7 @@ struct DatabaseCallRecordSaver {
 #[async_trait::async_trait]
 impl CallRecordSaver for DatabaseCallRecordSaver {
     async fn save(&self, record: &CallRecord) -> Result<String> {
+        let start = std::time::Instant::now();
         let details_json = serde_json::to_string(&record.details)?;
         let hangup_reason = record.hangup_reason.as_ref().map(|r| r.to_string());
         let mut insert = Query::insert();
@@ -815,10 +822,16 @@ impl CallRecordSaver for DatabaseCallRecordSaver {
                 hangup_reason.into(),
                 details_json.into(),
             ]);
-        self.db
+        let result = self
+            .db
             .execute(self.db.get_database_backend().build(&insert))
-            .await?;
-
+            .await;
+        let elapsed = start.elapsed().as_secs_f64();
+        crate::metrics::db::query_latency_seconds("call_record_insert", elapsed);
+        if elapsed > 0.1 {
+            crate::metrics::db::slow_query_total("call_record_insert", 100);
+        }
+        result?;
         Ok(format!("database:{}/{}", self.db_url, record.call_id))
     }
 }

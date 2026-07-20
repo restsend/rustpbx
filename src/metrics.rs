@@ -206,6 +206,25 @@ pub mod media {
     }
 }
 
+pub mod db {
+    pub fn query_latency_seconds(op: &str, duration_secs: f64) {
+        metrics::histogram!(
+            "rustpbx_db_query_latency_seconds",
+            "op" => op.to_string()
+        )
+        .record(duration_secs);
+    }
+
+    pub fn slow_query_total(op: &str, threshold_ms: u64) {
+        metrics::counter!(
+            "rustpbx_db_slow_query_total",
+            "op" => op.to_string(),
+            "threshold_ms" => threshold_ms.to_string()
+        )
+        .increment(1);
+    }
+}
+
 pub mod system {
     use std::sync::OnceLock;
 
@@ -808,6 +827,9 @@ mod tests {
         sip::set_active_dialogs(10);
         sip::response(200, "INVITE");
         sip::invite_latency_seconds(0.5, "inbound");
+
+        db::query_latency_seconds("call_record_insert", 0.05);
+        db::slow_query_total("wholesale_cdr_insert", 100);
 
         trunk::call_routed("trunk-1", "outbound");
         trunk::call_failed("trunk-1", "outbound", "timeout");
