@@ -178,7 +178,6 @@ fn encode_sip_addr(addr: &SipAddr) -> String {
 
 const HOME_PROXY_MARKER: &str = "|hp=";
 const REGISTERED_AOR_MARKER: &str = "|ra=";
-const CONTACT_RAW_MARKER: &str = "|cr=";
 
 fn decode_sip_addr(value: &str) -> Option<SipAddr> {
     let trimmed = value.trim();
@@ -211,7 +210,6 @@ fn encode_location_metadata(
     user_agent: Option<&str>,
     home_proxy: Option<&SipAddr>,
     registered_aor: Option<&rsipstack::sip::Uri>,
-    contact_raw: Option<&str>,
 ) -> Option<String> {
     let mut value = user_agent.unwrap_or("").to_string();
 
@@ -225,30 +223,19 @@ fn encode_location_metadata(
         value.push_str(registered_aor.to_string().as_str());
     }
 
-    if let Some(contact_raw) = contact_raw {
-        value.push_str(CONTACT_RAW_MARKER);
-        value.push_str(contact_raw);
-    }
-
     if value.is_empty() { None } else { Some(value) }
 }
 
 fn decode_location_metadata(
     value: Option<&str>,
-) -> (
-    Option<String>,
-    Option<SipAddr>,
-    Option<rsipstack::sip::Uri>,
-    Option<String>,
-) {
+) -> (Option<String>, Option<SipAddr>, Option<rsipstack::sip::Uri>) {
     let Some(raw) = value else {
-        return (None, None, None, None);
+        return (None, None, None);
     };
 
     let mut rest = raw;
     let mut home_proxy: Option<SipAddr> = None;
     let mut registered_aor: Option<rsipstack::sip::Uri> = None;
-    let mut contact_raw: Option<String> = None;
 
     loop {
         let Some((prefix, tail)) = rest.rsplit_once('|') else {
@@ -273,14 +260,6 @@ fn decode_location_metadata(
             continue;
         }
 
-        if contact_raw.is_none()
-            && let Some(value) = tail.strip_prefix("cr=")
-        {
-            contact_raw = Some(value.to_string());
-            rest = prefix;
-            continue;
-        }
-
         break;
     }
 
@@ -290,7 +269,7 @@ fn decode_location_metadata(
         Some(rest.to_string())
     };
 
-    (user_agent, home_proxy, registered_aor, contact_raw)
+    (user_agent, home_proxy, registered_aor)
 }
 
 #[async_trait]
@@ -392,7 +371,6 @@ impl Locator for DbLocator {
                     location.user_agent.as_deref(),
                     location.home_proxy.as_ref(),
                     location.registered_aor.as_ref(),
-                    location.contact_raw.as_deref(),
                 ));
 
                 active_model
@@ -420,7 +398,6 @@ impl Locator for DbLocator {
                     location.user_agent.as_deref(),
                     location.home_proxy.as_ref(),
                     location.registered_aor.as_ref(),
-                    location.contact_raw.as_deref(),
                 ));
 
                 // Insert without specifying id
@@ -491,7 +468,7 @@ impl Locator for DbLocator {
                 addr,
             };
 
-            let (user_agent, home_proxy, decoded_registered_aor, contact_raw) =
+            let (user_agent, home_proxy, decoded_registered_aor) =
                 decode_location_metadata(loc.user_agent.as_deref());
             let registered_aor = choose_registered_aor(
                 loc.username.as_str(),
@@ -509,7 +486,6 @@ impl Locator for DbLocator {
                 registered_aor: Some(registered_aor),
                 user_agent,
                 home_proxy,
-                contact_raw,
                 ..Default::default()
             });
         }
@@ -596,26 +572,6 @@ impl Locator for DbLocator {
                             )
                         })?;
                 }
-
-                // 3. Contact-raw match for WebSocket clients where the Contact
-                //    URI user part (random JsSIP) differs from the registered
-                //    username.  Searches the encoded user_agent metadata column.
-                if models.is_empty() {
-                    let cr_pattern = format!("%{}%{}%", CONTACT_RAW_MARKER, fb.user);
-                    models = Entity::find()
-                        .filter(Column::UserAgent.like(&cr_pattern))
-                        .order_by_desc(Column::LastModified)
-                        .order_by_desc(Column::UpdatedAt)
-                        .order_by_desc(Column::Id)
-                        .all(&self.db)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Database error on lookup by contact_raw for .invalid: {}",
-                                e
-                            )
-                        })?;
-                }
             }
         }
 
@@ -670,7 +626,7 @@ impl Locator for DbLocator {
             let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
 
-            let (user_agent, home_proxy, decoded_registered_aor, contact_raw) =
+            let (user_agent, home_proxy, decoded_registered_aor) =
                 decode_location_metadata(model.user_agent.as_deref());
             let registered_aor = choose_registered_aor(
                 model.username.as_str(),
@@ -717,7 +673,6 @@ impl Locator for DbLocator {
                 registered_aor: Some(registered_aor),
                 user_agent,
                 home_proxy,
-                contact_raw,
                 ..Default::default()
             });
         }

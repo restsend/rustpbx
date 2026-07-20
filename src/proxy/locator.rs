@@ -357,16 +357,6 @@ impl TargetLocator for DialogTargetLocator {
                 }
             }
         }
-        if is_webrtc_invalid_host(&uri.host().to_string()) {
-            debug!(
-                %uri,
-                "DialogTargetLocator: .invalid locator lookup empty, returning NoRoute error"
-            );
-            return Err(rsipstack::Error::Error(format!(
-                "no route for WebRTC contact: {}",
-                uri
-            )));
-        }
         debug!(%uri, "DialogTargetLocator: location lookup returned empty, using SipAddr fallback");
         SipAddr::try_from(uri).map_err(|e| {
             rsipstack::Error::Error(format!(
@@ -572,18 +562,6 @@ impl Locator for MemoryLocator {
                 {
                     direct_hits.push(loc.clone());
                     continue;
-                }
-                if let Some(contact_raw) = &loc.contact_raw {
-                    let contact_string = match contact_raw.parse::<rsipstack::sip::Uri>() {
-                        Ok(contact_uri) => contact_uri.to_string(),
-                        Err(_) => contact_raw.clone(),
-                    };
-                    if uri_string.eq_ignore_ascii_case(&contact_string)
-                        || uri_string.eq_ignore_ascii_case(contact_raw)
-                    {
-                        direct_hits.push(loc.clone());
-                        continue;
-                    }
                 }
             }
         }
