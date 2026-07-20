@@ -88,6 +88,12 @@ pub struct MediaState {
     pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
     pub caller_answer_uses_media_bridge: bool,
     pub callee_offer_uses_media_bridge: bool,
+    /// True when the bridge's callee PC was replaced with a WebRTC PC because
+    /// both caller and callee are WebRTC endpoints and an app media_bridge is
+    /// being reused. Used by `start_media_bridge_forwarding`,
+    /// `apply_bridge_callee_answer`, `bridge_callee_offer_sdp` to pick the
+    /// correct PeerConnection (bridge.callee_pc() instead of bridge.caller_pc()).
+    pub callee_pc_is_webrtc: bool,
     pub media_bridge_started: bool,
     pub bridge_playback_track_ids: HashMap<String, String>,
     pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
@@ -158,6 +164,7 @@ impl MediaState {
             media_bridge: None,
             caller_answer_uses_media_bridge: false,
             callee_offer_uses_media_bridge: false,
+            callee_pc_is_webrtc: false,
             media_bridge_started: false,
             bridge_playback_track_ids: HashMap::new(),
             rtp_timeout_tx: None,

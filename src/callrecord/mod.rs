@@ -327,9 +327,47 @@ impl std::fmt::Display for CallRecordHangupReason {
     }
 }
 
+impl CallRecordHangupReason {
+    /// Normalized hangup initiator: who ended the call.
+    ///
+    /// This is the single source of truth used by both the core `call_hangup`
+    /// event and the CC-layer `cc_hangup` event so the two stay consistent.
+    ///
+    /// - `"agent"`   — the contact-center agent (callee leg) hung up.
+    /// - `"caller"`  — the calling party hung up.
+    /// - `"system"`  — the server/auto-hangup ended the call.
+    /// - `"transfer"`— the call ended due to a transfer/REFER.
+    /// - `"unknown"` — initiator cannot be determined.
+    pub fn initiator(&self) -> &'static str {
+        match self {
+            Self::ByCaller | Self::Abandoned => "caller",
+            Self::ByCallee => "agent",
+            Self::BySystem | Self::Autohangup => "system",
+            Self::ByRefer => "transfer",
+            _ => "unknown",
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait CallRecordHook: Send + Sync {
-    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()>;
+    /// Enrichment phase: runs in registration order **before** the record is
+    /// saved and **before** any side-effect (`on_record_completed`) hook.
+    ///
+    /// Addons use this to fill generic core fields (e.g. `agent_id`) from the
+    /// typed session-extensions bag, so that subsequent side-effect hooks
+    /// (upload, billing, CSAT) and the saver see the completed record. This
+    /// keeps the core free of addon-specific knowledge: core only carries the
+    /// generic fields, the addon populates them.
+    async fn on_record_enrich(&self, _record: &mut CallRecord) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Side-effect phase: runs **after** the record has been saved. Used for
+    /// uploads, webhook emission, billing, CSAT linkage, metrics, etc.
+    async fn on_record_completed(&self, _record: &mut CallRecord) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Channel type used to forward call records to the background saver.
@@ -815,6 +853,16 @@ impl CallRecordManager {
                     futures.push(async move {
                         let mut record = record;
                         let start_time = Instant::now();
+
+                        // Enrichment phase: addons fill generic core fields
+                        // (e.g. agent_id) BEFORE the record is saved or any
+                        // side-effect hook (upload/billing/CSAT) runs.
+                        for hook in hooks.iter() {
+                            if let Err(e) = hook.on_record_enrich(&mut record).await {
+                                warn!("CallRecordHook enrich failed: {}", e);
+                            }
+                        }
+
                         match saver.save(&record).await {
                             Ok(file_name) => {
                                 let elapsed = start_time.elapsed();

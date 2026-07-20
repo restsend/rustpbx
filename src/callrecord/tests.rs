@@ -4,6 +4,7 @@ use crate::config::CallRecordStorageConfig;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
 #[tokio::test]
@@ -391,4 +392,118 @@ fn test_hangup_reason_abandoned_roundtrip() {
     let s = original.to_string();
     let parsed = CallRecordHangupReason::from_str(&s).unwrap();
     assert_eq!(original, parsed);
+}
+
+// ── CallRecordHangupReason::initiator() (module C) ───────────────────────
+
+/// `initiator()` is the single source of truth for the normalized hangup
+/// initiator used by both `call_hangup` and `cc_hangup`. Exhaustive mapping.
+#[test]
+fn test_initiator_mapping() {
+    use CallRecordHangupReason::*;
+    assert_eq!(ByCaller.initiator(), "caller");
+    assert_eq!(Abandoned.initiator(), "caller");
+    assert_eq!(ByCallee.initiator(), "agent");
+    assert_eq!(BySystem.initiator(), "system");
+    assert_eq!(Autohangup.initiator(), "system");
+    assert_eq!(ByRefer.initiator(), "transfer");
+    // Everything else is "unknown".
+    assert_eq!(NoAnswer.initiator(), "unknown");
+    assert_eq!(Canceled.initiator(), "unknown");
+    assert_eq!(Rejected.initiator(), "unknown");
+    assert_eq!(Failed.initiator(), "unknown");
+    assert_eq!(RtpTimeout.initiator(), "unknown");
+    assert_eq!(AnswerMachine.initiator(), "unknown");
+    assert_eq!(NoBalance.initiator(), "unknown");
+    assert_eq!(ServerUnavailable.initiator(), "unknown");
+    assert_eq!(Other("x".into()).initiator(), "unknown");
+}
+
+// ── Two-phase CallRecordHook ordering (module B) ─────────────────────────
+//
+// The enrichment phase must run (in registration order) BEFORE the record is
+// saved and before any side-effect (`on_record_completed`) hook, so that an
+// enrich hook can populate fields a completed hook relies on.
+
+struct CompletedProbe {
+    log: Arc<Mutex<Vec<&'static str>>>,
+    tag: &'static str,
+    expect_queue: &'static str,
+}
+
+#[async_trait::async_trait]
+impl CallRecordHook for CompletedProbe {
+    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+        // completed runs after enrich → the field set by the enrich probe
+        // must already be visible here.
+        assert_eq!(
+            record.details.queue.as_deref(),
+            Some(self.expect_queue),
+            "enrich must run before completed"
+        );
+        self.log.lock().unwrap().push(self.tag);
+        Ok(())
+    }
+}
+
+struct EnrichSetsQueue;
+#[async_trait::async_trait]
+impl CallRecordHook for EnrichSetsQueue {
+    async fn on_record_enrich(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+        record.details.queue = Some("from-enrich".to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_enrich_phase_runs_before_completed_and_can_mutate() {
+    // Drive the manager end-to-end: enrich → save → completed.
+    let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_hook(Box::new(EnrichSetsQueue))
+        .with_hook(Box::new(CompletedProbe {
+            log: log.clone(),
+            tag: "completed",
+            expect_queue: "from-enrich",
+        }))
+        .build()
+        .await
+        .unwrap();
+
+    let sender = manager.sender.clone();
+    let cancel = manager.cancel_token.clone();
+    let serve_handle = tokio::spawn(async move {
+        let mut mgr = manager;
+        mgr.serve().await;
+    });
+
+    let mut record = CallRecord {
+        call_id: "order-test-1".to_string(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
+        caller: "a".to_string(),
+        callee: "b".to_string(),
+        status_code: 200,
+        ..Default::default()
+    };
+    record.details.queue = None;
+    sender.send(record).await.unwrap();
+
+    // Wait for the completed probe to record its tag.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if log.lock().unwrap().contains(&"completed") {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            cancel.cancel();
+            serve_handle.await.ok();
+            panic!("completed hook never ran; log={:?}", log.lock().unwrap());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    cancel.cancel();
+    serve_handle.await.ok();
 }

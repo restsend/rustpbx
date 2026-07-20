@@ -180,11 +180,7 @@ impl CallReporter {
 
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
-        let mut metadata_map = snapshot
-            .extensions
-            .get::<HashMap<String, String>>()
-            .cloned()
-            .unwrap_or_default();
+        let mut metadata_map = snapshot.metadata.clone();
 
         if let Some(ctx) = &outbound_trunk_context {
             metadata_map.insert("outbound_trunk_name".to_string(), ctx.name.clone());
@@ -476,6 +472,7 @@ mod tests {
                 remote_tag: "remote".to_string(),
             },
             extensions: http::Extensions::new(),
+            metadata: std::collections::HashMap::new(),
         };
 
         let roles = build_sip_leg_roles(&snapshot);

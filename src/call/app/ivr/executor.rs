@@ -2780,6 +2780,239 @@ mod tests {
             .await;
     }
 
+    // ── interruptible parameter verification tests ─────────────────────────
+
+    /// The Play command emitted for a **non-interruptible** Prompt must carry
+    /// `interrupt_on_dtmf: false` in its PlayOptions.
+    #[tokio::test]
+    async fn test_non_interruptible_prompt_play_cmd_has_flag_false() {
+        let node = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Grab the Play command and inspect its options.
+        let play_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected a Play command");
+        match &play_cmd {
+            CallCommand::Play { options, .. } => {
+                let opts = options.as_ref().expect("PlayOptions must be set");
+                assert!(
+                    !opts.interrupt_on_dtmf,
+                    "non-interruptible Prompt must have interrupt_on_dtmf=false, got true"
+                );
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    /// The Play command emitted for an **interruptible** Prompt must carry
+    /// `interrupt_on_dtmf: true` in its PlayOptions.
+    #[tokio::test]
+    async fn test_interruptible_prompt_play_cmd_has_flag_true() {
+        let node = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: true,
+            tts_api_url: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        let play_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected a Play command");
+        match &play_cmd {
+            CallCommand::Play { options, .. } => {
+                let opts = options.as_ref().expect("PlayOptions must be set");
+                assert!(
+                    opts.interrupt_on_dtmf,
+                    "interruptible Prompt must have interrupt_on_dtmf=true, got false"
+                );
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    /// After an interruptible Prompt finishes naturally (no DTMF), a chained
+    /// non-interruptible Prompt must NOT be interruptible — the
+    /// `interrupt_on_dtmf` flag must not leak from the previous node.
+    #[tokio::test]
+    async fn test_interruptible_then_non_interruptible_no_leak() {
+        let node = ActionNode::with_next(
+            EntryAction::Prompt {
+                file: Some("first.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: true,
+                tts_api_url: None,
+            },
+            ActionNode::new(EntryAction::Prompt {
+                file: Some("second.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+            }),
+        );
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // First prompt (interruptible) starts playing.
+        stack
+            .assert_cmd(200, "play first", |c| {
+                matches!(c, CallCommand::Play { source, options, .. }
+                    if matches!(source, crate::call::domain::MediaSource::File { path } if path == "first.wav")
+                    && options.as_ref().map_or(false, |o| o.interrupt_on_dtmf))
+            })
+            .await;
+
+        // First prompt finishes naturally — no DTMF pressed.
+        stack.audio_complete("ivr_prompt");
+
+        // Second prompt (non-interruptible) starts playing.
+        stack
+            .assert_cmd(200, "play second", |c| {
+                matches!(c, CallCommand::Play { source, options, .. }
+                    if matches!(source, crate::call::domain::MediaSource::File { path } if path == "second.wav")
+                    && options.as_ref().map_or(false, |o| !o.interrupt_on_dtmf))
+            })
+            .await;
+
+        // Press a key during the second (non-interruptible) prompt.
+        let _ = stack.drain_cmds();
+        stack.dtmf("5");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // No stop / transfer / any command should have been emitted.
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "DTMF during non-interruptible prompt (after interruptible) should be ignored, got: {cmds:?}"
+        );
+
+        // Audio completes normally → provider is asked for next node.
+        // MockProvider has no more nodes → fallback plays error.wav then hangup.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "fallback play", |c| {
+                matches!(c, CallCommand::Play { source, .. }
+                    if matches!(source, crate::call::domain::MediaSource::File { path } if path.contains("error.wav")))
+            })
+            .await;
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "fallback hangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
+            .await;
+    }
+
+    /// Multiple DTMF digits pressed during a non-interruptible Prompt must
+    /// ALL be silently ignored — none should trigger stop_audio or a provider
+    /// call.
+    #[tokio::test]
+    async fn test_multiple_dtmf_during_non_interruptible_all_ignored() {
+        let node = ActionNode::with_next(
+            EntryAction::Prompt {
+                file: Some("hello.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+            },
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+            }),
+        );
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+
+        // Hammer multiple digits while playback is in progress.
+        let _ = stack.drain_cmds();
+        for d in &["1", "2", "3", "*", "#"] {
+            stack.dtmf(*d);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "all DTMF during non-interruptible prompt should be ignored, got: {cmds:?}"
+        );
+
+        // After natural completion, the chained Transfer fires.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// JSON without an explicit `interruptible` field must default to `false`
+    /// (non-interruptible) per the `#[serde(default)]` attribute.
+    #[test]
+    fn test_prompt_json_without_interruptible_defaults_false() {
+        let json = r#"{"type":"prompt","file":"hello.wav"}"#;
+        let node: ActionNode = serde_json::from_str(json).expect("parse JSON");
+        match node.action {
+            EntryAction::Prompt { interruptible, .. } => {
+                assert!(
+                    !interruptible,
+                    "missing `interruptible` must default to false"
+                );
+            }
+            other => panic!("expected Prompt action, got {other:?}"),
+        }
+    }
+
+    /// JSON with `"interruptible": true` must parse correctly.
+    #[test]
+    fn test_prompt_json_with_interruptible_true() {
+        let json = r#"{"type":"prompt","file":"hello.wav","interruptible":true}"#;
+        let node: ActionNode = serde_json::from_str(json).expect("parse JSON");
+        match node.action {
+            EntryAction::Prompt { interruptible, .. } => {
+                assert!(interruptible, "interruptible=true must parse");
+            }
+            other => panic!("expected Prompt action, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_remote_hangup_skips_provider_session_end() {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Prompt {

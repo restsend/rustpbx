@@ -286,6 +286,87 @@ dos_scan_probe_threshold = 50
 dos_scan_block_duration_secs = 600
 ```
 
+## SBC / Trusted Proxy Support
+
+When RustPBX sits behind a SIP proxy or SBC, the socket-level source
+address is always the proxy's IP, which breaks ACL matching, trunk
+identification, and DoS tracking. Use `trusted_proxies` to extract
+the real client IP from the Via header chain.
+
+```toml
+[proxy]
+# List of trusted proxy/SBC IPs or CIDR networks.
+# When a request arrives from one of these addresses, the real client
+# IP is extracted from the Via chain instead of using the socket IP.
+# Leave empty (default) if no proxy is in front of PBX.
+trusted_proxies = ["10.0.0.1", "10.0.0.0/24"]
+```
+
+### How It Works
+
+1. If the socket-level source IP does **not** match any entry in
+   `trusted_proxies`, it is used directly (no proxy scenario).
+
+2. If it matches, PBX walks the Via header chain, skipping the first
+   entry (the directly-connected proxy) and any subsequent entries
+   whose sent-by IP also matches `trusted_proxies` (multi-hop SBC).
+
+3. The first Via entry **not** in the trusted list is treated as the
+   client:
+   - If it has a `received=` parameter (RFC 3581, set when the client
+     was behind NAT), that IP is used.
+   - Otherwise, the Via sent-by IP is used.
+
+4. If all Via entries belong to trusted proxies, falls back to the
+   socket IP.
+
+### Example: Single SBC
+
+```
+Client (1.2.3.4) → SBC (10.0.0.1) → PBX
+
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=sbc
+Via: SIP/2.0/UDP 1.2.3.4:5060;received=1.2.3.4;branch=client
+```
+
+- Socket IP = 10.0.0.1 → matches `trusted_proxies`
+- Skip entry[0] (10.0.0.1, matches trusted)
+- entry[1] = 1.2.3.4 → not trusted → client!
+- `received=1.2.3.4` present → use received IP
+
+### Example: Client Without NAT
+
+```
+Client (1.2.3.4, no NAT) → SBC (10.0.0.1) → PBX
+
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=sbc
+Via: SIP/2.0/UDP 1.2.3.4:5060;branch=client    (no received=)
+```
+
+- Same process, but no `received=` → use sent-by IP 1.2.3.4
+
+### Example: Multi-Hop SBC
+
+```
+Client (1.2.3.4) → SBC1 (10.0.0.2) → SBC2 (10.0.0.1) → PBX
+
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=sbc2
+Via: SIP/2.0/UDP 10.0.0.2:5060;branch=sbc1
+Via: SIP/2.0/UDP 1.2.3.4:5060;received=1.2.3.4;branch=client
+```
+
+- Socket IP = 10.0.0.1 → matches trusted
+- Skip entry[0] (10.0.0.1, matches trusted)
+- entry[1] = 10.0.0.2 → matches trusted → skip
+- entry[2] = 1.2.3.4 → not trusted → client!
+
+### Security
+
+Only enable `trusted_proxies` when the PBX listener is firewalled so
+that all traffic must arrive through the trusted SBC/proxy. If an
+attacker can send requests directly to the PBX, they should not match
+any `trusted_proxies` entry (their socket IP will be used directly).
+
 ## URI Validation
 
 ```toml

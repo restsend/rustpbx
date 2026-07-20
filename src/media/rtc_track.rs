@@ -9,12 +9,10 @@ use tracing::debug;
 
 use crate::media::Track;
 use crate::media::negotiate;
-use crate::media::recorder::RecorderOption;
 
 pub struct RtcTrack {
     track_id: String,
     pc: PeerConnection,
-    pub recorder_option: Option<RecorderOption>,
     rtp_map: Vec<negotiate::CodecInfo>,
     muted: std::sync::atomic::AtomicBool,
     sender: Option<SampleStreamSource>,
@@ -43,7 +41,6 @@ impl RtcTrack {
         Self {
             track_id,
             pc,
-            recorder_option: None,
             rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
             sender: Some(tx),
@@ -84,16 +81,10 @@ impl RtcTrack {
         Self {
             track_id,
             pc,
-            recorder_option: None,
             rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
             sender: Some(tx),
         }
-    }
-
-    pub fn with_recorder_option(mut self, option: RecorderOption) -> Self {
-        self.recorder_option = Some(option);
-        self
     }
 
     async fn set_local(&self, pc: &PeerConnection, desc: SessionDescription) -> Result<String> {

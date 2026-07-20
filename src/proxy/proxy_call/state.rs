@@ -33,6 +33,10 @@ pub struct CallSessionRecordSnapshot {
     pub last_queue_name: Option<String>,
     pub callee_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,
+    /// Merged session + routing metadata (opaque HashMap pass-through).
+    /// Populated by `record_snapshot` from the session extensions bag and
+    /// consumed directly by the reporter — no longer hidden inside `extensions`.
+    pub metadata: std::collections::HashMap<String, String>,
     pub extensions: http::Extensions,
 }
 

@@ -421,7 +421,7 @@ impl ProxyModule for RegistrarModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
-        _cookie: TransactionCookie,
+        cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         let method = tx.original.method();
         if !matches!(method, rsipstack::sip::Method::Register) {
@@ -438,15 +438,27 @@ impl ProxyModule for RegistrarModule {
             .unwrap_or_else(|| "unknown".to_string());
         metrics::sip::registration_received(&realm);
 
-        let user = match SipUser::try_from(&*tx) {
-            Ok(u) => u,
-            Err(e) => {
-                info!("failed to parse user: {:?}", e);
-                metrics::sip::registration_failed(&realm, "invalid_user");
-                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
-                return Ok(ProxyAction::Abort);
+        // Build the user: prefer the cookie's authenticated user (set by the
+        // auth module) because it carries `is_support_webrtc` from the user
+        // backend config. Fall back to constructing from the transaction if
+        // auth didn't run / didn't set a user.
+        let mut user = if let Some(authed) = cookie.get_user() {
+            authed.clone()
+        } else {
+            match SipUser::try_from(&*tx) {
+                Ok(u) => u,
+                Err(e) => {
+                    info!("failed to parse user: {:?}", e);
+                    metrics::sip::registration_failed(&realm, "invalid_user");
+                    tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
+                    return Ok(ProxyAction::Abort);
+                }
             }
         };
+        // Ensure Via-derived fields (destination etc.) are up to date.
+        if let Ok(tx_user) = SipUser::try_from(&*tx) {
+            user.merge_with(&tx_user);
+        }
 
         let registered_aor = match tx.original.to_header() {
             Ok(to) => match to.uri() {

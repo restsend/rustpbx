@@ -1,9 +1,10 @@
 use crate::config::LocatorWebhookConfig;
 use crate::rwi::gateway::EventCacheEntry;
+use anyhow::anyhow;
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Buffer size for the broadcast channel between gateway and webhook handler.
 const WEBHOOK_CHANNEL_SIZE: usize = 512;
@@ -33,10 +34,57 @@ impl RwiWebhookSender {
         self.allowed_events.is_empty() || self.allowed_events.iter().any(|e| e == event_type)
     }
 
-    async fn send_payload(&self, payload: &serde_json::Value) -> Result<(), anyhow::Error> {
-        let req = self.client.post(&self.url).json(payload);
-        crate::http_util::execute_request(req, &self.headers, None).await?;
-        Ok(())
+    /// Deliver the payload to the configured webhook URL, returning a record
+    /// describing the call (url, status code, latency, body preview) for
+    /// structured logging. The request is sent directly (rather than via
+    /// `http_util::execute_request`) so that the HTTP status code is captured
+    /// for *every* response — including non-2xx — which is essential for
+    /// observability. The body is truncated to keep logs bounded.
+    async fn send_payload(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<WebhookCallRecord, anyhow::Error> {
+        let start = std::time::Instant::now();
+        let mut req = self.client.post(&self.url).json(payload);
+        for (key, value) in &self.headers {
+            req = req.header(key, value);
+        }
+        // The client is built with a connect/read timeout, so we don't wrap
+        // an additional timeout here.
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
+        let status_code = resp.status().as_u16();
+        // Drain the body (best-effort) so the connection can be reused.
+        let _ = resp.text().await;
+        Ok(WebhookCallRecord {
+            url: self.url.clone(),
+            status_code: Some(status_code),
+            latency_ms: start.elapsed().as_millis() as u64,
+            body_preview: truncate_payload(payload),
+        })
+    }
+}
+
+/// Captured metadata for a single webhook delivery attempt, used for
+/// structured observability logging.
+#[derive(Debug, Clone)]
+pub struct WebhookCallRecord {
+    pub url: String,
+    pub status_code: Option<u16>,
+    pub latency_ms: u64,
+    pub body_preview: String,
+}
+
+/// Truncate a JSON payload to a bounded preview for logging.
+fn truncate_payload(payload: &serde_json::Value) -> String {
+    const MAX_BODY_PREVIEW: usize = 1024;
+    let s = payload.to_string();
+    if s.len() <= MAX_BODY_PREVIEW {
+        s
+    } else {
+        format!("{}…(truncated {} bytes)", &s[..MAX_BODY_PREVIEW], s.len())
     }
 }
 
@@ -111,11 +159,50 @@ async fn run_rwi_webhook_handler(
             "event": event_value,
         });
 
-        if let Err(e) = sender.send_payload(&payload).await {
-            warn!(
-                "RWI webhook send failed for {} (event: {}): {}",
-                sender.url, event_type, e
-            );
+        match sender.send_payload(&payload).await {
+            Ok(record) => {
+                let success = record
+                    .status_code
+                    .map(|c| (200..300).contains(&c))
+                    .unwrap_or(false);
+                let call_id = if entry.call_id.is_empty() {
+                    "-"
+                } else {
+                    entry.call_id.as_str()
+                };
+                if success {
+                    info!(
+                        url = %record.url,
+                        event_type,
+                        call_id,
+                        sequence = entry.sequence,
+                        status_code = record.status_code.unwrap_or(0),
+                        latency_ms = record.latency_ms,
+                        "RWI webhook delivered"
+                    );
+                } else {
+                    warn!(
+                        url = %record.url,
+                        event_type,
+                        call_id,
+                        sequence = entry.sequence,
+                        status_code = record.status_code.unwrap_or(0),
+                        latency_ms = record.latency_ms,
+                        body_preview = %record.body_preview,
+                        "RWI webhook returned non-success status"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    url = %sender.url,
+                    event_type,
+                    call_id = %entry.call_id,
+                    sequence = entry.sequence,
+                    error = %e,
+                    "RWI webhook send failed"
+                );
+            }
         }
     }
 }
@@ -144,7 +231,7 @@ pub async fn send_test_event(
         }
     });
 
-    sender.send_payload(&test_payload).await
+    sender.send_payload(&test_payload).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -314,5 +401,75 @@ mod tests {
             types.contains(&"record_end".to_string()),
             "record_end should be delivered via webhook: {types:?}"
         );
+    }
+
+    /// `send_payload` returns a `WebhookCallRecord` capturing the response
+    /// status code and latency, used for structured observability logging.
+    #[tokio::test]
+    async fn test_send_payload_captures_status_and_latency() {
+        let server = TestHttpServer::start().await;
+        let sender = RwiWebhookSender::new(LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        });
+
+        let payload = json!({"event_type": "test", "call_id": "c1"});
+        let record = sender.send_payload(&payload).await.expect("send ok");
+
+        assert_eq!(record.url, server.url());
+        assert_eq!(record.status_code, Some(200));
+        assert!(record.latency_ms < 5000, "latency should be bounded");
+        assert!(
+            record.body_preview.contains("test"),
+            "body preview should reflect payload"
+        );
+    }
+
+    /// Non-success responses are still captured (status code recorded) so the
+    /// dispatch loop can log them at warn.
+    #[tokio::test]
+    async fn test_send_payload_captures_non_success_status() {
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "boom",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let sender = RwiWebhookSender::new(LocatorWebhookConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        });
+
+        let payload = json!({"event_type": "test"});
+        // send_payload treats any HTTP response as Ok (it only errors on
+        // transport failure); the status code is captured in the record.
+        let record = sender.send_payload(&payload).await.expect("http ok");
+        assert_eq!(record.status_code, Some(500));
+    }
+
+    /// Body preview is truncated for very large payloads to keep logs bounded.
+    #[test]
+    fn test_truncate_payload_bounds_size() {
+        let huge = serde_json::Value::String("x".repeat(5000));
+        let preview = truncate_payload(&huge);
+        assert!(
+            preview.len() < 5000,
+            "preview must be truncated, len={}",
+            preview.len()
+        );
+        assert!(preview.contains("truncated"));
     }
 }

@@ -153,12 +153,12 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         flush_interval_secs: 5,
         id_cache_size: 8192,
         engine,
+        compress: true,
+        compress_level: 6,
         ttl_secs: None,
         memtable_size_mb: 64,
         block_cache_capacity_mb: 128,
         upload: None,
-        compress: true,
-        compress_level: 6,
     };
 
     let backend = rustpbx::sipflow::create_backend(&config).unwrap();

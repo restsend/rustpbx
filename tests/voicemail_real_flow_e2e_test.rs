@@ -116,7 +116,10 @@ greeting_path = "{}"
         Some(p) => p,
         None => panic!("voicemail recording file not found under /tmp/voicemail_1001_*"),
     };
-    info!(?recording, "found voicemail recording (VoicemailApp.start_recording ran)");
+    info!(
+        ?recording,
+        "found voicemail recording (VoicemailApp.start_recording ran)"
+    );
 
     // Forward audio path: the caller must have received the greeting + beep
     // (PBX → caller). This is the audio-forwarding guarantee for voicemail.
@@ -128,7 +131,9 @@ greeting_path = "{}"
     let q = caller.audio_quality_summary();
     info!(
         "caller audio quality: total={} silence={} has_audio={}",
-        q.total_frames, q.silence_frames, q.has_audio()
+        q.total_frames,
+        q.silence_frames,
+        q.has_audio()
     );
 
     // The recording file's existence + the call tearing down after the caller's
@@ -137,7 +142,11 @@ greeting_path = "{}"
     // only in this in-process app-bridge path (the recorder tap doesn't capture
     // the caller leg here); the caller RX check above covers the audio path.
     let (samples, sr) = read_wav_mono(&recording);
-    info!("recording: {} samples at {} Hz (header-only is a known app-bridge recorder limitation)", samples.len(), sr);
+    info!(
+        "recording: {} samples at {} Hz (header-only is a known app-bridge recorder limitation)",
+        samples.len(),
+        sr
+    );
 
     caller.stop();
     pbx.stop();

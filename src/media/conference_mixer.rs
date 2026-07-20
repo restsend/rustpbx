@@ -25,22 +25,8 @@ pub struct AudioFrame {
     pub timestamp: u64,
 }
 
-/// A frame captured from a participant's input, sent to the recorder tap.
-/// Each participant's raw PCM is forwarded here before mixing so the
-/// recorder can write per-leg audio to the corresponding WAV channel.
-#[derive(Debug, Clone)]
-pub struct RecorderFrame {
-    /// Which participant this audio came from.
-    pub leg_id: LegId,
-    /// PCM samples (16-bit signed, mono).
-    pub samples: Vec<i16>,
-    /// Sample rate of the samples.
-    pub sample_rate: u32,
-    /// Monotonic timestamp for ordering.
-    pub timestamp: u64,
-}
-
 impl AudioFrame {
+    /// Create a new audio frame.
     pub fn new(samples: Vec<i16>, sample_rate: u32) -> Self {
         Self {
             samples,
@@ -92,9 +78,6 @@ pub struct ConferenceAudioMixer {
     /// Per-(source, destination) gain overrides for supervisor modes.
     /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
     route_gains: Arc<DashMap<(LegId, LegId), f32>>,
-    /// Optional recorder tap: each participant's input PCM is cloned here
-    /// before mixing so the recorder can write per-leg audio.
-    recorder_sink: Arc<parking_lot::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
 }
 
 impl std::fmt::Debug for ConferenceAudioMixer {
@@ -127,7 +110,6 @@ pub(crate) struct MixingLoopContext {
     frame_size: usize,
     sample_rate: u32,
     route_gains: Arc<DashMap<(LegId, LegId), f32>>,
-    recorder_sink: Arc<parking_lot::Mutex<Option<mpsc::Sender<RecorderFrame>>>>,
 }
 
 pub(crate) struct MixingLoopContextBuilder {
@@ -150,18 +132,12 @@ impl MixingLoopContextBuilder {
                 frame_size,
                 sample_rate,
                 route_gains: Arc::new(DashMap::new()),
-                recorder_sink: Arc::new(parking_lot::Mutex::new(None)),
             },
         }
     }
 
     pub fn with_route_gains(mut self, gains: Arc<DashMap<(LegId, LegId), f32>>) -> Self {
         self.inner.route_gains = gains;
-        self
-    }
-
-    pub fn with_recorder_sink(mut self, sink: Arc<parking_lot::Mutex<Option<mpsc::Sender<RecorderFrame>>>>) -> Self {
-        self.inner.recorder_sink = sink;
         self
     }
 
@@ -184,16 +160,7 @@ impl ConferenceAudioMixer {
             cancel_token: CancellationToken::new(),
             mixing_task: Arc::new(ParkMutex::new(None)),
             route_gains: Arc::new(DashMap::new()),
-            recorder_sink: Arc::new(parking_lot::Mutex::new(None)),
         }
-    }
-
-    /// Install a recorder tap.  Every 20ms tick, the mixer will send each
-    /// participant's raw input PCM to the provided channel **before**
-    /// N-1 mixing, so the recorder can write per-leg audio.
-    pub async fn set_recorder_sink(&self, sink: Option<mpsc::Sender<RecorderFrame>>) {
-        let mut guard = self.recorder_sink.lock();
-        *guard = sink;
     }
 
     /// Add a participant to the conference
@@ -344,7 +311,6 @@ impl ConferenceAudioMixer {
             self.sample_rate,
         )
         .with_route_gains(self.route_gains.clone())
-        .with_recorder_sink(self.recorder_sink.clone())
         .build();
         let task = crate::utils::media_spawn(async move {
             Self::mixing_loop(ctx).await;
@@ -413,22 +379,6 @@ impl ConferenceAudioMixer {
 
                     let participant_ids: Vec<LegId> =
                         ctx.participants.iter().map(|e| e.key().clone()).collect();
-
-                    if !participant_audio.is_empty() {
-                        let sink_guard = ctx.recorder_sink.lock();
-                        if let Some(ref sink) = *sink_guard {
-                            for (leg_id, frame) in &participant_audio {
-                                let rf = RecorderFrame {
-                                    leg_id: leg_id.clone(),
-                                    samples: frame.samples.clone(),
-                                    sample_rate: frame.sample_rate,
-                                    timestamp: frame.timestamp,
-                                };
-                                let _ = sink.try_send(rf);
-                            }
-                        }
-                        drop(sink_guard);
-                    }
 
                     if !participant_audio.is_empty() {
                         for output_leg in &participant_ids {

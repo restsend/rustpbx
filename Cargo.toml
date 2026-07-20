@@ -266,7 +266,7 @@ flowdb = { version = "0.7.4", default-features = false }
 [dev-dependencies]
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
-sipbot = { version = "0.2.42", default-features = false }
+sipbot = { version = "0.2.44", default-features = false }
 serde_urlencoded = "0.7"
 ctor = "1.0.7"
 

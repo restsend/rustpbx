@@ -4,7 +4,7 @@ use crate::{
     config::ProxyConfig,
     proxy::{
         routing::{
-            extract_from_user, extract_to_user, source_addr_ip,
+            extract_from_user, extract_to_user, extract_trusted_ip, parse_trusted_proxy,
         },
     },
 };
@@ -172,11 +172,15 @@ impl AclModule {
 
     // ── DoS protection helpers ─────────────────────────────────────
 
-    fn extract_ip(tx: &Transaction) -> Option<IpAddr> {
-        tx.connection
-            .as_ref()
-            .and_then(|conn| conn.get_remote_addr())
-            .and_then(source_addr_ip)
+    fn extract_ip(&self, tx: &Transaction) -> Option<IpAddr> {
+        let trusted: Vec<ipnet::IpNet> = self
+            .inner
+            .config
+            .trusted_proxies
+            .iter()
+            .filter_map(|s| parse_trusted_proxy(s))
+            .collect();
+        extract_trusted_ip(tx, &trusted)
     }
 
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
@@ -440,7 +444,7 @@ impl ProxyModule for AclModule {
 
         // 3. DoS protection (per-IP rate limiting, applies to all sources)
         if self.inner.config.dos_enabled {
-            if let Some(ip) = Self::extract_ip(tx) {
+            if let Some(ip) = self.extract_ip(tx) {
                 if let Err(e) = self.dos_check_and_track(ip).await {
                     warn!("DoS blocked {}: {}", ip, e);
                     return Ok(ProxyAction::Abort);
@@ -449,7 +453,7 @@ impl ProxyModule for AclModule {
         }
 
         // 4. IP ACL check (allow/deny with trunk bypass)
-        let from_addr = Self::extract_ip(tx)
+        let from_addr = self.extract_ip(tx)
             .ok_or_else(|| anyhow::anyhow!("missing transport source address"))?;
         if let Some(ctx) = self.is_from_trunk_context(&from_addr, &tx.original) {
             debug!(
@@ -476,7 +480,7 @@ impl ProxyModule for AclModule {
 
     async fn on_transaction_end(&self, tx: &mut Transaction) -> Result<()> {
         if self.inner.config.dos_enabled {
-            if let Some(ip) = Self::extract_ip(tx) {
+            if let Some(ip) = self.extract_ip(tx) {
                 self.dos_release(ip).await;
             }
         }

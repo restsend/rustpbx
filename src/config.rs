@@ -161,6 +161,9 @@ pub struct RecordingPolicy {
     /// signalling only (no RTP). Media upload is handled by the
     /// `[recording]` upload path, not `[sipflow.upload]`.
     pub force_file: Option<bool>,
+    /// Swap stereo channels in recording: callee→left, caller→right.
+    #[serde(default)]
+    pub stereo_swap: Option<bool>,
 }
 
 impl RecordingPolicy {
@@ -169,6 +172,7 @@ impl RecordingPolicy {
             enabled: self.enabled.unwrap_or(false),
             auto_start: self.auto_start.unwrap_or(true),
             force_file: self.force_file.unwrap_or(false),
+            stereo_swap: self.stereo_swap.unwrap_or(false),
             option: None,
         }
     }
@@ -930,6 +934,9 @@ pub struct ProxyConfig {
     #[serde(default = "default_dos_scan_block_secs")]
     pub dos_scan_block_duration_secs: u64,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
+
     #[serde(default = "default_uri_max_length")]
     pub uri_max_length: usize,
     #[serde(default)]
@@ -1343,6 +1350,7 @@ impl Default for ProxyConfig {
             dos_max_concurrent_per_ip: default_dos_max_concurrent(),
             dos_scan_probe_threshold: default_dos_scan_threshold(),
             dos_scan_block_duration_secs: default_dos_scan_block_secs(),
+            trusted_proxies: Vec::new(),
             uri_max_length: default_uri_max_length(),
             uri_reject_malformed: false,
             emergency: None,

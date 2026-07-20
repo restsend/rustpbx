@@ -251,16 +251,9 @@ impl CallRecordHook for RecordingUploadHook {
             // (e.g. MQ consumers) are notified that the recording is ready.
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
-                // Pull agent context from CallDetails.metadata — populated by
-                // CcCallSessionHook via extensions → record_snapshot → reporter.
-                // Core does not know addon-specific field names — it reads from
-                // the generic HashMap that addons write into.
-                let (agent_id, agent_name) = record
-                    .details
-                    .metadata
-                    .as_ref()
-                    .map(|m| (m.get("agent_id").cloned(), m.get("agent_name").cloned()))
-                    .unwrap_or((None, None));
+                // The generic `metadata` bag carries all addon-contributed
+                // keys (agent_id, queue_id, etc.) verbatim — forwarded to
+                // the webhook so external consumers read what they need.
                 let metadata = RecordingMetadata {
                     filename: record
                         .recorder
@@ -271,21 +264,15 @@ impl CallRecordHook for RecordingUploadHook {
                                 .map(|f| f.to_string_lossy().to_string())
                         })
                         .unwrap_or_default(),
-                    unique_id: record.call_id.clone(),
                     file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
                     download_url: Some(url.clone()),
                     caller_name: extract_sip_username(&record.caller),
                     callee_name: extract_sip_username(&record.callee),
-                    called_phone: extract_sip_username(&record.callee),
                     call_type: record.details.direction.clone(),
-                    agent_id,
-                    agent_name: agent_name.or_else(|| record.details.agent_name.clone()),
                     call_start_time: Some(record.start_time.to_rfc3339()),
                     call_end_time: Some(record.end_time.to_rfc3339()),
                     upload_time: Some(chrono::Utc::now().to_rfc3339()),
-                    switch_flag: None,
-                    process_flag: None,
-                    root_call_id: None,
+                    extra: record.details.metadata.clone(),
                 };
                 let gw_ref = gw.read();
                 gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {

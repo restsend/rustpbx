@@ -100,7 +100,7 @@ impl TestUa {
         let local_addr = format!("127.0.0.1:{}", self.config.local_port).parse::<SocketAddr>()?;
 
         // Setup transport
-        let connection = UdpConnection::create_connection(local_addr, None, None)
+        let connection = UdpConnection::create_connection(local_addr, None, Some(self.cancel_token.clone()))
             .await
             .map_err(|e| e.into_anyhow())?;
         transport_layer.add_transport(connection.into());

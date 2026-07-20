@@ -1031,6 +1031,92 @@ pub fn extract_via_ip(origin: &rsipstack::sip::Request) -> Option<std::net::IpAd
     target.host.try_into().ok()
 }
 
+pub fn parse_trusted_proxy(s: &str) -> Option<IpNet> {
+    s.trim().parse::<IpNet>().ok().or_else(|| {
+        let ip: IpAddr = s.trim().parse().ok()?;
+        Some(IpNet::from(ip))
+    })
+}
+
+fn ip_matches_trusted(ip: &IpAddr, trusted: &[IpNet]) -> bool {
+    trusted.iter().any(|net| net.contains(ip))
+}
+
+fn split_via_values(raw: &str) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return entries;
+    }
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                entries.push(raw[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = raw[start..].trim();
+    if !last.is_empty() {
+        entries.push(last);
+    }
+    entries
+}
+
+pub fn extract_trusted_ip(
+    tx: &rsipstack::transaction::transaction::Transaction,
+    trusted_proxies: &[IpNet],
+) -> Option<IpAddr> {
+    let socket_ip = tx
+        .connection
+        .as_ref()
+        .and_then(|conn| conn.get_remote_addr())
+        .and_then(source_addr_ip)?;
+
+    if trusted_proxies.is_empty() || !ip_matches_trusted(&socket_ip, trusted_proxies) {
+        return Some(socket_ip);
+    }
+
+    let via = tx.original.via_header().ok()?;
+    let entries = split_via_values(via.value());
+    if entries.len() < 2 {
+        return Some(socket_ip);
+    }
+
+    for entry in entries.iter().skip(1) {
+        let typed = match rsipstack::sip::headers::typed::Via::parse(entry) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let via_ip: IpAddr = match typed.sent_by().host.clone().try_into() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+
+        if ip_matches_trusted(&via_ip, trusted_proxies) {
+            continue;
+        }
+
+        if let Some(Ok(received)) = typed.received() {
+            return Some(received);
+        }
+        return Some(via_ip);
+    }
+
+    Some(socket_ip)
+}
+
 pub fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {
     origin
         .from_header()

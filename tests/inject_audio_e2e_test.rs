@@ -1054,7 +1054,8 @@ async fn test_inject_audio_recording_captures_injected_audio() {
 
     let rec_path = temp_dir.join("recording.wav");
 
-    let recorder: std::sync::Arc<parking_lot::RwLock<Option<rustpbx::media::recorder::Recorder>>> =
+    let recording_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let recorder_arc: std::sync::Arc<parking_lot::RwLock<Option<rustpbx::media::recorder::Recorder>>> =
         std::sync::Arc::new(parking_lot::RwLock::new(Some(
             rustpbx::media::recorder::Recorder::new(
                 &rec_path.to_string_lossy(),
@@ -1062,11 +1063,10 @@ async fn test_inject_audio_recording_captures_injected_audio() {
             )
             .unwrap(),
         )));
-    let recording_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let bridge = BridgePeerBuilder::new("test-rec-bridge".into())
         .with_rtp_port_range(30400, 30500)
-        .with_recorder(recorder.clone(), recording_paused.clone())
+        .with_recorder(recorder_arc.clone(), recording_paused.clone())
         .build();
     bridge.setup_bridge().await.unwrap();
 
@@ -1076,14 +1076,14 @@ async fn test_inject_audio_recording_captures_injected_audio() {
         .with_codec_info(codec_info());
 
     bridge
-        .replace_output_with_file(BridgeEndpoint::Callee, &track)
+        .replace_output_with_file(BridgeEndpoint::Caller, &track)
         .await
         .unwrap();
 
     let rtp_track = bridge
-        .get_callee_track()
+        .get_caller_track()
         .await
-        .expect("callee track should exist");
+        .expect("caller track should exist");
 
     let mut received_frames = 0u32;
     for _ in 0..10 {
@@ -1105,7 +1105,7 @@ async fn test_inject_audio_recording_captures_injected_audio() {
     bridge.stop().await;
 
     {
-        let mut guard = recorder.write();
+        let mut guard = recorder_arc.write();
         if let Some(ref mut rec) = *guard {
             rec.finalize().unwrap();
         }

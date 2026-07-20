@@ -255,7 +255,7 @@ impl SipFlowBackend for LocalBackend {
             let payload_map =
                 build_payload_maps(&mut storage, &call_id, start_time, end_time).await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, &mut cursor)?;
+            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut cursor)?;
             Ok::<Vec<u8>, anyhow::Error>(cursor.into_inner())
         })
         .await??;
@@ -292,7 +292,7 @@ impl SipFlowBackend for LocalBackend {
             )
             .await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, &mut cursor)?;
+            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut cursor)?;
             Ok::<Vec<u8>, anyhow::Error>(cursor.into_inner())
         })
         .await??;
@@ -330,7 +330,7 @@ impl SipFlowBackend for LocalBackend {
             .await;
 
             let mut file = tempfile::NamedTempFile::new()?;
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, &mut file)?;
+            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut file)?;
             std::io::Write::flush(&mut file)?;
             Ok::<Option<tempfile::NamedTempFile>, anyhow::Error>(Some(file))
         })

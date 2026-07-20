@@ -5,7 +5,6 @@ use rustrtc::PeerConnection;
 use rustrtc::media::SampleStreamSource;
 
 use crate::media::negotiate;
-use crate::media::recorder::RecorderOption;
 
 #[async_trait]
 pub trait Track: Send + Sync {
@@ -15,7 +14,6 @@ pub trait Track: Send + Sync {
     async fn set_remote_description(&self, remote: &str) -> Result<()>;
     async fn stop(&self);
     async fn get_peer_connection(&self) -> Option<PeerConnection>;
-    async fn set_recorder_option(&mut self, _option: RecorderOption) {}
     fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {
     }
     fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {

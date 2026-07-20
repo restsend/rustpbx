@@ -2102,6 +2102,7 @@ impl RwiCommandProcessor {
                                         &crate::rwi::CallHangup {
                                             call_id: call_id.clone(),
                                             reason: Some("normal".to_string()),
+                                            hangup_by: None,
                                             sip_status: None,
                                         },
                                         None,
@@ -2130,6 +2131,7 @@ impl RwiCommandProcessor {
                                         &crate::rwi::event::to_legacy_event(&crate::rwi::CallHangup {
                                             call_id: call_id.clone(),
                                             reason: Some("originate_failed".to_string()),
+                                            hangup_by: None,
                                             sip_status,
                                         }, None),
                                     );
@@ -2146,6 +2148,7 @@ impl RwiCommandProcessor {
                                     &crate::rwi::event::to_legacy_event(&crate::rwi::CallHangup {
                                         call_id: call_id.clone(),
                                     reason: Some(e.to_string()),
+                                    hangup_by: None,
                                     sip_status: None,
                                     }, None),
                                 );

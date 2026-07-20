@@ -259,6 +259,7 @@ async fn test_full_rwi_event_chain_with_recording() {
             &rustpbx::rwi::CallHangup {
                 call_id: call_id.clone(),
                 reason: Some("cleanup".to_string()),
+                hangup_by: None,
                 sip_status: Some(200),
             },
             None,

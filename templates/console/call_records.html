@@ -409,12 +409,14 @@
                                         x-text="record.quality && record.quality.mos !== undefined && record.quality.mos !== null ? formatNumber(record.quality.mos) : '—'">
                                     </div>
                                 </td>
-                                <td class="px-4 py-2">
+                                <td class="whitespace-nowrap px-4 py-2">
                                     <span
                                         class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="statusClasses(record.status)">
+                                        :class="statusClasses(record.status)"
+                                        :title="statusLabel(record.status)">
                                         <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
-                                        <span class="font-mono text-xs" x-text="statusCodeText(record)"></span>
+                                        <span x-show="record.status_code" class="font-mono text-xs" x-text="record.status_code"></span>
+                                        <span x-show="!record.status_code" x-html="statusIconSvg(record.status)"></span>
                                     </span>
                                 </td>
                                 <td class="px-4 py-2">
@@ -1644,6 +1646,18 @@
                     return String(record.status_code);
                 }
                 return this.statusLabel(record && record.status ? record.status : '');
+            },
+            statusIconSvg(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'completed':
+                        return `<svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10l3 3 7-7"/></svg>`;
+                    case 'missed':
+                        return `<svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="12" height="10" rx="2"/><path d="M7 5 v-4 a4 3 0 0 0 6 0 v4"/><line x1="2" y1="2" x2="18" y2="18"/></svg>`;
+                    case 'failed':
+                        return `<svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l8 8M6 14l8-8"/></svg>`;
+                    default:
+                        return `<span class="font-mono text-xs">${this.statusLabel(status || '')}</span>`;
+                }
             },
             directionLabel(value) {
                 switch ((value || '').toLowerCase()) {

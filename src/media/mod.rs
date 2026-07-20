@@ -7,6 +7,7 @@
 
 pub mod audio_source;
 pub mod bridge;
+pub mod capture;
 pub mod engine;
 pub mod forwarding_track;
 pub mod leg_id;

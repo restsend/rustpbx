@@ -715,6 +715,9 @@ pub struct CallRecordingConfig {
     /// When true, use the legacy WAV file recorder instead of SipFlow for
     /// media capture. SipFlow captures SIP signalling only.
     pub force_file: bool,
+    /// Swap stereo channels: callee→left, caller→right.
+    /// Default (false): caller→left, callee→right.
+    pub stereo_swap: bool,
 }
 
 impl CallRecordingConfig {
@@ -724,6 +727,7 @@ impl CallRecordingConfig {
             option: None,
             auto_start: true,
             force_file: false,
+            stereo_swap: false,
         }
     }
 

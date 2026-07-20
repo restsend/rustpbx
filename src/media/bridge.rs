@@ -44,6 +44,7 @@
 use crate::media::ReceiveTimestampClock;
 use crate::media::engine::command::SharedMediaSample;
 use crate::media::recorder::{Leg as RecLeg, Recorder};
+use rustrtc::rtp::{RtpHeader, RtpPacket};
 use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
 use anyhow::Result;
 use audio_codec::CodecType as AudioCodecType;
@@ -252,7 +253,7 @@ use crate::media::dtmf::{DtmfSink, PayloadMapping, DtmfDetector};
 struct ForwardLoopContext {
     bridge_id: String,
     track: Arc<dyn MediaStreamTrack>,
-    sender_weak: std::sync::Weak<parking_lot::Mutex<Option<MediaSender>>>,
+    sender_weak: std::sync::Weak<parking_lot::Mutex<Option<EgressTap>>>,
     output_mode: Arc<AtomicU8>,
     cancel_token: CancellationToken,
     path: ForwardPath,
@@ -277,7 +278,7 @@ impl ForwardLoopContextBuilder {
     fn new(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,
-        sender_weak: std::sync::Weak<parking_lot::Mutex<Option<MediaSender>>>,
+        sender_weak: std::sync::Weak<parking_lot::Mutex<Option<EgressTap>>>,
         output_mode: Arc<AtomicU8>,
         cancel_token: CancellationToken,
         path: ForwardPath,
@@ -371,12 +372,12 @@ impl ForwardLoopContextBuilder {
 struct FileOutputContext {
     bridge_id: String,
     endpoint: BridgeEndpoint,
-    sender: Option<MediaSender>,
+    /// Egress sender (wrapped in `EgressTap`): recording of file-output audio
+    /// is handled by the tap, so no separate recorder/sipflow fields are needed.
+    sender: Option<EgressTap>,
     output_state: Arc<parking_lot::Mutex<OutputState>>,
     output_mode_atomic: Arc<AtomicU8>,
     cancel_token: CancellationToken,
-    recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
-    recording_paused: Arc<AtomicBool>,
 }
 
 struct FileOutputContextBuilder {
@@ -387,7 +388,7 @@ impl FileOutputContextBuilder {
     fn new(
         bridge_id: String,
         endpoint: BridgeEndpoint,
-        sender: Option<MediaSender>,
+        sender: Option<EgressTap>,
         output_state: Arc<parking_lot::Mutex<OutputState>>,
         output_mode_atomic: Arc<AtomicU8>,
         cancel_token: CancellationToken,
@@ -400,20 +401,8 @@ impl FileOutputContextBuilder {
                 output_state,
                 output_mode_atomic,
                 cancel_token,
-                recorder: None,
-                recording_paused: Arc::new(AtomicBool::new(false)),
             },
         }
-    }
-
-    pub fn with_recorder(
-        mut self,
-        recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
-        paused: Arc<AtomicBool>,
-    ) -> Self {
-        self.inner.recorder = recorder;
-        self.inner.recording_paused = paused;
-        self
     }
 
     pub fn build(self) -> FileOutputContext {
@@ -442,10 +431,144 @@ fn scale_rtp_timestamp(rtp_timestamp: u32, source_rate: u32, target_rate: u32) -
     }
 }
 
+/// Wrapper around a side's egress `MediaSender` that taps every outbound
+/// sample into the recorder / sipflow capture.
+///
+/// Recording is anchored on the **A-leg (caller) bidirectional stream**: the
+/// caller's ingress (mic) is captured as leg A in the forward loop's recv
+/// path, and the caller's egress (everything the caller hears: forwarded
+/// callee audio, IVR prompts, beeps, TTS, DTMF) is captured as leg B here at
+/// the single egress chokepoint. Because all outbound audio for a side funnels
+/// through its sender, wrapping it captures every source uniformly regardless
+/// of transport (RTP/WebRTC/SRTP) — the samples are already depacketized.
+///
+/// The callee side is constructed with `leg = None`, making its tap a zero-cost
+/// passthrough (only the A-leg is recorded).
+#[derive(Clone)]
+struct EgressTap {
+    inner: MediaSender,
+    recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+    sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
+    recording_paused: Arc<AtomicBool>,
+    receive_clock: ReceiveTimestampClock,
+    /// Leg to tag egress samples with (None ⇒ no recording, callee side).
+    leg: Option<RecLeg>,
+    /// Stable SSRC for synthesizing raw RTP when the outbound sample carries
+    /// none (required for sipflow storage / WAV export).
+    synth_ssrc: u32,
+    /// Callee→caller DTMF payload mapping: `target_pt` is the telephone-event
+    /// PT used on the caller egress. Passing it explicitly lets the recorder
+    /// detect callee-side DTMF on leg B even though `profile_b` describes the
+    /// callee (native) PT — without this the remapped egress DTMF would be
+    /// missed and the B-side digit would not be rendered as a tone.
+    dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<PayloadMapping>>>>,
+}
+
+impl EgressTap {
+    /// Non-recording passthrough wrapper (used for the callee side).
+    fn passthrough(inner: MediaSender) -> Self {
+        Self {
+            inner,
+            recorder: None,
+            sipflow_tx: None,
+            recording_paused: Arc::new(AtomicBool::new(false)),
+            receive_clock: ReceiveTimestampClock::new(),
+            leg: None,
+            synth_ssrc: rand::random::<u32>(),
+            dtmf_mapping: None,
+        }
+    }
+
+    /// Recording wrapper tagging egress as `leg`.
+    fn recording(
+        inner: MediaSender,
+        recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+        sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
+        recording_paused: Arc<AtomicBool>,
+        receive_clock: ReceiveTimestampClock,
+        leg: RecLeg,
+        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<PayloadMapping>>>>,
+    ) -> Self {
+        Self {
+            inner,
+            recorder,
+            sipflow_tx,
+            recording_paused,
+            receive_clock,
+            leg: Some(leg),
+            synth_ssrc: rand::random::<u32>(),
+            dtmf_mapping,
+        }
+    }
+
+    fn tap(&self, sample: &MediaSample) {
+        let Some(leg) = self.leg else {
+            return;
+        };
+        // Sipflow/recorder capture AUDIO ONLY by default — video is never
+        // recorded. Guard here so the intent is explicit and future-proof
+        // even if a sender ever carries non-audio samples.
+        if !matches!(sample, MediaSample::Audio(_)) {
+            return;
+        }
+        if self.recording_paused.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Caller-side telephone-event PT used on this egress (after remap).
+        let dtmf_pt = self
+            .dtmf_mapping
+            .as_ref()
+            .and_then(|m| m.read().as_ref().map(|p| p.target_pt));
+
+        // File recorder: write_sample tolerates raw_packet == None (uses frame.data).
+        if let Some(rec) = &self.recorder
+            && let Some(mut guard) = rec.try_write()
+            && let Some(r) = guard.as_mut()
+        {
+            let _ = r.write_sample(leg, sample, dtmf_pt, None::<u32>, None::<AudioCodecType>);
+        }
+
+        // Sipflow stores raw RTP bytes; outbound samples carry no raw_packet, so
+        // synthesize one with a stable ssrc for correct WAV-export stream grouping.
+        // Sipflow WAV export detects DTMF by payload shape (looks_like_dtmf_payload),
+        // so both legs' DTMF are captured without needing a PT hint here.
+        if let Some(tx) = &self.sipflow_tx {
+            let mut synth = sample.clone();
+            if let MediaSample::Audio(f) = &mut synth {
+                let header = RtpHeader::new(
+                    f.payload_type.unwrap_or(0),
+                    f.sequence_number.unwrap_or(0),
+                    f.rtp_timestamp,
+                    self.synth_ssrc,
+                );
+                f.raw_packet = Some(RtpPacket::new(header, f.data.to_vec()));
+            }
+            let _ = tx.try_send((leg, Arc::new(synth), self.receive_clock.now_micros()));
+        }
+    }
+
+    pub fn try_send(&self, sample: MediaSample) -> Result<(), MediaError> {
+        self.tap(&sample);
+        self.inner.try_send(sample)
+    }
+
+    pub fn send(&self, sample: MediaSample) -> Result<(), MediaError> {
+        self.tap(&sample);
+        self.inner.send(sample)
+    }
+
+    /// Access the underlying sender (e.g. for direct injection paths that must
+    /// bypass the recording tap, such as call transfer / conference re-wiring).
+    pub fn inner_sender(&self) -> &MediaSender {
+        &self.inner
+    }
+}
+
 /// Per-side state for one endpoint of the bridge (Caller or Callee).
 struct BridgeSideState {
-    pc: PeerConnection,
-    send: Arc<parking_lot::Mutex<Option<MediaSender>>>,
+    pc: parking_lot::Mutex<PeerConnection>,
+    send: Arc<parking_lot::Mutex<Option<EgressTap>>>,
     output_state: Arc<parking_lot::Mutex<OutputState>>,
     output_mode: Arc<AtomicU8>,
     video_send: Arc<parking_lot::Mutex<Option<MediaSender>>>,
@@ -460,7 +583,7 @@ struct BridgeSideState {
 impl BridgeSideState {
     fn new(pc: PeerConnection) -> Self {
         Self {
-            pc,
+            pc: parking_lot::Mutex::new(pc),
             send: Arc::new(parking_lot::Mutex::new(None)),
             output_state: Arc::new(parking_lot::Mutex::new(OutputState {
                 mode: BRIDGE_OUTPUT_PEER,
@@ -480,6 +603,14 @@ impl BridgeSideState {
             video_payload_type: Arc::new(AtomicU8::new(96)),
             video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
+    }
+
+    fn pc(&self) -> PeerConnection {
+        self.pc.lock().clone()
+    }
+
+    fn replace_pc(&self, new_pc: PeerConnection) {
+        *self.pc.lock() = new_pc;
     }
 }
 
@@ -549,6 +680,9 @@ pub struct BridgePeer {
     sub_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     cancel_token: CancellationToken,
     forwarding_started: AtomicBool,
+    /// Handle to the bidirectional forwarder task, used to restart it
+    /// when PeerConnection(s) are replaced (e.g. RTP → WebRTC callee).
+    forwarder_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     caller_gate: Arc<AtomicBool>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     recording_paused: Arc<AtomicBool>,
@@ -579,7 +713,7 @@ struct ForwardTrackArgs {
 /// Per-direction parameters for process_track_event.
 struct DirectionParams {
     target_pc: PeerConnection,
-    sender_weak: std::sync::Weak<parking_lot::Mutex<Option<MediaSender>>>,
+    sender_weak: std::sync::Weak<parking_lot::Mutex<Option<EgressTap>>>,
     output_mode: Arc<AtomicU8>,
     direction: &'static str,
     path: ForwardPath,
@@ -612,6 +746,7 @@ impl BridgePeer {
             sub_tasks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
             forwarding_started: AtomicBool::new(false),
+            forwarder_handle: Arc::new(parking_lot::Mutex::new(None)),
             caller_gate: Arc::new(AtomicBool::new(false)),
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
@@ -655,12 +790,26 @@ impl BridgePeer {
         let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Audio, 100);
         let st = self.side_state(side);
         *st.track.lock() = Some(track.clone());
-        let pc = st.pc.clone();
+        let pc = st.pc();
         {
             let _g = crate::utils::media_enter();
             let _ = pc.add_track(track, params);
         }
-        *st.send.lock() = Some(tx);
+        // A-leg (Caller) egress is recorded as leg B; callee egress is a
+        // zero-cost passthrough (only the A-leg is recorded).
+        let tap = match side {
+            BridgeSide::Caller => EgressTap::recording(
+                tx,
+                self.recorder.clone(),
+                self.sipflow_tx.clone(),
+                self.recording_paused.clone(),
+                self.receive_clock.clone(),
+                RecLeg::B,
+                Some(Arc::clone(&self.callee_to_caller_codec.dtmf_mapping)),
+            ),
+            BridgeSide::Callee => EgressTap::passthrough(tx),
+        };
+        *st.send.lock() = Some(tap);
     }
 
     /// Register a video sample track on one bridge side (if not already present).
@@ -671,7 +820,7 @@ impl BridgePeer {
         }
         st.video_payload_type.store(params.payload_type, Ordering::Relaxed);
         let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
-        let pc = st.pc.clone();
+        let pc = st.pc();
         let sender = {
             let _g = crate::utils::media_enter();
             pc.add_track(track, params.clone())?
@@ -699,7 +848,6 @@ impl BridgePeer {
                 Arc::clone(&self.caller.output_mode),
                 self.cancel_token.clone(),
             )
-            .with_recorder(self.recorder.clone(), self.recording_paused.clone())
             .build(),
         ));
         tasks.push(Self::spawn_file_output_clock(
@@ -711,7 +859,6 @@ impl BridgePeer {
                 Arc::clone(&self.callee.output_mode),
                 self.cancel_token.clone(),
             )
-            .with_recorder(self.recorder.clone(), self.recording_paused.clone())
             .build(),
         ));
         drop(tasks);
@@ -861,8 +1008,16 @@ impl BridgePeer {
     /// Optimized: Merged bidirectional forwarding into a single task to reduce Tokio scheduling overhead
     pub async fn start_bridge(&self) {
         if self.forwarding_started.swap(true, Ordering::AcqRel) {
-            debug!(bridge_id = %self.id, "Media bridge forwarding already started");
-            return;
+            // Already started — restart with potentially re-configured PeerConnection(s),
+            // e.g. when the IVR app bridge replaces an RTP callee PC with a WebRTC one.
+            if let Some(handle) = self.forwarder_handle.lock().take() {
+                handle.abort();
+            }
+            self.forwarding_started.store(false, Ordering::Release);
+            self.forwarding_started.swap(true, Ordering::AcqRel);
+            debug!(bridge_id = %self.id, "Media bridge forwarding restarted with re-configured PeerConnections");
+        } else {
+            debug!(bridge_id = %self.id, "Media bridge forwarding started");
         }
 
         // Spawn a single bidirectional forwarding task instead of 2 separate tasks
@@ -964,19 +1119,21 @@ impl BridgePeer {
         };
 
         let mut tasks = self.bridge_tasks.lock();
-        tasks.push(bidirectional_task);
+        *self.forwarder_handle.lock() = Some(bidirectional_task);
         tasks.push(stats_task);
         tasks.push(self.spawn_peer_forward_loops());
     }
 
     /// Get the WebRTC-side sender (for test injection)
+    /// Get the WebRTC-side sender (for test injection / direct send paths).
+    /// Returns the underlying `MediaSender` (bypasses the recording tap).
     pub async fn get_caller_sender(&self) -> Option<MediaSender> {
-        self.caller.send.lock().clone()
+        self.caller.send.lock().as_ref().map(|t| t.inner_sender().clone())
     }
 
     /// Get the RTP-side sender (for test injection)
     pub async fn get_callee_sender(&self) -> Option<MediaSender> {
-        self.callee.send.lock().clone()
+        self.callee.send.lock().as_ref().map(|t| t.inner_sender().clone())
     }
 
     pub fn set_dtmf_sink(
@@ -1366,10 +1523,8 @@ impl BridgePeer {
     }
 
     fn spawn_file_output_clock(ctx: FileOutputContext) -> tokio::task::JoinHandle<()> {
-        let recorder_leg = match ctx.endpoint {
-            BridgeEndpoint::Callee => Some(RecLeg::A),
-            BridgeEndpoint::Caller => Some(RecLeg::B),
-        };
+        // Recording of file-output audio is handled by the EgressTap wrapping
+        // ctx.sender; no per-leg recorder plumbing is needed here.
 
         crate::utils::media_spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
@@ -1450,19 +1605,9 @@ impl BridgePeer {
                                 Some(mapped_ts.wrapping_add(frame_ticks_20ms(frame.clock_rate)));
                         }
 
-                        if let (Some(rec), Some(leg)) = (&ctx.recorder, recorder_leg)
-                            && !ctx.recording_paused.load(Ordering::Relaxed)
-                            && let Some(mut guard) = rec.try_write()
-                            && let Some(r) = guard.as_mut()
-                        {
-                            let _ = r.write_sample(
-                                leg,
-                                &sample,
-                                None,
-                                None::<u32>,
-                                None::<AudioCodecType>,
-                            );
-                        }
+                        // Recording of file-output (announcement) audio is handled
+                        // by the EgressTap wrapping `ctx.sender` below — no separate
+                        // recorder/sipflow tee is needed here.
 
                         let Some(sender) = ctx.sender.as_ref() else {
                             warn!(
@@ -1777,7 +1922,7 @@ impl BridgePeer {
         };
 
         let c2c = DirectionParams {
-            target_pc: self.callee.pc.clone(),
+            target_pc: self.callee.pc(),
             sender_weak: Arc::downgrade(&self.callee.send),
             output_mode: Arc::clone(&self.callee.output_mode),
             direction: "Caller->Callee",
@@ -1795,13 +1940,17 @@ impl BridgePeer {
         };
 
         let c2r = DirectionParams {
-            target_pc: self.caller.pc.clone(),
+            target_pc: self.caller.pc(),
             sender_weak: Arc::downgrade(&self.caller.send),
             output_mode: Arc::clone(&self.caller.output_mode),
             direction: "Callee->Caller",
             path: ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
             leg_stats: Arc::clone(&self.stats.callee_to_caller),
-            recorder_leg: Some(RecLeg::B),
+            // A-leg (Caller) egress is recorded as leg B by the EgressTap
+            // wrapping caller.send, so the callee-side ingress is NOT tapped
+            // here (avoids duplicating leg B). Only the A-leg ingress (c2c,
+            // leg A) is tapped at recv.
+            recorder_leg: None,
             video_payload_type: Arc::clone(&self.caller.video_payload_type),
             video_payload_map: Arc::clone(&self.caller.video_payload_map),
             video_track_label: "callee-to-caller-video",
@@ -1812,8 +1961,8 @@ impl BridgePeer {
             gate: None,
         };
 
-        let caller_pc = self.caller.pc.clone();
-        let callee_pc = self.callee.pc.clone();
+        let caller_pc = self.caller.pc();
+        let callee_pc = self.callee.pc();
         let sub_tasks = self.sub_tasks.clone();
         let cancel = self.cancel_token.clone();
 
@@ -2255,13 +2404,30 @@ impl BridgePeer {
     }
 
     /// Get the WebRTC PeerConnection
-    pub fn caller_pc(&self) -> &PeerConnection {
-        &self.caller.pc
+    pub fn caller_pc(&self) -> PeerConnection {
+        self.caller.pc()
     }
 
     /// Get the RTP PeerConnection
-    pub fn callee_pc(&self) -> &PeerConnection {
-        &self.callee.pc
+    pub fn callee_pc(&self) -> PeerConnection {
+        self.callee.pc()
+    }
+
+    /// Replace the callee-side PeerConnection. Used when an IVR app bridge
+    /// (originally built with an RTP callee PC) needs to serve a WebRTC callee.
+    pub fn replace_callee_pc(&self, pc: PeerConnection) {
+        info!(bridge_id = %self.id, "Replacing callee PeerConnection");
+        self.callee.replace_pc(pc);
+    }
+
+    /// Install (or replace) the audio sample track on the callee side.
+    pub fn setup_callee_audio(&self, params: RtpCodecParameters) {
+        self.setup_audio_side(BridgeSide::Callee, params);
+    }
+
+    /// Return the sender codec configured for the caller leg at build time.
+    pub fn caller_sender_codec(&self) -> Option<RtpCodecParameters> {
+        self.caller.sender_codec.clone()
     }
 
     /// Stop the bridge's forwarding loops WITHOUT closing the PeerConnections.
@@ -2281,13 +2447,19 @@ impl BridgePeer {
     pub async fn stop(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge");
         self.cancel_token.cancel();
-        self.caller.pc.close();
-        self.callee.pc.close();
+        self.caller.pc().close();
+        self.callee.pc().close();
 
+        // Drain the forwarder handle separately (not in bridge_tasks so start_bridge can
+        // abort & replace it when PeerConnection is replaced).
+        let fwd = self.forwarder_handle.lock().take();
         // Wait for main tasks to complete (drain while holding lock, then drop guard before .await)
         let tasks = self.bridge_tasks.lock().drain(..).collect::<Vec<_>>();
         for task in tasks {
             let _ = task.await;
+        }
+        if let Some(fwd) = fwd {
+            let _ = fwd.await;
         }
 
         // Wait for sub-tasks (forward_track_to_sender, pli_forwarder, etc.)
@@ -2300,6 +2472,9 @@ impl BridgePeer {
     /// Close both PeerConnections and abort all tasks (sync, no awaiting).
     pub fn close_sync(&self) {
         self.cancel_token.cancel();
+        if let Some(handle) = self.forwarder_handle.lock().take() {
+            handle.abort();
+        }
         // Abort bridge tasks so they don't keep Arc references alive.
         for task in self.bridge_tasks.lock().iter() {
             task.abort();
@@ -2308,8 +2483,8 @@ impl BridgePeer {
         for task in sub.iter() {
             task.abort();
         }
-        self.caller.pc.close();
-        self.callee.pc.close();
+        self.caller.pc().close();
+        self.callee.pc().close();
     }
 }
 
@@ -2317,6 +2492,9 @@ impl Drop for BridgePeer {
     fn drop(&mut self) {
         trace!(bridge_id = %self.id, "BridgePeer dropping, cleaning up resources");
         self.cancel_token.cancel();
+        if let Some(handle) = self.forwarder_handle.lock().take() {
+            handle.abort();
+        }
         // Drain and abort bridge tasks to release Arc references immediately.
         for task in self.bridge_tasks.get_mut().drain(..) {
             task.abort();
@@ -2325,8 +2503,8 @@ impl Drop for BridgePeer {
         for task in self.sub_tasks.lock().drain(..) {
             task.abort();
         }
-        self.caller.pc.close();
-        self.callee.pc.close();
+        self.caller.pc().close();
+        self.callee.pc().close();
     }
 }
 
@@ -2969,6 +3147,88 @@ mod tests {
         assert!(
             frame_count >= 3,
             "bridge should poll the FileTrack source and send audio without a FileTrack-owned task"
+        );
+    }
+
+    /// Regression: locally-played (file-output) audio — IVR prompts,
+    /// announcements, beeps — must be captured into the sipflow stream.
+    /// Previously the file-output clock only teed to the file recorder, so
+    /// sipflow-mode recordings silently omitted every outbound announcement.
+    #[tokio::test]
+    async fn test_bridge_file_output_captures_locally_played_audio_to_sipflow() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_bridge_file_output_sipflow.wav");
+        create_test_wav_file(test_file.to_str().unwrap(), 800).unwrap();
+
+        let (sipflow_tx, mut sipflow_rx) =
+            mpsc::channel::<(RecLeg, SharedMediaSample, u64)>(64);
+
+        let bridge = BridgePeerBuilder::new("test-file-output-sipflow".to_string())
+            .with_rtp_port_range(25700, 25800)
+            .with_sipflow_capture(sipflow_tx)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+
+        let track = FileTrack::new("file-output-sipflow".to_string())
+            .with_path(test_file.to_string_lossy().to_string())
+            .with_loop(false)
+            .with_codec_info(crate::media::negotiate::CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            });
+
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Caller, &track)
+            .await
+            .unwrap();
+        drop(track);
+
+        // A-leg (Caller) egress is recorded as leg B by the EgressTap wrapping
+        // caller.send; callee egress is a passthrough (not recorded).
+        let mut captured = 0usize;
+        let mut with_raw_packet = 0usize;
+        let mut saw_leg_b = false;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        while tokio::time::Instant::now() < deadline && captured < 8 {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                sipflow_rx.recv(),
+            )
+            .await
+            {
+                Ok(Some((leg, sample, _ts))) => {
+                    captured += 1;
+                    if leg == RecLeg::B {
+                        saw_leg_b = true;
+                    }
+                    if let MediaSample::Audio(f) = &*sample
+                        && f.raw_packet.is_some()
+                        && f.raw_packet.as_ref().unwrap().marshal().is_ok()
+                    {
+                        with_raw_packet += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        bridge.stop().await;
+        let _ = std::fs::remove_file(&test_file);
+
+        assert!(
+            captured >= 3,
+            "A-leg file-output audio should be captured into the sipflow stream, got {captured}"
+        );
+        assert_eq!(
+            captured, with_raw_packet,
+            "every captured file-output sample must carry a marshalable raw_packet for sipflow storage"
+        );
+        assert!(
+            saw_leg_b,
+            "caller (A-leg) file-output should be captured on leg B (RecLeg::B)"
         );
     }
 
@@ -4133,7 +4393,7 @@ mod tests {
         // sample_track returns (source, track_a, feedback_rx).
         // track_a receives what source sends.
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(EgressTap::passthrough(output_tx))));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         // Configure G.729 → PCMU transcoder
@@ -4222,7 +4482,7 @@ mod tests {
         });
 
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(EgressTap::passthrough(output_tx))));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         let transcoder = Arc::new(parking_lot::Mutex::new(Some(Transcoder::new(
@@ -4536,7 +4796,7 @@ mod tests {
         });
 
         let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
-        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(output_tx)));
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(EgressTap::passthrough(output_tx))));
         let sender_weak = Arc::downgrade(&sender_arc);
 
         let cancel = CancellationToken::new();

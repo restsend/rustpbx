@@ -367,7 +367,7 @@ pub fn generate_wav_to_writer_ex<W: Write + Seek>(
     force_pcm: bool,
     writer: &mut W,
 ) -> Result<u64> {
-    generate_wav_to_writer(packets, &HashMap::new(), &HashMap::new(), force_pcm, writer)
+    generate_wav_to_writer(packets, &HashMap::new(), &HashMap::new(), force_pcm, false, writer)
 }
 
 pub(crate) fn generate_wav_from_packets_with_map_ex(
@@ -381,6 +381,7 @@ pub(crate) fn generate_wav_from_packets_with_map_ex(
         payload_map,
         &HashMap::new(),
         force_pcm,
+        false,
         &mut cursor,
     )?;
     Ok(cursor.into_inner())
@@ -391,6 +392,7 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     payload_map: &PayloadTypeMap,
     leg_payload_map: &LegPayloadTypeMap,
     force_pcm: bool,
+    stereo_swap: bool,
     writer: &mut W,
 ) -> Result<u64> {
     if packets.is_empty() {
@@ -627,17 +629,24 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
         let chunk_b = compose_leg_chunk_owned(audio_b, dtmf_b, &silence_frame, target_codec);
 
         interleaved.clear();
+        // Default: chunk_a (leg 0) = left, chunk_b (leg 1) = right.
+        // stereo_swap: leg 1 = left, leg 0 = right.
+        let (left, right) = if stereo_swap {
+            (&chunk_b, &chunk_a)
+        } else {
+            (&chunk_a, &chunk_b)
+        };
         if target_codec.is_none() {
-            let count = chunk_a.len().min(chunk_b.len()) / 2;
+            let count = left.len().min(right.len()) / 2;
             for i in 0..count {
-                interleaved.extend_from_slice(&chunk_a[i * 2..(i + 1) * 2]);
-                interleaved.extend_from_slice(&chunk_b[i * 2..(i + 1) * 2]);
+                interleaved.extend_from_slice(&left[i * 2..(i + 1) * 2]);
+                interleaved.extend_from_slice(&right[i * 2..(i + 1) * 2]);
             }
         } else {
-            let count = chunk_a.len().min(chunk_b.len());
+            let count = left.len().min(right.len());
             for i in 0..count {
-                interleaved.push(chunk_a[i]);
-                interleaved.push(chunk_b[i]);
+                interleaved.push(left[i]);
+                interleaved.push(right[i]);
             }
         }
 
@@ -899,6 +908,205 @@ mod tests {
             "RFC4733 payload without SDP mapping should still regenerate an audible tone, got {} windows",
             audible_windows
         );
+    }
+
+    // ==================== Telephone-Event -> Audio Verification (record then export) =====
+    //
+    // Mirrors the real two-phase sipflow lifecycle: SIP+RTP are first recorded
+    // into a SipFlowItem stream, then exported to a WAV. The test verifies the
+    // end-to-end property that a recorded RFC 4733 telephone-event burst is
+    // rendered as the *corresponding audible DTMF tone* in the exported WAV by
+    // decoding the PCM and running a Goertzel frequency analysis.
+
+    /// Goertzel magnitude of `freq` (Hz) in `samples` at `sample_rate`.
+    fn goertzel(samples: &[i16], freq: f64, sample_rate: u32) -> f64 {
+        let n = samples.len() as f64;
+        if n == 0.0 {
+            return 0.0;
+        }
+        let k = (freq * n / sample_rate as f64).round();
+        let omega = 2.0 * std::f64::consts::PI * k / n;
+        let coeff = 2.0 * omega.cos();
+        let (mut s_prev, mut s_prev2) = (0.0f64, 0.0f64);
+        for &x in samples {
+            let s = x as f64 + coeff * s_prev - s_prev2;
+            s_prev2 = s_prev;
+            s_prev = s;
+        }
+        (s_prev * s_prev + s_prev2 * s_prev2 - coeff * s_prev * s_prev2).sqrt()
+    }
+
+    /// Slice to the contiguous region above `threshold` (the audible tone),
+    /// robust to where exactly the export placed the DTMF in the timeline.
+    fn active_region(samples: &[i16], threshold: i16) -> &[i16] {
+        let start = samples.iter().position(|s| s.abs() > threshold).unwrap_or(0);
+        let end = samples
+            .iter()
+            .rposition(|s| s.abs() > threshold)
+            .map(|i| i + 1)
+            .unwrap_or(samples.len());
+        if end <= start {
+            return &samples[..0];
+        }
+        &samples[start..end]
+    }
+
+    fn assert_dtmf_present(pcm: &[i16], row_freq: f64, col_freq: f64, label: &str) {
+        let sr = 16_000u32;
+        let tone = active_region(pcm, 500);
+        assert!(
+            tone.len() > 1000,
+            "{label}: no audible tone found (active len={})",
+            tone.len()
+        );
+        let mag_row = goertzel(tone, row_freq, sr);
+        let mag_col = goertzel(tone, col_freq, sr);
+        let rows = [697.0, 770.0, 852.0, 941.0];
+        let cols = [1209.0, 1336.0, 1477.0, 1633.0];
+        let wrong_row = rows.iter().copied().find(|r| (r - row_freq).abs() > 1.0).unwrap_or(697.0);
+        let wrong_col = cols.iter().copied().find(|c| (c - col_freq).abs() > 1.0).unwrap_or(1209.0);
+        let mag_noise = goertzel(tone, 1000.0, sr);
+        let mag_wrong_row = goertzel(tone, wrong_row, sr);
+        let mag_wrong_col = goertzel(tone, wrong_col, sr);
+
+        println!(
+            "{label}: row({row_freq:.0})={mag_row:.0} col({col_freq:.0})={mag_col:.0} \
+             noise(1000)={mag_noise:.0} wrong_row({wrong_row:.0})={mag_wrong_row:.0} wrong_col({wrong_col:.0})={mag_wrong_col:.0} len={}",
+            tone.len()
+        );
+
+        let ratio = 4.0;
+        assert!(mag_row > mag_noise * ratio, "{label}: row {row_freq}Hz must beat noise ({mag_row:.0} vs {mag_noise:.0})");
+        assert!(mag_col > mag_noise * ratio, "{label}: col {col_freq}Hz must beat noise ({mag_col:.0} vs {mag_noise:.0})");
+        assert!(mag_row > mag_wrong_row * ratio, "{label}: row {row_freq}Hz must beat wrong row {wrong_row}Hz ({mag_row:.0} vs {mag_wrong_row:.0})");
+        assert!(mag_col > mag_wrong_col * ratio, "{label}: col {col_freq}Hz must beat wrong col {wrong_col}Hz ({mag_col:.0} vs {mag_wrong_col:.0})");
+    }
+
+    /// Build the captured (SIP + RTP) item stream for a single RFC 4733 digit.
+    fn capture_digit_press(digit_code: u8, total_duration: u16) -> Vec<SipFlowItem> {
+        // --- Phase 1a: SIP signaling carrying the SDP codec map ---
+        let sdp = Bytes::from_static(
+            b"INVITE sip:test@example.com SIP/2.0\r\n\r\n\
+              v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+              m=audio 5004 RTP/AVP 0 101\r\n\
+              a=rtpmap:0 PCMU/8000\r\n\
+              a=rtpmap:101 telephone-event/8000\r\n",
+        );
+        let mut items = vec![SipFlowItem {
+            timestamp: 0,
+            seq: 0,
+            leg: None,
+            msg_type: SipFlowMsgType::Sip,
+            src_addr: "10.0.0.10:5004".to_string(),
+            dst_addr: "10.0.0.20:4008".to_string(),
+            payload: sdp,
+        }];
+
+        // --- Phase 1b: a few PCMU audio packets establish the leg timeline ---
+        let silence = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
+        for i in 0..4u32 {
+            items.push(SipFlowItem {
+                timestamp: (i * 20_000) as u64,
+                seq: 1 + i as u64,
+                leg: Some(0),
+                msg_type: SipFlowMsgType::Rtp,
+                src_addr: "10.0.0.10:5004".to_string(),
+                dst_addr: "10.0.0.20:4008".to_string(),
+                payload: Bytes::from(build_rtp_packet(0, i * 160, &silence)),
+            });
+        }
+
+        // --- Phase 1c: RFC 4733 begin / continue / end burst for the digit ---
+        let dtmf_ts = 640u32; // shared RTP timestamp for all packets of this digit
+        let dtmf_capture = 80_000u64;
+        let steps = 10u16;
+        let step = total_duration / steps;
+        for i in 1..=steps {
+            let is_end = i == steps;
+            let flags = if is_end { 0x8a } else { 0x0a };
+            let dur = step * i;
+            items.push(SipFlowItem {
+                timestamp: dtmf_capture,
+                seq: 100 + i as u64,
+                leg: Some(0),
+                msg_type: SipFlowMsgType::Rtp,
+                src_addr: "10.0.0.10:5004".to_string(),
+                dst_addr: "10.0.0.20:4008".to_string(),
+                payload: Bytes::from(build_rtp_packet(
+                    101,
+                    dtmf_ts,
+                    &[digit_code, flags, (dur >> 8) as u8, (dur & 0xff) as u8],
+                )),
+            });
+        }
+        items
+    }
+
+    #[test]
+    fn test_sipflow_export_renders_telephone_event_as_dtmf_audio() {
+        // ---- Phase 1: record the SIP+RTP item stream ----
+        let items = capture_digit_press(5, 1600); // digit '5', 200 ms @ 8 kHz
+
+        // ---- Phase 2: export, mirroring FlowDbBackend::generate_wav ----
+        // 2a. payload map derived from the recorded SDP (not hard-coded).
+        let sip_items: Vec<SipFlowItem> = items
+            .iter()
+            .filter(|i| i.msg_type == SipFlowMsgType::Sip)
+            .cloned()
+            .collect();
+        let payload_map = build_payload_type_map(&sip_items);
+        assert_eq!(
+            payload_map.get(&101).map(|d| d.codec),
+            Some(CodecType::TelephoneEvent),
+            "SDP must negotiate PT 101 as telephone-event"
+        );
+
+        // 2b. RTP packets extracted from the recorded RTP items.
+        let packets: Vec<(i32, u64, Vec<u8>)> = items
+            .iter()
+            .filter(|i| i.msg_type == SipFlowMsgType::Rtp)
+            .map(|i| (i.leg.unwrap_or(0), i.timestamp, i.payload.to_vec()))
+            .collect();
+
+        // 2c. force_pcm = true, exactly like the real export path.
+        let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
+            .expect("sipflow wav export should succeed");
+
+        // ---- Verify: digit '5' => 770 / 1336 Hz on leg 0 (left channel) ----
+        let left = left_channel_pcm_samples(&wav);
+        assert!(left.len() > 2000, "exported wav too short: {}", left.len());
+        assert_dtmf_present(&left, 770.0, 1336.0, "digit 5 / leg 0 (left)");
+
+        // ---- Verify leg isolation: leg 1 (right channel) must be silent ----
+        let right = right_channel_pcm_samples(&wav);
+        let max_right = right.iter().map(|s| s.abs()).max().unwrap_or(0);
+        assert!(
+            max_right < 500,
+            "leg 1 (right) should be silent while leg 0 has a DTMF tone, max={max_right}"
+        );
+    }
+
+    #[test]
+    fn test_sipflow_export_renders_distinct_digits() {
+        for (digit_code, row, col, name) in [
+            (1u8, 697.0, 1209.0, "1"),
+            (9u8, 852.0, 1477.0, "9"),
+            (11u8, 941.0, 1477.0, "#"),
+        ] {
+            let items = capture_digit_press(digit_code, 1600);
+            let payload_map = build_payload_type_map(
+                &items.iter().filter(|i| i.msg_type == SipFlowMsgType::Sip).cloned().collect::<Vec<_>>(),
+            );
+            let packets: Vec<(i32, u64, Vec<u8>)> = items
+                .iter()
+                .filter(|i| i.msg_type == SipFlowMsgType::Rtp)
+                .map(|i| (i.leg.unwrap_or(0), i.timestamp, i.payload.to_vec()))
+                .collect();
+            let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
+                .expect("export should succeed");
+            let left = left_channel_pcm_samples(&wav);
+            assert_dtmf_present(&left, row, col, &format!("digit {name}"));
+        }
     }
 
     #[test]

@@ -501,10 +501,15 @@ impl EngineCore {
                     .unwrap_or(audio_codec::CodecType::PCMU);
                 let mut recorder =
                     crate::media::recorder::Recorder::new(&config.path, recorder_codec)?;
+                recorder.stereo_swap = config.stereo_swap;
                 if let Some(profile) = caller_profile {
-                    recorder.set_leg_profile(crate::media::recorder::Leg::A, profile);
-                }
-                if let Some(profile) = callee_profile {
+                    recorder.set_leg_profile(crate::media::recorder::Leg::A, profile.clone());
+                    // Leg B = caller egress (what caller hears) — use caller profile
+                    // so the recorder can detect DTMF and audio codec correctly on
+                    // the egress side (samples are encoded in the caller's codec).
+                    recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
+                } else if let Some(profile) = callee_profile {
+                    recorder.set_leg_profile(crate::media::recorder::Leg::A, profile.clone());
                     recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
                 }
                 *guard = Some(recorder);
@@ -1108,6 +1113,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1179,6 +1185,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1233,6 +1240,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1251,6 +1259,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1428,6 +1437,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1517,6 +1527,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -1877,6 +1888,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: Some(caller_profile),
                 callee_profile: None,
@@ -1926,6 +1938,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,
@@ -2287,6 +2300,7 @@ mod tests {
                     max_duration_secs: None,
                     beep: false,
                     format: None,
+                    stereo_swap: false,
                 },
                 caller_profile: None,
                 callee_profile: None,

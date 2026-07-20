@@ -207,6 +207,7 @@ impl CallSessionBuilder {
                 remote_tag: "".into(),
             },
             extensions: dialplan.extensions.clone(),
+            metadata: std::collections::HashMap::new(),
         };
 
         reporter.report(snapshot);

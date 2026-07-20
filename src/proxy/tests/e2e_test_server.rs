@@ -28,7 +28,7 @@ pub struct E2eTestServer {
     pub registry: Arc<ActiveProxyCallRegistry>,
     pub media_proxy_mode: MediaProxyMode,
     cancel_token: CancellationToken,
-    _server_handle: Option<tokio::task::JoinHandle<()>>,
+    _server_abort: Option<tokio::task::AbortHandle>,
 }
 
 impl E2eTestServer {
@@ -68,7 +68,7 @@ impl E2eTestServer {
         let registry = server_ref.active_call_registry.clone();
 
         let cancel_token_clone = cancel_token.clone();
-        let _server_handle = Some(crate::utils::spawn(async move {
+        let join_handle = crate::utils::spawn(async move {
             tokio::select! {
                 _ = cancel_token_clone.cancelled() => {
                     info!("E2E test server cancelled");
@@ -79,7 +79,8 @@ impl E2eTestServer {
                     }
                 }
             }
-        }));
+        });
+        let _server_abort = Some(join_handle.abort_handle());
 
         // Wait for server to be ready
         sleep(Duration::from_millis(200)).await;
@@ -94,7 +95,7 @@ impl E2eTestServer {
             registry,
             media_proxy_mode: mode,
             cancel_token,
-            _server_handle,
+            _server_abort,
         })
     }
 
@@ -141,7 +142,7 @@ impl E2eTestServer {
         let registry = server_ref.active_call_registry.clone();
 
         let cancel_token_clone = cancel_token.clone();
-        let _server_handle = Some(crate::utils::spawn(async move {
+        let join_handle = crate::utils::spawn(async move {
             tokio::select! {
                 _ = cancel_token_clone.cancelled() => {
                     info!("E2E test server cancelled");
@@ -152,7 +153,8 @@ impl E2eTestServer {
                     }
                 }
             }
-        }));
+        });
+        let _server_abort = Some(join_handle.abort_handle());
 
         // Wait for server to be ready
         sleep(Duration::from_millis(200)).await;
@@ -167,7 +169,7 @@ impl E2eTestServer {
             registry,
             media_proxy_mode: mode,
             cancel_token,
-            _server_handle,
+            _server_abort,
         })
     }
 
@@ -235,6 +237,9 @@ impl E2eTestServer {
 impl Drop for E2eTestServer {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+        if let Some(abort) = self._server_abort.take() {
+            abort.abort();
+        }
     }
 }
 

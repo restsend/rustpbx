@@ -125,6 +125,9 @@ rwi_event!(CallAnswered, "call_answered");
 pub struct CallHangup {
     pub call_id: String,
     pub reason: Option<String>,
+    /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
+    /// | `"unknown"`. Consistent with the CC-layer `cc_hangup.hangup_by`.
+    pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
 }
 rwi_event!(CallHangup, "call_hangup");

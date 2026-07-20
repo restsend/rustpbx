@@ -298,9 +298,10 @@ impl ProxyModule for AuthModule {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Check if this is an in-dialog request and if we can skip authentication via cache
-        if let Some(ref cache) = self.dialog_auth_cache {
-            if self.is_in_dialog_request(tx) {
+        // Check if this is an in-dialog request and if we can skip authentication
+        if self.is_in_dialog_request(tx) {
+            // First, try the dialog auth cache
+            if let Some(ref cache) = self.dialog_auth_cache {
                 if let (Some(cache_key), Some(source_addr)) =
                     (self.extract_auth_cache_key(tx), self.get_source_addr(tx))
                 {
@@ -324,6 +325,19 @@ impl ProxyModule for AuthModule {
                         return Ok(ProxyAction::Continue);
                     }
                 }
+            }
+
+            // Cache miss or disabled: for re-INVITEs (in-dialog INVITE),
+            // trust the call module's dialog layer to validate the dialog
+            // actually exists. Other in-dialog methods (BYE, CANCEL, etc.)
+            // already bypass auth at the method check below.
+            if tx.original.method == rsipstack::sip::Method::Invite {
+                debug!(
+                    method = %tx.original.method,
+                    "In-dialog INVITE (re-INVITE) detected, skipping auth"
+                );
+                cookie.set_user(tx_user.clone());
+                return Ok(ProxyAction::Continue);
             }
         }
 

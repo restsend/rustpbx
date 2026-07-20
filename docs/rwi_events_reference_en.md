@@ -271,6 +271,7 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `reason` | Option\<String\> | Hangup reason (see table below) |
+| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. Same vocabulary as `cc_hangup.hangup_by`; makes it unambiguous who ended the call. |
 | `sip_status` | Option\<u16\> | SIP response code |
 | *+ctx* | | Flat context fields |
 
@@ -296,6 +297,7 @@ Dispatch: call_owner
   "call_hangup": {
     "call_id": "call-abc",
     "reason": "caller",
+    "hangup_by": "caller",
     "sip_status": null,
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
@@ -305,6 +307,45 @@ Dispatch: call_owner
   }
 }
 ```
+
+#### cc_hangup
+
+Contact-center layer hangup (CC-routed calls only). Emitted alongside
+`call_hangup`; named `cc_hangup` for consistency with the core event. `reason`
+uses the **same Display vocabulary** as `call_hangup.reason` (e.g. `caller`,
+`callee`, `abandoned` — NOT the Debug form). `hangup_by` makes it explicit
+whether the agent, the caller, the system, or a transfer ended the call —
+this is critical for contact-center reporting.
+
+Dispatch: broadcast (delivered to the configured `[rwi_webhook]`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `agent_id` | Option\<String\> | CC agent identifier (callee leg) |
+| `queue_id` | Option\<String\> | Queue/skill-group the call was routed through |
+| `reason` | String | Normalized reason, same vocabulary as `call_hangup.reason` |
+| `hangup_by` | Option\<String\> | `agent` \| `caller` \| `system` \| `transfer` \| `unknown` |
+| `duration_secs` | u64 | Talk time in seconds (0 for unanswered) |
+
+```json
+{
+  "rwi": "1.0",
+  "event_type": "cc_hangup",
+  "event": {
+    "call_id": "call-abc",
+    "agent_id": "1001",
+    "queue_id": "support",
+    "reason": "callee",
+    "hangup_by": "agent",
+    "duration_secs": 42
+  }
+}
+```
+
+> Previously this event was named `cc_ended` and carried `reason` as the Debug
+> form of the internal enum (e.g. `"ByCallee"`). Both were normalized to match
+> `call_hangup`.
 
 ### 6.2 Transfer Events
 
@@ -1233,6 +1274,11 @@ Dispatch: broadcast
 | `skill_group_agent_assigned` | broadcast | yes | — |
 | `skill_group_no_agent` | broadcast | yes | — |
 | `agent_state_changed` | broadcast | optional | — |
+| `cc_ringing` | broadcast | optional | — |
+| `cc_answered` | broadcast | optional | — |
+| `cc_hangup` | broadcast | optional | — |
+| `cc_held` | broadcast | optional | — |
+| `cc_unheld` | broadcast | optional | — |
 | `dn_state_changed` | broadcast | optional | — |
 | `dn_registered` | broadcast | — | — |
 | `dn_unregistered` | broadcast | — | — |

@@ -6,14 +6,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::media::Track;
-use crate::media::recorder::RecorderOption;
 
 pub type TrackMap = DashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>;
 
 pub struct MediaStreamBuilder {
     id: Option<String>,
     cancel_token: Option<CancellationToken>,
-    recorder_option: Option<RecorderOption>,
 }
 
 impl Default for MediaStreamBuilder {
@@ -27,7 +25,6 @@ impl MediaStreamBuilder {
         Self {
             id: None,
             cancel_token: None,
-            recorder_option: None,
         }
     }
 
@@ -41,17 +38,11 @@ impl MediaStreamBuilder {
         self
     }
 
-    pub fn with_recorder_config(mut self, option: RecorderOption) -> Self {
-        self.recorder_option = Some(option);
-        self
-    }
-
     pub fn build(self) -> MediaStream {
         MediaStream {
             id: self.id.unwrap_or_else(|| "media-stream".to_string()),
             cancel_token: self.cancel_token.unwrap_or_default(),
             tracks: DashMap::new(),
-            recorder_option: self.recorder_option,
         }
     }
 }
@@ -60,7 +51,6 @@ pub struct MediaStream {
     pub id: String,
     pub cancel_token: CancellationToken,
     tracks: DashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>,
-    pub recorder_option: Option<RecorderOption>,
 }
 
 impl MediaStream {
@@ -70,10 +60,7 @@ impl MediaStream {
         Ok(())
     }
 
-    pub async fn update_track(&self, mut track: Box<dyn Track>, play_id: Option<String>) {
-        if let Some(ref option) = self.recorder_option {
-            track.set_recorder_option(option.clone()).await;
-        }
+    pub async fn update_track(&self, track: Box<dyn Track>, play_id: Option<String>) {
         let id = track.id().to_string();
         let wrapped = Arc::new(AsyncMutex::new(track));
         self.tracks.insert(id.clone(), wrapped.clone());

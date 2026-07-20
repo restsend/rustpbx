@@ -117,21 +117,26 @@ impl CallMetaStore {
 #[serde(rename_all = "snake_case")]
 pub struct RecordingMetadata {
     pub filename: String,
-    pub unique_id: String,
     pub file_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub callee_name: Option<String>,
-    pub called_phone: Option<String>,
     pub call_type: String,
-    pub agent_id: Option<String>,
-    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub call_start_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub call_end_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_time: Option<String>,
-    pub switch_flag: Option<String>,
-    pub process_flag: Option<String>,
-    pub root_call_id: Option<String>,
+    /// Generic metadata bag, populated from `CallDetails.metadata`. Addons
+    /// write flat string keys (e.g. `agent_id`, `queue_id`, `tenant_id`)
+    /// that the core passes through without naming — external consumers
+    /// read what they need.
+    #[serde(flatten)]
+    pub extra: Option<std::collections::HashMap<String, String>>,
 }
 
 #[cfg(test)]

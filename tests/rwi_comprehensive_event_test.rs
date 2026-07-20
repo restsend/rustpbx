@@ -389,6 +389,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::CallHangup {
                 call_id: call_id.into(),
                 reason: Some("normal".into()),
+                hangup_by: None,
                 sip_status: Some(200),
             },
         );
@@ -500,6 +501,7 @@ async fn test_new_api_event_structs() {
         gw.broadcast(&rustpbx::rwi::CallHangup {
             call_id: call_id.into(),
             reason: Some("normal".into()),
+            hangup_by: None,
             sip_status: Some(200),
         });
     }

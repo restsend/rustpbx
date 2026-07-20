@@ -3,6 +3,7 @@
 //! All operations on the MediaEngine are expressed as variants of [`MediaCommand`].
 //! Commands are sent via `mpsc::Sender<MediaCommand>` to the engine's command loop.
 
+use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -23,8 +24,28 @@ use tokio::sync::mpsc;
 /// share it via `Arc` to make the second `try_send` essentially free.
 pub type SharedMediaSample = Arc<rustrtc::media::frame::MediaSample>;
 
-/// Channel type used to forward raw RTP samples to the SipFlow capture backend.
-/// Matches the type alias in sip_session.rs so the engine can accept it directly.
+/// Pre-marshalled RTP bytes sent from the forwarding hot path to the sipflow
+/// capture backend, avoiding both the deep `MediaSample::clone` (which copies
+/// `raw_packet.payload: Vec<u8>`) and the redundant `RtpPacket::marshal()` in
+/// the receiver task.
+///
+/// The RTP packet is marshalled **once** in the hot path and the raw bytes
+/// are forwarded through this channel instead of passing a heavy
+/// `Arc<MediaSample>` that must later be re-serialised.
+pub struct SipFlowCaptureData {
+    pub leg: crate::media::recorder::Leg,
+    /// Pre-marshalled full RTP packet (header + payload + extension + padding).
+    pub rtp_bytes: Bytes,
+    /// Monotonic receive timestamp in microseconds (from `ReceiveTimestampClock`).
+    pub received_at_micros: u64,
+    /// RTP sequence number extracted from the `AudioFrame` (also embedded in
+    /// `rtp_bytes` but kept as a convenience to avoid re-parsing).
+    pub sequence_number: Option<u16>,
+    /// Source socket address formatted as `"ip:port"` if available.
+    pub source_addr: String,
+}
+
+/// Channel type used to forward raw RTP bytes to the SipFlow capture backend.
 pub type SipFlowCaptureTx = mpsc::Sender<(crate::media::recorder::Leg, SharedMediaSample, u64)>;
 pub type SipFlowCaptureRx = mpsc::Receiver<(crate::media::recorder::Leg, SharedMediaSample, u64)>;
 
@@ -156,12 +177,14 @@ impl CodecProfile {
 }
 
 /// Recording configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordConfig {
     pub path: String,
     pub max_duration_secs: Option<u32>,
     pub beep: bool,
     pub format: Option<String>,
+    #[serde(default)]
+    pub stereo_swap: bool,
 }
 
 // ---------------------------------------------------------------------------

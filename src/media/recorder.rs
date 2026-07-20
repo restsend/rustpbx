@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tracing::debug;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -70,29 +70,28 @@ pub struct Recorder {
     decoders: HashMap<(Leg, u8), Box<dyn Decoder>>,
     resamplers: HashMap<(Leg, u8), audio_codec::Resampler>,
 
-    // Buffers store encoded data indexed by absolute recording timestamp (in samples)
+    // Buffers store encoded data indexed by absolute recording position (in samples)
     buffer_a: BTreeMap<u32, Bytes>,
     buffer_b: BTreeMap<u32, Bytes>,
 
-    start_instant: Instant,
     last_flush: Instant,
 
-    base_timestamp_a: Option<u32>,
-    base_timestamp_b: Option<u32>,
-    start_offset_a: u32, // in samples
-    start_offset_b: u32, // in samples
-    last_ssrc_a: Option<u32>,
-    last_ssrc_b: Option<u32>,
     profile_a: NegotiatedLegProfile,
     profile_b: NegotiatedLegProfile,
     dtmf_state_a: Option<DtmfEventState>,
     dtmf_state_b: Option<DtmfEventState>,
+    leg_a_started: bool,
+    leg_b_started: bool,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
 
     written_samples: u64,
     writer: Box<dyn StreamWriter>,
+
+    /// When true, swap stereo channels: callee→left, caller→right.
+    /// Default (false): caller→left, callee→right.
+    pub stereo_swap: bool,
 }
 
 impl Recorder {
@@ -140,14 +139,7 @@ impl Recorder {
             resamplers: HashMap::new(),
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
-            start_instant: Instant::now(),
             last_flush: Instant::now(),
-            base_timestamp_a: None,
-            base_timestamp_b: None,
-            start_offset_a: 0,
-            start_offset_b: 0,
-            last_ssrc_a: None,
-            last_ssrc_b: None,
             profile_a: NegotiatedLegProfile::default(),
             profile_b: NegotiatedLegProfile::default(),
             dtmf_state_a: None,
@@ -156,6 +148,9 @@ impl Recorder {
             written_samples: 0,
             writer,
             ptime: Duration::from_millis(200),
+            stereo_swap: false,
+            leg_a_started: false,
+            leg_b_started: false,
         })
     }
 
@@ -208,25 +203,90 @@ impl Recorder {
             );
         }
 
-        let codec_hint = codec_hint.or(match (frame.payload_type, profile_audio_pt) {
+        // DTMF fallback: when the PT doesn't match the profile's DTMF PT
+        // (e.g. SDP negotiated multiple telephone-event PTs but only one
+        // was stored), detect DTMF by payload shape — RFC 4733 payload is
+        // always exactly 4 bytes and the first byte is a valid digit code.
+        if dtmf_pt.is_some() && frame.data.len() == 4 {
+            let code = frame.data[0];
+            if crate::media::telephone_event::dtmf_code_to_char(code).is_some() {
+                return self.write_dtmf_payload(
+                    leg,
+                    &frame.data,
+                    frame.rtp_timestamp,
+                    frame.clock_rate.max(8000),
+                );
+            }
+        }
+
+        let mut codec_hint = codec_hint.or(match (frame.payload_type, profile_audio_pt) {
             (Some(pt), Some(audio_pt)) if pt == audio_pt => profile_audio_codec,
             _ => None,
         });
 
-        let decoder_type = match codec_hint {
-            Some(codec) => codec,
-            None => CodecType::try_from(frame.payload_type.unwrap_or(0))?,
-        };
-        let packet_ssrc = frame.raw_packet.as_ref().map(|packet| packet.header.ssrc);
-        let (mut encoded, frame_clock_rate) = match sample {
+        // Extract payload (prefer raw RTP payload when available).
+        let (mut encoded, _frame_clock_rate) = match sample {
             MediaSample::Audio(frame) => match frame.raw_packet.as_ref() {
                 Some(packet) => (
                     Bytes::copy_from_slice(&packet.payload),
-                    decoder_type.clock_rate().max(1),
+                    frame.clock_rate.max(1),
                 ),
                 None => (frame.data.clone(), frame.clock_rate.max(1)),
             },
             _ => return Ok(()),
+        };
+
+        // Handle RFC 2198 RED: JsSIP/Chrome WebRTC clients send Opus wrapped
+        // in RED (PT 63).  Parse the RED header blocks to extract the primary
+        // (newest) payload and decode it as the profile's audio codec.
+        //
+        // RED format:
+        //   Block header (not-last): [F=1 | PT(7)] [ts_off_hi(8)] [ts_off_lo(6)|len_hi(2)] [len_lo(8)]
+        //   Block header (last):     [F=0 | PT(7)]
+        //   Then payloads in order (oldest first, primary last).
+        if codec_hint.is_none() && encoded.len() > 1 {
+            let first_pt = encoded[0] & 0x7F;
+            if Some(first_pt) == profile_audio_pt {
+                // Walk the header chain to find total header size and
+                // the cumulative length of all redundant (non-primary) payloads.
+                let hdr_end;
+                let mut redundant_len = 0usize;  // total bytes of non-primary payloads
+                let mut pos = 0usize;
+                let mut ok = true;
+                loop {
+                    if pos >= encoded.len() { ok = false; break; }
+                    let hdr = encoded[pos];
+                    let f_bit = hdr & 0x80 != 0;
+                    let _pt = hdr & 0x7F;
+                    pos += 1;
+                    if f_bit {
+                        // Not-last block: 3 more header bytes (ts offset + length)
+                        if pos + 2 >= encoded.len() { ok = false; break; }
+                        let blen = ((encoded[pos + 1] as usize & 0x03) << 8)
+                            | encoded[pos + 2] as usize;
+                        redundant_len += blen;
+                        pos += 3;
+                    } else {
+                        // Last header block found — primary payload follows
+                        break;
+                    }
+                }
+                hdr_end = pos;
+                if ok && hdr_end + redundant_len < encoded.len() {
+                    // Primary payload = everything after headers + redundant payloads
+                    let primary_start = hdr_end + redundant_len;
+                    encoded = encoded.slice(primary_start..);
+                    codec_hint = profile_audio_codec;
+                }
+            }
+        }
+
+        let decoder_type = match codec_hint {
+            Some(codec) => codec,
+            None => match CodecType::try_from(frame.payload_type.unwrap_or(0)) {
+                Ok(c) => c,
+                Err(_) => return Ok(()), // Unknown PT — skip silently
+            },
         };
 
         if decoder_type != self.codec {
@@ -252,82 +312,16 @@ impl Recorder {
             }
             .into();
         }
-        self.maybe_reset_leg_timeline(
-            leg,
-            frame.rtp_timestamp,
-            frame_clock_rate,
-            packet_ssrc,
-            &encoded,
-        );
-        let absolute_ts = self.timestamp_to_absolute(leg, frame.rtp_timestamp, frame_clock_rate);
+
+        // Position sequentially: append right after the previous sample.
+        // This eliminates jitter-induced silence gaps (click noise) that
+        // occur with wall-clock or RTP timestamp positioning.
+        let absolute_ts = self.leg_end_ts(leg);
         self.insert_audio_block(leg, absolute_ts, encoded);
         if self.last_flush.elapsed() >= self.ptime {
             self.flush()?;
         }
         Ok(())
-    }
-
-    fn maybe_reset_leg_timeline(
-        &mut self,
-        leg: Leg,
-        rtp_timestamp: u32,
-        frame_clock_rate: u32,
-        packet_ssrc: Option<u32>,
-        encoded: &[u8],
-    ) {
-        let leg_end = self.leg_end_ts(leg);
-        let (base_timestamp, start_offset, last_ssrc) = match leg {
-            Leg::A => (
-                &mut self.base_timestamp_a,
-                &mut self.start_offset_a,
-                &mut self.last_ssrc_a,
-            ),
-            Leg::B => (
-                &mut self.base_timestamp_b,
-                &mut self.start_offset_b,
-                &mut self.last_ssrc_b,
-            ),
-        };
-
-        let Some(base) = *base_timestamp else {
-            *last_ssrc = packet_ssrc;
-            return;
-        };
-
-        let projected = start_offset.wrapping_add(
-            ((rtp_timestamp.wrapping_sub(base)) as u64 * self.sample_rate as u64
-                / frame_clock_rate.max(1) as u64) as u32,
-        );
-        let max_gap = self.sample_rate * 2;
-        let ssrc_changed =
-            matches!((*last_ssrc, packet_ssrc), (Some(prev), Some(curr)) if prev != curr);
-        let timestamp_far_ahead = projected > leg_end.saturating_add(max_gap);
-        let timestamp_far_behind = leg_end > projected.saturating_add(max_gap);
-        let prev_ssrc = *last_ssrc;
-
-        if ssrc_changed || timestamp_far_ahead || timestamp_far_behind {
-            trace!(
-                recorder_path = %self.path,
-                leg = ?leg,
-                base_timestamp = base,
-                rtp_timestamp,
-                frame_clock_rate,
-                prev_ssrc,
-                packet_ssrc,
-                leg_end,
-                projected,
-                max_gap,
-                ssrc_changed,
-                timestamp_far_ahead,
-                timestamp_far_behind,
-                encoded_len = encoded.len(),
-                "Recorder timeline discontinuity detected, resetting leg base"
-            );
-            *base_timestamp = Some(rtp_timestamp);
-            *start_offset = leg_end;
-        }
-
-        *last_ssrc = packet_ssrc.or(*last_ssrc);
     }
 
     fn leg_end_ts(&self, leg: Leg) -> u32 {
@@ -345,36 +339,6 @@ impl Recorder {
     fn block_span_samples(&self, data: &[u8]) -> u32 {
         let (samples_per_block, bytes_per_block) = self.block_info();
         (data.len() / bytes_per_block) as u32 * samples_per_block
-    }
-
-    fn timestamp_to_absolute(&mut self, leg: Leg, timestamp: u32, clock_rate: u32) -> u32 {
-        let timestamp_clock_rate = clock_rate.max(1);
-        match leg {
-            Leg::A => {
-                if self.base_timestamp_a.is_none() {
-                    self.base_timestamp_a = Some(timestamp);
-                    self.start_offset_a = (self.start_instant.elapsed().as_millis() as u64
-                        * self.sample_rate as u64
-                        / 1000) as u32;
-                }
-                let relative = timestamp.wrapping_sub(self.base_timestamp_a.unwrap());
-                let scaled_relative = (relative as u64 * self.sample_rate as u64
-                    / timestamp_clock_rate as u64) as u32;
-                self.start_offset_a.wrapping_add(scaled_relative)
-            }
-            Leg::B => {
-                if self.base_timestamp_b.is_none() {
-                    self.base_timestamp_b = Some(timestamp);
-                    self.start_offset_b = (self.start_instant.elapsed().as_millis() as u64
-                        * self.sample_rate as u64
-                        / 1000) as u32;
-                }
-                let relative = timestamp.wrapping_sub(self.base_timestamp_b.unwrap());
-                let scaled_relative = (relative as u64 * self.sample_rate as u64
-                    / timestamp_clock_rate as u64) as u32;
-                self.start_offset_b.wrapping_add(scaled_relative)
-            }
-        }
     }
 
     fn active_dtmf_state(&self, leg: Leg) -> Option<DtmfEventState> {
@@ -483,6 +447,10 @@ impl Recorder {
     }
 
     fn insert_audio_block(&mut self, leg: Leg, start_ts: u32, encoded: Bytes) {
+        match leg {
+            Leg::A => self.leg_a_started = true,
+            Leg::B => self.leg_b_started = true,
+        }
         let mut inserts = vec![(start_ts, encoded)];
         if let Some(state) = self.active_dtmf_state(leg) {
             let dtmf_start = state.absolute_timestamp;
@@ -530,7 +498,7 @@ impl Recorder {
         &mut self,
         leg: Leg,
         payload: &[u8],
-        timestamp: u32,
+        rtp_timestamp: u32,
         clock_rate: u32,
     ) -> Result<()> {
         if payload.len() < 4 {
@@ -549,13 +517,13 @@ impl Recorder {
 
         if let Some(state) = self.active_dtmf_state(leg)
             && state.digit_code == digit_code
-            && state.rtp_timestamp == timestamp
+            && state.rtp_timestamp == rtp_timestamp
             && duration_samples <= state.duration_samples
         {
             return Ok(());
         }
 
-        let absolute_ts = self.timestamp_to_absolute(leg, timestamp, clock_rate);
+        let absolute_ts = self.leg_end_ts(leg);
 
         debug!(
             leg = ?leg,
@@ -573,13 +541,17 @@ impl Recorder {
             Bytes::from(audio_codec::samples_to_bytes(&pcm))
         };
         let end_ts = absolute_ts.saturating_add(duration_samples);
+        match leg {
+            Leg::A => self.leg_a_started = true,
+            Leg::B => self.leg_b_started = true,
+        }
         self.overlay_dtmf_range(leg, absolute_ts, end_ts, encoded);
 
         self.set_dtmf_state(
             leg,
             DtmfEventState {
                 digit_code,
-                rtp_timestamp: timestamp,
+                rtp_timestamp,
                 absolute_timestamp: absolute_ts,
                 duration_samples,
             },
@@ -596,8 +568,6 @@ impl Recorder {
         leg: Leg,
         digit: char,
         duration_ms: u32,
-        timestamp: Option<u32>,
-        timestamp_clock_rate: Option<u32>,
     ) -> Result<()> {
         let pcm = self.dtmf_gen.generate(digit, duration_ms);
         debug!(
@@ -608,24 +578,8 @@ impl Recorder {
             pcm.len()
         );
 
-        // Determine absolute timestamp
-        let ts = if let Some(t) = timestamp {
-            self.timestamp_to_absolute(leg, t, timestamp_clock_rate.unwrap_or(self.sample_rate))
-        } else {
-            // If no timestamp provided, append to the end of the buffer
-            match leg {
-                Leg::A => self
-                    .buffer_a
-                    .last_key_value()
-                    .map(|(k, v)| k + v.len() as u32)
-                    .unwrap_or(self.next_flush_ts),
-                Leg::B => self
-                    .buffer_b
-                    .last_key_value()
-                    .map(|(k, v)| k + v.len() as u32)
-                    .unwrap_or(self.next_flush_ts),
-            }
-        };
+        // Position sequentially — append after previous content
+        let ts = self.leg_end_ts(leg);
 
         let encoded = if let Some(enc) = self.encoder.as_mut() {
             Bytes::from(enc.encode(&pcm))
@@ -640,7 +594,7 @@ impl Recorder {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
 
         let max_ts_a = self
@@ -661,13 +615,37 @@ impl Recorder {
                 k + (v.len() / bytes_per_block) as u32 * samples_per_block
             })
             .unwrap_or(0);
-        let max_available_ts = max_ts_a.max(max_ts_b);
+        // Flush strategy — prevents silence gaps on the slower leg.
+        //
+        // When both legs are active, flush only up to min(a, b) to avoid
+        // silence-filling the lagging leg.  When one leg is temporarily
+        // stalled (no new data past next_flush_ts), WAIT (return early)
+        // rather than using max — that prevents the periodic 100ms silence
+        // gaps that sound like choppy/glitchy audio.
+        //
+        // Safety-valve: if the leading leg has >2 s of buffered data the
+        // stalled leg is likely permanently done — force-flush to keep
+        // memory bounded.
+        let flush_target = if !self.leg_a_started || !self.leg_b_started {
+            max_ts_a.max(max_ts_b)
+        } else if max_ts_a > self.next_flush_ts && max_ts_b > self.next_flush_ts {
+            max_ts_a.min(max_ts_b)
+        } else {
+            // Both started but at least one hasn't advanced.
+            let max_ts = max_ts_a.max(max_ts_b);
+            let buffered = max_ts.saturating_sub(self.next_flush_ts);
+            if buffered > self.sample_rate * 2 {
+                max_ts  // safety-valve: leading leg >2s ahead
+            } else {
+                return Ok(());  // wait for slower leg
+            }
+        };
 
-        if max_available_ts <= self.next_flush_ts {
+        if flush_target <= self.next_flush_ts {
             return Ok(());
         }
 
-        let mut flush_len = max_available_ts - self.next_flush_ts;
+        let mut flush_len = flush_target - self.next_flush_ts;
 
         // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
         let max_flush_samples = self.sample_rate * 10;
@@ -691,8 +669,14 @@ impl Recorder {
             // Mono: mix both legs
             self.mix(&data_a, &data_b)?
         } else {
-            // Stereo: interleave both legs
-            self.interleave(&data_a, &data_b)?
+            // Stereo: interleave both legs.
+            // Default: Leg A (caller) → left, Leg B (callee) → right.
+            // stereo_swap: callee → left, caller → right.
+            if self.stereo_swap {
+                self.interleave(&data_b, &data_a)?
+            } else {
+                self.interleave(&data_a, &data_b)?
+            }
         };
 
         self.writer.write_packet(&output, flush_len as usize)?;
@@ -703,8 +687,39 @@ impl Recorder {
     }
 
     pub fn finalize(&mut self) -> Result<()> {
-        self.flush()?;
+        // Final flush: use max to flush ALL remaining data from both legs.
+        self.flush_final()?;
         self.writer.finalize()?;
+        Ok(())
+    }
+
+    /// Flush everything remaining — used by finalize() to write trailing data.
+    fn flush_final(&mut self) -> Result<()> {
+        self.last_flush = Instant::now();
+        let max_ts_a = self.buffer_a.last_key_value()
+            .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
+            .unwrap_or(0);
+        let max_ts_b = self.buffer_b.last_key_value()
+            .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
+            .unwrap_or(0);
+        let max_available_ts = max_ts_a.max(max_ts_b);
+        if max_available_ts <= self.next_flush_ts {
+            return Ok(());
+        }
+        let flush_len = max_available_ts - self.next_flush_ts;
+        let data_a = self.get_leg_data(Leg::A, flush_len)?;
+        let data_b = self.get_leg_data(Leg::B, flush_len)?;
+        self.next_flush_ts += flush_len;
+        let output = if self.channels == 1 {
+            self.mix(&data_a, &data_b)?
+        } else if self.stereo_swap {
+            self.interleave(&data_b, &data_a)?
+        } else {
+            self.interleave(&data_a, &data_b)?
+        };
+        self.writer.write_packet(&output, flush_len as usize)?;
+        self.written_bytes += output.len() as u32;
+        self.written_samples += flush_len as u64;
         Ok(())
     }
 
@@ -1191,14 +1206,7 @@ mod tests {
             resamplers: HashMap::new(),
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
-            start_instant: Instant::now(),
             last_flush: Instant::now(),
-            base_timestamp_a: None,
-            base_timestamp_b: None,
-            start_offset_a: 0,
-            start_offset_b: 0,
-            last_ssrc_a: None,
-            last_ssrc_b: None,
             profile_a: NegotiatedLegProfile::default(),
             profile_b: NegotiatedLegProfile::default(),
             dtmf_state_a: None,
@@ -1207,6 +1215,9 @@ mod tests {
             written_samples: 0,
             writer: Box::new(TestWriter::new()),
             ptime: Duration::from_millis(20),
+            stereo_swap: false,
+            leg_a_started: false,
+            leg_b_started: false,
         }
     }
 

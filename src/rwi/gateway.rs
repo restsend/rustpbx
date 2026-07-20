@@ -538,7 +538,7 @@ impl RwiGateway {
     ///
     /// Each broadcast event gets a unique sequence number from a monotonic
     /// counter so the webhook dedup logic doesn't drop consecutive CC events
-    /// (cc_ringing, cc_answered, call.ended) that share the same call_id.
+    /// (cc_ringing, cc_answered, cc_hangup) that share the same call_id.
     pub fn broadcast_event(&self, event: &RwiEvent) {
         // Use a unique sequence so webhook dedup doesn't drop consecutive
         // CC events with the same call_id.
