@@ -1,4 +1,5 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded};
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
@@ -105,8 +106,10 @@ enum WriteCommand {
     Shutdown,
 }
 
+struct Backend(Option<Arc<dyn SipFlowBackend>>);
+
 struct SipFlowInner {
-    backend: Option<Arc<dyn SipFlowBackend>>,
+    shared_backend: Arc<ArcSwap<Backend>>,
     inspectors: Vec<Box<dyn MessageInspector>>,
     writer_tx: Option<Sender<WriteCommand>>,
     pool: Arc<ItemPool>,
@@ -120,7 +123,11 @@ pub struct SipFlow {
 
 impl SipFlow {
     pub fn backend(&self) -> Option<Arc<dyn SipFlowBackend>> {
-        self.inner.backend.clone()
+        self.inner.shared_backend.load().0.clone()
+    }
+
+    pub fn has_backend(&self) -> bool {
+        self.inner.shared_backend.load().0.is_some()
     }
 
     pub fn new(
@@ -131,26 +138,26 @@ impl SipFlow {
         let pool = Arc::new(ItemPool::new());
         let pool_clone = pool.clone();
 
-        let writer_tx = if enable_async_writer {
-            backend.as_ref().map(|b| {
-                let (tx, rx) = bounded(CHANNEL_CAPACITY);
-                let backend_clone = b.clone();
+        let shared_backend = Arc::new(ArcSwap::new(Arc::new(Backend(backend))));
 
-                // Use dedicated OS thread instead of tokio task
-                // This avoids Tokio scheduling overhead
-                thread::spawn(move || {
-                    Self::batch_writer_thread(backend_clone, rx, pool_clone);
-                });
+        let writer_tx = if enable_async_writer && shared_backend.load().0.is_some() {
+            let (tx, rx) = bounded(CHANNEL_CAPACITY);
+            let sb_for_writer = shared_backend.clone();
 
-                tx
-            })
+            // Use dedicated OS thread instead of tokio task
+            // This avoids Tokio scheduling overhead
+            thread::spawn(move || {
+                Self::batch_writer_thread(sb_for_writer, rx, pool_clone);
+            });
+
+            Some(tx)
         } else {
             None
         };
 
         SipFlow {
             inner: Arc::new(SipFlowInner {
-                backend,
+                shared_backend,
                 inspectors,
                 writer_tx,
                 pool,
@@ -159,9 +166,22 @@ impl SipFlow {
         }
     }
 
-    /// Dedicated writer thread - avoids Tokio runtime overhead
+    /// Atomically swap the backend without restarting the writer thread.
+    /// The next flush in the batch writer thread will use the new backend.
+    pub fn swap_backend(&self, new_backend: Arc<dyn SipFlowBackend>) {
+        self.inner.shared_backend.store(Arc::new(Backend(Some(new_backend))));
+    }
+
+    /// Remove the backend entirely (disable sipflow at runtime).
+    pub fn clear_backend(&self) {
+        self.inner.shared_backend.store(Arc::new(Backend(None)));
+    }
+
+    /// Dedicated writer thread - avoids Tokio runtime overhead.
+    /// Reads the current backend from the shared lock on each flush so that
+    /// the backend can be hot-swapped at runtime via [`SipFlow::swap_backend`].
     fn batch_writer_thread(
-        backend: Arc<dyn SipFlowBackend>,
+        shared_backend: Arc<ArcSwap<Backend>>,
         rx: crossbeam_channel::Receiver<WriteCommand>,
         pool: Arc<ItemPool>,
     ) {
@@ -172,6 +192,10 @@ impl SipFlow {
             // Calculate deadline for recv
             let deadline =
                 std::time::Instant::now() + std::time::Duration::from_millis(BATCH_FLUSH_MS);
+
+            // Obtain a snapshot of the current backend on each iteration
+            // so that a runtime swap takes effect within one batch cycle.
+            let current_backend = shared_backend.load().0.clone();
 
             // Batch recv with timeout
             match rx.recv_deadline(deadline) {
@@ -184,27 +208,45 @@ impl SipFlow {
                         batch.push((call_id, item, pool_idx));
 
                         if batch.len() >= BATCH_SIZE {
-                            Self::flush_batch(&backend, &mut batch, &pool);
+                            if let Some(ref backend) = current_backend {
+                                Self::flush_batch(backend, &mut batch, &pool);
+                            } else {
+                                // Backend was removed while items were queued:
+                                // drain the batch and release pooled items.
+                                for (_, _, pool_idx) in batch.drain(..) {
+                                    if let Some(idx) = pool_idx {
+                                        pool.release(idx);
+                                    }
+                                }
+                            }
                             last_flush = std::time::Instant::now();
                         }
                     }
                     WriteCommand::Flush => {
-                        Self::flush_batch(&backend, &mut batch, &pool);
+                        if let Some(ref backend) = current_backend {
+                            Self::flush_batch(backend, &mut batch, &pool);
+                        }
                         last_flush = std::time::Instant::now();
                     }
                     WriteCommand::FlushSync { done } => {
-                        Self::flush_batch(&backend, &mut batch, &pool);
+                        if let Some(ref backend) = current_backend {
+                            Self::flush_batch(backend, &mut batch, &pool);
+                        }
                         last_flush = std::time::Instant::now();
                         let _ = done.send(());
                     }
                     WriteCommand::Shutdown => {
-                        Self::flush_batch(&backend, &mut batch, &pool);
+                        if let Some(ref backend) = current_backend {
+                            Self::flush_batch(backend, &mut batch, &pool);
+                        }
                         break;
                     }
                 },
                 Err(RecvTimeoutError::Disconnected) => {
                     // Channel closed, flush and exit
-                    Self::flush_batch(&backend, &mut batch, &pool);
+                    if let Some(ref backend) = current_backend {
+                        Self::flush_batch(backend, &mut batch, &pool);
+                    }
                     break;
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -212,7 +254,9 @@ impl SipFlow {
                     if !batch.is_empty()
                         && last_flush.elapsed().as_millis() >= BATCH_FLUSH_MS as u128
                     {
-                        Self::flush_batch(&backend, &mut batch, &pool);
+                        if let Some(ref backend) = current_backend {
+                            Self::flush_batch(backend, &mut batch, &pool);
+                        }
                         last_flush = std::time::Instant::now();
                     }
                 }
@@ -235,18 +279,15 @@ impl SipFlow {
                 pool.release(idx);
             }
         }
-
-        // Use blocking flush - we're in a dedicated thread
-        let _ = std::hint::black_box(backend); // Keep reference alive
     }
 
     /// Ultra-optimized record_sip with zero-copy where possible
     #[inline]
     pub fn record_sip(&self, is_outgoing: bool, msg: &SipMessage, addr: Option<&SipAddr>) {
-        let backend = match &self.inner.backend {
-            Some(b) => b,
-            None => return,
-        };
+        // Fast check: skip if no backend is configured
+        if !self.has_backend() {
+            return;
+        }
 
         // Fast path: extract call_id header without full parsing
         let call_id_result = match msg {
@@ -301,8 +342,10 @@ impl SipFlow {
                     pool_idx,
                 });
             } else {
-                // Fallback: direct synchronous write
-                let _ = backend.record(&call_id, item);
+                // Fallback: direct synchronous write (writer_tx is None)
+                if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
+                    let _ = backend.record(&call_id, item);
+                }
             }
         }
     }
@@ -380,7 +423,7 @@ impl SipFlow {
         if let Some(ref tx) = self.inner.writer_tx {
             let _ = tx.send(WriteCommand::Flush);
         }
-        if let Some(ref backend) = self.inner.backend {
+        if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
             let _ = backend.flush().await;
         }
     }
@@ -393,7 +436,7 @@ impl SipFlow {
             let _ = tx.send(WriteCommand::FlushSync { done: done_tx });
             let _ = done_rx.await;
         }
-        if let Some(ref backend) = self.inner.backend {
+        if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
             let _ = backend.flush().await;
         }
     }

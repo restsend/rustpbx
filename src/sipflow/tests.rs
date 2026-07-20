@@ -99,6 +99,7 @@ mod tests {
             batch_size: 256,
             batch_flush_ms: 20,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -116,6 +117,7 @@ mod tests {
             batch_size: 256,
             batch_flush_ms: 20,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -142,6 +144,7 @@ mod tests {
             batch_size: 256,
             batch_flush_ms: 20,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let backend = create_backend(&cfg);
@@ -159,6 +162,7 @@ mod tests {
             batch_size: 256,
             batch_flush_ms: 20,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let result = create_backend(&cfg);
@@ -365,6 +369,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             batch_size: 16,
             batch_flush_ms: 20,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let backend = create_backend(&cfg).expect("backend creation");
@@ -436,6 +441,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             // affect this test since flushes are immediate when disabled.
             batch_flush_ms: 1,
             channel_capacity: 8192,
+            dns_ttl_secs: 0,
             upload: None,
         };
         let backend = create_backend(&cfg).expect("backend creation");

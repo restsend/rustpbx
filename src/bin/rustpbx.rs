@@ -6,7 +6,7 @@ use rustpbx::{
     app::{AppStateBuilder, create_router},
     config::Config,
     handler::middleware::request_log::AccessLogEventFormat,
-    observability, preflight, version,
+    log_reload, observability, preflight, version,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -380,6 +380,11 @@ fn main() -> Result<()> {
         env_filter
     });
 
+    // Wrap EnvFilter in a reloadable layer so the log level can be changed
+    // at runtime without restarting the service.
+    let (filter_layer, filter_handle) = log_reload::ReloadableFilterLayer::new(env_filter);
+    log_reload::set_log_filter_handle(filter_handle);
+
     // Install the hot-swappable reload layer BEFORE the subscriber is built.
     // The commercial TelemetryAddon will inject an OTel layer into this slot
     // during addon initialization.
@@ -459,19 +464,19 @@ fn main() -> Result<()> {
     if let Some(console_layer) = console_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
-            .with(env_filter)
+            .with(filter_layer)
             .with(console_layer)
             .try_init()?;
     } else if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
-            .with(env_filter)
+            .with(filter_layer)
             .with(file_layer)
             .try_init()?;
     } else if let Some(fmt_layer) = fmt_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
-            .with(env_filter)
+            .with(filter_layer)
             .with(fmt_layer)
             .try_init()?;
     }

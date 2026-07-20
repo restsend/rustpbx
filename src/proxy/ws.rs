@@ -6,21 +6,16 @@ use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
 };
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
-
-use super::pre_auth_registry::PreAuthRegistry;
+use tracing::{debug, info,  warn};
 
 pub async fn sip_ws_handler(
     token: CancellationToken,
     client_addr: ClientAddr,
     socket: WebSocket,
     endpoint_ref: EndpointInnerRef,
-    pre_authed_agent: Option<String>,
-    pre_auth_registry: Option<Arc<PreAuthRegistry>>,
 ) {
     let (mut ws_sink, mut ws_read) = socket.split();
     let (from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
@@ -57,62 +52,25 @@ pub async fn sip_ws_handler(
         "created WebSocket channel connection"
     );
 
-    // Register pre-authenticated agent if provided (path B: JWT WS pre-auth)
-    if let (Some(agent), Some(registry)) = (&pre_authed_agent, &pre_auth_registry) {
-        registry.register(local_addr.clone(), agent.clone()).await;
-        info!(addr = %local_addr, agent = %agent, "WebSocket pre-authenticated");
-    }
-
     endpoint_ref
         .transport_layer
         .add_connection(sip_connection.clone());
 
-    // Track the last time we received any data (including WebSocket Pong) from
-    // the client so the idle-detection / read-timeout is decoupled from whether
-    // the WebSocket library passes Pong frames up to the application stream.
-    // tokio-tungstenite may handle Ping/Pong at the protocol level and *not*
-    // deliver Pong frames to `ws_read.next()`, which would cause the old
-    // per-read `tokio::time::timeout` to fire even though the connection is
-    // healthy.  By tracking wall-clock activity separately we avoid that.
     const WS_PING_INTERVAL: Duration = Duration::from_secs(25);
-    const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
-    let last_activity: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
-
     let local_addr_clone = local_addr.clone();
     let sip_connection_clone = sip_connection.clone();
-    let last_activity_read = last_activity.clone();
     let read_from_websocket_loop = async move {
         loop {
-            // Use a generous per-read timeout so a stuck stream doesn't hang
-            // forever, but rely on last_activity for the actual idle detection.
-            match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_read.next()).await {
-                Err(_) => {
-                    // Check whether we've actually been idle or the stream is
-                    // simply waiting on the next message.
-                    let idle = last_activity_read.lock().unwrap().elapsed();
-                    if idle >= WS_IDLE_TIMEOUT {
-                        warn!(
-                            addr = %local_addr_clone,
-                            idle_secs = idle.as_secs(),
-                            "WebSocket idle timeout (client likely gone)"
-                        );
-                        break;
-                    }
-                    // False alarm – activity was recent, keep waiting.
-                    continue;
-                }
-                Ok(None) => {
+            match ws_read.next().await {
+                None => {
                     debug!(addr = %local_addr_clone, "WebSocket stream ended");
                     break;
                 }
-                Ok(Some(Err(e))) => {
+                Some(Err(e)) => {
                     debug!(addr = %local_addr_clone, "WebSocket read error: {}", e);
                     break;
                 }
-                Ok(Some(Ok(message))) => {
-                    // Any received data counts as activity.
-                    *last_activity_read.lock().unwrap() = Instant::now();
+                Some(Ok(message)) => {
                     match message {
                         Message::Text(text) => {
                             let text = text.to_string();
@@ -185,13 +143,9 @@ pub async fn sip_ws_handler(
         }
     };
     let local_addr_clone = local_addr.clone();
-    let last_activity_write = last_activity.clone();
     let write_to_websocket_loop = async move {
         let mut ping_ticker = tokio::time::interval(WS_PING_INTERVAL);
         ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Consume the immediate first tick so we don't fire a Ping right after
-        // the handshake completes.
-        ping_ticker.tick().await;
         loop {
             tokio::select! {
                 event = to_ws_rx.recv() => {
@@ -200,7 +154,7 @@ pub async fn sip_ws_handler(
                         TransportEvent::Incoming(sip_msg, _, _) => {
                             let raw_message = sip_msg.to_string();
                             let cseq = sip_msg.cseq_header().ok();
-                            trace!(
+                            debug!(
                                 addr = %local_addr_clone,
                                 cseq = cseq.map(|c| c.value()).unwrap_or_default(),
                                 raw_message,
@@ -224,17 +178,6 @@ pub async fn sip_ws_handler(
                         warn!(addr = %local_addr_clone, "error sending WebSocket ping: {}", e);
                         break;
                     }
-                    // After sending a Ping, check whether the client has been
-                    // silent too long.
-                    let idle = last_activity_write.lock().unwrap().elapsed();
-                    if idle >= WS_IDLE_TIMEOUT {
-                        warn!(
-                            addr = %local_addr_clone,
-                            idle_secs = idle.as_secs(),
-                            "WebSocket idle timeout – no response from client"
-                        );
-                        break;
-                    }
                     debug!(addr = %local_addr_clone, "WebSocket ping sent");
                 }
             }
@@ -245,16 +188,13 @@ pub async fn sip_ws_handler(
         _ = token.cancelled() => {
             info!(addr = %local_addr, "WebSocket connection cancelled");
         }
-        _ = read_from_websocket_loop => {}
-        _ = write_to_websocket_loop => {}
+        _ = read_from_websocket_loop => {
+            info!(addr = %local_addr, "WebSocket read loop exited");
+        }
+        _ = write_to_websocket_loop => {
+            info!(addr = %local_addr, "WebSocket write loop exited");
+        }
     }
     ws_token.cancel();
     endpoint_ref.transport_layer.del_connection(&local_addr);
-    // Clean up pre-auth registry entry
-    if let Some(ref registry) = pre_auth_registry {
-        registry.remove(&local_addr).await;
-    }
-    debug!(addr = %local_addr, "WebSocket connection handler exiting");
 }
-
-

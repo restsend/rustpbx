@@ -657,6 +657,13 @@ pub enum SipFlowConfig {
         /// Values below 1 are clamped to 1.
         #[serde(default = "default_remote_channel_capacity")]
         channel_capacity: usize,
+        /// DNS re-resolution interval in seconds for cluster node UDP
+        /// addresses (default 5). Set to 0 to disable periodic DNS refresh.
+        /// When enabled, each node's `udp` hostname is resolved every
+        /// `dns_ttl_secs` seconds so that IP changes (e.g. load-balancer
+        /// rotation, failover) are picked up without restarting the service.
+        #[serde(default = "default_sipflow_dns_ttl")]
+        dns_ttl_secs: u64,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },
@@ -684,6 +691,10 @@ fn default_remote_channel_capacity() -> usize {
 
 fn default_sipflow_timeout() -> u64 {
     10
+}
+
+fn default_sipflow_dns_ttl() -> u64 {
+    5
 }
 
 fn default_sipflow_id_cache_size() -> usize {

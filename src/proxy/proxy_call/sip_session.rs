@@ -12449,6 +12449,7 @@ mod tests {
             clock_rate: 90000,
             fmtp: fmtp.map(|s| s.to_string()),
             rtcp_fbs: rtcp_fbs.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 

@@ -12,7 +12,7 @@ use crate::{
         CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder},
     },
-    config::{ProxyConfig, RtpConfig, SipFlowConfig},
+    config::{MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig, SipFlowConfig},
     proxy::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
@@ -20,13 +20,13 @@ use crate::{
         call::{CallRouter, DialplanInspector},
         cluster_event::{ClusterEventHub, ClusterEventModule},
         locator::{DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator},
-        pre_auth_registry::PreAuthRegistry,
         presence::PresenceManager,
     },
     sipflow::SipFlowBackend,
     sipflow::backend::create_backend,
 };
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwap;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::{Auth, Param, Transport};
 use rsipstack::{
@@ -59,7 +59,8 @@ use tracing::{debug, info, warn};
 
 pub struct SipServerInner {
     pub cancel_token: CancellationToken,
-    pub rtp_config: RtpConfig,
+    pub rtp_config: ArcSwap<RtpConfig>,
+    pub media_proxy: ArcSwap<MediaProxyMode>,
     pub proxy_config: Arc<ProxyConfig>,
     pub data_context: Arc<ProxyDataContext>,
     pub database: Option<DatabaseConnection>,
@@ -74,7 +75,8 @@ pub struct SipServerInner {
     pub create_route_invites: Vec<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
-    pub sipflow_config: Option<SipFlowConfig>,
+    pub sipflow_config: ArcSwap<Option<SipFlowConfig>>,
+    pub recording_policy: ArcSwap<Option<RecordingPolicy>>,
     pub sip_flow: Option<SipFlow>,
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
@@ -106,8 +108,6 @@ pub struct SipServerInner {
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks (connected, held, unheld, ended).
     pub session_hooks: Arc<Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>>,
-    /// Pre-auth registry for WebSocket connections authenticated via JWT (path B).
-    pub pre_auth_registry: Option<Arc<PreAuthRegistry>>,
     /// Resolved contact username (from config or random hex).
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
@@ -477,13 +477,6 @@ impl SipServerBuilder {
             }
         }
 
-        // Create pre-auth registry for WebSocket JWT pre-authentication (path B)
-        let pre_auth_registry = if self.config.jwt_auth.as_ref().is_some_and(|c| c.enabled) {
-            Some(PreAuthRegistry::new())
-        } else {
-            None
-        };
-
         let locator = if let Some(locator) = self.locator {
             locator
         } else {
@@ -767,8 +760,8 @@ impl SipServerBuilder {
         {
             call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
                 http_router_config.clone(),
-                rtp_config.clone(),
-                self.config.media_proxy,
+                ArcSwap::new(Arc::new(rtp_config.clone())),
+                ArcSwap::new(Arc::new(self.config.media_proxy)),
                 self.config.enable_latching,
                 self.config.latching_probation_max_packets,
             )));
@@ -895,7 +888,8 @@ impl SipServerBuilder {
         self.trunk_health = Some(trunk_health_states.clone());
 
         let inner = Arc::new(SipServerInner {
-            rtp_config,
+            rtp_config: ArcSwap::new(Arc::new(rtp_config)),
+            media_proxy: ArcSwap::new(Arc::new(self.config.media_proxy)),
             proxy_config: self.config.clone(),
             cancel_token,
             data_context,
@@ -911,7 +905,8 @@ impl SipServerBuilder {
             create_route_invites: self.create_route_invites,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
-            sipflow_config: self.sipflow_config.clone(),
+            sipflow_config: ArcSwap::new(Arc::new(self.sipflow_config.clone())),
+            recording_policy: ArcSwap::new(Arc::new(self.config.recording.clone())),
             sip_flow,
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
@@ -935,7 +930,6 @@ impl SipServerBuilder {
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
-            pre_auth_registry,
             contact_username: self
                 .config
                 .contact_username
@@ -1359,17 +1353,134 @@ impl SipServerInner {
     }
 
     pub fn default_media_config(&self) -> MediaConfig {
+        let rtp = self.rtp_config.load();
+        let media_proxy = **self.media_proxy.load();
         MediaConfig::new()
-            .with_proxy_mode(self.proxy_config.media_proxy)
-            .with_external_ip(self.rtp_config.external_ip.clone())
-            .with_bind_ip(self.rtp_config.bind_ip.clone())
-            .with_rtp_start_port(self.rtp_config.start_port)
-            .with_rtp_end_port(self.rtp_config.end_port)
-            .with_webrtc_start_port(self.rtp_config.webrtc_start_port)
-            .with_webrtc_end_port(self.rtp_config.webrtc_end_port)
-            .with_ice_servers(self.rtp_config.ice_servers.clone())
+            .with_proxy_mode(media_proxy)
+            .with_external_ip(rtp.external_ip.clone())
+            .with_bind_ip(rtp.bind_ip.clone())
+            .with_rtp_start_port(rtp.start_port)
+            .with_rtp_end_port(rtp.end_port)
+            .with_webrtc_start_port(rtp.webrtc_start_port)
+            .with_webrtc_end_port(rtp.webrtc_end_port)
+            .with_ice_servers(rtp.ice_servers.clone())
             .with_enable_latching(self.proxy_config.enable_latching)
             .with_probation_max_packets(self.proxy_config.latching_probation_max_packets)
+    }
+
+    /// Hot-reload platform settings (external_ip, RTP port range, media proxy
+    /// mode) from the on-disk configuration. New calls will use the updated
+    /// settings immediately; existing calls are unaffected.
+    pub async fn reload_platform_settings(&self, config_path: &str) -> Result<String> {
+        let config = crate::config::Config::load(config_path)
+            .map_err(|e| anyhow!("Failed to load config: {e}"))?;
+
+        let mut new_rtp = config.rtp_config();
+        let old_rtp = self.rtp_config.load();
+
+        // Re-run auto_external_ip detection if not manually configured
+        if new_rtp.external_ip.is_none() {
+            if let Some(ref url) = new_rtp.auto_external_ip {
+                if let Ok(ip) = crate::auto_external_ip::detect_external_ip(url).await {
+                    tracing::info!(ip = %ip, url = %url, "auto_external_ip detected on platform reload");
+                    new_rtp.external_ip = Some(ip.to_string());
+                }
+            }
+        }
+
+        let external_ip_changed = old_rtp.external_ip != new_rtp.external_ip;
+        let ports_changed = old_rtp.start_port != new_rtp.start_port
+            || old_rtp.end_port != new_rtp.end_port;
+        let proxy_changed = **self.media_proxy.load() != config.proxy.media_proxy;
+
+        self.rtp_config.store(Arc::new(new_rtp));
+        self.media_proxy
+            .store(Arc::new(config.proxy.media_proxy));
+
+        let mut parts = Vec::new();
+        if external_ip_changed {
+            parts.push("external_ip".to_string());
+        }
+        if ports_changed {
+            parts.push("RTP ports".to_string());
+        }
+        if proxy_changed {
+            parts.push("media_proxy".to_string());
+        }
+
+        if parts.is_empty() {
+            Ok("Platform settings reloaded (no changes detected)".to_string())
+        } else {
+            tracing::info!(changed = %parts.join(", "), "Platform settings hot-reloaded");
+            Ok(format!("Platform settings applied: {}", parts.join(", ")))
+        }
+    }
+
+    /// Hot-reload recording policy from the on-disk configuration. New calls
+    /// will use the updated policy immediately; existing calls are unaffected.
+    pub fn reload_recording_settings(&self, config_path: &str) -> Result<String> {
+        let config = crate::config::Config::load(config_path)
+            .map_err(|e| anyhow!("Failed to load config: {e}"))?;
+
+        let new_policy = config.proxy.recording.or(config.recording);
+
+        self.recording_policy
+            .store(Arc::new(new_policy.clone()));
+
+        if let Some(ref policy) = new_policy {
+            if policy.enabled.unwrap_or(false) {
+                Ok(format!(
+                    "Recording policy applied (enabled, type={})",
+                    policy.recording_type.as_ref().map(|t| format!("{t:?}")).unwrap_or_else(|| "default".to_string())
+                ))
+            } else {
+                Ok("Recording policy applied (disabled)".to_string())
+            }
+        } else {
+            Ok("Recording policy cleared".to_string())
+        }
+    }
+    pub async fn reload_sipflow(&self, config_path: &str) -> Result<String> {
+        let config = crate::config::Config::load(config_path)
+            .map_err(|e| anyhow!("Failed to load config: {e}"))?;
+
+        let old_mode = self.sipflow_config.load().as_ref().as_ref().map(|c| {
+            match c {
+                crate::config::SipFlowConfig::Local { .. } => "local",
+                crate::config::SipFlowConfig::Remote { .. } => "remote",
+            }
+        }).unwrap_or("none");
+
+        if let Some(ref new_cfg) = config.sipflow {
+            let new_backend = crate::sipflow::backend::create_backend(new_cfg)
+                .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
+            let new_backend: Arc<dyn crate::sipflow::SipFlowBackend> = Arc::from(new_backend);
+
+            let new_mode = match new_cfg {
+                crate::config::SipFlowConfig::Local { .. } => "local",
+                crate::config::SipFlowConfig::Remote { .. } => "remote",
+            };
+
+            if let Some(ref sf) = self.sip_flow {
+                sf.swap_backend(new_backend);
+            }
+            self.sipflow_config.store(Arc::new(Some(new_cfg.clone())));
+
+            tracing::info!(
+                old_mode,
+                new_mode,
+                "SipFlow backend hot-reloaded"
+            );
+            Ok(format!("SipFlow backend hot-reloaded: {old_mode} → {new_mode}"))
+        } else {
+            if let Some(ref sf) = self.sip_flow {
+                sf.clear_backend();
+            }
+            self.sipflow_config.store(Arc::new(None));
+
+            tracing::info!(old_mode, "SipFlow backend removed (disabled)");
+            Ok(format!("SipFlow disabled (was {old_mode})"))
+        }
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
@@ -1392,7 +1503,7 @@ impl SipServerInner {
         match host {
             "localhost" | "127.0.0.1" | "::1" => port.map(is_my_port).unwrap_or(true),
             _ => {
-                if let Some(external_ip) = self.rtp_config.external_ip.as_ref()
+                if let Some(external_ip) = self.rtp_config.load().external_ip.as_ref()
                     && external_ip == host
                 {
                     return port.map(is_my_port).unwrap_or(true);

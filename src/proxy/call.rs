@@ -443,17 +443,21 @@ impl CallModule {
             .value();
         let session_id = dialog_id.to_string();
 
-        let media_config = MediaConfig::new()
-            .with_proxy_mode(self.inner.config.media_proxy)
-            .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
-            .with_bind_ip(self.inner.server.rtp_config.bind_ip.clone())
-            .with_rtp_start_port(self.inner.server.rtp_config.start_port)
-            .with_rtp_end_port(self.inner.server.rtp_config.end_port)
-            .with_webrtc_start_port(self.inner.server.rtp_config.webrtc_start_port)
-            .with_webrtc_end_port(self.inner.server.rtp_config.webrtc_end_port)
-            .with_ice_servers(self.inner.server.rtp_config.ice_servers.clone())
-            .with_enable_latching(self.inner.config.enable_latching)
-            .with_probation_max_packets(self.inner.config.latching_probation_max_packets);
+        let media_config = {
+            let rtp = self.inner.server.rtp_config.load();
+            let proxy_mode = **self.inner.server.media_proxy.load();
+            MediaConfig::new()
+                .with_proxy_mode(proxy_mode)
+                .with_external_ip(rtp.external_ip.clone())
+                .with_bind_ip(rtp.bind_ip.clone())
+                .with_rtp_start_port(rtp.start_port)
+                .with_rtp_end_port(rtp.end_port)
+                .with_webrtc_start_port(rtp.webrtc_start_port)
+                .with_webrtc_end_port(rtp.webrtc_end_port)
+                .with_ice_servers(rtp.ice_servers.clone())
+                .with_enable_latching(self.inner.config.enable_latching)
+                .with_probation_max_packets(self.inner.config.latching_probation_max_packets)
+        };
 
         let caller_is_same_realm = self
             .inner
@@ -931,7 +935,7 @@ impl CallModule {
 
                 merged
             }
-            None => match self.inner.config.recording.as_ref() {
+            None => match self.inner.server.recording_policy.load().as_ref() {
                 Some(policy) => policy.clone(),
                 None => return dialplan,
             },

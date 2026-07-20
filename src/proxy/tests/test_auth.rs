@@ -9,12 +9,13 @@ use super::common::{
 use crate::auth::jwt_auth_backend::JwtAuthBackend;
 use crate::auth::jwt_validator::{JwtValidator, generate_hs256_jwt};
 use crate::call::{SipUser, TransactionCookie};
-use crate::config::{JwtAuthConfig, ProxyConfig, RtpConfig};
+use crate::config::{JwtAuthConfig, MediaProxyMode, ProxyConfig, RtpConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::auth::{AuthBackend, AuthModule};
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
+use arc_swap::ArcSwap;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsipstack::EndpointBuilder;
@@ -477,7 +478,9 @@ async fn test_guest_call_allowed_extension() {
     );
 
     let server_inner = Arc::new(SipServerInner {
-        rtp_config: RtpConfig::default(),
+        rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
+        media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
+        recording_policy: ArcSwap::new(Arc::new(None)),
         proxy_config: config,
         cancel_token: CancellationToken::new(),
         data_context,
@@ -493,7 +496,7 @@ async fn test_guest_call_allowed_extension() {
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: None,
-        sipflow_config: None,
+        sipflow_config: ArcSwap::new(Arc::new(None)),
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
@@ -515,7 +518,6 @@ async fn test_guest_call_allowed_extension() {
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
-        pre_auth_registry: None,
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
         media_engine: {

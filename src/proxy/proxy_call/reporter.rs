@@ -215,7 +215,8 @@ impl CallReporter {
 
         if call_was_accepted
             && details.recording_url.is_none()
-            && self.server.proxy_config.recording.is_none()
+            && self.server.recording_policy.load().is_none()
+            && let sipflow_cfg = self.server.sipflow_config.load()
             && let Some(crate::config::SipFlowConfig::Local {
                 upload:
                     Some(crate::config::SipFlowUploadConfig::S3 {
@@ -226,7 +227,7 @@ impl CallReporter {
                         ..
                     }),
                 ..
-            }) = self.server.sipflow_config.as_ref()
+            }) = sipflow_cfg.as_ref().as_ref()
             && media.unwrap_or(true)
         {
             let mut tmp = CallRecord::default();

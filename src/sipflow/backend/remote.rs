@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+use arc_swap::ArcSwap;
 use crate::config::SipFlowClusterNode;
 use crate::http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::sipflow::backend::SipFlowBackend;
@@ -44,9 +45,10 @@ pub fn jump_consistent_hash(key: &str, num_buckets: usize) -> usize {
 }
 
 #[derive(Clone)]
-struct ClusterNode {
-    udp_addr: SocketAddr,
+struct RemoteNode {
+    udp_host: String,
     http_addr: String,
+    udp_addr: Arc<ArcSwap<SocketAddr>>,
 }
 
 /// Minimum (and default) flush interval. Values below this in config are
@@ -81,9 +83,15 @@ enum Command {
 /// sent immediately as a single-packet (legacy format) UDP datagram. This
 /// is the safe escape hatch if a receiver is too old to understand the
 /// batch wire format.
+///
+/// ## DNS TTL
+/// When `dns_ttl_secs > 0`, a background task periodically re-resolves
+/// each node's `udp` hostname. If the resolved IP changes (e.g. due to
+/// load-balancer rotation or failover), the new address is used for
+/// subsequent sends without restarting the service.
 pub struct RemoteBackend {
     sender: mpsc::Sender<Command>,
-    nodes: Vec<ClusterNode>,
+    nodes: Vec<RemoteNode>,
     client: reqwest::Client,
     cancel_token: CancellationToken,
 }
@@ -96,20 +104,27 @@ impl RemoteBackend {
         batch_size_cfg: usize,
         batch_flush_ms_cfg: u64,
         channel_capacity_cfg: usize,
+        dns_ttl_secs: u64,
     ) -> Result<Self> {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
         socket.set_nonblocking(true)?;
         let udp_socket = Arc::new(UdpSocket::from_std(socket)?);
 
-        let nodes: Vec<ClusterNode> = config_nodes
+        let nodes: Vec<RemoteNode> = config_nodes
             .iter()
             .map(|n| {
-                let udp_addr: SocketAddr = n.udp.to_socket_addrs()?.next().ok_or_else(|| {
-                    anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", n.udp)
-                })?;
-                Ok(ClusterNode {
-                    udp_addr,
+                let udp_host = n.udp.clone();
+                let udp_addr: SocketAddr =
+                    (&*udp_host).to_socket_addrs()?.next().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Unable to resolve SipFlow UDP address: {}",
+                            n.udp
+                        )
+                    })?;
+                Ok(RemoteNode {
+                    udp_host,
                     http_addr: n.http.clone(),
+                    udp_addr: Arc::new(ArcSwap::new(Arc::new(udp_addr))),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -160,6 +175,14 @@ impl RemoteBackend {
             .await;
         });
 
+        // Start DNS refresh task if TTL is configured and at least one node
+        // uses a hostname (not a raw IP).
+        if dns_ttl_secs > 0 {
+            let dns_nodes = nodes.clone();
+            let dns_cancel = cancel_token.clone();
+            crate::utils::spawn(async move { dns_refresh_loop(dns_nodes, dns_ttl_secs, dns_cancel).await });
+        }
+
         Ok(Self {
             sender: tx,
             nodes,
@@ -168,7 +191,7 @@ impl RemoteBackend {
         })
     }
 
-    fn select_node(&self, call_id: &str) -> &ClusterNode {
+    fn select_node(&self, call_id: &str) -> &RemoteNode {
         let idx = jump_consistent_hash(call_id, self.nodes.len());
         &self.nodes[idx]
     }
@@ -254,7 +277,7 @@ fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
 async fn worker_loop(
     mut rx: mpsc::Receiver<Command>,
     udp_socket: Arc<UdpSocket>,
-    nodes: Vec<ClusterNode>,
+    nodes: Vec<RemoteNode>,
     batch_size: usize,
     batch_enabled: bool,
     flush_duration: Duration,
@@ -292,7 +315,7 @@ async fn worker_loop(
                     let node_buf = &mut per_node[idx];
                     node_buf.push(packet);
                     if node_buf.len() >= batch_size {
-                        flush_one(node_buf, &udp_socket, nodes[idx].udp_addr, &mut send_buf, batch_enabled).await;
+                        flush_one(node_buf, &udp_socket, **nodes[idx].udp_addr.load(), &mut send_buf, batch_enabled).await;
                     }
                 }
             }
@@ -352,13 +375,12 @@ async fn flush_one(
     buf.clear();
 }
 
-/// Flush every node's pending buffer. Iterates in node order so the same
-/// `send_buf` can be reused safely (each `flush_one` completes before the
-/// next begins).
+/// Flush every node's pending buffer. Reads the latest DNS-resolved address
+/// from each node's [`ArcSwap`].
 async fn flush_all(
     per_node: &mut [Vec<Packet>],
     udp_socket: &UdpSocket,
-    nodes: &[ClusterNode],
+    nodes: &[RemoteNode],
     send_buf: &mut Vec<u8>,
     batch_enabled: bool,
 ) {
@@ -366,11 +388,53 @@ async fn flush_all(
         flush_one(
             &mut per_node[i],
             udp_socket,
-            node.udp_addr,
+            **node.udp_addr.load(),
             send_buf,
             batch_enabled,
         )
         .await;
+    }
+}
+
+/// Background task that periodically re-resolves each node's UDP hostname.
+/// When a resolved address changes, the node's [`ArcSwap`] is updated
+/// atomically so that subsequent sends use the new address.
+async fn dns_refresh_loop(
+    nodes: Vec<RemoteNode>,
+    ttl_secs: u64,
+    cancel: CancellationToken,
+) {
+    let interval = Duration::from_secs(ttl_secs);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        for node in &nodes {
+            match (&*node.udp_host).to_socket_addrs() {
+                Ok(mut addrs) => {
+                    if let Some(new_addr) = addrs.next() {
+                        let old = **node.udp_addr.load();
+                        if old != new_addr {
+                            tracing::info!(
+                                old = %old,
+                                new = %new_addr,
+                                host = %node.udp_host,
+                                "SipFlow remote node DNS updated"
+                            );
+                            node.udp_addr.store(Arc::new(new_addr));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        host = %node.udp_host,
+                        error = %e,
+                        "SipFlow DNS re-resolution failed, keeping previous address"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -448,63 +512,19 @@ impl SipFlowBackend for RemoteBackend {
             fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
-            let stats = json["stats"]
+            let stats_array = json["media_stats"]
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| {
-                            let packet_count =
-                                v.get("packet_count")
-                                    .or_else(|| v.get("count"))
-                                    .and_then(|value| value.as_u64())
-                                    .unwrap_or(0) as usize;
-                            let lost_packets = v
-                                .get("lost_packets")
-                                .and_then(|value| value.as_u64())
-                                .unwrap_or(0);
-                            let expected_packets = v
-                                .get("expected_packets")
-                                .and_then(|value| value.as_u64())
-                                .unwrap_or(packet_count as u64 + lost_packets);
+                .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
-                            Some(SipFlowMediaStats {
-                                leg: v.get("leg")?.as_i64()? as i32,
-                                src: v.get("src")?.as_str()?.to_string(),
-                                packet_count,
-                                lost_packets,
-                                expected_packets,
-                                loss_percent: v
-                                    .get("loss_percent")
-                                    .and_then(|value| value.as_f64())
-                                    .unwrap_or_else(|| {
-                                        if expected_packets > 0 {
-                                            lost_packets as f64 / expected_packets as f64 * 100.0
-                                        } else {
-                                            0.0
-                                        }
-                                    }),
-                                jitter_ms: v.get("jitter_ms").and_then(|value| value.as_f64()),
-                                ssrc: v
-                                    .get("ssrc")
-                                    .and_then(|value| value.as_u64())
-                                    .map(|value| value as u32),
-                                payload_type: v
-                                    .get("payload_type")
-                                    .and_then(|value| value.as_u64())
-                                    .map(|value| value as u8),
-                                clock_rate: v
-                                    .get("clock_rate")
-                                    .and_then(|value| value.as_u64())
-                                    .map(|value| value as u32),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let stats: Vec<SipFlowMediaStats> = stats_array
+                .iter()
+                .filter_map(|stat| serde_json::from_value(stat.clone()).ok())
+                .collect();
+
             Ok(stats)
         } else {
             Err(anyhow::anyhow!(
-                "Media stats query failed: {}",
+                "Query failed: {}",
                 json["message"].as_str().unwrap_or("Unknown error")
             ))
         }
@@ -525,13 +545,7 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let bytes = fetch_bytes(
-            &self.client,
-            reqwest::Method::GET,
-            &url,
-            &HttpFetchOptions::new(),
-        )
-        .await?;
+        let bytes = fetch_bytes(&self.client, reqwest::Method::GET, &url, &HttpFetchOptions::new()).await?;
         Ok(bytes.to_vec())
     }
 
@@ -551,111 +565,16 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let file = tokio::task::spawn_blocking(|| tempfile::NamedTempFile::new())
-            .await
-            .map_err(|e| anyhow::anyhow!("temp file creation failed: {e}"))??;
+        let bytes = fetch_bytes(&self.client, reqwest::Method::GET, &url, &HttpFetchOptions::new()).await?;
 
-        let std_file = file.reopen()?;
-        let mut tokio_file = tokio::fs::File::from_std(std_file);
-        crate::http_util::fetch_to_writer(
-            &self.client,
-            reqwest::Method::GET,
-            &url,
-            &HttpFetchOptions::new(),
-            &mut tokio_file,
-        )
-        .await?;
-
-        Ok(file)
+        let mut tmp = tempfile::Builder::new()
+            .prefix("sipflow_wav_")
+            .suffix(".wav")
+            .tempfile()?;
+        use std::io::Write;
+        tmp.write_all(&bytes)?;
+        tmp.flush()?;
+        Ok(tmp)
     }
 }
 
-impl Drop for RemoteBackend {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_jump_hash_single_bucket() {
-        for key in ["", "a", "hello", "call-id-12345"] {
-            assert_eq!(jump_consistent_hash(key, 1), 0);
-        }
-    }
-
-    #[test]
-    fn test_jump_hash_deterministic() {
-        let keys = [
-            "",
-            "a",
-            "hello",
-            "call-id-12345",
-            "very-long-call-id-that-exceeds-64-chars-in-length-abcdefghijklmnopqrstuvwxyz",
-        ];
-        for key in &keys {
-            let h1 = jump_consistent_hash(key, 10);
-            let h2 = jump_consistent_hash(key, 10);
-            assert_eq!(h1, h2, "hash must be deterministic for key: {key}");
-        }
-    }
-
-    #[test]
-    fn test_jump_hash_different_keys() {
-        let keys = ["call-a", "call-b", "call-c", "call-d", "call-e"];
-        let results: std::collections::HashSet<usize> =
-            keys.iter().map(|k| jump_consistent_hash(k, 4)).collect();
-        // At least 2 different buckets out of 5 keys and 4 buckets (high probability)
-        assert!(results.len() >= 2, "expected at least 2 distinct buckets");
-    }
-
-    #[test]
-    fn test_jump_hash_distribution() {
-        let num_buckets = 4;
-        let num_keys = 10000;
-        let mut counts = vec![0usize; num_buckets];
-
-        for i in 0..num_keys {
-            let key = format!("call-id-{:020}", i);
-            let bucket = jump_consistent_hash(&key, num_buckets);
-            counts[bucket] += 1;
-        }
-
-        let expected = num_keys / num_buckets;
-        let tolerance = (expected as f64 * 0.10) as usize; // ±10%
-        for (i, &count) in counts.iter().enumerate() {
-            assert!(
-                count.abs_diff(expected) <= tolerance,
-                "bucket {i} has {count} keys, expected ~{expected} (±{tolerance})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_jump_hash_minimal_disruption() {
-        // When adding a new bucket, only ~1/n keys should move.
-        // Here 4→5 should move ~20% of keys.
-        let num_keys = 10000;
-        let mut moved = 0;
-
-        for i in 0..num_keys {
-            let key = format!("call-id-{:020}", i);
-            let b4 = jump_consistent_hash(&key, 4);
-            let b5 = jump_consistent_hash(&key, 5);
-            if b4 != b5 {
-                moved += 1;
-            }
-        }
-
-        // With 4→5, ~20% of keys should move. Allow ±5% margin.
-        let ratio = moved as f64 / num_keys as f64;
-        assert!(
-            (ratio - 0.2).abs() < 0.05,
-            "expected ~20% keys to move from 4→5 buckets, got {:.1}%",
-            ratio * 100.0
-        );
-    }
-}

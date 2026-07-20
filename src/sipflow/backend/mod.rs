@@ -122,6 +122,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             batch_size,
             batch_flush_ms,
             channel_capacity,
+            dns_ttl_secs,
             ..
         } => {
             let resolved = if !nodes.is_empty() {
@@ -142,6 +143,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
                 *batch_size,
                 *batch_flush_ms,
                 *channel_capacity,
+                *dns_ttl_secs,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }

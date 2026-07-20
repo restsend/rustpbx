@@ -6,6 +6,7 @@ use crate::call::{
 use crate::config::{HttpRouterConfig, MediaProxyMode, RecordingPolicy, RtpConfig};
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use rsipstack::sip::prelude::*;
 use rsipstack::transport::SipConnection;
@@ -16,8 +17,8 @@ use tracing::{info, warn};
 
 pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
-    pub rtp_config: RtpConfig,
-    pub default_media_proxy_mode: MediaProxyMode,
+    pub rtp_config: ArcSwap<RtpConfig>,
+    pub default_media_proxy_mode: ArcSwap<MediaProxyMode>,
     pub enable_latching: bool,
     pub probation_max_packets: Option<u8>,
     pub client: reqwest::Client,
@@ -26,8 +27,8 @@ pub struct HttpCallRouter {
 impl HttpCallRouter {
     pub fn new(
         config: HttpRouterConfig,
-        rtp_config: RtpConfig,
-        default_media_proxy_mode: MediaProxyMode,
+        rtp_config: ArcSwap<RtpConfig>,
+        default_media_proxy_mode: ArcSwap<MediaProxyMode>,
         enable_latching: bool,
         probation_max_packets: Option<u8>,
     ) -> Self {
@@ -278,14 +279,15 @@ impl CallRouter for HttpCallRouter {
                 let mut dialplan = Dialplan::new(call_id, original.clone(), direction);
 
                 // Start from server defaults, then let HTTP router override individual fields.
-                dialplan.media.proxy_mode = self.default_media_proxy_mode;
-                dialplan.media.external_ip = self.rtp_config.external_ip.clone();
-                dialplan.media.bind_ip = self.rtp_config.bind_ip.clone();
-                dialplan.media.rtp_start_port = self.rtp_config.start_port;
-                dialplan.media.rtp_end_port = self.rtp_config.end_port;
-                dialplan.media.webrtc_port_start = self.rtp_config.webrtc_start_port;
-                dialplan.media.webrtc_port_end = self.rtp_config.webrtc_end_port;
-                dialplan.media.ice_servers = self.rtp_config.ice_servers.clone();
+                let rtp_cfg = self.rtp_config.load();
+                dialplan.media.proxy_mode = **self.default_media_proxy_mode.load();
+                dialplan.media.external_ip = rtp_cfg.external_ip.clone();
+                dialplan.media.bind_ip = rtp_cfg.bind_ip.clone();
+                dialplan.media.rtp_start_port = rtp_cfg.start_port;
+                dialplan.media.rtp_end_port = rtp_cfg.end_port;
+                dialplan.media.webrtc_port_start = rtp_cfg.webrtc_start_port;
+                dialplan.media.webrtc_port_end = rtp_cfg.webrtc_end_port;
+                dialplan.media.ice_servers = rtp_cfg.ice_servers.clone();
                 dialplan.media.enable_latching = self.enable_latching;
                 dialplan.media.probation_max_packets = self.probation_max_packets;
 

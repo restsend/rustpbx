@@ -1743,10 +1743,35 @@ pub(crate) async fn update_platform_settings(
         return resp;
     }
 
+    // Hot-reload: log level (immediate) + platform settings (new calls only).
+    let mut log_level_applied = false;
+    if let Some(ref level) = config.log_level {
+        log_level_applied = crate::log_reload::apply_log_level(level).is_ok();
+    }
+
+    let mut platform_applied = false;
+    let mut platform_msg = String::new();
+    if let Some(app_state) = state.app_state() {
+        match app_state
+            .sip_server()
+            .inner
+            .reload_platform_settings(&config_path)
+            .await
+        {
+            Ok(msg) => {
+                platform_applied = true;
+                platform_msg = msg;
+            }
+            Err(e) => {
+                platform_msg = format!("Failed: {e}");
+            }
+        }
+    }
+
     Json(json!({
         "status": "ok",
-        "requires_restart": true,
-        "message": "Platform settings saved. Restart RustPBX to apply changes.",
+        "requires_restart": !platform_applied,
+        "message": platform_msg,
         "platform": {
             "log_level": config.log_level,
             "log_file": config.log_file,
@@ -1756,7 +1781,9 @@ pub(crate) async fn update_platform_settings(
             "auto_external_ip": config.auto_external_ip,
             "start_port": config.rtp_start_port,
             "end_port": config.rtp_end_port,
-        }
+        },
+        "log_level_applied": log_level_applied,
+        "platform_applied": platform_applied,
     }))
     .into_response()
 }
@@ -2019,12 +2046,31 @@ pub(crate) async fn update_storage_settings(
         return resp;
     }
 
+    // Hot-reload recording policy.
+    let mut recording_applied = false;
+    let mut recording_msg = String::from("Storage settings saved.");
+    if let Some(app_state) = state.app_state() {
+        match app_state
+            .sip_server()
+            .inner
+            .reload_recording_settings(&config_path)
+        {
+            Ok(msg) => {
+                recording_applied = true;
+                recording_msg = format!("Recording policy applied. {msg}");
+            }
+            Err(e) => {
+                recording_msg = format!("Recording reload failed: {e}");
+            }
+        }
+    }
+
     let (storage_meta, storage_profiles) = build_storage_profiles(&config);
 
     Json(json!({
         "status": "ok",
-        "requires_restart": true,
-        "message": "Storage settings saved. Restart RustPBX to apply changes.",
+        "requires_restart": !recording_applied,
+        "message": recording_msg,
         "storage": storage_meta,
         "storage_profiles": storage_profiles,
     }))

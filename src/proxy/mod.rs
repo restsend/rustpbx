@@ -21,7 +21,6 @@ pub mod locator_db;
 pub mod locator_webhook;
 pub mod nat;
 pub mod number_pool;
-pub mod pre_auth_registry;
 pub mod presence;
 pub mod proxy_call;
 pub mod registrar;

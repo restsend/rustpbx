@@ -251,14 +251,30 @@ async fn update_settings(
         return resp;
     }
 
-    (
-        StatusCode::OK,
+    // Hot-reload the SipFlow backend without restarting the service.
+    let mut reload_message = String::new();
+    let mut reload_error = Option::<String>::None;
+    if let Some(app_state) = state.app_state() {
+        let inner = &app_state.sip_server().inner;
+        match inner.reload_sipflow(&config_path).await {
+            Ok(msg) => reload_message = msg,
+            Err(e) => reload_error = Some(e.to_string()),
+        }
+    }
+
+    if let Some(err) = reload_error {
         Json(json!({
-            "message": "SipFlow settings updated. Please restart the server for changes to take effect.",
-            "restart_required": true
-        })),
-    )
-        .into_response()
+            "status": "ok",
+            "message": format!("SipFlow settings saved but apply failed: {err}"),
+            "restart_required": false
+        })).into_response()
+    } else {
+        Json(json!({
+            "status": "ok",
+            "message": format!("SipFlow settings applied. {reload_message}"),
+            "restart_required": false
+        })).into_response()
+    }
 }
 
 async fn query_flow(

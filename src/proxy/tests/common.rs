@@ -1,5 +1,5 @@
 use crate::call::SipUser;
-use crate::config::{ProxyConfig, RtpConfig};
+use crate::config::{MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
@@ -7,6 +7,7 @@ use crate::proxy::{
     data::ProxyDataContext,
     locator::{Locator, MemoryLocator},
 };
+use arc_swap::ArcSwap;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::sip::Header;
 use rsipstack::sip::services::DigestGenerator;
@@ -75,7 +76,9 @@ pub async fn create_test_server_with_config(
     let (locator_events_tx, _) = tokio::sync::broadcast::channel(100);
 
     let server_inner = Arc::new(SipServerInner {
-        rtp_config: RtpConfig::default(),
+        rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
+        media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
+        recording_policy: ArcSwap::new(Arc::new(None)),
         proxy_config: config.clone(),
         cancel_token: CancellationToken::new(),
         data_context,
@@ -91,7 +94,7 @@ pub async fn create_test_server_with_config(
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
-        sipflow_config: None,
+        sipflow_config: ArcSwap::new(Arc::new(None)),
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
@@ -113,7 +116,6 @@ pub async fn create_test_server_with_config(
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
-        pre_auth_registry: None,
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
         media_engine: {

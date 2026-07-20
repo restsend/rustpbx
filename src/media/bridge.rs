@@ -2538,6 +2538,7 @@ impl BridgePeerBuilder {
             clock_rate: 90000,
             fmtp: Some("packetization-mode=1".to_string()),
             rtcp_fbs: vec![],
+            rtx_payload_type: None,
             ..Default::default()
         }]
     }
@@ -2691,6 +2692,7 @@ mod tests {
                 clock_rate: 90000,
                 fmtp: Some("profile-level-id=42801F".to_string()),
                 rtcp_fbs: vec![],
+                rtx_payload_type: None,
             },
             rustrtc::config::VideoCapability {
                 payload_type: 97,
@@ -2698,6 +2700,7 @@ mod tests {
                 clock_rate: 90000,
                 fmtp: None,
                 rtcp_fbs: vec![],
+                rtx_payload_type: None,
             },
         ];
         let webrtc_caps = vec![
@@ -2707,6 +2710,7 @@ mod tests {
                 clock_rate: 90000,
                 fmtp: None,
                 rtcp_fbs: vec![],
+                rtx_payload_type: None,
             },
             rustrtc::config::VideoCapability {
                 payload_type: 103,
@@ -2717,6 +2721,7 @@ mod tests {
                         .to_string(),
                 ),
                 rtcp_fbs: vec![],
+                rtx_payload_type: None,
             },
         ];
 
