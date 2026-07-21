@@ -517,7 +517,7 @@ impl SipFlowBackend for RemoteBackend {
             fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
-            let stats_array = json["media_stats"]
+            let stats_array = json["stats"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
