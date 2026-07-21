@@ -99,6 +99,10 @@ video_policy = "passthrough"      # "passthrough", "strip", "transcode"
 external_ip = "100.64.10.1"       # Override global rtp_config.external_ip
 bind_ip = "100.64.10.2"           # Override global rtp_config.bind_ip
 
+# See [06-media-recording.md](06-media-recording.md) for the full media proxy
+# reference, including latching, trunk-level vs server-level configuration,
+# and recommended combinations for NAT / overlay scenarios.
+
 # SIP header manipulation
 header_rules = [
     { action = "add", name = "X-Client-ID", value = "rustpbx" },
