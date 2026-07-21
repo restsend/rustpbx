@@ -846,6 +846,7 @@ impl SipSession {
             sipflow,
             call_id,
             self.recording_paused.clone(),
+            vec![],
         ))
     }
 
@@ -5007,6 +5008,18 @@ impl SipSession {
         target: &crate::call::Location,
     ) -> Option<Vec<u8>> {
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
+
+        // Bug 3 fix: transport-aware parallel-fork caching. When multiple fork
+        // targets share the same transport type, reuse the cached offer so all
+        // forks promise the same bound port. Regenerate when transport differs
+        // (e.g. one WebRTC fork and one RTP fork).
+        if let Some(cached) = &self.media.callee_offer {
+            if self.media.callee_offer_cached_webrtc == Some(callee_is_webrtc) {
+                return Some(cached.clone().into_bytes());
+            }
+        }
+        self.media.callee_offer_cached_webrtc = Some(callee_is_webrtc);
+
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_sdp = if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
             self.media.callee_offer_uses_media_bridge = false;
@@ -6651,6 +6664,25 @@ impl SipSession {
                 callee_is_webrtc,
                 "Reusing existing media bridge callee-facing offer"
             );
+            return Self::bridge_callee_offer_sdp(bridge, callee_is_webrtc, false).await;
+        }
+
+        // Bug 4 fix: Reuse the app media bridge for same-transport (RTP→RTP)
+        // callee legs. Previously this fell through to the
+        // "anchored no transport bridge" path (line 6953) which created a
+        // separate callee RtpTrack that the bridge forwarder could not reach.
+        // By reusing the bridge's callee PC, the bridge forwarder naturally
+        // connects caller ↔ callee without needing ForwardingTrack wiring.
+        //
+        // This does NOT match WebRTC+WebRTC (handled by Check 1 above) or
+        // transport-bridge scenarios (handled by Check 2/3).
+        if !need_transport_bridge
+            && !(caller_is_webrtc && callee_is_webrtc)
+            && self.media.caller_answer_uses_media_bridge
+            && self.media.media_bridge.is_some()
+        {
+            self.media.callee_offer_uses_media_bridge = true;
+            let bridge = self.media.media_bridge.as_ref().unwrap();
             return Self::bridge_callee_offer_sdp(bridge, callee_is_webrtc, false).await;
         }
 
@@ -13261,5 +13293,285 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
                 path: "/tmp/default.wav".into()
             })
         );
+    }
+
+    // ── Bug 3: transport-aware parallel-fork callee offer caching ──────
+
+    fn extract_audio_port(sdp: &str) -> Option<u16> {
+        for line in sdp.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("m=audio ") {
+                return rest.split_whitespace().next().and_then(|s| s.parse().ok());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn test_parallel_fork_callee_offer_caches_same_transport_port() {
+        // Two fork targets with the same transport must share the same RTP port
+        // (cached callee offer). Without the Bug 3 fix, each fork created a
+        // separate callee track with a different bound port.
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let mut dialplan = Dialplan::new(
+            "test-fork-cache".to_string(), original_request, DialDirection::Inbound,
+        );
+        dialplan.media.rtp_start_port = Some(31000);
+        dialplan.media.rtp_end_port = Some(31100);
+        let context = CallContext {
+            session_id: "test-fork-cache".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(), CancellationToken::new(), None, context, server_dialog,
+            true, caller_peer, callee_peer,
+        );
+
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n","o=alice 1 1 IN IP4 192.0.2.10\r\n","s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n","t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n","a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n","a=sendrecv\r\n",
+            ).to_string(),
+        );
+
+        let target1 = Location {
+            aor: "sip:agent1@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+        let target2 = Location {
+            aor: "sip:agent2@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+
+        let sdp1 = String::from_utf8(
+            session.prepare_callee_media_offer(&target1).await.expect("1st offer")
+        ).unwrap();
+        let port1 = extract_audio_port(&sdp1).expect("1st SDP port");
+
+        let sdp2 = String::from_utf8(
+            session.prepare_callee_media_offer(&target2).await.expect("2nd offer")
+        ).unwrap();
+        let port2 = extract_audio_port(&sdp2).expect("2nd SDP port");
+
+        assert_eq!(
+            port1, port2,
+            "same-transport forks must share the same port (cached), got {} vs {}",
+            port1, port2,
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_fork_callee_offer_regenerates_for_different_transport() {
+        // When fork targets use different transports (WebRTC vs RTP), the
+        // callee offer must NOT be reused from the cache — each transport
+        // produces a different SDP.
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let mut dialplan = Dialplan::new(
+            "test-fork-cross".to_string(), original_request, DialDirection::Inbound,
+        );
+        dialplan.media.rtp_start_port = Some(31100);
+        dialplan.media.rtp_end_port = Some(31200);
+        let context = CallContext {
+            session_id: "test-fork-cross".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(), CancellationToken::new(), None, context, server_dialog,
+            true, caller_peer, callee_peer,
+        );
+
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n","o=alice 1 1 IN IP4 192.0.2.10\r\n","s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n","t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n","a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n","a=sendrecv\r\n",
+            ).to_string(),
+        );
+
+        // First fork: WebRTC target → SDP has DTLS fingerprint
+        let webrtc_target = Location {
+            aor: "sip:agent-webrtc@rustpbx.com".try_into().unwrap(),
+            supports_webrtc: true,
+            ..Default::default()
+        };
+        let sdp_w = String::from_utf8(
+            session.prepare_callee_media_offer(&webrtc_target).await.expect("WebRTC offer")
+        ).unwrap();
+        assert!(
+            sdp_w.contains("a=fingerprint"),
+            "WebRTC target SDP must have DTLS fingerprint: {}",
+            sdp_w,
+        );
+
+        // Second fork: RTP target → SDP must NOT have DTLS fingerprint
+        let rtp_target = Location {
+            aor: "sip:agent-rtp@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+        let sdp_r = String::from_utf8(
+            session.prepare_callee_media_offer(&rtp_target).await.expect("RTP offer")
+        ).unwrap();
+        assert!(
+            !sdp_r.contains("a=fingerprint"),
+            "RTP target SDP must NOT have DTLS fingerprint: {}",
+            sdp_r,
+        );
+
+        // Different transports → the SDP strings must differ
+        assert_ne!(
+            sdp_w, sdp_r,
+            "different transport forks must produce different SDP (not cached)"
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
+    // ── Bug 4: app bridge reused for same-transport callee ─────────────
+
+    #[tokio::test]
+    async fn test_app_bridge_reused_for_rtp_callee() {
+        // When an app media bridge is active (e.g. queue ringback / IVR hold)
+        // and a same-transport RTP callee is created, the bridge must be
+        // reused instead of creating a separate callee track. This ensures
+        // the bridge forwarder can naturally connect both legs.
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-app-bridge-reuse".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-app-bridge-reuse".to_string(), original_request, DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(), CancellationToken::new(), None, context, server_dialog,
+            true, caller_peer, callee_peer,
+        );
+
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n","o=alice 1 1 IN IP4 192.0.2.10\r\n","s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n","t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n","a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n","a=sendrecv\r\n",
+            ).to_string(),
+        );
+
+        // Step 1: Prepare app caller bridge (simulates queue/IVR ringing)
+        let _answer = session.prepare_app_caller_media_bridge().await
+            .expect("app caller bridge answer");
+        assert!(session.media.caller_answer_uses_media_bridge,
+            "caller must use media bridge after prepare_app_caller_media_bridge");
+        let bridge_before = session.media.media_bridge.as_ref().map(|b| b.id.clone());
+
+        // Step 2: Create callee track for an RTP agent
+        let sdp = session.create_callee_track(false).await
+            .expect("create_callee_track should succeed for RTP callee");
+        assert!(session.media.callee_offer_uses_media_bridge,
+            "RTP callee must use the app bridge (Bug 4 fix)");
+        assert!(
+            sdp.contains("RTP/AVP"),
+            "callee SDP must be RTP, got: {}",
+            sdp,
+        );
+
+        // Step 3: Bridge must be the SAME object (not replaced)
+        let bridge_after = session.media.media_bridge.as_ref().map(|b| b.id.clone());
+        assert_eq!(
+            bridge_before, bridge_after,
+            "bridge must be the same object (not replaced)"
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
     }
 }

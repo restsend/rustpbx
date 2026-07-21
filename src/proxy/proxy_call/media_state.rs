@@ -79,6 +79,11 @@ impl RecordingPhase {
 pub struct MediaState {
     pub caller_offer: Option<String>,
     pub callee_offer: Option<String>,
+    /// When Some, records what transport type the cached callee_offer was
+    /// generated for, so prepare_callee_media_offer knows whether to reuse
+    /// the cache or regenerate when the next fork target uses a different
+    /// transport (Bug 3 fix: parallel-fork port mismatch).
+    pub callee_offer_cached_webrtc: Option<bool>,
     pub answer: Option<String>,
     pub early_media_sent: bool,
     pub callee_answer_sdp: Option<String>,
@@ -155,6 +160,7 @@ impl MediaState {
         Self {
             caller_offer,
             callee_offer: None,
+            callee_offer_cached_webrtc: None,
             answer: None,
             early_media_sent: false,
             callee_answer_sdp: None,
