@@ -107,6 +107,10 @@ impl RemoteBackend {
         dns_ttl_secs: u64,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
+        // Backend shutdown must be one-way: cancelling the server stops this
+        // backend, while dropping/reloading this backend must not stop the server.
+        let cancel_token = cancel_token.child_token();
+
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
         socket.set_nonblocking(true)?;
         let udp_socket = Arc::new(UdpSocket::from_std(socket)?);
@@ -585,3 +589,53 @@ impl Drop for RemoteBackend {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remote_backend_uses_one_way_child_cancellation() {
+        let server_cancel = CancellationToken::new();
+        let backend = RemoteBackend::new(
+            vec![SipFlowClusterNode {
+                udp: "127.0.0.1:3000".to_string(),
+                http: "http://127.0.0.1:3001".to_string(),
+            }],
+            1,
+            0,
+            20,
+            16,
+            0,
+            server_cancel.clone(),
+        )
+        .expect("remote backend should be created");
+        let backend_cancel = backend.cancel_token.clone();
+
+        drop(backend);
+
+        assert!(backend_cancel.is_cancelled());
+        assert!(
+            !server_cancel.is_cancelled(),
+            "dropping a remote backend must not cancel the server"
+        );
+
+        let backend = RemoteBackend::new(
+            vec![SipFlowClusterNode {
+                udp: "127.0.0.1:3000".to_string(),
+                http: "http://127.0.0.1:3001".to_string(),
+            }],
+            1,
+            0,
+            20,
+            16,
+            0,
+            server_cancel.clone(),
+        )
+        .expect("remote backend should be created");
+        let backend_cancel = backend.cancel_token.clone();
+
+        server_cancel.cancel();
+
+        assert!(backend_cancel.is_cancelled());
+    }
+}
