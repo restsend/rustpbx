@@ -523,7 +523,18 @@ impl SipFlowBackend for RemoteBackend {
 
             let stats: Vec<SipFlowMediaStats> = stats_array
                 .iter()
-                .filter_map(|stat| serde_json::from_value(stat.clone()).ok())
+                .filter_map(|stat| match serde_json::from_value(stat.clone()) {
+                    Ok(stats) => Some(stats),
+                    Err(err) => {
+                        tracing::warn!(
+                            call_id,
+                            error = %err,
+                            stat = %stat,
+                            "failed to deserialize remote SipFlow media stats"
+                        );
+                        None
+                    }
+                })
                 .collect();
 
             Ok(stats)

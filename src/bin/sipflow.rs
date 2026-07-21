@@ -483,29 +483,11 @@ async fn media_handler(
             .query_media_stats(&callid, start_dt, end_dt)
             .await
             .unwrap_or_default();
-        let stats_json: Vec<_> = stats
-            .into_iter()
-            .map(|stat| {
-                serde_json::json!({
-                    "leg": stat.leg,
-                    "src": stat.src,
-                    "count": stat.packet_count,
-                    "packet_count": stat.packet_count,
-                    "lost_packets": stat.lost_packets,
-                    "expected_packets": stat.expected_packets,
-                    "loss_percent": stat.loss_percent,
-                    "jitter_ms": stat.jitter_ms,
-                    "ssrc": stat.ssrc,
-                    "payload_type": stat.payload_type,
-                    "clock_rate": stat.clock_rate,
-                })
-            })
-            .collect();
 
         return axum::Json(serde_json::json!({
             "status": "success",
             "callid": callid,
-            "stats": stats_json
+            "stats": stats
         }))
         .into_response();
     }

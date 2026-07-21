@@ -7,7 +7,7 @@ mod tests {
 
     use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
     use crate::sipflow::backend::create_backend;
-    use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
+    use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
     use chrono::{Local, TimeZone};
     use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,28 @@ mod tests {
             dst_addr: "127.0.0.1:5001".to_string(),
             payload: bytes::Bytes::from(vec![0u8; 20]),
         }
+    }
+
+    #[test]
+    fn test_media_stats_wire_format_uses_packet_count_and_accepts_legacy_count() {
+        let stats = SipFlowMediaStats {
+            leg: 0,
+            src: "127.0.0.1:5000".to_string(),
+            packet_count: 42,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(stats).expect("serialize media stats");
+
+        assert_eq!(json["packet_count"], 42);
+        assert!(json.get("count").is_none());
+
+        let legacy: SipFlowMediaStats = serde_json::from_value(serde_json::json!({
+            "leg": 0,
+            "src": "127.0.0.1:5000",
+            "count": 42
+        }))
+        .expect("deserialize legacy media stats");
+        assert_eq!(legacy.packet_count, 42);
     }
 
     /// `flush()` on an empty Local backend should succeed without error.
