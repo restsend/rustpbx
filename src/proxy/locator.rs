@@ -474,6 +474,41 @@ impl Locator for MemoryLocator {
             }
         }
 
+        // If the location has an instance_id, find an existing binding with the
+        // same instance_id (across any identifier) but a different binding key
+        // and update only its destination. The identifier (username@realm) may
+        // differ between old and new registration — search globally, not scoped
+        // to the current identifier.
+        if let Some(ref instance_id) = location.instance_id {
+            let old_identifier = self.locations.iter().find_map(|map_ref| {
+                if map_ref.value().values().any(|loc| {
+                    loc.instance_id.as_ref() == Some(instance_id)
+                        && loc.binding_key() != key
+                        && !loc.is_expired_at(now)
+                }) {
+                    Some(map_ref.key().clone())
+                } else {
+                    None
+                }
+            });
+            if let Some(old_id) = old_identifier {
+                if let Some(mut map) = self.locations.get_mut(&old_id) {
+                    if let Some(old_loc) = map.values_mut().find(|loc| {
+                        loc.instance_id.as_ref() == Some(instance_id) && loc.binding_key() != key
+                    }) {
+                        if let Some(ref new_dest) = location.destination {
+                            old_loc.destination = Some(new_dest.clone());
+                            debug!(
+                                old_aor = %old_loc.aor,
+                                new_aor = %location.aor,
+                                "updated destination for same-instance-id binding"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if location.expires == 0 {
             if let Some(mut map) = self.locations.get_mut(&identifier) {
                 map.remove(&key);
@@ -1486,6 +1521,137 @@ mod tests {
         assert_eq!(
             result, destination,
             "DialogTargetLocator should fallback to destination when home_proxy is absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_locator_same_instance_id_updates_old_destination() {
+        let locator = MemoryLocator::new();
+        let instance_id = "urn:uuid:b8c9e0d0-1234-5678-9abc-def012345678".to_string();
+
+        // First registration: old AoR + old destination
+        let old_aor: rsipstack::sip::Uri =
+            "sip:olduser@oldhost.invalid;transport=ws".try_into().unwrap();
+        let old_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: HostWithPort::try_from("192.168.1.100:443").unwrap(),
+        };
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: old_aor.clone(),
+                    expires: 120,
+                    destination: Some(old_dest.clone()),
+                    transport: Some(Transport::Ws),
+                    last_modified: Some(Instant::now()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Second registration: new AoR (different user@host) but same instance_id
+        let new_aor: rsipstack::sip::Uri =
+            "sip:newuser@newhost.invalid;transport=ws".try_into().unwrap();
+        let new_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: HostWithPort::try_from("10.0.0.1:8443").unwrap(),
+        };
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: new_aor.clone(),
+                    expires: 120,
+                    destination: Some(new_dest),
+                    transport: Some(Transport::Ws),
+                    last_modified: Some(Instant::now()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Lookup with old AoR must find the old location with updated destination
+        let locations = locator.lookup(&old_aor).await.unwrap();
+        assert_eq!(locations.len(), 1, "old AoR must still resolve");
+        assert_eq!(
+            locations[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("10.0.0.1:8443".to_string()),
+            "old location's destination must be updated to new WS address"
+        );
+
+        // Lookup with new AoR must also succeed
+        let locations_new = locator.lookup(&new_aor).await.unwrap();
+        assert_eq!(locations_new.len(), 1, "new AoR must resolve");
+        assert_eq!(
+            locations_new[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("10.0.0.1:8443".to_string()),
+            "new location has correct destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_locator_same_instance_id_does_not_update_expired_location() {
+        let locator = MemoryLocator::new();
+        let instance_id = "urn:uuid:expired".to_string();
+
+        let old_aor: rsipstack::sip::Uri =
+            "sip:olduser@oldhost.invalid;transport=ws".try_into().unwrap();
+        let old_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: HostWithPort::try_from("192.168.1.100:443").unwrap(),
+        };
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: old_aor.clone(),
+                    expires: 0, // immediately expired
+                    destination: Some(old_dest.clone()),
+                    transport: Some(Transport::Ws),
+                    last_modified: Some(Instant::now()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let new_aor: rsipstack::sip::Uri =
+            "sip:newuser@newhost.invalid;transport=ws".try_into().unwrap();
+        let new_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: HostWithPort::try_from("10.0.0.1:8443").unwrap(),
+        };
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: new_aor.clone(),
+                    expires: 120,
+                    destination: Some(new_dest),
+                    transport: Some(Transport::Ws),
+                    last_modified: Some(Instant::now()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Old entry should have been removed (expired or overwritten) — no match
+        let locations = locator.lookup(&old_aor).await.unwrap();
+        assert!(
+            locations.is_empty(),
+            "expired old AoR should not be found"
         );
     }
 }

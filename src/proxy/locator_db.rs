@@ -33,6 +33,7 @@ pub struct Model {
     pub updated_at: DateTimeUtc,
     pub supports_webrtc: bool,
     pub user_agent: Option<String>,
+    pub instance_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -120,12 +121,61 @@ impl MigrationTrait for Migration {
     }
 }
 
+#[derive(DeriveMigrationName)]
+pub struct MigrationAddInstanceId;
+
+#[async_trait::async_trait]
+impl MigrationTrait for MigrationAddInstanceId {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("rustpbx_locations", "instance_id").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Entity)
+                        .add_column_if_not_exists(string_len_null(Column::InstanceId, 255))
+                        .to_owned(),
+                )
+                .await?;
+
+            if !manager
+                .has_index("rustpbx_locations", "idx_locations_instance")
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .table(Entity)
+                            .name("idx_locations_instance_id")
+                            .col(Column::InstanceId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.has_column("rustpbx_locations", "instance_id").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Entity)
+                        .drop_column(Column::InstanceId)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration {})]
+        vec![Box::new(Migration {}), Box::new(MigrationAddInstanceId {})]
     }
 }
 
@@ -163,7 +213,11 @@ impl DbLocator {
         Migration
             .up(&manager)
             .await
-            .map_err(|e| anyhow::anyhow!("Migration error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Migration error (initial): {}", e))?;
+        MigrationAddInstanceId
+            .up(&manager)
+            .await
+            .map_err(|e| anyhow::anyhow!("Migration error (add instance_id): {}", e))?;
         Ok(())
     }
 }
@@ -345,7 +399,34 @@ impl Locator for DbLocator {
             return Ok(());
         }
 
-        // Check if record exists
+        // If the location has an instance_id, find an existing registration with
+        // the same instance_id (any username/realm) but a different AoR and
+        // update only its destination. The identifier may differ between old and
+        // new registration — search globally, not scoped to the current identifier.
+        if let Some(ref instance_id) = location.instance_id {
+            let old = Entity::find()
+                .filter(Column::InstanceId.eq(instance_id))
+                .filter(Column::Aor.ne(&aor))
+                .one(&self.db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Database error on register instance_id lookup: {}", e))?;
+
+            if let Some(old_model) = old {
+                let now_epoch = now_epoch_secs();
+                if !is_location_expired(old_model.expires, old_model.last_modified, now_epoch) {
+                    let mut active_model: ActiveModel = old_model.into();
+                    active_model.destination = Set(host.clone());
+                    active_model.transport = Set(transport.to_string());
+                    active_model.updated_at = Set(chrono::Utc::now());
+                    active_model
+                        .update(&self.db)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Database error on register instance_id update: {}", e))?;
+                }
+            }
+        }
+
+        // Check if record exists by (username, realm, aor)
         let existing = Entity::find()
             .filter(Column::Username.eq(&username_key))
             .filter(Column::Realm.eq(&realm_key))
@@ -372,6 +453,7 @@ impl Locator for DbLocator {
                     location.home_proxy.as_ref(),
                     location.registered_aor.as_ref(),
                 ));
+                active_model.instance_id = Set(location.instance_id.clone());
 
                 active_model
                     .update(&self.db)
@@ -399,6 +481,7 @@ impl Locator for DbLocator {
                     location.home_proxy.as_ref(),
                     location.registered_aor.as_ref(),
                 ));
+                active_model.instance_id = Set(location.instance_id.clone());
 
                 // Insert without specifying id
                 active_model
@@ -486,6 +569,7 @@ impl Locator for DbLocator {
                 registered_aor: Some(registered_aor),
                 user_agent,
                 home_proxy,
+                instance_id: loc.instance_id.clone(),
                 ..Default::default()
             });
         }
@@ -673,6 +757,7 @@ impl Locator for DbLocator {
                 registered_aor: Some(registered_aor),
                 user_agent,
                 home_proxy,
+                instance_id: model.instance_id.clone(),
                 ..Default::default()
             });
         }
@@ -882,6 +967,94 @@ mod tests {
         assert!(
             locations.is_empty(),
             "unknown .invalid contact should return empty"
+        );
+    }
+
+    /// Rapid reconnect: client re-registers with a new AoR (Contact URI) but the
+    /// same +sip.instance. The old location should have its destination updated
+    /// to the new WebSocket connection, while retaining the old AoR so that
+    /// in-dialog BYE requests using the old remote_uri can still match.
+    #[tokio::test]
+    async fn same_instance_id_updates_old_location_destination() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let instance_id = "urn:uuid:b8c9e0d0-1234-5678-9abc-def012345678".to_string();
+
+        // First registration: old AoR + old destination
+        let old_aor: rsipstack::sip::Uri =
+            "sip:olduser@oldhost.invalid;transport=ws"
+                .try_into()
+                .expect("valid old aor");
+        let old_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: "192.168.1.100:443"
+                .try_into()
+                .expect("valid old destination"),
+        };
+        let old_location = Location {
+            aor: old_aor.clone(),
+            expires: 120,
+            destination: Some(old_dest.clone()),
+            transport: Some(Transport::Ws),
+            last_modified: Some(Instant::now()),
+            instance_id: Some(instance_id.clone()),
+            ..Default::default()
+        };
+        locator
+            .register("alice", Some("pbx.example.com"), old_location)
+            .await
+            .expect("first register should succeed");
+
+        // Second registration: new AoR (different user@host) but same instance_id
+        let new_aor: rsipstack::sip::Uri =
+            "sip:newuser@newhost.invalid;transport=ws"
+                .try_into()
+                .expect("valid new aor");
+        let new_dest = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: "10.0.0.1:8443"
+                .try_into()
+                .expect("valid new destination"),
+        };
+        let new_location = Location {
+            aor: new_aor.clone(),
+            expires: 120,
+            destination: Some(new_dest),
+            transport: Some(Transport::Ws),
+            last_modified: Some(Instant::now()),
+            instance_id: Some(instance_id.clone()),
+            ..Default::default()
+        };
+        locator
+            .register("alice", Some("pbx.example.com"), new_location)
+            .await
+            .expect("second register should succeed");
+
+        // Lookup with old AoR (simulating BYE using old remote_uri) must find
+        // the old location with its destination updated to the new WS address.
+        let locations = locator
+            .lookup(&old_aor)
+            .await
+            .expect("lookup with old aor should succeed");
+        assert_eq!(locations.len(), 1, "old AoR must still resolve to a location");
+        assert_eq!(
+            locations[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("10.0.0.1:8443".to_string()),
+            "old location's destination must be updated to new WebSocket address"
+        );
+
+        // Lookup with new AoR must also succeed
+        let locations_new = locator
+            .lookup(&new_aor)
+            .await
+            .expect("lookup with new aor should succeed");
+        assert_eq!(locations_new.len(), 1, "new AoR must resolve");
+        assert_eq!(
+            locations_new[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("10.0.0.1:8443".to_string()),
+            "new location has correct destination"
         );
     }
 }
