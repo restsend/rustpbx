@@ -144,6 +144,7 @@ pub async fn persist_call_record(
                     Column::DepartmentId,
                     Column::ExtensionId,
                     Column::SipTrunkId,
+                    Column::OutboundSipTrunkId,
                     Column::RouteId,
                     Column::SipGateway,
                     Column::RewriteOriginalFrom,
