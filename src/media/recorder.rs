@@ -515,15 +515,17 @@ impl Recorder {
             (duration as u64 * self.sample_rate as u64).div_ceil(clock_rate.max(1) as u64) as u32;
         let duration_ms = (duration as u64 * 1000).div_ceil(clock_rate.max(1) as u64) as u32;
 
-        if let Some(state) = self.active_dtmf_state(leg)
-            && state.digit_code == digit_code
-            && state.rtp_timestamp == rtp_timestamp
-            && duration_samples <= state.duration_samples
-        {
+        let existing_state = self.active_dtmf_state(leg).filter(|state| {
+            state.digit_code == digit_code && state.rtp_timestamp == rtp_timestamp
+        });
+        if existing_state.is_some_and(|state| duration_samples <= state.duration_samples) {
             return Ok(());
         }
 
-        let absolute_ts = self.leg_end_ts(leg);
+        let (absolute_ts, previous_duration_samples) = existing_state
+            .map(|state| (state.absolute_timestamp, state.duration_samples))
+            .unwrap_or_else(|| (self.leg_end_ts(leg), 0));
+        let write_start_ts = absolute_ts.saturating_add(previous_duration_samples);
 
         debug!(
             leg = ?leg,
@@ -535,17 +537,18 @@ impl Recorder {
         let pcm = self
             .dtmf_gen
             .generate_samples(digit, duration_samples as usize);
+        let pcm = &pcm[previous_duration_samples as usize..];
         let encoded = if let Some(enc) = self.encoder.as_mut() {
-            Bytes::from(enc.encode(&pcm))
+            Bytes::from(enc.encode(pcm))
         } else {
-            Bytes::from(audio_codec::samples_to_bytes(&pcm))
+            Bytes::from(audio_codec::samples_to_bytes(pcm))
         };
         let end_ts = absolute_ts.saturating_add(duration_samples);
         match leg {
             Leg::A => self.leg_a_started = true,
             Leg::B => self.leg_b_started = true,
         }
-        self.overlay_dtmf_range(leg, absolute_ts, end_ts, encoded);
+        self.overlay_dtmf_range(leg, write_start_ts, end_ts, encoded);
 
         self.set_dtmf_state(
             leg,

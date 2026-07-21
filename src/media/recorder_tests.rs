@@ -310,6 +310,44 @@ mod recorder_advanced_tests {
     }
 
     #[test]
+    fn test_recorder_dtmf_progressive_duration_is_not_appended_repeatedly() {
+        let temp_path =
+            std::env::temp_dir().join("test_recorder_dtmf_progressive_duration.wav");
+        let mut recorder = Recorder::new(temp_path.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let rtp_timestamp = 12_345;
+
+        for duration in [160u16, 320, 480, 640, 800] {
+            let payload = [
+                5,
+                if duration == 800 { 0x80 } else { 0x00 },
+                (duration >> 8) as u8,
+                duration as u8,
+            ];
+            recorder
+                .write_dtmf_payload(Leg::A, &payload, rtp_timestamp, 8000)
+                .expect("progressive DTMF packet should be accepted");
+        }
+
+        let terminal_payload = [5, 0x80, 0x03, 0x20];
+        for _ in 0..2 {
+            recorder
+                .write_dtmf_payload(Leg::A, &terminal_payload, rtp_timestamp, 8000)
+                .expect("repeated terminal DTMF packet should be accepted");
+        }
+
+        recorder.finalize().expect("finalize should succeed");
+
+        let file_len = std::fs::metadata(&temp_path).unwrap().len();
+        assert_eq!(
+            file_len,
+            44 + 800 * 2,
+            "progressive packets must produce one 800-sample stereo PCMU tone"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
     fn test_recorder_dtmf_uses_event_clock_rate() {
         let temp_path_a = std::env::temp_dir().join("test_recorder_dtmf_clock_a.wav");
