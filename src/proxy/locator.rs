@@ -17,7 +17,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing::{debug, info};
 
@@ -458,11 +458,14 @@ impl Locator for MemoryLocator {
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm).await;
         if identifier.is_empty() {
+            debug!(%username, "skip registering location with empty identifier");
             return Ok(());
         }
-        let mut location = location;
-        let key = location.binding_key();
+
+        let binding_key = location.binding_key();
         let now = Instant::now();
+
+        debug!(%identifier, binding = %binding_key, %location, "Memory locator: registering");
 
         // Prune expired bindings for THIS identifier (opportunistic GC).
         if let Some(mut map) = self.locations.get_mut(&identifier) {
@@ -474,6 +477,20 @@ impl Locator for MemoryLocator {
             }
         }
 
+        // Expires == 0 means unregister this specific binding.
+        if location.expires == 0 {
+            if let Some(mut map) = self.locations.get_mut(&identifier) {
+                map.remove(&binding_key);
+                let empty = map.is_empty();
+                drop(map);
+                if empty {
+                    self.locations.remove(&identifier);
+                }
+                info!(%identifier, binding = %binding_key, "unregistered location (expires=0)");
+            }
+            return Ok(());
+        }
+
         // If the location has an instance_id, find an existing binding with the
         // same instance_id (across any identifier) but a different binding key
         // and update only its destination. The identifier (username@realm) may
@@ -483,7 +500,7 @@ impl Locator for MemoryLocator {
             let old_identifier = self.locations.iter().find_map(|map_ref| {
                 if map_ref.value().values().any(|loc| {
                     loc.instance_id.as_ref() == Some(instance_id)
-                        && loc.binding_key() != key
+                        && loc.binding_key() != binding_key
                         && !loc.is_expired_at(now)
                 }) {
                     Some(map_ref.key().clone())
@@ -494,14 +511,16 @@ impl Locator for MemoryLocator {
             if let Some(old_id) = old_identifier {
                 if let Some(mut map) = self.locations.get_mut(&old_id) {
                     if let Some(old_loc) = map.values_mut().find(|loc| {
-                        loc.instance_id.as_ref() == Some(instance_id) && loc.binding_key() != key
+                        loc.instance_id.as_ref() == Some(instance_id)
+                            && loc.binding_key() != binding_key
                     }) {
                         if let Some(ref new_dest) = location.destination {
                             old_loc.destination = Some(new_dest.clone());
-                            debug!(
+                            info!(
                                 old_aor = %old_loc.aor,
                                 new_aor = %location.aor,
-                                "updated destination for same-instance-id binding"
+                                %instance_id,
+                                "updated destination for same-instance-id binding (rapid reconnect)"
                             );
                         }
                     }
@@ -509,37 +528,37 @@ impl Locator for MemoryLocator {
             }
         }
 
-        if location.expires == 0 {
-            if let Some(mut map) = self.locations.get_mut(&identifier) {
-                map.remove(&key);
-                let empty = map.is_empty();
-                drop(map);
-                if empty {
-                    self.locations.remove(&identifier);
-                }
-            }
-            info!(identifier, "unregistered location (expires=0)");
-        } else {
-            if location.last_modified.is_none() {
-                location.last_modified = Some(Instant::now());
-            }
-            self.locations
-                .entry(identifier.clone())
-                .or_default()
-                .insert(key, location);
-            info!(identifier, "registered location");
+        // Store or update the binding for this identifier.
+        let mut location = location;
+        if location.last_modified.is_none() {
+            location.last_modified = Some(Instant::now());
         }
+        let bk = binding_key.clone();
+        self.locations
+            .entry(identifier.clone())
+            .or_default()
+            .insert(binding_key, location);
+        info!(%identifier, binding = %bk, "registered location");
+
         Ok(())
     }
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm).await;
+        if identifier.is_empty() {
+            return Ok(());
+        }
+        debug!(%identifier, "Memory locator: unregistering all bindings");
         self.locations.remove(&identifier);
+        info!(%identifier, "unregistered all locations");
         Ok(())
     }
 
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+        let now = Instant::now();
+        let grace_cutoff = now - Duration::from_secs(UNREGISTER_GRACE_SECS as u64);
         let mut removed_locations = Vec::new();
+
         self.locations.retain(|_, map| {
             let keys_to_remove: Vec<String> = map
                 .iter()
@@ -547,14 +566,33 @@ impl Locator for MemoryLocator {
                     if let Some(dest) = &loc.destination
                         && dest == addr
                     {
-                        return Some(key.clone());
+                        // Only remove bindings older than the grace window.
+                        // This guards against the rapid-reconnect race: a WS
+                        // client reconnects and reuses the same NAT ip:port,
+                        // then the stale close event for the previous connection
+                        // would otherwise delete the fresh binding.
+                        let within_grace = loc
+                            .last_modified
+                            .map(|lm| lm >= grace_cutoff)
+                            .unwrap_or(false);
+                        if !within_grace {
+                            Some(key.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
-                    None
                 })
                 .collect();
 
-            for key in keys_to_remove {
-                if let Some(loc) = map.remove(&key) {
+            for key in &keys_to_remove {
+                if let Some(loc) = map.remove(key) {
+                    debug!(
+                        aor = %loc.aor,
+                        %addr,
+                        "removed location on transport close"
+                    );
                     removed_locations.push(loc);
                 }
             }
@@ -564,6 +602,11 @@ impl Locator for MemoryLocator {
         if removed_locations.is_empty() {
             Ok(None)
         } else {
+            info!(
+                count = removed_locations.len(),
+                %addr,
+                "unregistered locations by address"
+            );
             Ok(Some(removed_locations))
         }
     }
