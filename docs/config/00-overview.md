@@ -6,8 +6,11 @@ RustPBX loads configuration in the following order of precedence:
 2. **Main Config File**: `rustpbx.toml` (or custom path)
 3. **Partial Config Files**: Loaded via glob patterns defined in main config (e.g. `trunks_files`, `routes_files`).
 4. **Generated Configs**: Automatically loaded from `generated_dir` if present (managed by UI/API).
+5. **Database Configs**: When `generated_db = true`, generated configs (trunks, routes, queues, IVR, ACL, CC, SBC) are stored in the `config_entries` database table instead of files.
 
-## Directory Structure
+## Storage Modes
+
+### File System Mode (default)
 By default, the system assumes a `config` folder exists next to the binary:
 
 ```toml
@@ -20,8 +23,24 @@ trunks_files = ["config/trunks/*.toml"]
 acl_files = ["config/acl/*.toml"]
 ```
 
+### Database Mode
+Set `generated_db = true` to store all generated configs in the application database:
+
+```toml
+[proxy]
+generated_db = true
+```
+
+In this mode, the system reads from and writes to the `config_entries` table instead of the filesystem. This includes:
+- SIP trunks, routes, queues, and ACL rules
+- IVR project definitions (when published)
+- CC ACD config, skill groups, and agents
+- SBC JSON-RPC config
+
+File-based `routes_files`, `trunks_files`, etc. are ignored in DB mode — all config is managed through the database. The `generated_dir` path is also unused.
+
 ## Reload Behavior
-Changes to `rustpbx.toml` usually require a restart. However, **Trunks**, **Queues**, **Routes**, and **ACLs** can be reloaded at runtime without dropping active calls via the Admin Console or API.
+Changes to `rustpbx.toml` usually require a restart. However, **Trunks**, **Queues**, **Routes**, and **ACLs** can be reloaded at runtime without dropping active calls via the Admin Console or API. In DB mode, the same runtime reload applies — configs are loaded from the database.
 
 ## Addon System
 Addons (like Wholesale, Queue, Transcript) are enabled in the `[proxy]` section.

@@ -5,7 +5,7 @@ RustPBX configuration is split into several logical sections. The application lo
 ## Navigation
 
 1. [Overview & Concepts](config/00-overview.md)  
-   *File structure, reload behavior, generated configs.*
+   *File structure, reload behavior, generated configs, database config mode.*
 
 2. [Platform & Networking](config/01-platform.md)  
    *HTTP, Logging, Database, RTP, NAT, ICE.*

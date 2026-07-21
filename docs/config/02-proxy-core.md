@@ -166,6 +166,8 @@ nat_fix = true
 
 ## File Loading & Paths
 
+### File System Mode (default)
+
 ```toml
 [proxy]
 # Directory for auto-generated configs (managed by UI/API)
@@ -181,6 +183,39 @@ ivr_files = ["config/ivr/*.toml"]
 # Directory for queue-specific data files
 queue_dir = "./queues"
 ```
+
+### Database Mode
+
+Set `generated_db = true` to store all generated configs in the application database instead of the filesystem. This is useful for:
+- **High-availability deployments** where config must be shared across nodes
+- **Kubernetes/container environments** with ephemeral filesystems
+- **Multi-instance clusters** requiring centralized config management
+
+```toml
+[proxy]
+generated_db = true
+# generated_dir, routes_files, trunks_files, etc. are ignored
+# in DB mode — all generated configs use the config_entries table.
+```
+
+In this mode, the following config types are written to and loaded from the `config_entries` database table:
+
+| Config Type | Category | Entry Name |
+|-------------|----------|-----------|
+| Trunks | `trunks` | `trunks.generated.toml` |
+| Routes | `routes` | `routes.generated.toml` |
+| Queues | `queue` | `queues.generated.toml` |
+| ACL | `acl` | `acl.generated.toml` |
+| IVR projects | `ivr` | `{name}.generated.toml` |
+| CC ACD | `cc_acd` | `acd.toml` |
+| CC Skill Groups | `cc_skill_groups` | `skill_groups.generated.toml` |
+| CC Agents | `cc_agents` | `agents.generated.toml` |
+| CC Transfer | `cc_transfer` | `transfer.toml` |
+| SBC JSON-RPC | `sbc` | `sbc_jsonrpc.toml` |
+
+> **Note**: There is no migration path between modes. Switching from filesystem to DB mode (or vice versa) requires re-exporting all configs through the admin console.
+
+### Inline ACL Rules
 
 ### Inline ACL Rules
 
