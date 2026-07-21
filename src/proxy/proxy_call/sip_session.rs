@@ -1209,9 +1209,7 @@ impl SipSession {
 
         let max_setup_duration =
             max_ring_time.clamp(Duration::from_secs(30), Duration::from_secs(120));
-        let teardown_duration = Duration::from_secs(2);
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
-        let mut cancelled = false;
 
         loop {
             tokio::select! {
@@ -1225,10 +1223,14 @@ impl SipSession {
                     }
                     break;
                 }
-                _ = cancel_token.cancelled(), if !cancelled => {
+                _ = cancel_token.cancelled() => {
                     debug!(session_id = %session_id, "Call cancelled via token");
-                    cancelled = true;
-                    timeout = tokio::time::sleep(teardown_duration).boxed();
+                    if !server_dialog_clone.state().is_terminated() {
+                        if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
+                            warn!(session_id = %session_id, error = %e, "Failed to reply 487 on cancel");
+                        }
+                    }
+                    break;
                 }
                 _ = &mut timeout => {
                     warn!(session_id = %session_id, "Call setup timed out");
