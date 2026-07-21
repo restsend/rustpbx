@@ -6,6 +6,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::config::{SipFlowClusterNode, SipFlowConfig};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats};
 
@@ -80,7 +82,7 @@ pub trait SipFlowBackend: Send + Sync {
 }
 
 /// Create backend from configuration
-pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>> {
+pub fn create_backend(config: &SipFlowConfig, cancel_token: CancellationToken) -> Result<Box<dyn SipFlowBackend>> {
     match config {
         SipFlowConfig::Local {
             root,
@@ -144,6 +146,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
                 *batch_flush_ms,
                 *channel_capacity,
                 *dns_ttl_secs,
+                cancel_token,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }

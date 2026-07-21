@@ -818,6 +818,16 @@ impl CallModule {
             if let Some(video_policy) = hints.video_policy {
                 dialplan.media.video_policy = Some(video_policy);
             }
+            // Per-trunk external_ip / bind_ip overrides the global rtp_config
+            // value. This lets operators assign different advertised IPs per
+            // trunk (e.g. overlay-network IP for internal trunks, public NAT
+            // IP for external trunks) without running multiple PBX instances.
+            if let Some(external_ip) = hints.external_ip.take() {
+                dialplan.media.external_ip = Some(external_ip);
+            }
+            if let Some(bind_ip) = hints.bind_ip.take() {
+                dialplan.media.bind_ip = Some(bind_ip);
+            }
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }

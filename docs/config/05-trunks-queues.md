@@ -44,6 +44,8 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `rewrite_hostport` | bool | `true` | Rewrite host:port in outgoing Contact headers |
 | `recording` | table | none | Per-trunk recording policy override |
 | `ringback` | table | none | Per-trunk ringback audio override |
+| `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the global `rtp_config.external_ip`. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
+| `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the global `rtp_config.bind_ip` |
 
 ### Trunk Registration
 
@@ -86,8 +88,16 @@ cac_policy = "loss_based"         # "loss_based" or "reject"
 overflow_threshold = 90           # Trigger CAC at 90% capacity
 
 # Media handling
-media_mode = "auto"               # "auto", "all", "none", "nat", "bypass"
+media_mode = "auto"               # "auto", "none", "bypass", "force_transcode"
+                                  # - auto: bridge only for app/queue flows
+                                  # - none: no media proxy (SDP passthrough, RTP direct)
+                                  # - bypass: SDP rewrite only, RTP direct
+                                  # - force_transcode: always bridge through PBX
 video_policy = "passthrough"      # "passthrough", "strip", "transcode"
+
+# Per-trunk IP override (for overlay networks like Tailscale/WireGuard)
+external_ip = "100.64.10.1"       # Override global rtp_config.external_ip
+bind_ip = "100.64.10.2"           # Override global rtp_config.bind_ip
 
 # SIP header manipulation
 header_rules = [

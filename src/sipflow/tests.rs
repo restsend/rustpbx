@@ -9,6 +9,7 @@ mod tests {
     use crate::sipflow::backend::create_backend;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
     use chrono::{Local, TimeZone};
+    use tokio_util::sync::CancellationToken;
 
     fn make_rtp_item(leg: i32) -> SipFlowItem {
         SipFlowItem {
@@ -40,7 +41,7 @@ mod tests {
             block_cache_capacity_mb: 128,
             upload: None,
         };
-        let backend = create_backend(&cfg).expect("backend creation should succeed");
+        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
 
@@ -65,7 +66,7 @@ mod tests {
             upload: None,
         };
         let backend: Arc<dyn SipFlowBackend> =
-            Arc::from(create_backend(&cfg).expect("backend creation should succeed"));
+            Arc::from(create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed"));
 
         for _ in 0..5 {
             backend
@@ -102,7 +103,7 @@ mod tests {
             dns_ttl_secs: 0,
             upload: None,
         };
-        let backend = create_backend(&cfg);
+        let backend = create_backend(&cfg, CancellationToken::new());
         assert!(backend.is_ok(), "legacy format should create backend");
     }
 
@@ -120,7 +121,7 @@ mod tests {
             dns_ttl_secs: 0,
             upload: None,
         };
-        let backend = create_backend(&cfg);
+        let backend = create_backend(&cfg, CancellationToken::new());
         assert!(backend.is_ok(), "domain UDP address should create backend");
     }
 
@@ -147,7 +148,7 @@ mod tests {
             dns_ttl_secs: 0,
             upload: None,
         };
-        let backend = create_backend(&cfg);
+        let backend = create_backend(&cfg, CancellationToken::new());
         assert!(backend.is_ok(), "multi-node format should create backend");
     }
 
@@ -165,7 +166,7 @@ mod tests {
             dns_ttl_secs: 0,
             upload: None,
         };
-        let result = create_backend(&cfg);
+        let result = create_backend(&cfg, CancellationToken::new());
         assert!(
             result.is_err(),
             "expected error when neither nodes nor udp_addr/http_addr provided"
@@ -190,7 +191,7 @@ mod tests {
             block_cache_capacity_mb: 16,
             upload: None,
         };
-        let backend = create_backend(&cfg).expect("flowdb backend creation should succeed");
+        let backend = create_backend(&cfg, CancellationToken::new()).expect("flowdb backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
 
@@ -216,7 +217,7 @@ mod tests {
             upload: None,
         };
         let backend: Arc<dyn SipFlowBackend> =
-            Arc::from(create_backend(&cfg).expect("backend creation should succeed"));
+            Arc::from(create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed"));
 
         let base = chrono::Utc::now().timestamp_micros();
         let item = SipFlowItem {
@@ -372,7 +373,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             dns_ttl_secs: 0,
             upload: None,
         };
-        let backend = create_backend(&cfg).expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");
 
         // Send N records (N > batch_size) with the same call_id so they all
         // hash to the same single node.
@@ -444,7 +445,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             dns_ttl_secs: 0,
             upload: None,
         };
-        let backend = create_backend(&cfg).expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");
 
         const N: u32 = 10;
         for i in 0..N {

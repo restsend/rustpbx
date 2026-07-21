@@ -1074,6 +1074,10 @@ pub struct DialplanHints {
     pub media_mode: Option<MediaProxyMode>,
     /// Video policy from trunk config
     pub video_policy: Option<crate::proxy::routing::VideoPolicy>,
+    /// Per-trunk override for the advertised external IP (SDP c=/o= and ICE).
+    pub external_ip: Option<String>,
+    /// Per-trunk override for the local bind IP.
+    pub bind_ip: Option<String>,
     /// Per-trunk ringback/early-media audio configuration
     pub ringback: Option<crate::proxy::routing::RingbackAudio>,
     /// Concurrency slots acquired during routing policy enforcement. The

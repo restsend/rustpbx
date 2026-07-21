@@ -1,5 +1,5 @@
 use crate::call::SipUser;
-use crate::config::{MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig};
+use crate::config::{MediaProxyMode, ProxyConfig, RtpConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;

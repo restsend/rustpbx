@@ -118,6 +118,16 @@ pub struct TrunkConfig {
     pub media_mode: Option<MediaMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_policy: Option<VideoPolicy>,
+    /// Per-trunk override for the IP advertised in SDP `c=`/`o=` lines and ICE
+    /// candidates. When set, this trunk's legs use this address instead of the
+    /// global `rtp_config.external_ip`. Useful when some trunks terminate on an
+    /// overlay network (Tailscale/WireGuard) that needs a different advertised
+    /// IP than the public NAT address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ip: Option<String>,
+    /// Per-trunk override for the local IP RTP sockets bind to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_ip: Option<String>,
 
     #[serde(skip)]
     pub origin: ConfigOrigin,
@@ -286,6 +296,8 @@ impl Default for TrunkConfig {
             header_rules: None,
             media_mode: None,
             video_policy: None,
+            external_ip: None,
+            bind_ip: None,
             did_numbers: Vec::new(),
             ringback: None,
             origin: ConfigOrigin::embedded(),

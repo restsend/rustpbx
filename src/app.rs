@@ -275,7 +275,7 @@ impl AppStateBuilder {
         // spool directory, avoiding concurrent SQLite writes.
         let sipflow_backend_arc: Option<Arc<dyn crate::sipflow::SipFlowBackend>> =
             config.sipflow.as_ref().and_then(|cfg| {
-                crate::sipflow::backend::create_backend(cfg)
+                crate::sipflow::backend::create_backend(cfg, token.clone())
                     .map(|b| Arc::from(b) as Arc<dyn crate::sipflow::SipFlowBackend>)
                     .map_err(|e| warn!("Failed to create sipflow backend: {e}"))
                     .ok()

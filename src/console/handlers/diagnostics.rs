@@ -714,6 +714,8 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         header_rules: None,
         media_mode: None,
         video_policy: None,
+        external_ip: None,
+        bind_ip: None,
         did_numbers: vec![],
         ringback: None,
     })

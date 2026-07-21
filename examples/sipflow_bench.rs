@@ -13,6 +13,7 @@
 
 use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
+use tokio_util::sync::CancellationToken;
 use clap::Parser;
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{SipFlowItem, SipFlowMsgType};
@@ -161,7 +162,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         upload: None,
     };
 
-    let backend = rustpbx::sipflow::create_backend(&config).unwrap();
+    let backend = rustpbx::sipflow::create_backend(&config, CancellationToken::new()).unwrap();
 
     let base_ts = chrono::Utc::now().timestamp_micros() as u64;
     let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);

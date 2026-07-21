@@ -105,6 +105,7 @@ impl RemoteBackend {
         batch_flush_ms_cfg: u64,
         channel_capacity_cfg: usize,
         dns_ttl_secs: u64,
+        cancel_token: CancellationToken,
     ) -> Result<Self> {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
         socket.set_nonblocking(true)?;
@@ -141,7 +142,6 @@ impl RemoteBackend {
             channel_capacity_cfg.max(MIN_CHANNEL_CAPACITY)
         };
         let (tx, rx) = mpsc::channel::<Command>(channel_capacity);
-        let cancel_token = CancellationToken::new();
 
         // `batch_size = 0` disables batching entirely (each record is sent
         // as a legacy single-packet datagram). Otherwise clamp to a sane
@@ -576,6 +576,12 @@ impl SipFlowBackend for RemoteBackend {
         tmp.write_all(&bytes)?;
         tmp.flush()?;
         Ok(tmp)
+    }
+}
+
+impl Drop for RemoteBackend {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
 

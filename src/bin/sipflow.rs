@@ -8,6 +8,7 @@ use axum::{
 use chrono::{Local, TimeZone};
 use clap::Parser;
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
+use tokio_util::sync::CancellationToken;
 use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
     perf::{PerfCounters, PerfDumper},
@@ -268,7 +269,7 @@ async fn main() -> Result<()> {
         upload: None,
     };
 
-    let backend: Arc<dyn SipFlowBackend> = Arc::from(create_backend(&config)?);
+    let backend: Arc<dyn SipFlowBackend> = Arc::from(create_backend(&config, CancellationToken::new())?);
     let perf_counters = PerfCounters::new_arc();
 
     let app_state = AppState {

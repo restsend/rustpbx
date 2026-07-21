@@ -440,6 +440,77 @@ async fn test_match_invite_exact_match() {
 }
 
 #[tokio::test]
+async fn test_trunk_external_ip_propagates_to_hints() {
+    // Bug 1+2: per-trunk external_ip / bind_ip must flow through DialplanHints
+    // so that the SDP generated for this trunk's leg advertises the correct IP
+    // (e.g. an overlay-network IP for internal trunks, a public NAT IP for
+    // external trunks) instead of the single global rtp_config.external_ip.
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+
+    trunks.insert(
+        "overlay_trunk".to_string(),
+        TrunkConfig {
+            dest: "sip:overlay.example:5060".to_string(),
+            external_ip: Some("100.64.10.1".to_string()),
+            bind_ip: Some("100.64.10.2".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "overlay_rule".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("overlay_trunk".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("Failed to match invite");
+
+    match result {
+        RouteResult::Forward(_option, hints) => {
+            let hints = hints.expect("external_ip on trunk should produce hints");
+            assert_eq!(
+                hints.external_ip.as_deref(),
+                Some("100.64.10.1"),
+                "per-trunk external_ip must propagate to DialplanHints"
+            );
+            assert_eq!(
+                hints.bind_ip.as_deref(),
+                Some("100.64.10.2"),
+                "per-trunk bind_ip must propagate to DialplanHints"
+            );
+        }
+        RouteResult::NotHandled(_, _) => panic!("Expected forward, got not handled"),
+        RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::Queue { .. } => panic!("unexpected queue result"),
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
+    }
+}
+
+#[tokio::test]
 async fn test_route_codecs_override_selected_trunk_codecs() {
     let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();

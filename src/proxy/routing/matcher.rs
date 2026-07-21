@@ -1428,6 +1428,8 @@ pub(crate) fn merge_trunk_media_hints(
         && trunk.video_policy.is_none()
         && trunk.recording.is_none()
         && trunk.ringback.is_none()
+        && trunk.external_ip.is_none()
+        && trunk.bind_ip.is_none()
     {
         return;
     }
@@ -1447,6 +1449,12 @@ pub(crate) fn merge_trunk_media_hints(
     }
     if let Some(ringback) = &trunk.ringback {
         hints.ringback = Some(ringback.clone());
+    }
+    if let Some(external_ip) = trunk.external_ip.clone() {
+        hints.external_ip = Some(external_ip);
+    }
+    if let Some(bind_ip) = trunk.bind_ip.clone() {
+        hints.bind_ip = Some(bind_ip);
     }
 }
 

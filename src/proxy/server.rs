@@ -711,7 +711,7 @@ impl SipServerBuilder {
         let sipflow_backend = self.sipflow_backend.take().or_else(|| {
             self.sipflow_config
                 .as_ref()
-                .and_then(|cfg| create_backend(cfg).ok())
+                .and_then(|cfg| create_backend(cfg, cancel_token.clone()).ok())
                 .map(|b| Arc::from(b) as Arc<dyn SipFlowBackend>)
         });
         if let Some(backend) = sipflow_backend {
@@ -1469,7 +1469,7 @@ impl SipServerInner {
         }).unwrap_or("none");
 
         if let Some(ref new_cfg) = config.sipflow {
-            let new_backend = crate::sipflow::backend::create_backend(new_cfg)
+            let new_backend = crate::sipflow::backend::create_backend(new_cfg, self.cancel_token.clone())
                 .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
             let new_backend: Arc<dyn crate::sipflow::SipFlowBackend> = Arc::from(new_backend);
 

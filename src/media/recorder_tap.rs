@@ -18,13 +18,13 @@ use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
+use rustrtc::media::MediaSample;
+use rustrtc::media::frame::AudioFrame;
 use rustrtc::rtp::{RtcpPacket, RtpPacket};
 use rustrtc::transports::rtp::RtpTransport;
-use rustrtc::media::frame::AudioFrame;
-use rustrtc::media::MediaSample;
 use rustrtc::{RtpReceiverInterceptor, RtpSenderInterceptor};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{trace, warn};
 
 /// Recording tap that directly writes incoming/outgoing RTP to file + sipflow.
@@ -44,6 +44,7 @@ pub struct RecorderTap {
     /// Shared pause flag (same Arc as `SipSession::recording_paused`).
     /// When `true`, the tap is a no-op (1 atomic read + return).
     paused: Arc<AtomicBool>,
+    allowed_pts: Vec<u8>,
     clock: ReceiveTimestampClock,
     /// Diagnostic: total packets captured (for debugging empty-WAV issues).
     pkt_count: AtomicU64,
@@ -56,6 +57,7 @@ impl RecorderTap {
         sipflow: Option<Arc<dyn SipFlowBackend>>,
         call_id: String,
         paused: Arc<AtomicBool>,
+        allowed_pts: Vec<u8>,
     ) -> Self {
         Self {
             recorder,
@@ -63,6 +65,7 @@ impl RecorderTap {
             call_id,
             leg: Leg::A,
             paused,
+            allowed_pts,
             clock: ReceiveTimestampClock::new(),
             pkt_count: AtomicU64::new(0),
         }
@@ -74,6 +77,7 @@ impl RecorderTap {
         sipflow: Option<Arc<dyn SipFlowBackend>>,
         call_id: String,
         paused: Arc<AtomicBool>,
+        allowed_pts: Vec<u8>,
     ) -> Self {
         Self {
             recorder,
@@ -81,6 +85,7 @@ impl RecorderTap {
             call_id,
             leg: Leg::B,
             paused,
+            allowed_pts,
             clock: ReceiveTimestampClock::new(),
             pkt_count: AtomicU64::new(0),
         }
@@ -94,6 +99,7 @@ impl RecorderTap {
             call_id: self.call_id.clone(),
             leg: self.leg,
             paused: self.paused.clone(),
+            allowed_pts: self.allowed_pts.clone(),
             clock: self.clock.clone(),
             pkt_count: AtomicU64::new(0),
         }
@@ -106,13 +112,23 @@ impl RecorderTap {
 
     /// Core capture — called from both interceptor trait impls.
     #[inline]
-    fn capture(&self, packet: &RtpPacket, peer_addr: std::net::SocketAddr, local_addr: std::net::SocketAddr) {
+    fn capture(
+        &self,
+        packet: &RtpPacket,
+        peer_addr: std::net::SocketAddr,
+        local_addr: std::net::SocketAddr,
+    ) {
         // 1. Pause guard — when paused, hot path is 1 relaxed load + return.
         if self.paused.load(Ordering::Relaxed) {
             return;
         }
 
         let pt = packet.header.payload_type;
+
+        // 2. PT filter: only capture audio + DTMF, skip video.
+        if !self.allowed_pts.is_empty() && !self.allowed_pts.contains(&pt) {
+            return;
+        }
         let timestamp_us = self.clock.now_micros();
         let count = self.pkt_count.fetch_add(1, Ordering::Relaxed);
         if count == 0 {
@@ -227,18 +243,21 @@ pub fn build_caller_interceptors(
     sipflow: Option<Arc<dyn SipFlowBackend>>,
     call_id: String,
     paused: Arc<AtomicBool>,
+    allowed_pts: Vec<u8>,
 ) -> (Arc<RecorderTap>, Arc<RecorderTap>) {
     let recv_tap = Arc::new(RecorderTap::for_recv(
         recorder.clone(),
         sipflow.clone(),
         call_id.clone(),
         paused.clone(),
+        allowed_pts.clone(),
     ));
     let send_tap = Arc::new(RecorderTap::for_send(
         recorder,
         sipflow,
         call_id,
         paused,
+        allowed_pts,
     ));
     (recv_tap, send_tap)
 }
@@ -249,7 +268,6 @@ mod tests {
     use crate::media::recorder::Recorder;
     use crate::sipflow::SipFlowItem;
     use audio_codec::CodecType;
-    use bytes::Bytes;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::sync::atomic::AtomicUsize;
 
@@ -313,10 +331,16 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "call-1".into(),
             paused,
+            vec![],
         );
 
         let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
-        tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        tap.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
         assert_eq!(backend.count(), 0, "inactive tap should not record");
     }
 
@@ -329,11 +353,17 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "call-2".into(),
             paused,
+            vec![],
         );
 
         for i in 0..5u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
         assert_eq!(backend.count(), 5, "should record 5 packets");
     }
@@ -347,6 +377,7 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "call-3".into(),
             paused,
+            vec![],
         );
         assert_eq!(tap.leg, Leg::B);
     }
@@ -380,12 +411,18 @@ mod tests {
             None,
             "call-4".into(),
             paused,
+            vec![],
         );
 
         // Send 10 PCMU packets (200ms of audio)
         for i in 0..10u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
 
         // Finalize recorder
@@ -413,12 +450,18 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "call-dtmf".into(),
             paused,
+            vec![],
         );
 
         // DTMF digit '5' end event (PT 101, 4-byte payload)
         let dtmf_payload = vec![5u8, 0x80, 0x00, 0xA0];
         let pkt = make_rtp_packet(101, 1, 160, dtmf_payload);
-        tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        tap.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
 
         assert_eq!(backend.count(), 1, "DTMF packet should be captured");
     }
@@ -465,16 +508,27 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "dual-call".into(),
             paused,
+            vec![],
         );
 
         // Send 10 audio + 2 DTMF packets
         for i in 0..10u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
         for i in 10..12u16 {
             let pkt = make_rtp_packet(101, i, 1600, vec![5u8, 0x80, 0x00, 0xA0]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
 
         // Sipflow should have all 12 packets
@@ -502,12 +556,18 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "pause-call".into(),
             paused.clone(),
+            vec![],
         );
 
         // 3 packets while active
         for i in 0..3u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
         assert_eq!(backend.count(), 3);
 
@@ -517,7 +577,12 @@ mod tests {
         // 3 packets while paused — should be skipped
         for i in 3..6u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
         assert_eq!(backend.count(), 3, "paused tap should not capture");
 
@@ -526,7 +591,12 @@ mod tests {
 
         for i in 6..9u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
         assert_eq!(backend.count(), 6, "resumed tap should capture again");
     }
@@ -544,12 +614,18 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "leak-test".into(),
             paused,
+            vec![],
         );
 
         // Send 1000 packets
         for i in 0..1000u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
         }
 
         assert_eq!(backend.count(), 1000);
@@ -571,17 +647,31 @@ mod tests {
             Some(backend_a.clone() as Arc<dyn SipFlowBackend>),
             "leg-test".into(),
             paused.clone(),
+            vec![],
         );
         let send_tap = RecorderTap::for_send(
             None,
             Some(backend_b.clone() as Arc<dyn SipFlowBackend>),
             "leg-test".into(),
             paused,
+            vec![],
         );
 
         let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
-        recv_tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
-        send_tap.on_packet_sent(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        recv_tap
+            .on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
+        send_tap
+            .on_packet_sent(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
 
         assert_eq!(backend_a.count(), 1);
         assert_eq!(backend_b.count(), 1);
@@ -592,7 +682,7 @@ mod tests {
     // ── Video PT is captured (not filtered) ────────────────────────────
 
     #[tokio::test]
-    async fn video_packet_captured() {
+    async fn video_packet_captured_when_no_filter() {
         let backend = Arc::new(CountingBackend::new());
         let paused = Arc::new(AtomicBool::new(false));
         let tap = RecorderTap::for_recv(
@@ -600,13 +690,19 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "video-call".into(),
             paused,
+            vec![],
         );
 
         // H264 packet (PT 96, dynamic)
         let pkt = make_rtp_packet(96, 1, 9000, vec![0x80u8; 1200]);
-        tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        tap.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
 
-        assert_eq!(backend.count(), 1, "video packet should be captured for sipflow");
+        assert_eq!(backend.count(), 1, "video captured when no filter");
     }
 
     // ── Audio → DTMF → Audio sequence (real call flow) ─────────────────
@@ -620,29 +716,54 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "seq-call".into(),
             paused,
+            vec![],
         );
 
         let mut seq = 0u16;
         // 3 audio packets
         for _ in 0..3 {
             let pkt = make_rtp_packet(0, seq, seq as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
             seq += 1;
         }
         // DTMF '1' start + end
         for (flags, dur) in [(0x00u8, 80u16), (0x80, 160)] {
-            let pkt = make_rtp_packet(101, seq, 480, vec![1u8, flags, (dur >> 8) as u8, (dur & 0xff) as u8]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            let pkt = make_rtp_packet(
+                101,
+                seq,
+                480,
+                vec![1u8, flags, (dur >> 8) as u8, (dur & 0xff) as u8],
+            );
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
             seq += 1;
         }
         // 2 more audio packets
         for _ in 0..2 {
             let pkt = make_rtp_packet(0, seq, seq as u32 * 160, vec![0x55u8; 160]);
-            tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            tap.on_packet_received(
+                &pkt,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            )
+            .await;
             seq += 1;
         }
 
-        assert_eq!(backend.count(), 7, "all 7 packets (3 audio + 2 DTMF + 2 audio) captured");
+        assert_eq!(
+            backend.count(),
+            7,
+            "all 7 packets (3 audio + 2 DTMF + 2 audio) captured"
+        );
     }
 
     // ── Zero-copy verification: payload Bytes is Arc-shared ────────────
@@ -660,21 +781,28 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "zerocopy-call".into(),
             paused,
+            vec![],
         );
 
         let payload = vec![0xABu8; 160];
         let payload_ptr = payload.as_ptr();
 
-        let pkt = RtpPacket::new(
-            RtpHeader::new(0, 1, 160, 0x1234),
-            payload,
-        );
+        let pkt = RtpPacket::new(RtpHeader::new(0, 1, 160, 0x1234), payload);
 
         // The interceptor receives &RtpPacket — it must not move the payload.
-        tap.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        tap.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
 
         // Original packet's payload should still be accessible
-        assert_eq!(pkt.payload.as_ptr(), payload_ptr, "payload ptr must not change");
+        assert_eq!(
+            pkt.payload.as_ptr(),
+            payload_ptr,
+            "payload ptr must not change"
+        );
         assert_eq!(pkt.payload.len(), 160, "payload must be intact");
         assert_eq!(backend.count(), 1);
     }
@@ -692,15 +820,77 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "ivr-call".into(),
             paused,
+            vec![],
         );
 
         // Simulate 5 IVR prompt packets (Opus PT=111)
         for i in 0..5u16 {
             let pkt = make_rtp_packet(111, i, i as u32 * 960, vec![0x55u8; 80]);
-            send_tap.on_packet_sent(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+            send_tap
+                .on_packet_sent(
+                    &pkt,
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+                    std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+                )
+                .await;
         }
 
-        assert_eq!(backend.count(), 5, "IVR audio should be captured on send side");
+        assert_eq!(
+            backend.count(),
+            5,
+            "IVR audio should be captured on send side"
+        );
+    }
+
+    // ── PT filter: relies on SDP-negotiated audio PT whitelist ─────────
+    //
+    // The `allowed_pts` filter is NOT hardcoded to exclude PT 96 as video.
+    // Instead, it is populated from the SDP answer's audio profile:
+    //   build_recorder_taps() → extract_leg_profile(answer_sdp) → allowed_pts
+    // Only audio+DTMF PTs from the negotiated profile are whitelisted.
+    // Any PT not in the whitelist (including dynamic video PTs like 96, 106,
+    // or 122) is filtered out — regardless of its numeric value.
+
+    #[tokio::test]
+    async fn video_packet_filtered_by_allowed_pts() {
+        let backend = Arc::new(CountingBackend::new());
+        let paused = Arc::new(AtomicBool::new(false));
+        // allowed_pts = [0, 101] simulates an SDP where PCMU(PT=0) and
+        // telephone-event(PT=101) are the only audio codecs. Any packet
+        // with a different PT (e.g. H264/VP8 at dynamic PT 96-127) is
+        // filtered out, regardless of what codec it carries.
+        let tap = RecorderTap::for_recv(
+            None,
+            Some(backend.clone() as Arc<dyn SipFlowBackend>),
+            "video-filter".into(),
+            paused,
+            vec![0, 101],
+        );
+
+        tap.on_packet_received(
+            &make_rtp_packet(96, 1, 9000, vec![0x80u8; 1200]),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+        tap.on_packet_received(
+            &make_rtp_packet(0, 2, 160, vec![0x55u8; 160]),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+        tap.on_packet_received(
+            &make_rtp_packet(101, 3, 320, vec![5u8, 0x80, 0, 0xA0]),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+
+        assert_eq!(
+            backend.count(),
+            2,
+            "only audio+DTMF captured, video filtered"
+        );
     }
 
     // ── build_caller_interceptors returns matching taps ────────────────
@@ -715,6 +905,7 @@ mod tests {
             Some(backend.clone() as Arc<dyn SipFlowBackend>),
             "build-test".into(),
             paused,
+            vec![],
         );
 
         assert_eq!(recv.leg, Leg::A, "recv tap should be Leg::A");
@@ -722,8 +913,18 @@ mod tests {
 
         // Both should capture to the same backend
         let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
-        recv.on_packet_received(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
-        send.on_packet_sent(&pkt, std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), std::net::SocketAddr::from(([0, 0, 0, 0], 0))).await;
+        recv.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+        send.on_packet_sent(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
         assert_eq!(backend.count(), 2);
     }
 }
