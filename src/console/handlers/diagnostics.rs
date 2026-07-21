@@ -1296,7 +1296,25 @@ async fn route_evaluate(
                 let dir = app.config().proxy.generated_ivr_dir();
                 Some(dir)
             });
-            let routes = match load_routes_from_db(db, &trunk_lookup, ivr_dir.as_deref()).await {
+            let config_store: Option<crate::config_store::GeneratedConfigStore> =
+                state.app_state().and_then(|app| {
+                    let config = app.config();
+                    if config.proxy.use_db_config() {
+                        Some(crate::config_store::GeneratedConfigStore::db(
+                            app.db().clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                });
+            let routes = match load_routes_from_db(
+                db,
+                &trunk_lookup,
+                ivr_dir.as_deref(),
+                config_store.as_ref(),
+            )
+            .await
+            {
                 Ok(routes) => routes,
                 Err(err) => {
                     return (

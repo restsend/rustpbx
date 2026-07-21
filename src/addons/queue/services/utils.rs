@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fs, path::Path};
 use tracing::{info, warn};
 
-use crate::{addons::queue::models as queue, proxy::routing::RouteQueueConfig};
+use crate::{
+    addons::queue::models as queue,
+    config_store::GeneratedConfigStore,
+    proxy::routing::RouteQueueConfig,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +114,13 @@ pub fn queue_export_entry_cmp(a: &QueueExportEntry, b: &QueueExportEntry) -> Ord
 
 pub fn write_queue_file(path: &Path, entry: &QueueExportEntry) -> Result<()> {
     ensure_parent_dir(path)?;
+    let toml_doc = serialize_queue_entry(entry)?;
+    fs::write(path, toml_doc)
+        .with_context(|| format!("failed to write queue file {}", path.display()))?;
+    Ok(())
+}
+
+pub fn serialize_queue_entry(entry: &QueueExportEntry) -> Result<String> {
     let doc = QueueFileDocument {
         id: entry.id,
         name: entry.name.clone(),
@@ -117,11 +128,8 @@ pub fn write_queue_file(path: &Path, entry: &QueueExportEntry) -> Result<()> {
         tags: entry.tags.clone(),
         queue: entry.queue.clone(),
     };
-    let toml_doc = toml::to_string_pretty(&doc)
-        .with_context(|| format!("failed to serialize queue toml for {}", entry.name))?;
-    fs::write(path, toml_doc)
-        .with_context(|| format!("failed to write queue file {}", path.display()))?;
-    Ok(())
+    toml::to_string_pretty(&doc)
+        .with_context(|| format!("failed to serialize queue toml for {}", entry.name))
 }
 
 pub fn cleanup_queue_dir(dir: &Path) -> Result<()> {
@@ -143,6 +151,40 @@ pub fn cleanup_queue_dir(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Clean up queue entries in the config store for a given set of names.
+pub async fn cleanup_queue_store(
+    store: &GeneratedConfigStore,
+    keep_names: &[String],
+) -> Result<()> {
+    let names = store.list_names_async("queue").await?;
+    for name in names {
+        if !keep_names.contains(&name) {
+            store.delete_async("queue", &name).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Write a queue entry to the config store.
+pub async fn write_queue_entry_to_store(
+    store: &GeneratedConfigStore,
+    entry: &QueueExportEntry,
+) -> Result<String> {
+    let filename = format!("{}.toml", entry.get_key());
+    let toml_doc = serialize_queue_entry(entry)?;
+    store
+        .write_async("queue", &filename, &toml_doc)
+        .await?;
+    Ok(filename)
+}
+
+impl QueueExportEntry {
+    /// Get the key used for storing this entry.
+    pub fn get_key(&self) -> String {
+        queue_entry_key(self)
+    }
 }
 
 pub fn canonical_queue_key(value: &str) -> Option<String> {

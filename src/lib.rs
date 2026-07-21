@@ -11,6 +11,7 @@ pub mod auto_external_ip;
 pub mod call;
 pub mod callrecord;
 pub mod config;
+pub mod config_store;
 #[cfg(feature = "console")]
 pub mod console;
 pub mod handler;

@@ -21,6 +21,7 @@ use tracing::{info, warn};
 use crate::{
     addons::queue::services::utils as queue_utils,
     config::{ProxyConfig, RecordingPolicy},
+    config_store::GeneratedConfigStore,
     models::{routing, sip_trunk},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
@@ -91,6 +92,18 @@ impl ProxyDataContext {
 
     pub fn trunk_registrar(&self) -> &Arc<TrunkRegistrar> {
         &self.trunk_registrar
+    }
+
+    pub fn config_store(&self) -> GeneratedConfigStore {
+        let config = self.config.read().unwrap();
+        if config.use_db_config() {
+            if let Some(db) = &self.db {
+                return GeneratedConfigStore::Database { db: db.clone() };
+            }
+        }
+        GeneratedConfigStore::FileSystem {
+            root: config.generated_root_dir(),
+        }
     }
 
     pub fn config(&self) -> Arc<ProxyConfig> {
@@ -176,6 +189,16 @@ impl ProxyDataContext {
         if trimmed.is_empty() {
             return Ok(None);
         }
+        let store = self.config_store();
+        if store.is_db() {
+            // In DB mode, try to read the queue file from config_entries
+            if let Ok(Some(content)) = store.read("queue", trimmed) {
+                let doc: queue_utils::QueueFileDocument = toml::from_str(&content)
+                    .with_context(|| format!("failed to parse queue file from db: {}", trimmed))?;
+                return Ok(Some(doc.queue));
+            }
+            return Ok(None);
+        }
         let config = self.config.read().unwrap().clone();
         let base = config.generated_queue_dir();
         let path = Self::resolve_reference_path(base.as_path(), trimmed);
@@ -183,6 +206,24 @@ impl ProxyDataContext {
     }
 
     pub fn resolve_ivr_file(&self, ivr_name: &str) -> String {
+        let store = self.config_store();
+        if store.is_db() {
+            // In DB mode, check if the IVR exists in the config store
+            if store
+                .exists("ivr", &format!("{}.generated.toml", ivr_name))
+                .unwrap_or(false)
+            {
+                return format!("db://ivr/{}.generated.toml", ivr_name);
+            }
+            // Check for non-generated ivr file
+            if store
+                .exists("ivr", &format!("{}.toml", ivr_name))
+                .unwrap_or(false)
+            {
+                return format!("db://ivr/{}.toml", ivr_name);
+            }
+            return ivr_name.to_string();
+        }
         let config = self.config.read().unwrap().clone();
         let ivr_dir = config.generated_ivr_dir();
         resolve_ivr_name_to_path(ivr_name, &ivr_dir)
@@ -278,28 +319,50 @@ impl ProxyDataContext {
                 trunks.insert(name.clone(), copy);
             }
         }
-        if !config.trunks_files.is_empty() {
-            let (file_trunks, file_paths) = load_trunks_from_files(&config.trunks_files)?;
-            file_count = file_trunks.len();
-            if !file_paths.is_empty() {
-                files.extend(file_paths);
-            }
-            trunks.extend(file_trunks);
-        }
-        if let Some(ref info) = generated {
-            let generated_pattern = vec![info.path.clone()];
-            let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
-            trunks.extend(generated_trunks);
-        } else if let Some(ref path) = generated_path {
-            info!(path = %path.display(), "loading previously generated trunks file");
-            let generated_pattern = vec![path.to_string_lossy().to_string()];
-            match load_trunks_from_files(&generated_pattern) {
-                Ok((generated_trunks, _)) => {
-                    generated_entries = generated_trunks.len();
-                    trunks.extend(generated_trunks);
+        let store = self.config_store();
+        if store.is_db() {
+            // In DB mode, load generated trunks directly from the config store
+            if let Ok(Some(content)) = store.read_async("trunks", "trunks.generated.toml").await
+            {
+                let data: TrunkIncludeFile = match toml::from_str(&content) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("failed to parse trunks from db config: {}", e);
+                        TrunkIncludeFile::default()
+                    }
+                };
+                let count = data.trunks.len();
+                info!(count, "loading trunks from database config store");
+                generated_entries = count;
+                for (name, mut trunk) in data.trunks {
+                    trunk.origin = ConfigOrigin::from_file("db://trunks/trunks.generated.toml".to_string());
+                    trunks.insert(name, trunk);
                 }
-                Err(e) => {
-                    warn!("failed to load previously generated trunks file: {}", e);
+            }
+        } else {
+            if !config.trunks_files.is_empty() {
+                let (file_trunks, file_paths) = load_trunks_from_files(&config.trunks_files)?;
+                file_count = file_trunks.len();
+                if !file_paths.is_empty() {
+                    files.extend(file_paths);
+                }
+                trunks.extend(file_trunks);
+            }
+            if let Some(ref info) = generated {
+                let generated_pattern = vec![info.path.clone()];
+                let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
+                trunks.extend(generated_trunks);
+            } else if let Some(ref path) = generated_path {
+                info!(path = %path.display(), "loading previously generated trunks file");
+                let generated_pattern = vec![path.to_string_lossy().to_string()];
+                match load_trunks_from_files(&generated_pattern) {
+                    Ok((generated_trunks, _)) => {
+                        generated_entries = generated_trunks.len();
+                        trunks.extend(generated_trunks);
+                    }
+                    Err(e) => {
+                        warn!("failed to load previously generated trunks file: {}", e);
+                    }
                 }
             }
         }
@@ -446,46 +509,62 @@ impl ProxyDataContext {
             }
         }
 
-        if !config.queues_files.is_empty() {
-            match queue_utils::load_queues_from_files(&config.queues_files) {
-                Ok((file_queues, file_paths)) => {
-                    file_count = file_queues.len();
-                    if !file_paths.is_empty() {
-                        files.extend(file_paths.clone());
+        let store = self.config_store();
+        if store.is_db() {
+            if let Ok(Some(content)) = store.read_async("queue", "queues.generated.toml").await {
+                match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
+                    Ok(loaded) => {
+                        let count = loaded.len();
+                        info!(count, "loading queues from database config store");
+                        queues.extend(loaded);
                     }
-                    for (key, mut queue) in file_queues {
-                        let path = file_paths
-                            .iter()
-                            .find(|p| p.contains(&key))
-                            .cloned()
-                            .unwrap_or_else(|| config.queues_files.join(", "));
-                        queue.origin = ConfigOrigin::from_file(path);
-                        queues.insert(key, queue);
+                    Err(e) => {
+                        tracing::error!("failed to parse queues from db config: {}", e);
                     }
-                }
-                Err(e) => {
-                    tracing::error!("failed to load queues from files: {}", e);
                 }
             }
-        }
-
-        let generated_file = config.generated_queue_dir().join("queues.generated.toml");
-        if generated_file.exists() {
-            match fs::read_to_string(&generated_file) {
-                Ok(content) => {
-                    match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
-                        Ok(loaded) => {
-                            file_count += loaded.len();
-                            files.push(generated_file.display().to_string());
-                            queues.extend(loaded);
+        } else {
+            if !config.queues_files.is_empty() {
+                match queue_utils::load_queues_from_files(&config.queues_files) {
+                    Ok((file_queues, file_paths)) => {
+                        file_count = file_queues.len();
+                        if !file_paths.is_empty() {
+                            files.extend(file_paths.clone());
                         }
-                        Err(e) => {
-                            tracing::error!("failed to parse queues.generated.toml: {}", e);
+                        for (key, mut queue) in file_queues {
+                            let path = file_paths
+                                .iter()
+                                .find(|p| p.contains(&key))
+                                .cloned()
+                                .unwrap_or_else(|| config.queues_files.join(", "));
+                            queue.origin = ConfigOrigin::from_file(path);
+                            queues.insert(key, queue);
                         }
                     }
+                    Err(e) => {
+                        tracing::error!("failed to load queues from files: {}", e);
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("failed to read queues.generated.toml: {}", e);
+            }
+
+            let generated_file = config.generated_queue_dir().join("queues.generated.toml");
+            if generated_file.exists() {
+                match fs::read_to_string(&generated_file) {
+                    Ok(content) => {
+                        match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
+                            Ok(loaded) => {
+                                file_count += loaded.len();
+                                files.push(generated_file.display().to_string());
+                                queues.extend(loaded);
+                            }
+                            Err(e) => {
+                                tracing::error!("failed to parse queues.generated.toml: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to read queues.generated.toml: {}", e);
+                    }
                 }
             }
         }
@@ -549,21 +628,41 @@ impl ProxyDataContext {
                 upsert_route(&mut routes, route);
             }
         }
-        if !config.routes_files.is_empty() {
-            let (file_routes, file_paths) = load_routes_from_files(&config.routes_files)?;
-            file_count = file_routes.len();
-            if !file_paths.is_empty() {
-                files.extend(file_paths);
+        let store = self.config_store();
+        if store.is_db() {
+            if let Ok(Some(content)) = store.read_async("routes", "routes.generated.toml").await
+            {
+                let data: RouteIncludeFile = match toml::from_str(&content) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("failed to parse routes from db config: {}", e);
+                        RouteIncludeFile::default()
+                    }
+                };
+                let count = data.routes.len();
+                info!(count, "loading routes from database config store");
+                for mut route in data.routes {
+                    route.origin = ConfigOrigin::from_file("db://routes/routes.generated.toml".to_string());
+                    upsert_route(&mut routes, route);
+                }
             }
-            for route in file_routes {
-                upsert_route(&mut routes, route);
+        } else {
+            if !config.routes_files.is_empty() {
+                let (file_routes, file_paths) = load_routes_from_files(&config.routes_files)?;
+                file_count = file_routes.len();
+                if !file_paths.is_empty() {
+                    files.extend(file_paths);
+                }
+                for route in file_routes {
+                    upsert_route(&mut routes, route);
+                }
             }
-        }
-        if let Some(ref info) = generated {
-            let generated_pattern = vec![info.path.clone()];
-            let (generated_routes, _) = load_routes_from_files(&generated_pattern)?;
-            for route in generated_routes {
-                upsert_route(&mut routes, route);
+            if let Some(ref info) = generated {
+                let generated_pattern = vec![info.path.clone()];
+                let (generated_routes, _) = load_routes_from_files(&generated_pattern)?;
+                for route in generated_routes {
+                    upsert_route(&mut routes, route);
+                }
             }
         }
 
@@ -627,15 +726,31 @@ impl ProxyDataContext {
             rules.extend(file_rules);
         }
 
-        let generated_acl_path = config.generated_acl_dir().join("acl.generated.toml");
-        if generated_acl_path.exists() {
-            let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
-            let (generated_rules, generated_files) = load_acl_rules_from_files(&generated_pattern)?;
-            if !generated_files.is_empty() {
-                files.extend(generated_files);
+        let store = self.config_store();
+        if store.is_db() {
+            if let Ok(Some(content)) = store.read("acl", "acl.generated.toml") {
+                match toml::from_str::<AclIncludeFile>(&content) {
+                    Ok(data) => {
+                        let count = data.acl_rules.len();
+                        info!(count, "loading acl rules from database config store");
+                        rules.extend(data.acl_rules);
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to parse acl from db config: {}", e);
+                    }
+                }
             }
-            file_count += generated_rules.len();
-            rules.extend(generated_rules);
+        } else {
+            let generated_acl_path = config.generated_acl_dir().join("acl.generated.toml");
+            if generated_acl_path.exists() {
+                let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
+                let (generated_rules, generated_files) = load_acl_rules_from_files(&generated_pattern)?;
+                if !generated_files.is_empty() {
+                    files.extend(generated_files);
+                }
+                file_count += generated_rules.len();
+                rules.extend(generated_rules);
+            }
         }
 
         if rules.is_empty() {
@@ -682,22 +797,40 @@ impl ProxyDataContext {
         let Some(db) = self.db.as_ref() else {
             return Ok(None);
         };
-        let Some(target_path) =
-            resolve_generated_path(&config.trunks_files, default_dir, "trunks.generated.toml")
-        else {
-            return Ok(None);
-        };
-
-        let trunks = load_trunks_from_db(db).await?;
-        let entries = trunks.len();
-        let backup = backup_existing_file(&target_path)?;
-        write_trunks_file(&target_path, &trunks)?;
-        info!(path = %target_path.display(), entries, "generated trunks file from database");
-        Ok(Some(GeneratedFileMetrics {
-            entries,
-            path: target_path.to_string_lossy().to_string(),
-            backup: backup.map(|path| path.to_string_lossy().to_string()),
-        }))
+        let store = self.config_store();
+        let entries;
+        if store.is_db() {
+            let trunks = load_trunks_from_db(db).await?;
+            entries = trunks.len();
+            let toml = serialize_trunks_toml(&trunks)?;
+            store
+                .write_async("trunks", "trunks.generated.toml", &toml)
+                .await?;
+            info!(entries, "generated trunks config to database");
+            Ok(Some(GeneratedFileMetrics {
+                entries,
+                path: "db://trunks/trunks.generated.toml".to_string(),
+                backup: None,
+            }))
+        } else {
+            let Some(target_path) = resolve_generated_path(
+                &config.trunks_files,
+                default_dir,
+                "trunks.generated.toml",
+            ) else {
+                return Ok(None);
+            };
+            let trunks = load_trunks_from_db(db).await?;
+            entries = trunks.len();
+            let backup = backup_existing_file(&target_path)?;
+            write_trunks_file(&target_path, &trunks)?;
+            info!(path = %target_path.display(), entries, "generated trunks file from database");
+            Ok(Some(GeneratedFileMetrics {
+                entries,
+                path: target_path.to_string_lossy().to_string(),
+                backup: backup.map(|path| path.to_string_lossy().to_string()),
+            }))
+        }
     }
 
     async fn export_routes_to_toml(
@@ -708,12 +841,7 @@ impl ProxyDataContext {
         let Some(db) = self.db.as_ref() else {
             return Ok(None);
         };
-        let Some(target_path) =
-            resolve_generated_path(&config.routes_files, default_dir, "routes.generated.toml")
-        else {
-            return Ok(None);
-        };
-
+        let store = self.config_store();
         let trunk_lookup = {
             let guard = self.trunks.read().unwrap();
             guard
@@ -722,17 +850,42 @@ impl ProxyDataContext {
                 .collect::<HashMap<i64, String>>()
         };
 
-        let routes =
-            load_routes_from_db(db, &trunk_lookup, Some(&config.generated_ivr_dir())).await?;
+        let routes = load_routes_from_db(
+            db,
+            &trunk_lookup,
+            Some(&config.generated_ivr_dir()),
+            Some(&store),
+        )
+        .await?;
         let entries = routes.len();
-        let backup = backup_existing_file(&target_path)?;
-        write_routes_file(&target_path, &routes)?;
-        info!(path = %target_path.display(), entries, "generated routes file from database");
-        Ok(Some(GeneratedFileMetrics {
-            entries,
-            path: target_path.to_string_lossy().to_string(),
-            backup: backup.map(|path| path.to_string_lossy().to_string()),
-        }))
+        if store.is_db() {
+            let toml = serialize_routes_toml(&routes)?;
+            store
+                .write_async("routes", "routes.generated.toml", &toml)
+                .await?;
+            info!(entries, "generated routes config to database");
+            Ok(Some(GeneratedFileMetrics {
+                entries,
+                path: "db://routes/routes.generated.toml".to_string(),
+                backup: None,
+            }))
+        } else {
+            let Some(target_path) = resolve_generated_path(
+                &config.routes_files,
+                default_dir,
+                "routes.generated.toml",
+            ) else {
+                return Ok(None);
+            };
+            let backup = backup_existing_file(&target_path)?;
+            write_routes_file(&target_path, &routes)?;
+            info!(path = %target_path.display(), entries, "generated routes file from database");
+            Ok(Some(GeneratedFileMetrics {
+                entries,
+                path: target_path.to_string_lossy().to_string(),
+                backup: backup.map(|path| path.to_string_lossy().to_string()),
+            }))
+        }
     }
 }
 
@@ -927,28 +1080,36 @@ fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(backup_path))
 }
 
-fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
-    ensure_parent_dir(path)?;
+fn serialize_trunks_toml(trunks: &HashMap<String, TrunkConfig>) -> Result<String> {
     let data = TrunkIncludeFile {
         trunks: trunks
             .iter()
             .map(|(name, trunk)| (name.clone(), trunk.clone()))
             .collect(),
     };
-    let toml = toml::to_string_pretty(&data)
-        .with_context(|| format!("failed to serialize trunks toml for {}", path.display()))?;
+    toml::to_string_pretty(&data)
+        .with_context(|| "failed to serialize trunks toml".to_string())
+}
+
+fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
+    ensure_parent_dir(path)?;
+    let toml = serialize_trunks_toml(trunks)?;
     fs::write(path, toml)
         .with_context(|| format!("failed to write trunks file {}", path.display()))?;
     Ok(())
 }
 
-fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
-    ensure_parent_dir(path)?;
+fn serialize_routes_toml(routes: &[RouteRule]) -> Result<String> {
     let data = RouteIncludeFile {
         routes: routes.to_vec(),
     };
-    let toml = toml::to_string_pretty(&data)
-        .with_context(|| format!("failed to serialize routes toml for {}", path.display()))?;
+    toml::to_string_pretty(&data)
+        .with_context(|| "failed to serialize routes toml".to_string())
+}
+
+fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
+    ensure_parent_dir(path)?;
+    let toml = serialize_routes_toml(routes)?;
     fs::write(path, toml)
         .with_context(|| format!("failed to write routes file {}", path.display()))?;
     Ok(())
@@ -1173,6 +1334,7 @@ pub(crate) async fn load_routes_from_db(
     db: &DatabaseConnection,
     trunk_lookup: &HashMap<i64, String>,
     ivr_dir: Option<&Path>,
+    config_store: Option<&GeneratedConfigStore>,
 ) -> Result<Vec<RouteRule>> {
     let models = routing::Entity::find()
         .filter(routing::Column::IsActive.eq(true))
@@ -1182,7 +1344,9 @@ pub(crate) async fn load_routes_from_db(
 
     let mut routes = Vec::new();
     for model in models {
-        if let Some(route) = convert_route(model, trunk_lookup, ivr_dir).context("convert route")? {
+        if let Some(route) = convert_route(model, trunk_lookup, ivr_dir, config_store)
+            .context("convert route")?
+        {
             routes.push(route);
         }
     }
@@ -1217,6 +1381,7 @@ fn convert_route(
     model: routing::Model,
     trunk_lookup: &HashMap<i64, String>,
     ivr_dir: Option<&Path>,
+    config_store: Option<&GeneratedConfigStore>,
 ) -> Result<Option<RouteRule>> {
     let mut match_conditions = MatchConditions::default();
     if let Some(pattern) = model.source_pattern.clone()
@@ -1279,7 +1444,7 @@ fn convert_route(
         && let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata)
         && let Some(meta_action) = doc.action
     {
-        apply_route_metadata(&mut action, meta_action, ivr_dir);
+        apply_route_metadata(&mut action, meta_action, ivr_dir, config_store);
     }
 
     let mut source_trunks = Vec::new();
@@ -1338,6 +1503,7 @@ fn apply_route_metadata(
     action: &mut RouteAction,
     meta: RouteMetadataAction,
     ivr_dir: Option<&Path>,
+    config_store: Option<&GeneratedConfigStore>,
 ) {
     let target_type = meta
         .target_type
@@ -1358,7 +1524,26 @@ fn apply_route_metadata(
         }
         "ivr" => {
             if let Some(file) = sanitize_metadata_string(meta.ivr_file) {
-                let file_path = if let Some(dir) = ivr_dir {
+                let file_path = if let Some(store) = config_store
+                    && store.is_db()
+                {
+                    if store
+                        .exists(
+                            "ivr",
+                            &format!("{}.generated.toml", sanitize_ivr_filename(&file)),
+                        )
+                        .unwrap_or(false)
+                    {
+                        format!("db://ivr/{}.generated.toml", sanitize_ivr_filename(&file))
+                    } else if store
+                        .exists("ivr", &format!("{}.toml", sanitize_ivr_filename(&file)))
+                        .unwrap_or(false)
+                    {
+                        format!("db://ivr/{}.toml", sanitize_ivr_filename(&file))
+                    } else {
+                        file
+                    }
+                } else if let Some(dir) = ivr_dir {
                     resolve_ivr_name_to_path(&file, dir)
                 } else {
                     file
@@ -1657,7 +1842,7 @@ mod tests {
             voicemail_extension: None,
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta, None);
+        apply_route_metadata(&mut action, meta, None, None);
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
     }
 
@@ -1670,7 +1855,7 @@ mod tests {
             voicemail_extension: Some("1001".to_string()),
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta, None);
+        apply_route_metadata(&mut action, meta, None, None);
         assert_eq!(action.app.as_deref(), Some("voicemail"));
         let params = action.app_params.unwrap();
         assert_eq!(params["extension"], "1001");
@@ -1685,7 +1870,7 @@ mod tests {
             voicemail_extension: None,
             ivr_file: Some("config/ivr/main.toml".to_string()),
         };
-        apply_route_metadata(&mut action, meta, None);
+        apply_route_metadata(&mut action, meta, None, None);
         assert_eq!(action.app.as_deref(), Some("ivr"));
         let params = action.app_params.unwrap();
         assert_eq!(params["file"], "config/ivr/main.toml");

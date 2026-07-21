@@ -909,6 +909,8 @@ pub struct ProxyConfig {
     pub recording: Option<RecordingPolicy>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
+    #[serde(default)]
+    pub generated_db: bool,
     #[serde(default = "default_nat_fix")]
     pub nat_fix: bool,
     pub sip_flow_max_items: Option<usize>,
@@ -1204,6 +1206,10 @@ impl ProxyConfig {
         }
     }
 
+    pub fn use_db_config(&self) -> bool {
+        self.generated_db
+    }
+
     pub fn generated_root_dir(&self) -> PathBuf {
         let trimmed = self.generated_dir.trim();
         if trimmed.is_empty() {
@@ -1342,6 +1348,7 @@ impl Default for ProxyConfig {
             ivr_files: Vec::new(),
             recording: None,
             generated_dir: default_generated_config_dir(),
+            generated_db: false,
             nat_fix: true,
             sip_flow_max_items: None,
             addons: None,
