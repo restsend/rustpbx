@@ -510,14 +510,29 @@ pub enum CallRecordStorageConfig {
     Database {
         /// Database URL for call records.
         database_url: Option<String>,
-        /// Table name for call records (default: "call_records")
+        /// Table name for call records (default: "rustpbx_call_records").
         #[serde(default = "default_call_record_table")]
         table_name: String,
+        /// When true, don't CREATE TABLE or run migrations on the table.
+        #[serde(default)]
+        skip_create_table: bool,
+        /// Daily rotation mode. For SQLite: daily files ({path}-YYYYMMDD.db).
+        /// For other databases: daily tables ({table}_YYYYMMDD).
+        #[serde(default)]
+        rotate: RotationMode,
     },
 }
 
+#[derive(Debug, Deserialize, Clone, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RotationMode {
+    #[default]
+    None,
+    Daily,
+}
+
 fn default_call_record_table() -> String {
-    "call_records".to_string()
+    "rustpbx_call_records".to_string()
 }
 
 /// Directory structure for sipflow storage
@@ -670,6 +685,12 @@ pub enum SipFlowConfig {
         dns_ttl_secs: u64,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
+        /// When true, delegate SipFlow media/signalling upload to the remote
+        /// sipflow bin's `/upload` endpoint instead of downloading the WAV
+        /// and uploading from this process. Only effective when `upload` is
+        /// also set. Default false (backward compatible).
+        #[serde(default)]
+        delegate_upload: bool,
     },
 }
 
@@ -690,7 +711,7 @@ fn default_remote_batch_flush_ms() -> u64 {
 }
 
 fn default_remote_channel_capacity() -> usize {
-    8192
+    40000
 }
 
 fn default_sipflow_timeout() -> u64 {
@@ -951,6 +972,8 @@ pub struct ProxyConfig {
     pub rtc_cname: Option<String>,
     #[serde(default)]
     pub jwt_auth: Option<JwtAuthConfig>,
+    #[serde(default)]
+    pub hold_music: Option<String>,
 }
 
 /// Emergency number routing configuration.
@@ -1368,6 +1391,7 @@ impl Default for ProxyConfig {
             contact_username: None,
             rtc_cname: None,
             jwt_auth: None,
+            hold_music: None,
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
         }

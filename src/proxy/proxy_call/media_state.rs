@@ -270,11 +270,17 @@ mod tests {
 
         // Each leg resolves to its own track id — the lookup the stop path uses.
         assert_eq!(
-            state.bridge_playback_track_ids.get("caller").map(String::as_str),
+            state
+                .bridge_playback_track_ids
+                .get("caller")
+                .map(String::as_str),
             Some("pb-base-caller"),
         );
         assert_eq!(
-            state.bridge_playback_track_ids.get("callee").map(String::as_str),
+            state
+                .bridge_playback_track_ids
+                .get("callee")
+                .map(String::as_str),
             Some("pb-base-callee"),
         );
 
@@ -284,7 +290,10 @@ mod tests {
         state.bridge_playback_track_ids.remove("callee");
         assert!(state.bridge_playback_track_ids.get("callee").is_none());
         assert_eq!(
-            state.bridge_playback_track_ids.get("caller").map(String::as_str),
+            state
+                .bridge_playback_track_ids
+                .get("caller")
+                .map(String::as_str),
             Some("pb-base-caller"),
         );
 
@@ -301,7 +310,10 @@ mod tests {
         // is the implicit default for plain RTP relay).
         assert_eq!(AnchoredMediaMode::default(), AnchoredMediaMode::RelayOnly);
         // And a freshly-built MediaState starts in that mode.
-        assert_eq!(MediaState::new(None).anchored_mode, AnchoredMediaMode::RelayOnly);
+        assert_eq!(
+            MediaState::new(None).anchored_mode,
+            AnchoredMediaMode::RelayOnly
+        );
     }
 
     #[test]
@@ -318,7 +330,7 @@ mod tests {
         use AnchoredMediaMode::*;
         // (media_bridge_active, mode) → expected
         let cases: [(bool, AnchoredMediaMode, bool); 4] = [
-            (false, RelayOnly, true),       // fast-path active → MUST downgrade
+            (false, RelayOnly, true),        // fast-path active → MUST downgrade
             (false, ForwardingTrack, false), // already slow → idempotent no-op
             (true, RelayOnly, false),        // app bridge anchors media → skip
             (true, ForwardingTrack, false),  // app bridge + slow → skip

@@ -14,13 +14,11 @@
 use std::path::PathBuf;
 
 fn spec_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/addons/cc/openapi/cc-agent-cti.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/addons/cc/openapi/cc-agent-cti.yaml")
 }
 
 fn static_spec_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/addons/cc/static/cc-agent-cti.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/addons/cc/static/cc-agent-cti.yaml")
 }
 
 fn load() -> String {
@@ -32,9 +30,9 @@ fn load() -> String {
 /// starts with exactly 4 spaces followed by a non-space character.
 fn schema_block<'a>(raw: &'a str, name: &str) -> &'a str {
     let needle = format!("    {}:", name);
-    let idx = raw.find(&needle).unwrap_or_else(|| {
-        panic!("schema {} not found", name)
-    });
+    let idx = raw
+        .find(&needle)
+        .unwrap_or_else(|| panic!("schema {} not found", name));
     let after = &raw[idx + needle.len()..];
     let mut search = 0;
     let end: usize;
@@ -123,7 +121,10 @@ fn test_skill_groups_delete_hard_delete_and_204() {
         .map(|i| paths_idx + i)
         .unwrap();
     let after = &raw[sg_path..];
-    let next_path = after[1..].find("\n  /cc").map(|i| 1 + i).unwrap_or(after.len());
+    let next_path = after[1..]
+        .find("\n  /cc")
+        .map(|i| 1 + i)
+        .unwrap_or(after.len());
     let block = &after[..next_path];
     let del = block.find("    delete:").unwrap();
     let del_block = &block[del..];
@@ -152,9 +153,7 @@ fn test_skill_group_response_documents_acd_policy() {
         // Find the field under SkillGroupResponse (the 2nd occurrence for
         // overflow_groups is in CreateSkillGroupRequest — both must be nullable
         // in the Response, so search after "SkillGroupResponse").
-        let sg_idx = raw
-            .find("SkillGroupResponse:")
-            .expect("SkillGroupResponse");
+        let sg_idx = raw.find("SkillGroupResponse:").expect("SkillGroupResponse");
         let search_zone = &raw[sg_idx..sg_idx + 2000];
         let fidx = search_zone
             .find(field)
@@ -213,7 +212,13 @@ fn test_supervisor_sessions_has_required_fields() {
     // Drift #10 (severe)
     let raw = load();
     let block = schema_block(&raw, "MonitorStartRequest");
-    for field in &["supervisor_id", "target_call_id", "agent_leg", "monitor_type", "supervisor_call_id"] {
+    for field in &[
+        "supervisor_id",
+        "target_call_id",
+        "agent_leg",
+        "monitor_type",
+        "supervisor_call_id",
+    ] {
         assert!(
             block.contains(field),
             "MonitorStartRequest must document {}",
@@ -222,7 +227,10 @@ fn test_supervisor_sessions_has_required_fields() {
     }
     let req_idx = block.find("required:").expect("required list");
     let req_block = &block[req_idx..req_idx + 150];
-    assert!(req_block.contains("supervisor_id"), "supervisor_id in required");
+    assert!(
+        req_block.contains("supervisor_id"),
+        "supervisor_id in required"
+    );
     assert!(req_block.contains("agent_leg"), "agent_leg in required");
 }
 

@@ -58,5 +58,4 @@ mod mixer_e2e_tests {
         let result = mixer.mix_frames(vec![frame], &[0.5]);
         assert!(result.iter().all(|&s| (450..=550).contains(&s)));
     }
-
 }

@@ -1,4 +1,5 @@
 use crate::config::SipFlowSubdirs;
+use crate::sipflow::flusher::{FlushCommand, FlushMeta};
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
@@ -6,12 +7,13 @@ use anyhow::Result;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use futures::TryStreamExt;
-use lru::LruCache;
-use sqlx::{ConnectOptions, Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::{Connection, SqliteConnection};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
@@ -21,25 +23,10 @@ const RAW_READ_THROUGH_GAP: u64 = 64 * 1024;
 pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
-    db_conn: Option<SqliteConnection>,
     raw_file: Option<File>,
-    batch: Vec<Meta>,
-    last_flush: std::time::Instant,
-    flush_count: usize,
-    flush_interval: u64,
-    call_id_cache: LruCache<String, i32>,
     subdirs: SipFlowSubdirs,
-}
-
-struct Meta {
-    msg_type: MsgType,
-    callid: Option<String>,
-    src: String,
-    dst: String,
-    leg: Option<i32>, // 0=LegA, 1=LegB, None for SIP messages
-    timestamp: u64,
-    offset: u64,
-    size: usize,
+    flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+    dropped: Arc<AtomicU64>,
 }
 
 pub struct ProcessedPacket {
@@ -63,11 +50,11 @@ struct MediaPacketRow {
     size: i64,
 }
 
-struct StoredMediaPacket {
-    leg: i32,
-    src: String,
-    timestamp: u64,
-    payload: Vec<u8>,
+pub(crate) struct StoredMediaPacket {
+    pub leg: i32,
+    pub src: String,
+    pub timestamp: u64,
+    pub payload: Vec<u8>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -219,24 +206,19 @@ impl StorageManager {
         dt.timestamp_micros()
     }
 
-    pub fn new(
+    pub(crate) fn new(
         base_path: &Path,
-        flush_count: usize,
-        flush_interval: u64,
-        id_cache_size: usize,
         subdirs: SipFlowSubdirs,
+        flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+        dropped: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             base_path: base_path.to_path_buf(),
             current_hour: (0, 0, 0, 0),
-            db_conn: None,
             raw_file: None,
-            batch: Vec::new(),
-            last_flush: std::time::Instant::now(),
-            flush_count,
-            flush_interval,
-            call_id_cache: LruCache::new(NonZeroUsize::new(id_cache_size).unwrap()),
             subdirs,
+            flusher_tx,
+            dropped: dropped.unwrap_or_default(),
         }
     }
 
@@ -244,10 +226,9 @@ impl StorageManager {
         let dt = Local::now();
         let h = (dt.year(), dt.month(), dt.day(), dt.hour());
 
-        if self.db_conn.is_none() || self.current_hour != h {
+        if self.raw_file.is_none() || self.current_hour != h {
             self.rotate(dt).await?;
             self.current_hour = h;
-            self.call_id_cache.clear();
         }
 
         let file = self
@@ -261,47 +242,49 @@ impl StorageManager {
         file.write_all(&(processed.comp_size as u32).to_be_bytes())?;
         file.write_all(&processed.payload)?;
 
-        self.batch.push(Meta {
-            msg_type: processed.msg_type,
-            callid: processed.callid,
-            src: processed.src,
-            dst: processed.dst,
-            leg: processed.leg,
-            timestamp: processed.timestamp,
-            offset,
-            size: processed.comp_size,
-        });
-
-        if self.batch.len() >= self.flush_count
-            || self.last_flush.elapsed().as_secs() >= self.flush_interval
-        {
-            self.flush_batch().await?;
+        if let Some(ref tx) = self.flusher_tx {
+            let meta = FlushMeta {
+                msg_type: processed.msg_type,
+                callid: processed.callid,
+                src: processed.src,
+                dst: processed.dst,
+                leg: processed.leg,
+                timestamp: processed.timestamp,
+                offset,
+                size: processed.comp_size,
+            };
+            if tx.send(FlushCommand::Meta(meta)).is_err() {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         Ok(())
     }
 
-    /// Number of items waiting to be flushed.
-    pub fn batch_len(&self) -> usize {
-        self.batch.len()
+    /// Number of items dropped due to flusher channel being full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     pub async fn check_flush(&mut self) -> Result<()> {
-        if !self.batch.is_empty() && self.last_flush.elapsed().as_secs() >= self.flush_interval {
-            self.flush_batch().await?;
+        if let Some(ref tx) = self.flusher_tx {
+            let _ = tx.send(FlushCommand::Flush);
         }
         Ok(())
     }
 
-    /// Force-flush all pending items regardless of thresholds.
+    /// Force-flush all pending items and wait for completion.
     pub async fn force_flush(&mut self) -> Result<()> {
-        self.flush_batch().await
+        if let Some(ref tx) = self.flusher_tx {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            if tx.send(FlushCommand::FlushSync { done: done_tx }).is_ok() {
+                let _ = done_rx.await;
+            }
+        }
+        Ok(())
     }
 
     async fn rotate(&mut self, dt: DateTime<Local>) -> Result<()> {
-        if !self.batch.is_empty() {
-            self.flush_batch().await?;
-        }
         let subdir = match self.subdirs {
             SipFlowSubdirs::Hourly => format!(
                 "{:04}{:02}{:02}/{:02}",
@@ -319,154 +302,30 @@ impl StorageManager {
         let db_path = dir.join("sipflow.db");
         let raw_path = dir.join("data.raw");
 
-        let mut conn = SqliteConnectOptions::new()
-            .filename(db_path)
-            .create_if_missing(true)
-            .connect()
-            .await?;
-
-        // Create call_meta table for callid mapping
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS call_meta (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                callid TEXT UNIQUE NOT NULL
-            )",
-        )
-        .execute(&mut conn)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_callid ON call_meta(callid)")
-            .execute(&mut conn)
-            .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sip_msgs (
-                id INTEGER PRIMARY KEY,
-                call_id INTEGER NOT NULL,
-                src TEXT NOT NULL,
-                dst TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                offset INTEGER NOT NULL,
-                size INTEGER NOT NULL
-            )",
-        )
-        .execute(&mut conn)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sip_call ON sip_msgs(call_id)")
-            .execute(&mut conn)
-            .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS media_msgs (
-                id INTEGER PRIMARY KEY,
-                call_id INTEGER NOT NULL,
-                leg INTEGER NOT NULL,
-                src TEXT NOT NULL DEFAULT '',
-                timestamp INTEGER NOT NULL,
-                offset INTEGER NOT NULL,
-                size INTEGER NOT NULL
-            )",
-        )
-        .execute(&mut conn)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_call ON media_msgs(call_id)")
-            .execute(&mut conn)
-            .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_media_call_timestamp ON media_msgs(call_id, timestamp)",
-        )
-        .execute(&mut conn)
-        .await?;
-
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(raw_path)?;
 
-        self.db_conn = Some(conn);
         self.raw_file = Some(file);
+
+        if let Some(ref tx) = self.flusher_tx {
+            let _ = tx.send(FlushCommand::Rotate { db_path });
+        }
+
         Ok(())
     }
 
-    async fn flush_batch(&mut self) -> Result<()> {
-        if self.batch.is_empty() {
-            return Ok(());
+    /// Apply read-optimisation PRAGMAs to a query connection.
+    async fn configure_read_conn(conn: &mut SqliteConnection) {
+        for pragma in [
+            "PRAGMA mmap_size=268435456",
+            "PRAGMA cache_size=-64000",
+            "PRAGMA busy_timeout=5000",
+            "PRAGMA query_only=1",
+        ] {
+            let _ = sqlx::query(pragma).execute(&mut *conn).await;
         }
-
-        if let Some(conn) = self.db_conn.as_mut() {
-            let mut tx = conn.begin().await?;
-
-            for meta in self.batch.drain(..) {
-                // Get or create call_id from call_meta
-                let call_id = if let Some(ref callid) = meta.callid {
-                    // Check LRU cache first
-                    if let Some(&cached_id) = self.call_id_cache.get(callid) {
-                        cached_id
-                    } else {
-                        // Cache miss, query or insert into call_meta
-                        let id: i32 = sqlx::query_scalar(
-                            "INSERT INTO call_meta (callid) VALUES (?) 
-                             ON CONFLICT(callid) DO UPDATE SET callid=callid 
-                             RETURNING id",
-                        )
-                        .bind(callid)
-                        .fetch_one(&mut *tx)
-                        .await?;
-
-                        // Update LRU cache
-                        self.call_id_cache.put(callid.clone(), id);
-                        id
-                    }
-                } else {
-                    continue; // Skip records without callid
-                };
-
-                match meta.msg_type {
-                    MsgType::Sip => {
-                        sqlx::query(
-                            "INSERT INTO sip_msgs (call_id, src, dst, timestamp, offset, size) VALUES (?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(call_id)
-                        .bind(meta.src)
-                        .bind(meta.dst)
-                        .bind(meta.timestamp as i64)
-                        .bind(meta.offset as i64)
-                        .bind(meta.size as i64)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                    MsgType::Rtp => {
-                        let leg = meta.leg.unwrap_or(0);
-                        sqlx::query(
-                            "INSERT INTO media_msgs (
-                                call_id,
-                                leg,
-                                src,
-                                timestamp,
-                                offset,
-                                size
-                            ) VALUES (?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(call_id)
-                        .bind(leg)
-                        .bind(meta.src)
-                        .bind(meta.timestamp as i64)
-                        .bind(meta.offset as i64)
-                        .bind(meta.size as i64)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                }
-            }
-            tx.commit().await?;
-        }
-        if let Some(file) = self.raw_file.as_mut() {
-            file.flush()?;
-        }
-        self.last_flush = std::time::Instant::now();
-        Ok(())
     }
 
     pub async fn query_flow(
@@ -490,6 +349,7 @@ impl StorageManager {
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+            Self::configure_read_conn(&mut conn).await;
             let mut raw_file = File::open(raw_path)?;
             let mut current_pos = None;
 
@@ -553,6 +413,7 @@ impl StorageManager {
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+            Self::configure_read_conn(&mut conn).await;
             let mut raw_file = File::open(raw_path)?;
             let mut current_pos = None;
 
@@ -638,6 +499,7 @@ impl StorageManager {
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+            Self::configure_read_conn(&mut conn).await;
 
             let mut rows = sqlx::query_as::<_, MediaSourceRow>(
                 "SELECT m.leg AS leg,
@@ -664,7 +526,7 @@ impl StorageManager {
         Ok(results)
     }
 
-    async fn query_media_packets(
+    pub(crate) async fn query_media_packets(
         &mut self,
         callid: &str,
         start_dt: DateTime<Local>,
@@ -685,6 +547,7 @@ impl StorageManager {
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+            Self::configure_read_conn(&mut conn).await;
             let mut raw_file = File::open(raw_path)?;
             let mut current_pos = None;
 
@@ -873,6 +736,7 @@ pub fn extract_callid(payload: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sipflow::flusher::SipFlowFlusher;
     use chrono::TimeZone;
     use std::net::IpAddr;
 
@@ -881,6 +745,17 @@ mod tests {
             .timestamp_micros(ts_micros)
             .single()
             .expect("valid local datetime")
+    }
+
+    async fn new_test_storage(base_path: &Path) -> (StorageManager, SipFlowFlusher) {
+        let flusher = SipFlowFlusher::new(1000, 3600, 128);
+        let storage = StorageManager::new(
+            base_path,
+            SipFlowSubdirs::None,
+            Some(flusher.sender()),
+            Some(flusher.dropped_count()),
+        );
+        (storage, flusher)
     }
 
     fn make_sip_processed(ts_micros: u64, call_id: &str) -> ProcessedPacket {
@@ -956,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn test_rtp_metadata_writes_queryable_media() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
         let timestamp = chrono::Utc::now().timestamp_micros() as u64;
         let rtp = Bytes::from_static(b"\x80\x00\x00\x2a\x00\x00\x00\xa0\x00\x00\x00\x01payload");
 
@@ -990,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_flow_respects_time_range_inclusive() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
 
         let call_id = "flow-range-test";
         let base = chrono::Utc::now().timestamp_micros();
@@ -1028,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_media_and_stats_filter_receive_timestamp_within_selected_folders() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
 
         let call_id = "media-range-test";
         let base = chrono::Utc::now().timestamp_micros();
@@ -1106,7 +981,7 @@ mod tests {
         // different day, using a None-subdirs writer rooted at that bucket.
         let stale_bucket = base.join("20200101");
         std::fs::create_dir_all(&stale_bucket).expect("mkdir");
-        let mut writer = StorageManager::new(&stale_bucket, 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut writer, _flusher) = new_test_storage(&stale_bucket).await;
 
         let call_id = "cross-day-test";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
@@ -1118,7 +993,7 @@ mod tests {
 
         // Query with Daily subdirs for today's range — the 20200101 bucket
         // is outside the computed range but must still be scanned.
-        let mut reader = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::Daily);
+        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None);
         let items = reader
             .query_flow(
                 call_id,
@@ -1139,7 +1014,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path();
 
-        let mut writer = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut writer, _flusher) = new_test_storage(base).await;
         let call_id = "legacy-base-test";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
         writer
@@ -1148,7 +1023,7 @@ mod tests {
             .expect("write");
         writer.force_flush().await.expect("flush");
 
-        let mut reader = StorageManager::new(base, 1000, 3600, 128, SipFlowSubdirs::Daily);
+        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None);
         let items = reader
             .query_flow(
                 call_id,
@@ -1204,7 +1079,7 @@ mod tests {
         // read path must return it unchanged (magic-byte detection sees no
         // gzip/zstd header and passes the raw bytes through).
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
 
         let call_id = "no-compress-test";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
@@ -1256,7 +1131,7 @@ mod tests {
         // passed explicitly. process_packet must not re-compress, and the
         // read path must return the original uncompressed payload.
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
 
         let call_id = "precompressed-test";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
@@ -1308,11 +1183,11 @@ mod tests {
     /// Reproduction: `query_flow_in_range` loads ALL calls' SIP data in the time
     /// range, not just one call.  When `build_payload_maps` (called during WAV
     /// generation) uses this function, it loads every concurrent call's SIP
-    /// messages into memory — a major contributor to OOM under load.
+    /// messages into memory — a major contributor to OOM under crash.
     #[tokio::test]
     async fn repro_query_flow_in_range_loads_all_calls() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
 
         let base = chrono::Utc::now().timestamp_micros() as u64;
 

@@ -44,22 +44,24 @@ impl QueueExporter {
             toml::to_string_pretty(&queues_map).context("failed to serialize queues to toml")?;
 
         let store = if config.use_db_config() {
-            GeneratedConfigStore::Database { db: self.db.clone() }
+            GeneratedConfigStore::Database {
+                db: self.db.clone(),
+            }
         } else {
-            GeneratedConfigStore::FileSystem { root: config.generated_root_dir() }
+            GeneratedConfigStore::FileSystem {
+                root: config.generated_root_dir(),
+            }
         };
 
         store
-            .write_async("queue", "queues.generated.toml", &toml_str)
+            .write("queue", "queues.generated.toml", &toml_str)
             .await?;
 
         let path_label = if config.use_db_config() {
             "db://queue/queues.generated.toml".to_string()
         } else {
             let dir = config.generated_queue_dir();
-            dir.join("queues.generated.toml")
-                .display()
-                .to_string()
+            dir.join("queues.generated.toml").display().to_string()
         };
 
         Ok(vec![path_label])

@@ -27,7 +27,7 @@ pub mod transport;
 
 pub use command::{
     CodecProfile, InjectTarget, LegTransport, MediaCommand, PcmFrame, PlayOptions, PlaySource,
-    RecordConfig, SipFlowCaptureTx, SharedMediaSample,
+    RecordConfig, SharedMediaSample, SipFlowCaptureTx,
 };
 pub use event::{MediaEvent, RecordResult};
 pub use transport::resolve_audio_path;
@@ -599,9 +599,12 @@ impl EngineCore {
                 leg_id,
                 digits,
             } => {
-                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
-                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
-                }) else {
+                let Some((bridge, endpoint)) = self
+                    .sessions
+                    .read()
+                    .get(&session_id)
+                    .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
+                else {
                     debug!(session_id = %session_id, leg = %leg_id, digits = %digits, "SendDtmf: no bridge, skipped");
                     return Ok(());
                 };
@@ -716,12 +719,16 @@ impl EngineCore {
                         channels: 1,
                         fmtp: None,
                     };
-                    let cc = sess.caller_codec_info.first().cloned().unwrap_or_else(|| {
-                        fallback.clone()
-                    });
-                    let ce = sess.callee_codec_info.first().cloned().unwrap_or_else(|| {
-                        fallback
-                    });
+                    let cc = sess
+                        .caller_codec_info
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| fallback.clone());
+                    let ce = sess
+                        .callee_codec_info
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| fallback);
                     (bridge, cc, ce)
                 };
 
@@ -797,9 +804,12 @@ impl EngineCore {
                     .send(MediaEvent::LegUnheld { session_id, leg_id });
             }
             MediaCommand::MuteLeg { session_id, leg_id } => {
-                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
-                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
-                }) else {
+                let Some((bridge, endpoint)) = self
+                    .sessions
+                    .read()
+                    .get(&session_id)
+                    .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
+                else {
                     debug!(session_id = %session_id, leg = %leg_id, "MuteLeg: no bridge (signaling-layer hold)");
                     return Ok(());
                 };
@@ -807,9 +817,12 @@ impl EngineCore {
                 debug!(session_id = %session_id, leg = %leg_id, "MuteLeg: bridge output muted");
             }
             MediaCommand::UnmuteLeg { session_id, leg_id } => {
-                let Some((bridge, endpoint)) = self.sessions.read().get(&session_id).and_then(|s| {
-                    s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id)))
-                }) else {
+                let Some((bridge, endpoint)) = self
+                    .sessions
+                    .read()
+                    .get(&session_id)
+                    .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
+                else {
                     debug!(session_id = %session_id, leg = %leg_id, "UnmuteLeg: no bridge (signaling-layer hold)");
                     return Ok(());
                 };
@@ -911,8 +924,7 @@ impl EngineCore {
         let remaining = self.sessions.read().len();
         warn!(
             reaped = count,
-            remaining,
-            "MediaEngine reaper swept stale sessions"
+            remaining, "MediaEngine reaper swept stale sessions"
         );
     }
 }

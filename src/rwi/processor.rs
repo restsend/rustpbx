@@ -94,8 +94,7 @@ async fn start_peer_conference_bridge(
         .remote_description()
         .and_then(|desc| {
             let sdp = desc.to_sdp_string();
-            let profile =
-                crate::media::negotiate::MediaNegotiator::extract_leg_profile(&sdp);
+            let profile = crate::media::negotiate::MediaNegotiator::extract_leg_profile(&sdp);
             profile.audio.map(|audio| {
                 let codec = audio.codec;
                 let params = RtpCodecParameters {
@@ -133,7 +132,8 @@ async fn start_peer_conference_bridge(
 
     if let Some(transceiver) = existing {
         let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> = sample_track_arc;
-        let mut sender_builder = rustrtc::RtpSender::builder(track_arc, ssrc).params(negotiated_params);
+        let mut sender_builder =
+            rustrtc::RtpSender::builder(track_arc, ssrc).params(negotiated_params);
         if let Some(ref cname) = pc.config().cname {
             sender_builder = sender_builder.cname(cname.clone());
         }
@@ -176,13 +176,7 @@ async fn start_peer_conference_bridge(
     // Start the full-duplex bridge
     let bridge = crate::call::runtime::ConferenceMediaBridge::new(conf_manager.clone());
     match bridge
-        .start_bridge_full_duplex(
-            conf_id,
-            leg_id,
-            tx,
-            audio_receiver,
-            negotiated_codec,
-        )
+        .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, negotiated_codec)
         .await
     {
         Ok(handle) => {
@@ -396,7 +390,9 @@ impl RwiCommandProcessor {
             supervisor_states: Arc::new(RwLock::new(HashMap::new())),
             media_stream_states: Arc::new(RwLock::new(HashMap::new())),
             media_inject_states: Arc::new(RwLock::new(HashMap::new())),
-            mixer_registry: Arc::new(crate::proxy::proxy_call::session_registry::MixerRegistry::new()),
+            mixer_registry: Arc::new(
+                crate::proxy::proxy_call::session_registry::MixerRegistry::new(),
+            ),
             conference_manager,
             transfer_controller,
             command_dedup_cache: CommandDeduplicationCache::with_default_ttl(),
@@ -1294,7 +1290,12 @@ impl RwiCommandProcessor {
         // When no codecs are configured on the trunk, use the default full set (the
         // conference bridge now sends whatever codec was negotiated, so there is no
         // need to restrict to PCMU-only).
-        let media_track = if let Some(trunk_name) = req.trunk.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let media_track = if let Some(trunk_name) = req
+            .trunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
                 if !trunk.codec.is_empty() {
                     let codecs: Vec<audio_codec::CodecType> = trunk
@@ -2188,7 +2189,12 @@ impl RwiCommandProcessor {
         // disabled trunk surfaces as an immediate command failure rather than a
         // "started" operation in which every leg then fails. Per-leg
         // apply_explicit_originate_trunk re-resolves and applies it on each leg.
-        if let Some(trunk_name) = req.trunk.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(trunk_name) = req
+            .trunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Self::resolve_originate_trunk(&server, trunk_name)
                 .map_err(CommandError::CommandFailed)?;
         }
@@ -2434,16 +2440,20 @@ impl RwiCommandProcessor {
             media_track
         };
         // If routing out a named carrier trunk, respect the trunk's codec configuration.
-        let media_track = if let Some(trunk_name) = trunk.map(str::trim).filter(|s| !s.is_empty()) {
-            if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
-                if !trunk.codec.is_empty() {
-                    let codecs: Vec<audio_codec::CodecType> = trunk
-                        .codec
-                        .iter()
-                        .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
-                        .collect();
-                    if !codecs.is_empty() {
-                        media_track.with_codec_preference(codecs)
+        let media_track =
+            if let Some(trunk_name) = trunk.map(str::trim).filter(|s| !s.is_empty()) {
+                if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
+                    if !trunk.codec.is_empty() {
+                        let codecs: Vec<audio_codec::CodecType> = trunk
+                            .codec
+                            .iter()
+                            .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
+                            .collect();
+                        if !codecs.is_empty() {
+                            media_track.with_codec_preference(codecs)
+                        } else {
+                            media_track
+                        }
                     } else {
                         media_track
                     }
@@ -2453,10 +2463,7 @@ impl RwiCommandProcessor {
             } else {
                 media_track
             }
-        } else {
-            media_track
-        }
-        .build();
+            .build();
 
         let sdp_offer = match media_track.local_description().await {
             Ok(sdp) => {
@@ -3119,57 +3126,57 @@ impl RwiCommandProcessor {
         match overflow.action.as_deref() {
             Some("transfer") => match overflow.target_queue.as_ref() {
                 Some(target_queue) => {
-                info!(
-                    call_id = %req.call_id,
-                    from_queue = %req.queue_id,
-                    to_queue = %target_queue,
-                    "Transferring call to overflow queue"
-                );
+                    info!(
+                        call_id = %req.call_id,
+                        from_queue = %req.queue_id,
+                        to_queue = %target_queue,
+                        "Transferring call to overflow queue"
+                    );
 
-                let queue_state = QueueState {
-                    queue_id: target_queue.clone(),
-                    priority: req.priority,
-                    skills: req.skills,
-                    max_wait_secs: req.max_wait_secs,
-                    is_hold: false,
-                    enqueued_at: std::time::Instant::now(),
-                    agent_id: None,
-                    overflow_count: 1,
-                };
-
-                let mut states = self.queue_states.write().await;
-                states.insert(req.call_id.clone(), queue_state);
-                drop(states);
-
-                let overflow_event = crate::rwi::event::to_legacy_event(
-                    &crate::rwi::QueueOverflowed {
-                        call_id: req.call_id.clone(),
-                        original_queue_id: req.queue_id,
-                        overflow_queue_id: target_queue.clone(),
-                        reason: overflow.reason,
-                    },
-                    None,
-                );
-                let gw = self.gateway.read();
-                gw.send_event_to_call_owner(&req.call_id, &overflow_event);
-
-                let joined_event = crate::rwi::event::to_legacy_event(
-                    &crate::rwi::QueueJoined {
-                        call_id: req.call_id.clone(),
+                    let queue_state = QueueState {
                         queue_id: target_queue.clone(),
-                    },
-                    None,
-                );
-                gw.send_event_to_call_owner(&req.call_id, &joined_event);
+                        priority: req.priority,
+                        skills: req.skills,
+                        max_wait_secs: req.max_wait_secs,
+                        is_hold: false,
+                        enqueued_at: std::time::Instant::now(),
+                        agent_id: None,
+                        overflow_count: 1,
+                    };
 
-                Ok(CommandResult::Success)
-            }
-            None => {
-                warn!("Queue overflow: transfer action but no target queue");
-                Ok(CommandResult::Success)
-            }
-        },
-        Some("voicemail") => {
+                    let mut states = self.queue_states.write().await;
+                    states.insert(req.call_id.clone(), queue_state);
+                    drop(states);
+
+                    let overflow_event = crate::rwi::event::to_legacy_event(
+                        &crate::rwi::QueueOverflowed {
+                            call_id: req.call_id.clone(),
+                            original_queue_id: req.queue_id,
+                            overflow_queue_id: target_queue.clone(),
+                            reason: overflow.reason,
+                        },
+                        None,
+                    );
+                    let gw = self.gateway.read();
+                    gw.send_event_to_call_owner(&req.call_id, &overflow_event);
+
+                    let joined_event = crate::rwi::event::to_legacy_event(
+                        &crate::rwi::QueueJoined {
+                            call_id: req.call_id.clone(),
+                            queue_id: target_queue.clone(),
+                        },
+                        None,
+                    );
+                    gw.send_event_to_call_owner(&req.call_id, &joined_event);
+
+                    Ok(CommandResult::Success)
+                }
+                None => {
+                    warn!("Queue overflow: transfer action but no target queue");
+                    Ok(CommandResult::Success)
+                }
+            },
+            Some("voicemail") => {
                 info!(call_id = %req.call_id, "Redirecting to voicemail due to overflow");
                 let event = crate::rwi::event::to_legacy_event(
                     &crate::rwi::QueueVoicemailRedirected {
@@ -3636,10 +3643,7 @@ impl RwiCommandProcessor {
         if has_recording {
             let meta = self.gateway.read().meta_store.get_sync(call_id);
             let (ani, dnis) = match meta {
-                Some(ref m) => (
-                    m.caller_name.clone(),
-                    m.callee_name.clone(),
-                ),
+                Some(ref m) => (m.caller_name.clone(), m.callee_name.clone()),
                 None => (None, None),
             };
             let event = crate::rwi::event::to_legacy_event(
@@ -3654,8 +3658,8 @@ impl RwiCommandProcessor {
                     callee_name: dnis,
                     called_phone: None,
                     call_type: None,
-                agent_id: None,
-                agent_name: None,
+                    agent_id: None,
+                    agent_name: None,
                     call_start_time: None,
                     call_end_time: None,
                     upload_time: None,

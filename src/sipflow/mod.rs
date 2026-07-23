@@ -1,4 +1,6 @@
 pub mod backend;
+pub mod diag;
+pub mod flusher;
 pub mod flowdb_backend;
 pub mod flowdb_codec;
 pub mod perf;

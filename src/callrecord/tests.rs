@@ -1,37 +1,217 @@
 use super::*;
-use crate::callrecord::CallRecordHangupReason;
-use crate::config::CallRecordStorageConfig;
+use crate::callrecord::CallRecordRow;
+use crate::callrecord::{
+    CallRecordHangupReason, create_call_record_table, derive_daily_url, today_string,
+};
+use crate::config::{CallRecordStorageConfig, RotationMode};
 use chrono::Utc;
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
-#[tokio::test]
-async fn test_builder_without_callrecord_config_uses_noop_saver() {
-    let manager = CallRecordManagerBuilder::new().build().await.unwrap();
-    let record = CallRecord {
-        call_id: "noop_without_config".to_string(),
-        start_time: Utc::now(),
-        end_time: Utc::now(),
+fn make_record() -> CallRecord {
+    let now = Utc::now();
+    CallRecord {
+        call_id: "test-call-id".to_string(),
+        start_time: now,
+        end_time: now + chrono::Duration::seconds(30),
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
+        details: crate::callrecord::CallDetails {
+            direction: "inbound".to_string(),
+            status: "completed".to_string(),
+            from_number: Some("+1234567890".to_string()),
+            to_number: Some("+0987654321".to_string()),
+            caller_name: Some("Alice".to_string()),
+            ..Default::default()
+        },
         ..Default::default()
-    };
-
-    let result = manager.saver.save(&record).await.unwrap();
-    assert_eq!(result, "");
+    }
 }
 
+async fn in_memory_db() -> DatabaseConnection {
+    crate::models::connect_db("sqlite::memory:").await.unwrap()
+}
+
+// ── CallRecordRow extraction ───────────────────────────────────────────────────
+
+#[test]
+fn test_call_record_row_from_record() {
+    let record = make_record();
+    let row = CallRecordRow::from_record(&record);
+    assert_eq!(row.call_id, "test-call-id");
+    assert_eq!(row.direction, "inbound");
+    assert_eq!(row.status, "completed");
+    assert_eq!(row.from_number.as_deref(), Some("+1234567890"));
+    assert_eq!(row.caller_name.as_deref(), Some("Alice"));
+    assert!(row.ended_at.is_some());
+    assert_eq!(row.duration_secs, 30);
+    assert!(row.has_transcript == false);
+    assert!(row.display_id.is_none());
+    assert!(row.archived_at.is_none());
+}
+
+// ── today_string / derive_daily_url ─────────────────────────────────────────────
+
+#[test]
+fn test_today_string_format() {
+    let s = today_string();
+    assert_eq!(s.len(), 8);
+    assert!(s.chars().all(|c| c.is_ascii_digit()));
+}
+
+#[test]
+fn test_derive_daily_url_sqlite() {
+    let url = derive_daily_url("sqlite:///config/cdr/cdr.db", "20260722");
+    assert_eq!(url, "sqlite:///config/cdr/cdr-20260722.db");
+}
+
+#[test]
+fn test_derive_daily_url_sqlite_no_ext() {
+    let url = derive_daily_url("sqlite:///config/cdr/data", "20260722");
+    assert_eq!(url, "sqlite:///config/cdr/data-20260722");
+}
+
+#[test]
+fn test_derive_daily_url_single_slash() {
+    let url = derive_daily_url("sqlite:./config/cdr/cdr.db", "20260722");
+    assert_eq!(url, "sqlite:./config/cdr/cdr-20260722.db");
+}
+
+#[test]
+fn test_derive_daily_url_non_sqlite() {
+    let url = derive_daily_url("postgres://localhost/cdrs", "20260722");
+    assert_eq!(url, "postgres://localhost/cdrs");
+}
+
+// ── create_call_record_table ───────────────────────────────────────────────────
+
 #[tokio::test]
-async fn test_database_saver_requires_database_url() {
+async fn test_create_call_record_table() {
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "test_cdrs").await.unwrap();
+    // Verify table exists by querying it
+    let rows = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS cnt FROM test_cdrs",
+        ))
+        .await;
+    assert!(rows.is_ok(), "table should exist");
+}
+
+// ── BuiltinDatabaseSaver ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_builtin_saver_writes_to_rustpbx_call_records() {
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let saver = crate::callrecord::BuiltinDatabaseSaver { db: db.clone() };
+    let record = make_record();
+    let result = saver.save(&record).await;
+    assert!(
+        result.is_ok(),
+        "builtin saver should succeed: {:?}",
+        result.err()
+    );
+}
+
+// ── CustomDatabaseSaver ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_custom_saver_writes_full_schema() {
+    let db = in_memory_db().await;
+    let table = "my_cdrs";
+    create_call_record_table(&db, table).await.unwrap();
+    let saver = crate::callrecord::CustomDatabaseSaver {
+        db: db.clone(),
+        table_name: table.to_string(),
+    };
+    let record = make_record();
+    let result = saver.save(&record).await;
+    assert!(
+        result.is_ok(),
+        "custom saver should succeed: {:?}",
+        result.err()
+    );
+}
+
+// ── RotatingSqliteSaver ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_rotating_sqlite_saver_creates_daily_file() {
+    let dir = TempDir::new().unwrap();
+    let base = format!("sqlite://{}/cdr.db", dir.path().display());
+    let today = today_string();
+    let daily_url = derive_daily_url(&base, &today);
+    let db = crate::models::connect_db(&daily_url).await.unwrap();
+    create_call_record_table(&db, "rustpbx_call_records").await.unwrap();
+    let saver = crate::callrecord::RotatingSqliteSaver {
+        base_url: base.clone(),
+        table_name: "rustpbx_call_records".to_string(),
+        skip_create_table: false,
+        state: Arc::new(tokio::sync::Mutex::new(crate::callrecord::RotateState {
+            current_date: today.clone(),
+            db,
+        })),
+    };
+    let record = make_record();
+    let result = saver.save(&record).await;
+    assert!(
+        result.is_ok(),
+        "rotating saver should succeed: {:?}",
+        result.err()
+    );
+
+    let expected_path = dir.path().join(format!("cdr-{}.db", today));
+    assert!(
+        expected_path.exists(),
+        "daily file should exist: {:?}",
+        expected_path
+    );
+}
+
+// ── Builder without config (needs main_db) ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_builder_without_callrecord_config_uses_builtin_saver() {
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db)
+        .build()
+        .await
+        .unwrap();
+    let record = make_record();
+    let result = manager.saver.save(&record).await;
+    assert!(
+        result.is_ok(),
+        "default saver should succeed: {:?}",
+        result.err()
+    );
+    assert!(result.unwrap().starts_with("rustpbx_call_records/"));
+}
+
+// ── Builder with custom database requires main_db or database_url ─────────────
+
+#[tokio::test]
+async fn test_database_saver_without_url_needs_main_db() {
     let err = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
             max_concurrent: 64,
             storage: CallRecordStorageConfig::Database {
                 database_url: None,
-                table_name: "call_records".to_string(),
+                table_name: "custom_table".to_string(),
+                skip_create_table: false,
+                rotate: RotationMode::None,
             },
         })
         .build()
@@ -39,9 +219,10 @@ async fn test_database_saver_requires_database_url() {
         .err()
         .unwrap();
 
-    assert_eq!(
-        err.to_string(),
-        "database call record saver requires database_url"
+    assert!(
+        err.to_string().contains("database_url") || err.to_string().contains("main_db"),
+        "error should mention database_url or main_db: {}",
+        err
     );
 }
 
@@ -359,10 +540,7 @@ fn test_call_record_filename_sanitization() {
 
 #[test]
 fn test_hangup_reason_abandoned_display() {
-    assert_eq!(
-        CallRecordHangupReason::Abandoned.to_string(),
-        "abandoned"
-    );
+    assert_eq!(CallRecordHangupReason::Abandoned.to_string(), "abandoned");
 }
 
 #[test]
@@ -459,8 +637,13 @@ impl CallRecordHook for EnrichSetsQueue {
 async fn test_enrich_phase_runs_before_completed_and_can_mutate() {
     // Drive the manager end-to-end: enrich → save → completed.
     let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
 
     let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db)
         .with_hook(Box::new(EnrichSetsQueue))
         .with_hook(Box::new(CompletedProbe {
             log: log.clone(),

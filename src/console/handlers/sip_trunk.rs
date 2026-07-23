@@ -925,8 +925,7 @@ mod tests {
         let state = setup_state().await;
         let user = unprivileged_user();
         let form = SipTrunkForm::default();
-        let resp =
-            create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
+        let resp = create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
@@ -960,8 +959,7 @@ mod tests {
         let mut form = SipTrunkForm::default();
         form.name = Some("test-trunk".into());
         form.sip_server = Some("sip.example.com".into());
-        let resp =
-            create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
+        let resp = create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -169,7 +169,9 @@ impl SipFlow {
     /// Atomically swap the backend without restarting the writer thread.
     /// The next flush in the batch writer thread will use the new backend.
     pub fn swap_backend(&self, new_backend: Arc<dyn SipFlowBackend>) {
-        self.inner.shared_backend.store(Arc::new(Backend(Some(new_backend))));
+        self.inner
+            .shared_backend
+            .store(Arc::new(Backend(Some(new_backend))));
     }
 
     /// Remove the backend entirely (disable sipflow at runtime).

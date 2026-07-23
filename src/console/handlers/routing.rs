@@ -561,10 +561,10 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
         .await
 }
 
-fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
+async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
         Some(proxy_config) => {
-            let catalog = crate::console::catalog::build_forwarding_catalog(&proxy_config);
+            let catalog = crate::console::catalog::build_forwarding_catalog(&proxy_config).await;
             tracing::info!(
                 queue_count = catalog.queues.len(),
                 ivr_count = catalog.ivr_projects.len(),
@@ -820,7 +820,7 @@ pub async fn page_routing(
         .ami_path
         .clone()
         .unwrap_or_else(|| "/ami/v1".to_string());
-    let catalog = load_catalogs(state.as_ref());
+    let catalog = load_catalogs(state.as_ref()).await;
 
     state.render_with_headers(
         "console/routing.html",
@@ -1029,7 +1029,7 @@ pub async fn page_routing_create(
         }
     };
 
-    let catalog = load_catalogs(state.as_ref());
+    let catalog = load_catalogs(state.as_ref()).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
     let doc = RouteDocument::default();
@@ -1073,7 +1073,7 @@ pub async fn page_routing_edit(
         .map(|trunk| (trunk.id, trunk))
         .collect();
 
-    let catalog = load_catalogs(state.as_ref());
+    let catalog = load_catalogs(state.as_ref()).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
     let mut doc = RouteDocument::from_model(&model);
@@ -1112,7 +1112,7 @@ pub async fn route_detail_data(
         }
     };
 
-    let catalog = load_catalogs(state.as_ref());
+    let catalog = load_catalogs(state.as_ref()).await;
 
     let trunk_map: HashMap<i64, SipTrunkModel> =
         trunks.iter().cloned().map(|t| (t.id, t)).collect();
@@ -1179,7 +1179,7 @@ pub async fn clone_routing(
     };
     let trunk_lookup = build_trunk_name_lookup(&trunks);
 
-    let _catalog = load_catalogs(state.as_ref());
+    let _catalog = load_catalogs(state.as_ref()).await;
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk

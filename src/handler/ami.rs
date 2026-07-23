@@ -318,7 +318,7 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
         Err(response) => return response,
     };
 
-    match context.reload_acl_rules(true, config_override) {
+    match context.reload_acl_rules(true, config_override).await {
         Ok(metrics) => {
             let total = metrics.total;
             let active_rules = context.acl_rules_snapshot();
@@ -1001,7 +1001,11 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         let start = Instant::now();
         let opts = crate::http_util::HttpFetchOptions::new()
             .with_timeout(std::time::Duration::from_secs(5));
-        match crate::http_util::execute_request(state.http_client().get(&url), &opts.headers, opts.timeout)
+        match crate::http_util::execute_request(
+            state.http_client().get(&url),
+            &opts.headers,
+            opts.timeout,
+        )
         .await
         {
             Ok(resp) => {
@@ -1455,8 +1459,7 @@ pub async fn reload_addons_with_sync(
             addons: selected.clone(),
         };
         let peers = fanout_reload_to_peers(app, &payload).await;
-        let peers_json =
-            serde_json::to_value(&peers).unwrap_or(serde_json::json!([]));
+        let peers_json = serde_json::to_value(&peers).unwrap_or(serde_json::json!([]));
         return serde_json::json!({
             "local": local_json,
             "synced": true,
@@ -1642,10 +1645,7 @@ mod reload_addon_tests {
     #[test]
     fn build_local_reload_map_error_result() {
         let requested = vec!["ivr".to_string()];
-        let results = vec![(
-            "ivr",
-            Err("build failed: no provider url".to_string()),
-        )];
+        let results = vec![("ivr", Err("build failed: no provider url".to_string()))];
         let map = build_local_reload_map(&requested, results);
         let entry = map.get("ivr").expect("ivr key present");
         assert_eq!(entry["status"], "error");

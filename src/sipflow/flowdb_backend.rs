@@ -331,7 +331,7 @@ impl FlowDbBackend {
         Ok(items)
     }
 
-    fn scan_rtp_packets(
+    pub(crate) fn scan_rtp_packets(
         &self,
         call_id: &str,
         start_ts: i64,
@@ -450,7 +450,14 @@ impl FlowDbBackend {
         let (payload_map, leg_payload_map) =
             self.build_payload_maps(call_id, start_ts, end_ts, leg_filter);
         let mut cursor = std::io::Cursor::new(Vec::new());
-        generate_wav_to_writer(&packets, &payload_map, &leg_payload_map, true, false, &mut cursor)?;
+        generate_wav_to_writer(
+            &packets,
+            &payload_map,
+            &leg_payload_map,
+            true,
+            false,
+            &mut cursor,
+        )?;
         Ok(cursor.into_inner())
     }
 
@@ -704,7 +711,14 @@ impl SipFlowBackend for FlowDbBackend {
             self.build_payload_maps(call_id, start_ts, end_ts, stream_leg);
 
         let mut file = tempfile::NamedTempFile::new()?;
-        generate_wav_to_writer(&packets, &payload_map, &leg_payload_map, true, false, &mut file)?;
+        generate_wav_to_writer(
+            &packets,
+            &payload_map,
+            &leg_payload_map,
+            true,
+            false,
+            &mut file,
+        )?;
         std::io::Write::flush(&mut file)?;
         Ok(file)
     }

@@ -3,12 +3,12 @@ use crate::rwi::event::{RwiEvent, RwiEventSpec, merge_event_context};
 use crate::rwi::proto::CallMetaStore;
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc};
-use tracing::warn;
 use tokio::sync::{broadcast, mpsc};
+use tracing::warn;
 
 pub type SessionId = String;
 pub type CallId = String;
@@ -353,9 +353,7 @@ impl RwiGateway {
     }
 
     pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) -> u64 {
-        let mut cache_state = self
-            .event_cache
-            .lock();
+        let mut cache_state = self.event_cache.lock();
         let max_age = self.max_cache_age_secs;
         let now = chrono::Utc::now();
         while let Some(front) = cache_state.cache.front() {
@@ -389,9 +387,7 @@ impl RwiGateway {
     /// Get events for a call since a given sequence number
     /// Used for session resumption after disconnect
     pub fn get_events_since(&self, last_sequence: u64) -> Vec<EventCacheEntry> {
-        let cache_state = self
-            .event_cache
-            .lock();
+        let cache_state = self.event_cache.lock();
 
         cache_state
             .cache
@@ -407,9 +403,7 @@ impl RwiGateway {
         call_id: &CallId,
         last_sequence: u64,
     ) -> Vec<EventCacheEntry> {
-        let cache_state = self
-            .event_cache
-            .lock();
+        let cache_state = self.event_cache.lock();
 
         cache_state
             .cache
@@ -421,9 +415,7 @@ impl RwiGateway {
 
     /// Check if event is still in cache window
     pub fn is_sequence_in_cache(&self, sequence: u64) -> bool {
-        let cache_state = self
-            .event_cache
-            .lock();
+        let cache_state = self.event_cache.lock();
 
         if cache_state.cache.is_empty() {
             return false;
@@ -435,9 +427,7 @@ impl RwiGateway {
 
     /// Get current sequence number
     pub fn current_sequence(&self) -> u64 {
-        let cache_state = self
-            .event_cache
-            .lock();
+        let cache_state = self.event_cache.lock();
         cache_state.next_sequence
     }
 
@@ -571,9 +561,7 @@ impl RwiGateway {
         let events = match last_sequence {
             Some(seq) => self.get_events_since(seq),
             None => {
-                let cache_state = self
-                    .event_cache
-                    .lock();
+                let cache_state = self.event_cache.lock();
                 cache_state.cache.iter().cloned().collect()
             }
         };
@@ -593,9 +581,7 @@ impl RwiGateway {
         let events = match last_sequence {
             Some(seq) => self.get_events_for_call_since(call_id, seq),
             None => {
-                let cache_state = self
-                    .event_cache
-                    .lock();
+                let cache_state = self.event_cache.lock();
                 cache_state
                     .cache
                     .iter()

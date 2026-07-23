@@ -144,7 +144,9 @@ mod tests {
             .try_into()
             .expect("valid home proxy URI");
         let location = Location {
-            aor: "sip:device@192.0.2.10".try_into().expect("valid contact URI"),
+            aor: "sip:device@192.0.2.10"
+                .try_into()
+                .expect("valid contact URI"),
             home_proxy: Some(
                 rsipstack::transport::SipAddr::try_from(home_proxy_uri)
                     .expect("valid home proxy address"),

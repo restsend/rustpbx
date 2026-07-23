@@ -151,17 +151,11 @@ pub async fn seed_csrf_cookie(
 }
 
 /// Validate the CSRF token on unsafe methods; seed cookie on every response.
-pub async fn csrf_guard(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+pub async fn csrf_guard(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = request.method().clone();
     let headers = request.headers().clone();
 
-    let is_safe = matches!(
-        method.as_str(),
-        "GET" | "HEAD" | "OPTIONS" | "TRACE"
-    );
+    let is_safe = matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "TRACE");
     let has_authorization = headers.contains_key(axum::http::header::AUTHORIZATION);
 
     // Exempt auth endpoints (login/register/reset/forgot/logout/mfa) — these

@@ -82,7 +82,10 @@ pub trait SipFlowBackend: Send + Sync {
 }
 
 /// Create backend from configuration
-pub fn create_backend(config: &SipFlowConfig, cancel_token: CancellationToken) -> Result<Box<dyn SipFlowBackend>> {
+pub fn create_backend(
+    config: &SipFlowConfig,
+    cancel_token: CancellationToken,
+) -> Result<Box<dyn SipFlowBackend>> {
     match config {
         SipFlowConfig::Local {
             root,

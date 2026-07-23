@@ -17,7 +17,10 @@ async fn test_rwi_lifecycle_answer_hold_hangup() {
     let mut rwi = RwiCollector::connect(&pbx.rwi_url, TEST_TOKEN).await;
 
     let subscribe = rwi
-        .send_command("session.subscribe", serde_json::json!({"contexts": ["default"]}))
+        .send_command(
+            "session.subscribe",
+            serde_json::json!({"contexts": ["default"]}),
+        )
         .await;
     assert_eq!(subscribe["status"], "success");
 
@@ -83,7 +86,10 @@ async fn test_rwi_lifecycle_reject_busy() {
     let mut rwi = RwiCollector::connect(&pbx.rwi_url, TEST_TOKEN).await;
 
     let subscribe = rwi
-        .send_command("session.subscribe", serde_json::json!({"contexts": ["default"]}))
+        .send_command(
+            "session.subscribe",
+            serde_json::json!({"contexts": ["default"]}),
+        )
         .await;
     assert_eq!(subscribe["status"], "success");
 
@@ -106,7 +112,10 @@ async fn test_rwi_lifecycle_reject_busy() {
     let no_answer = rwi.wait_for_event_type("call_no_answer", 1).await;
     let hangup = rwi.wait_for_event_type("call_hangup", 1).await;
 
-    let matched = busy.or(no_answer).or(hangup).expect("missing reject outcome event");
+    let matched = busy
+        .or(no_answer)
+        .or(hangup)
+        .expect("missing reject outcome event");
     assert!(matched.to_string().contains(&call_id));
 
     rejecting.stop();

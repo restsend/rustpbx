@@ -18,7 +18,10 @@ pub struct AppEventLoop {
 }
 
 impl AppEventLoop {
-    async fn await_or_cancel<F>(cancel_token: &CancellationToken, future: F) -> WaitResult<F::Output>
+    async fn await_or_cancel<F>(
+        cancel_token: &CancellationToken,
+        future: F,
+    ) -> WaitResult<F::Output>
     where
         F: Future,
     {

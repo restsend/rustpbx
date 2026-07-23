@@ -147,8 +147,17 @@ impl CallReporter {
             (None, None)
         };
 
-        let outbound_trunk_context = self.context.cookie.get_extension::<crate::call::OutboundTrunkContext>()
-            .or_else(|| self.context.dialplan.extensions.get::<crate::call::OutboundTrunkContext>().cloned());
+        let outbound_trunk_context = self
+            .context
+            .cookie
+            .get_extension::<crate::call::OutboundTrunkContext>()
+            .or_else(|| {
+                self.context
+                    .dialplan
+                    .extensions
+                    .get::<crate::call::OutboundTrunkContext>()
+                    .cloned()
+            });
         let outbound_sip_trunk_id = outbound_trunk_context.as_ref().and_then(|ctx| ctx.id);
 
         let mut recorder = Vec::new();
@@ -205,7 +214,11 @@ impl CallReporter {
             recording_url: recording_path_for_db,
             rewrite,
             last_error,
-            metadata: if metadata_map.is_empty() { None } else { Some(metadata_map) },
+            metadata: if metadata_map.is_empty() {
+                None
+            } else {
+                Some(metadata_map)
+            },
             ..Default::default()
         };
 

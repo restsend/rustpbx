@@ -5,8 +5,7 @@ use std::{cmp::Ordering, collections::HashMap, fs, path::Path};
 use tracing::{info, warn};
 
 use crate::{
-    addons::queue::models as queue,
-    config_store::GeneratedConfigStore,
+    addons::queue::models as queue, config_store::GeneratedConfigStore,
     proxy::routing::RouteQueueConfig,
 };
 
@@ -158,10 +157,10 @@ pub async fn cleanup_queue_store(
     store: &GeneratedConfigStore,
     keep_names: &[String],
 ) -> Result<()> {
-    let names = store.list_names_async("queue").await?;
+    let names = store.list_names("queue").await?;
     for name in names {
         if !keep_names.contains(&name) {
-            store.delete_async("queue", &name).await?;
+            store.delete("queue", &name).await?;
         }
     }
     Ok(())
@@ -174,9 +173,7 @@ pub async fn write_queue_entry_to_store(
 ) -> Result<String> {
     let filename = format!("{}.toml", entry.get_key());
     let toml_doc = serialize_queue_entry(entry)?;
-    store
-        .write_async("queue", &filename, &toml_doc)
-        .await?;
+    store.write("queue", &filename, &toml_doc).await?;
     Ok(filename)
 }
 

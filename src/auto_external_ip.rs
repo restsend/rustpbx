@@ -9,7 +9,9 @@ pub async fn detect_external_ip(url: &str) -> Result<IpAddr, anyhow::Error> {
         DEFAULT_AUTO_EXTERNAL_IP_URL
     } else {
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(anyhow::anyhow!("External IP URL must start with http:// or https://"));
+            return Err(anyhow::anyhow!(
+                "External IP URL must start with http:// or https://"
+            ));
         }
         url
     };

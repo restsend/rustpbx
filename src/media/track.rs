@@ -14,8 +14,7 @@ pub trait Track: Send + Sync {
     async fn set_remote_description(&self, remote: &str) -> Result<()>;
     async fn stop(&self);
     async fn get_peer_connection(&self) -> Option<PeerConnection>;
-    fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {
-    }
+    fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {}
     fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
         None
     }

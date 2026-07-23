@@ -26,7 +26,7 @@ impl CallRecordHook for DatabaseHook {
 
 pub async fn persist_call_record(
     db: &DatabaseConnection,
-    record: &mut CallRecord,
+    record: &CallRecord,
 ) -> anyhow::Result<()> {
     let details = &record.details;
 
@@ -259,7 +259,10 @@ mod tests {
     #[test]
     fn extract_sip_username_plain_number() {
         assert_eq!(extract_sip_username("1001"), Some("1001".to_string()));
-        assert_eq!(extract_sip_username("+8613800138000"), Some("+8613800138000".to_string()));
+        assert_eq!(
+            extract_sip_username("+8613800138000"),
+            Some("+8613800138000".to_string())
+        );
     }
 
     #[test]
@@ -282,7 +285,7 @@ mod tests {
     }
 }
 
-fn normalize_endpoint_uri(value: &str) -> Option<String> {
+pub(crate) fn normalize_endpoint_uri(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None

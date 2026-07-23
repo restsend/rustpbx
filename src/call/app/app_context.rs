@@ -1,11 +1,9 @@
-use crate::call::app::CallApp;
 use crate::call::app::ivr::trace::IvrTraceCollector;
-use crate::call::runtime::PostCallHook;
 use crate::config::Config;
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -114,24 +112,11 @@ pub struct ApplicationContext {
     /// IVR step trace collector for debugging (optional).
     pub ivr_trace: Option<Arc<IvrTraceCollector>>,
 
-    /// Custom call app factories (registered by addons).
-    pub app_factories: Arc<
-        Vec<(
-            &'static str,
-            Arc<
-                dyn Fn(
-                        &str,
-                        Option<serde_json::Value>,
-                        &ApplicationContext,
-                    ) -> Option<Box<dyn CallApp>>
-                    + Send
-                    + Sync,
-            >,
-        )>,
-    >,
-
-    /// Post-call hook (registered by callcenter addon).
-    pub post_call_hook: Option<Arc<dyn PostCallHook>>,
+    /// Shared per-session typed extensions bag — same underlying `Arc` as
+    /// [`CallSessionContext::extensions`][crate::proxy::proxy_call::session_hooks::CallSessionContext::extensions].
+    /// Allows [`CallApp`]s to pass typed data to [`CallSessionHook`]s
+    /// (e.g. CSAT results → CDR).
+    pub session_extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions,
 
     /// Pending queue plan + resolved agent URIs, set by SipSession before
     /// starting the queue app. The queue app factory reads (and clears) this.
@@ -159,8 +144,7 @@ impl ApplicationContext {
             config,
             rwi_gateway: None,
             ivr_trace: None,
-            app_factories: Arc::new(Vec::new()),
-            post_call_hook: None,
+            session_extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions::new(),
             pending_queue: Arc::new(Mutex::new(None)),
         }
     }

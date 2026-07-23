@@ -128,11 +128,7 @@ impl MediaNegotiator {
 
     fn parse_rtpmap_attributes(
         section: &rustrtc::MediaSection,
-    ) -> (
-        HashMap<u8, CodecInfo>,
-        HashSet<u8>,
-        HashMap<u8, String>,
-    ) {
+    ) -> (HashMap<u8, CodecInfo>, HashSet<u8>, HashMap<u8, String>) {
         let mut codec_by_pt = HashMap::new();
         let mut unrecognized_pts = HashSet::new();
         let mut fmtp_by_pt = HashMap::new();
@@ -238,11 +234,9 @@ impl MediaNegotiator {
                 continue;
             }
 
-            let codec = codec_by_pt
-                .remove(&pt)
-                .or_else(|| {
-                    Self::static_codec_for_payload(section, pt, fmtp_by_pt.get(&pt).cloned())
-                });
+            let codec = codec_by_pt.remove(&pt).or_else(|| {
+                Self::static_codec_for_payload(section, pt, fmtp_by_pt.get(&pt).cloned())
+            });
             if let Some(codec) = codec {
                 ordered_codecs.push(codec);
             }
@@ -2384,8 +2378,7 @@ t=0 0\r\n\
 m=audio 10000 RTP/AVP 96\r\n\
 a=rtpmap:96 opus/48000/2\r\n";
 
-        let selected =
-            MediaNegotiator::build_codec_list_from_offer(caller_sdp, &[CodecType::Opus]);
+        let selected = MediaNegotiator::build_codec_list_from_offer(caller_sdp, &[CodecType::Opus]);
         let rewritten = MediaNegotiator::rewrite_sdp_codec_list(caller_sdp, &selected)
             .expect("rewrite must succeed");
 
@@ -2413,9 +2406,9 @@ a=rtpmap:0 PCMU/8000\r\n";
 
         assert!(rewritten.contains("a=rtpmap:101 telephone-event/8000"));
         assert!(rewritten.contains("a=rtpmap:102 telephone-event/48000"));
-        assert!(rewritten.contains(
-            "a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1\r\n"
-        ));
+        assert!(
+            rewritten.contains("a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1\r\n")
+        );
         assert!(rewritten.contains("a=fmtp:101 0-16\r\n"));
         assert!(rewritten.contains("a=fmtp:102 0-16\r\n"));
     }
@@ -2702,12 +2695,9 @@ a=rtpmap:0 PCMU/8000\r\n";
             a=ssrc:1234 cname:test\r\n\
             a=ssrc-group:FID 1234 5678\r\n";
 
-        let sanitized = MediaNegotiator::sanitize_sdp_for_rtp_peer(
-            SdpType::Offer,
-            sdp,
-            "test RTP offer",
-        )
-        .unwrap();
+        let sanitized =
+            MediaNegotiator::sanitize_sdp_for_rtp_peer(SdpType::Offer, sdp, "test RTP offer")
+                .unwrap();
 
         assert!(sanitized.contains("a=rtpmap:96 H264/90000\r\n"));
         assert!(sanitized.contains("a=fmtp:96 packetization-mode=1"));

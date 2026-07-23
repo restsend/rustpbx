@@ -168,10 +168,11 @@ async fn match_invite_impl(
         && let Some(trunk) = trunks.and_then(|trunks| trunks.get(&source.name))
         && (trunk.max_calls.is_some() || trunk.max_cps.is_some())
     {
-        if let Err(reason) = routing_state
-            .trunk_rate_limiter
-            .try_acquire(&source.name, trunk.max_calls, trunk.max_cps)
-        {
+        if let Err(reason) = routing_state.trunk_rate_limiter.try_acquire(
+            &source.name,
+            trunk.max_calls,
+            trunk.max_cps,
+        ) {
             let code = rsipstack::sip::StatusCode::from(reason.status_code());
             let phrase = reason.reason_phrase();
             info!(
@@ -415,8 +416,7 @@ async fn match_invite_impl(
                                 trunk_config.max_calls,
                                 trunk_config.max_cps,
                             ) {
-                                let code =
-                                    rsipstack::sip::StatusCode::from(reason.status_code());
+                                let code = rsipstack::sip::StatusCode::from(reason.status_code());
                                 let phrase = reason.reason_phrase();
                                 info!(
                                     trunk = %selected_trunk,
@@ -697,10 +697,7 @@ async fn release_holds(
 /// Release all accumulated per-trunk rate-limit slots. Used when a match
 /// aborts after acquiring a trunk slot (e.g. source trunk slot acquired, then
 /// a later routing-policy check rejected the call).
-fn release_trunk_holds(
-    routing_state: &Arc<RoutingState>,
-    holds: &mut Vec<String>,
-) {
+fn release_trunk_holds(routing_state: &Arc<RoutingState>, holds: &mut Vec<String>) {
     if holds.is_empty() {
         return;
     }
@@ -1419,10 +1416,7 @@ pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig)
     Ok(())
 }
 
-pub(crate) fn merge_trunk_media_hints(
-    hints: &mut Option<DialplanHints>,
-    trunk: &TrunkConfig,
-) {
+pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfig) {
     if trunk.codec.is_empty()
         && trunk.media_mode.is_none()
         && trunk.video_policy.is_none()

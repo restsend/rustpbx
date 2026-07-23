@@ -1,6 +1,6 @@
 use audio_codec::CodecType;
 use rustrtc::{
-    IceServer, IceTransportPolicy, TransportMode, RtcConfiguration, config::BufferDropStrategy,
+    IceServer, IceTransportPolicy, RtcConfiguration, TransportMode, config::BufferDropStrategy,
     config::VideoCapability,
 };
 use tokio_util::sync::CancellationToken;

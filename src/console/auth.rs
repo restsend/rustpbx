@@ -534,6 +534,7 @@ mod tests {
                 chart_js: None,
                 ..Default::default()
             },
+            None,
         )
         .await
         .expect("init console state")

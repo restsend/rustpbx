@@ -45,7 +45,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -146,7 +152,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -238,7 +250,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -341,7 +359,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -442,7 +466,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -530,7 +560,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -624,7 +660,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -717,7 +759,13 @@ mod tests {
             ..Default::default()
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(rtp_config)), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(rtp_config)),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -811,7 +859,13 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, ArcSwap::new(Arc::new(RtpConfig::default())), ArcSwap::new(Arc::new(MediaProxyMode::None)), true, None);
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,

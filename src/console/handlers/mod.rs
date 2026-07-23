@@ -126,7 +126,7 @@ pub mod test_helpers {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
+        ConsoleState::initialize(db, ConsoleConfig::default(), None)
             .await
             .expect("initialize console state")
     }

@@ -37,8 +37,8 @@ use helpers::audio_verifier::{
 };
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TestPbx, TestPbxInject};
-use rustpbx::call::domain::{CallCommand, LegId};
 use rustpbx::call::SipUser;
+use rustpbx::call::domain::{CallCommand, LegId};
 use rustpbx::config::{MediaProxyMode, ProxyConfig, UserBackendConfig};
 use rustpbx::proxy::active_call_registry::ActiveProxyCallStatus;
 use rustpbx::proxy::routing::RouteRule;
@@ -148,7 +148,13 @@ impl ToneWsServer {
             }
         });
 
-        Self { addr, connections, frames_received, last_samples, stop }
+        Self {
+            addr,
+            connections,
+            frames_received,
+            last_samples,
+            stop,
+        }
     }
 
     async fn connection_count(&self) -> u32 {
@@ -393,7 +399,11 @@ async fn test_bridge_sipbot_bidirectional_audio() {
 
     if record_path.exists() {
         let (rx_ch, _tx_ch, rec_sr) = read_wav_stereo(&record_path);
-        info!("alice recording: {} RX samples at {} Hz", rx_ch.len(), rec_sr);
+        info!(
+            "alice recording: {} RX samples at {} Hz",
+            rx_ch.len(),
+            rec_sr
+        );
         if !rx_ch.is_empty() {
             let start = find_signal_start(&rx_ch, 0.01, rec_sr as usize / 50);
             let region = extract_audio_region(&rx_ch, rec_sr, start, 1500);
@@ -575,7 +585,10 @@ file = "{}"
         }
         sleep(Duration::from_millis(100)).await;
     }
-    assert!(connected, "Bridge never connected to the WS server (IVR flow)");
+    assert!(
+        connected,
+        "Bridge never connected to the WS server (IVR flow)"
+    );
 
     sleep(Duration::from_secs(5)).await;
 

@@ -6,10 +6,10 @@ use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
 };
-use std::time::{Duration};
+use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info,  warn};
+use tracing::{debug, info, warn};
 
 pub async fn sip_ws_handler(
     token: CancellationToken,

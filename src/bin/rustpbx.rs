@@ -277,9 +277,7 @@ fn main() -> Result<()> {
 
     // ---- Handle one-shot commands before starting the server ----------------
     if let Some(Commands::Dump { database_url }) = &cli.command {
-        let url = database_url
-            .clone()
-            .unwrap_or(config.database_url.clone());
+        let url = database_url.clone().unwrap_or(config.database_url.clone());
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(dump_ddl(&url))?;
         return Ok(());
@@ -295,7 +293,10 @@ fn main() -> Result<()> {
     let sip_workers = config.proxy.sip_worker_threads.max(1);
     let media_workers = config.proxy.media_worker_threads.max(1);
 
-    println!("SIP workers={} Media workers={}", sip_workers, media_workers);
+    println!(
+        "SIP workers={} Media workers={}",
+        sip_workers, media_workers
+    );
 
     let media_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(media_workers)
@@ -683,14 +684,11 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
 
     let show_tables_sql = match backend {
         sea_orm::DbBackend::MySql => "SHOW TABLES".to_string(),
-        sea_orm::DbBackend::Sqlite => {
-            "SELECT name FROM sqlite_master WHERE type='table' \
+        sea_orm::DbBackend::Sqlite => "SELECT name FROM sqlite_master WHERE type='table' \
              AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_sqlx_%'"
-                .to_string()
-        }
+            .to_string(),
         sea_orm::DbBackend::Postgres => {
-            "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public'"
-                .to_string()
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public'".to_string()
         }
     };
 

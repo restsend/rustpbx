@@ -1404,8 +1404,5 @@ async fn test_srtp_track_creates_sdes_sdp() {
         !sdp.contains("a=fingerprint"),
         "SRTP track must not have DTLS fingerprint"
     );
-    assert!(
-        !sdp.contains("a=ice-ufrag"),
-        "SRTP track must not have ICE"
-    );
+    assert!(!sdp.contains("a=ice-ufrag"), "SRTP track must not have ICE");
 }

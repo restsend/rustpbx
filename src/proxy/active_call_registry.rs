@@ -61,15 +61,13 @@ impl ActiveProxyCallRegistry {
 
     pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: SipSessionHandle) {
         self.entries.insert(entry.session_id.clone(), entry);
-        self.handles
-            .insert(handle.session_id().to_string(), handle);
+        self.handles.insert(handle.session_id().to_string(), handle);
         self.notify_waiters();
     }
 
     pub fn register_dialog(&self, dialog_id: String, handle: SipSessionHandle) {
         let session_key = handle.session_id().to_string();
-        self.handles_by_dialog
-            .insert(dialog_id.clone(), handle);
+        self.handles_by_dialog.insert(dialog_id.clone(), handle);
         use dashmap::mapref::entry::Entry;
         match self.dialog_by_session.entry(session_key) {
             Entry::Occupied(mut e) => {
@@ -85,9 +83,7 @@ impl ActiveProxyCallRegistry {
         let handle = self.handles_by_dialog.remove(dialog_id);
         if let Some((_, handle)) = handle {
             let should_remove = {
-                let mut dialogs = self
-                    .dialog_by_session
-                    .get_mut(handle.session_id());
+                let mut dialogs = self.dialog_by_session.get_mut(handle.session_id());
                 match dialogs.as_mut() {
                     Some(d) => {
                         d.retain(|d| d != dialog_id);
@@ -103,9 +99,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
-        self.handles_by_dialog
-            .get(dialog_id)
-            .map(|e| e.clone())
+        self.handles_by_dialog.get(dialog_id).map(|e| e.clone())
     }
 
     pub fn update<F>(&self, session_id: &str, updater: F)
@@ -133,11 +127,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn list_recent(&self, limit: usize) -> Vec<ActiveProxyCallEntry> {
-        let mut entries: Vec<_> = self
-            .entries
-            .iter()
-            .map(|e| e.clone())
-            .collect();
+        let mut entries: Vec<_> = self.entries.iter().map(|e| e.clone()).collect();
         entries.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         if entries.len() > limit {
             entries.truncate(limit);

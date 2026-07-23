@@ -331,9 +331,7 @@ pub trait AgentRegistry: Send + Sync {
 
             // Can go to Idle from any non-active state
             (
-                PresenceState::Away(_)
-                | PresenceState::Wrapup { .. }
-                | PresenceState::Dnd,
+                PresenceState::Away(_) | PresenceState::Wrapup { .. } | PresenceState::Dnd,
                 PresenceState::Idle,
             ) => true,
 

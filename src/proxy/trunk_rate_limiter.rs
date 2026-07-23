@@ -184,7 +184,13 @@ mod tests {
         assert!(l.try_acquire("t", None, Some(2)).is_ok());
         assert!(l.try_acquire("t", None, Some(2)).is_ok());
         let err = l.try_acquire("t", None, Some(2)).unwrap_err();
-        assert_eq!(err, TrunkLimitReason::Cps { current: 2, limit: 2 });
+        assert_eq!(
+            err,
+            TrunkLimitReason::Cps {
+                current: 2,
+                limit: 2
+            }
+        );
         // CPS rejection must NOT acquire a concurrent slot.
         assert_eq!(l.concurrent_count("t"), 2);
     }
@@ -194,7 +200,13 @@ mod tests {
         let l = TrunkRateLimiter::new();
         assert!(l.try_acquire("t", Some(1), None).is_ok());
         let err = l.try_acquire("t", Some(1), None).unwrap_err();
-        assert_eq!(err, TrunkLimitReason::Concurrent { current: 1, limit: 1 });
+        assert_eq!(
+            err,
+            TrunkLimitReason::Concurrent {
+                current: 1,
+                limit: 1
+            }
+        );
     }
 
     #[test]
@@ -235,8 +247,22 @@ mod tests {
 
     #[test]
     fn status_code_mapping() {
-        assert_eq!(TrunkLimitReason::Concurrent { current: 5, limit: 5 }.status_code(), 486);
-        assert_eq!(TrunkLimitReason::Cps { current: 5, limit: 5 }.status_code(), 503);
+        assert_eq!(
+            TrunkLimitReason::Concurrent {
+                current: 5,
+                limit: 5
+            }
+            .status_code(),
+            486
+        );
+        assert_eq!(
+            TrunkLimitReason::Cps {
+                current: 5,
+                limit: 5
+            }
+            .status_code(),
+            503
+        );
     }
 
     #[test]

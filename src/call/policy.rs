@@ -139,7 +139,10 @@ impl PolicyGuard {
     /// Best-effort release of all concurrency slots held by a call. Called from
     /// the session cleanup path. Errors are logged and swallowed because a
     /// failed release must not abort call teardown.
-    pub async fn release_concurrency_holds(holds: &[ConcurrencyHold], limiter: &dyn FrequencyLimiter) {
+    pub async fn release_concurrency_holds(
+        holds: &[ConcurrencyHold],
+        limiter: &dyn FrequencyLimiter,
+    ) {
         for hold in holds {
             if let Err(e) = limiter
                 .release_concurrency(&hold.policy_id, &hold.scope, &hold.scope_value)
@@ -163,7 +166,14 @@ impl PolicyGuard {
     ) -> Result<PolicyCheckOutcome> {
         let mut holds: Vec<ConcurrencyHold> = Vec::new();
         let status = self
-            .check_policy_inner(policy_id, policy, caller, callee, origin_country, &mut holds)
+            .check_policy_inner(
+                policy_id,
+                policy,
+                caller,
+                callee,
+                origin_country,
+                &mut holds,
+            )
             .await?;
         // Only carry holds forward when the call was allowed. On rejection the
         // concurrency check returned false, so nothing was acquired.

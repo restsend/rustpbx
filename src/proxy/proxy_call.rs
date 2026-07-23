@@ -16,9 +16,9 @@ pub(crate) mod dtmf;
 pub(crate) mod leg_registry;
 pub(crate) mod media_peer;
 pub(crate) mod media_state;
-pub(crate) mod session_registry;
 pub(crate) mod reporter;
 pub(crate) mod session_hooks;
+pub(crate) mod session_registry;
 pub(crate) mod session_timer;
 pub(crate) mod sip_session;
 pub(crate) mod state;
@@ -140,8 +140,8 @@ impl CallSessionBuilder {
 
         #[cfg(feature = "addon-wholesale")]
         {
-            if let Some(ctx) = cookie
-                .get_extension::<crate::addons::wholesale::route::WholesaleBillingContext>()
+            if let Some(ctx) =
+                cookie.get_extension::<crate::addons::wholesale::route::WholesaleBillingContext>()
             {
                 dialplan.extensions.insert(ctx);
             }

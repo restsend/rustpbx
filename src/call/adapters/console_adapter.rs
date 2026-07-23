@@ -202,11 +202,9 @@ mod tests {
 
     #[test]
     fn test_hold_unhold_conversion() {
-        let hold = console_to_call_command(
-            CallCommandPayload::Hold { leg_id: None },
-            "session-123",
-        )
-        .unwrap();
+        let hold =
+            console_to_call_command(CallCommandPayload::Hold { leg_id: None }, "session-123")
+                .unwrap();
         if let CallCommand::Hold { leg_id, music } = hold {
             assert_eq!(leg_id.as_str(), "caller");
             assert!(music.is_none());
@@ -260,11 +258,14 @@ mod tests {
             panic!("Expected StartRecording command");
         }
 
-        let stop = console_to_call_command(CallCommandPayload::StopRecording, "session-123").unwrap();
+        let stop =
+            console_to_call_command(CallCommandPayload::StopRecording, "session-123").unwrap();
         assert!(matches!(stop, CallCommand::StopRecording));
-        let pause = console_to_call_command(CallCommandPayload::PauseRecording, "session-123").unwrap();
+        let pause =
+            console_to_call_command(CallCommandPayload::PauseRecording, "session-123").unwrap();
         assert!(matches!(pause, CallCommand::PauseRecording));
-        let resume = console_to_call_command(CallCommandPayload::ResumeRecording, "session-123").unwrap();
+        let resume =
+            console_to_call_command(CallCommandPayload::ResumeRecording, "session-123").unwrap();
         assert!(matches!(resume, CallCommand::ResumeRecording));
     }
 

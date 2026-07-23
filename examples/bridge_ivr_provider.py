@@ -284,6 +284,9 @@ def _write_frame(sock, opcode, payload, mask=False):
     sock.sendall(bytes(out))
 
 
+DTMF_SENT = threading.Event()
+
+
 def _echo_conn(sock, addr):
     try:
         sock.settimeout(15.0)
@@ -292,6 +295,7 @@ def _echo_conn(sock, addr):
         with ECHO_STATS.lock:
             ECHO_STATS.connections += 1
         print(f"[WS Echo] connection from {addr} (total {ECHO_STATS.connections})")
+        dtmf_received = False
         while True:
             frame = _read_frame(sock)
             if frame is None:
@@ -313,6 +317,28 @@ def _echo_conn(sock, addr):
                         ECHO_STATS.last_samples = list(
                             struct.unpack("<%dh" % (len(payload) // 2), payload)
                         )
+                if opcode == 0x1:  # text frame → DTMF JSON from caller
+                    try:
+                        data = json.loads(payload.decode("utf-8"))
+                        if isinstance(data, dict) and data.get("type") == "dtmf":
+                            digit = data.get("digit", "?")
+                            leg = data.get("leg_id", "?")
+                            print(f"[WS Echo] DTMF from {leg}: '{digit}' → {payload.decode('utf-8')}")
+                            if not dtmf_received:
+                                # Demonstrate outbound DTMF injection:
+                                # send {"type":"dtmf","digit":"5"} back to rustpbx
+                                outbound = json.dumps({"type": "dtmf", "digit": "5"}).encode("utf-8")
+                                _write_frame(sock, 0x1, outbound)
+                                print("[WS Echo] Sent outbound DTMF '5' to caller (demo)")
+                                dtmf_received = True
+                                DTMF_SENT.set()
+                            continue
+                        # Unknown JSON — still echo back as text for visibility
+                        _write_frame(sock, 0x1, payload)
+                        continue
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass
+                    # Non-JSON text falls through to binary echo below
                 # Echo back as a binary frame (PCM16 round-trip).
                 _write_frame(sock, 0x2, payload)
     except (OSError, struct.error):
@@ -504,6 +530,73 @@ def _ws_client_echo(url: str, samples: list) -> list:
             pass
 
 
+def _ws_client_send_dtmf(url: str, digit: str) -> tuple:
+    """Connect to the WS echo server, send a DTMF JSON text frame (as rustpbx
+    would), return (inbound_acked: bool, outbound_digit: str or None).
+
+    After sending an inbound DTMF JSON, the server should acknowledge it and
+    send back a demo outbound DTMF JSON.
+    """
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname
+    port = parts.port or 80
+    sock = socket.create_connection((host, port), timeout=5.0)
+    try:
+        sock.sendall(
+            (
+                f"GET {parts.path or '/'} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: aGVsbG8gd29ybGQgbm9uY2U==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii")
+        )
+        f = sock.makefile("rb", 0)
+        status = f.readline().decode("latin-1").strip()
+        if "101" not in status:
+            raise RuntimeError(f"WS handshake failed: {status}")
+        while True:
+            line = f.readline().decode("latin-1").strip()
+            if not line:
+                break
+        f.close()
+
+        # Send inbound DTMF JSON (simulating rustpbx forwarding caller DTMF)
+        payload = json.dumps({
+            "type": "dtmf",
+            "digit": digit,
+            "leg_id": "caller",
+        }).encode("utf-8")
+        _write_frame(sock, 0x1, payload, mask=True)
+
+        # Read response — expect first a text echo of our DTMF (ack)
+        # then possibly an outbound DTMF text frame
+        outbound_digit = None
+        for _ in range(3):
+            frame = _read_frame(sock)
+            if frame is None:
+                break
+            opcode, data = frame
+            if opcode == 0x1:  # text
+                try:
+                    msg = json.loads(data.decode("utf-8"))
+                    if isinstance(msg, dict) and msg.get("type") == "dtmf":
+                        outbound_digit = msg.get("digit")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+
+        return (True, outbound_digit)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def self_test(ivrr_port: int, ws_port: int):
     """Run provider + WS server in-process, drive the flow, print a trace."""
     print("=" * 72)
@@ -564,6 +657,15 @@ def self_test(ivrr_port: int, ws_port: int):
     print(f"[trace] WS echo: sent {len(samples)} samples, got {len(echoed)} "
           f"({'OK' if echoed == samples else 'MISMATCH'})")
 
+    # 5. DTMF round-trip: send DTMF JSON text frame, verify echo + outbound demo
+    acked, outbound_digit = _ws_client_send_dtmf(f"ws://127.0.0.1:{ws_port}", "1")
+    if not acked:
+        failures.append("DTMF JSON text frame not acknowledged by WS echo server")
+    if outbound_digit != "5":
+        failures.append(f"Expected outbound DTMF '5', got {outbound_digit!r}")
+    print(f"[trace] DTMF JSON: acked={acked} outbound={outbound_digit!r} "
+          f"({'OK' if acked and outbound_digit == '5' else 'FAIL'})")
+
     time.sleep(0.2)
     snap = ECHO_STATS.snapshot()
     print(f"[trace] WS stats: {snap['connections']} conn(s), "
@@ -588,6 +690,8 @@ def self_test(ivrr_port: int, ws_port: int):
     print("-" * 72)
     print("WS ECHO  sent=%d  echoed=%d  match=%s"
           % (len(samples), len(echoed), echoed == samples))
+    print("DTMF JSON acked=%s outbound=%s"
+          % (acked, outbound_digit))
     print("WS STATS conn=%d frames=%d bytes=%d"
           % (snap["connections"], snap["frames_received"], snap["bytes_received"]))
     print("-" * 72)
@@ -658,6 +762,37 @@ class TestWsFrames(unittest.TestCase):
         self.assertEqual(s.buf[0], 0x82)  # FIN + binary
         self.assertEqual(s.buf[1], 4)
         self.assertEqual(bytes(s.buf[2:]), b"\x01\x00\x02\x00")
+
+    def test_write_frame_text(self):
+        import io
+
+        class FakeSock:
+            def __init__(self):
+                self.buf = bytearray()
+
+            def sendall(self, b):
+                self.buf.extend(b)
+
+        s = FakeSock()
+        _write_frame(s, 0x1, b'{"type":"dtmf","digit":"1"}')
+        self.assertEqual(s.buf[0], 0x81)  # FIN + text
+        self.assertEqual(s.buf[1], 27)  # payload length
+
+    def test_write_frame_masked(self):
+        import io
+
+        class FakeSock:
+            def __init__(self):
+                self.buf = bytearray()
+
+            def sendall(self, b):
+                self.buf.extend(b)
+
+        s = FakeSock()
+        payload = b'{"type":"dtmf","digit":"5"}'
+        _write_frame(s, 0x1, payload, mask=True)
+        self.assertEqual(s.buf[0], 0x81)  # FIN + text
+        self.assertGreaterEqual(s.buf[1] & 0x80, 0x80)  # mask bit set
 
 
 def main():

@@ -43,14 +43,8 @@ impl MigrationTrait for Migration {
                     .col(string_len(Column::EntryName, 255))
                     .col(text(Column::Content))
                     .col(boolean(Column::IsGenerated).default(true))
-                    .col(
-                        timestamp(Column::CreatedAt)
-                            .default(Expr::current_timestamp()),
-                    )
-                    .col(
-                        timestamp(Column::UpdatedAt)
-                            .default(Expr::current_timestamp()),
-                    )
+                    .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
+                    .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .to_owned(),
             )
             .await?;

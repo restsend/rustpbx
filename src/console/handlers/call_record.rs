@@ -729,8 +729,12 @@ async fn query_call_records(
     AuthRequired(_): AuthRequired,
     Json(payload): Json<forms::ListQuery<QueryCallRecordFilters>>,
 ) -> Response {
-    let db = state.db();
     let filters = payload.filters.clone();
+    // Determine CDR date from filter date_from (fallback to today).
+    let cdr_date = filters.as_ref().and_then(|f| f.date_from.as_deref());
+    let cdb = state.cdr_db(cdr_date).await;
+
+    let rdb = state.db();
     let condition = build_condition(&filters);
 
     let mut selector = CallRecordEntity::find().filter(condition.clone());
@@ -752,7 +756,7 @@ async fn query_call_records(
     }
     selector = selector.order_by(CallRecordColumn::Id, Order::Desc);
 
-    let paginator = selector.paginate(db, payload.normalize().1);
+    let paginator = selector.paginate(&cdb, payload.normalize().1);
     let pagination = match forms::paginate(paginator, &payload).await {
         Ok(pagination) => pagination,
         Err(err) => {
@@ -765,7 +769,7 @@ async fn query_call_records(
         }
     };
 
-    let related = match load_related_context(db, &pagination.items).await {
+    let related = match load_related_context(&rdb, &pagination.items).await {
         Ok(related) => related,
         Err(err) => {
             warn!("failed to load related data for call records: {}", err);
@@ -805,7 +809,7 @@ async fn query_call_records(
         .map(|(record, inline)| build_record_payload(record, &related, &state, inline.as_deref()))
         .collect();
 
-    let summary = match build_summary(db, condition).await {
+    let summary = match build_summary(&cdb, condition).await {
         Ok(summary) => summary,
         Err(err) => {
             warn!("failed to build call record summary: {}", err);
@@ -1117,7 +1121,8 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
 
         let outbound_sip_trunk_ids = normalize_i64_list(filters.outbound_sip_trunk_ids.as_ref());
         if !outbound_sip_trunk_ids.is_empty() {
-            condition = condition.add(CallRecordColumn::OutboundSipTrunkId.is_in(outbound_sip_trunk_ids));
+            condition =
+                condition.add(CallRecordColumn::OutboundSipTrunkId.is_in(outbound_sip_trunk_ids));
         }
 
         let tags = normalize_string_list(filters.tags.as_ref());
@@ -1296,7 +1301,7 @@ fn build_record_payload(
         .and_then(|id| related.sip_trunks.get(&id))
         .map(|trunk| trunk.display_name.clone().unwrap_or(trunk.name.clone()))
         .or_else(|| metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_NAME_KEY));
-        
+
     let outbound_trunk_dest = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_DEST_KEY);
 
     let caller_uri = record.caller_uri.clone();
@@ -1850,21 +1855,9 @@ mod tests {
     }
 
     async fn create_console_state(db: DatabaseConnection) -> Arc<ConsoleState> {
-        ConsoleState::initialize(
-            db,
-            ConsoleConfig {
-                session_secret: "secret".into(),
-                base_path: "/console".into(),
-                allow_registration: false,
-                secure_cookie: false,
-                alpine_js: None,
-                tailwind_js: None,
-                chart_js: None,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("console state")
+        ConsoleState::initialize(db, ConsoleConfig::default(), None)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

@@ -127,7 +127,10 @@ pub struct MigrationAddInstanceId;
 #[async_trait::async_trait]
 impl MigrationTrait for MigrationAddInstanceId {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if !manager.has_column("rustpbx_locations", "instance_id").await? {
+        if !manager
+            .has_column("rustpbx_locations", "instance_id")
+            .await?
+        {
             manager
                 .alter_table(
                     Table::alter()
@@ -156,7 +159,10 @@ impl MigrationTrait for MigrationAddInstanceId {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if manager.has_column("rustpbx_locations", "instance_id").await? {
+        if manager
+            .has_column("rustpbx_locations", "instance_id")
+            .await?
+        {
             manager
                 .alter_table(
                     Table::alter()
@@ -409,7 +415,9 @@ impl Locator for DbLocator {
                 .filter(Column::Aor.ne(&aor))
                 .one(&self.db)
                 .await
-                .map_err(|e| anyhow::anyhow!("Database error on register instance_id lookup: {}", e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Database error on register instance_id lookup: {}", e)
+                })?;
 
             if let Some(old_model) = old {
                 let now_epoch = now_epoch_secs();
@@ -418,10 +426,9 @@ impl Locator for DbLocator {
                     active_model.destination = Set(host.clone());
                     active_model.transport = Set(transport.to_string());
                     active_model.updated_at = Set(chrono::Utc::now());
-                    active_model
-                        .update(&self.db)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Database error on register instance_id update: {}", e))?;
+                    active_model.update(&self.db).await.map_err(|e| {
+                        anyhow::anyhow!("Database error on register instance_id update: {}", e)
+                    })?;
                 }
             }
         }
@@ -870,15 +877,11 @@ mod tests {
 
         // Lookup with the same Contact as the INVITE (has ";ob" — exact AoR miss,
         // and user part "qn27nogk" ≠ stored username "xwork_5g_test").
-        let lookup_uri: rsipstack::sip::Uri =
-            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob"
-                .try_into()
-                .expect("valid lookup uri");
+        let lookup_uri: rsipstack::sip::Uri = "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob"
+            .try_into()
+            .expect("valid lookup uri");
 
-        let locations = locator
-            .lookup(&lookup_uri)
-            .await
-            .expect("lookup location");
+        let locations = locator.lookup(&lookup_uri).await.expect("lookup location");
 
         assert_eq!(
             locations.len(),
@@ -902,17 +905,17 @@ mod tests {
         )
         .await;
 
-        let lookup_uri: rsipstack::sip::Uri =
-            "sip:abc123@xyz.invalid;transport=ws;ob"
-                .try_into()
-                .expect("valid lookup uri");
+        let lookup_uri: rsipstack::sip::Uri = "sip:abc123@xyz.invalid;transport=ws;ob"
+            .try_into()
+            .expect("valid lookup uri");
 
-        let locations = locator
-            .lookup(&lookup_uri)
-            .await
-            .expect("lookup location");
+        let locations = locator.lookup(&lookup_uri).await.expect("lookup location");
 
-        assert_eq!(locations.len(), 1, ";ob param should not break AoR pattern match");
+        assert_eq!(
+            locations.len(),
+            1,
+            ";ob param should not break AoR pattern match"
+        );
     }
 
     /// The original Username-based fallback must still work for .invalid hosts
@@ -929,19 +932,19 @@ mod tests {
         // Lookup with a *different* contact user part that does NOT match any AoR
         // pattern, but shares the same .invalid host. Username fallback should kick in.
         // (In practice this is rare — both paths exist for defence-in-depth.)
-        let lookup_uri: rsipstack::sip::Uri =
-            "sip:agent42@different.invalid;transport=ws"
-                .try_into()
-                .expect("valid lookup uri");
+        let lookup_uri: rsipstack::sip::Uri = "sip:agent42@different.invalid;transport=ws"
+            .try_into()
+            .expect("valid lookup uri");
 
-        let locations = locator
-            .lookup(&lookup_uri)
-            .await
-            .expect("lookup location");
+        let locations = locator.lookup(&lookup_uri).await.expect("lookup location");
 
         // The host is different so AoR LIKE won't match, but the general
         // username/realm fallback (line 558+) should find it.
-        assert_eq!(locations.len(), 1, "username/realm fallback should still work");
+        assert_eq!(
+            locations.len(),
+            1,
+            "username/realm fallback should still work"
+        );
     }
 
     /// Negative test: a completely unrelated .invalid URI must return empty.
@@ -954,15 +957,11 @@ mod tests {
         )
         .await;
 
-        let lookup_uri: rsipstack::sip::Uri =
-            "sip:nobody@noreg.invalid;transport=ws"
-                .try_into()
-                .expect("valid lookup uri");
+        let lookup_uri: rsipstack::sip::Uri = "sip:nobody@noreg.invalid;transport=ws"
+            .try_into()
+            .expect("valid lookup uri");
 
-        let locations = locator
-            .lookup(&lookup_uri)
-            .await
-            .expect("lookup location");
+        let locations = locator.lookup(&lookup_uri).await.expect("lookup location");
 
         assert!(
             locations.is_empty(),
@@ -983,10 +982,9 @@ mod tests {
         let instance_id = "urn:uuid:b8c9e0d0-1234-5678-9abc-def012345678".to_string();
 
         // First registration: old AoR + old destination
-        let old_aor: rsipstack::sip::Uri =
-            "sip:olduser@oldhost.invalid;transport=ws"
-                .try_into()
-                .expect("valid old aor");
+        let old_aor: rsipstack::sip::Uri = "sip:olduser@oldhost.invalid;transport=ws"
+            .try_into()
+            .expect("valid old aor");
         let old_dest = SipAddr {
             r#type: Some(Transport::Wss),
             addr: "192.168.1.100:443"
@@ -1008,15 +1006,12 @@ mod tests {
             .expect("first register should succeed");
 
         // Second registration: new AoR (different user@host) but same instance_id
-        let new_aor: rsipstack::sip::Uri =
-            "sip:newuser@newhost.invalid;transport=ws"
-                .try_into()
-                .expect("valid new aor");
+        let new_aor: rsipstack::sip::Uri = "sip:newuser@newhost.invalid;transport=ws"
+            .try_into()
+            .expect("valid new aor");
         let new_dest = SipAddr {
             r#type: Some(Transport::Wss),
-            addr: "10.0.0.1:8443"
-                .try_into()
-                .expect("valid new destination"),
+            addr: "10.0.0.1:8443".try_into().expect("valid new destination"),
         };
         let new_location = Location {
             aor: new_aor.clone(),
@@ -1038,9 +1033,16 @@ mod tests {
             .lookup(&old_aor)
             .await
             .expect("lookup with old aor should succeed");
-        assert_eq!(locations.len(), 1, "old AoR must still resolve to a location");
         assert_eq!(
-            locations[0].destination.as_ref().map(|d| d.addr.to_string()),
+            locations.len(),
+            1,
+            "old AoR must still resolve to a location"
+        );
+        assert_eq!(
+            locations[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "old location's destination must be updated to new WebSocket address"
         );
@@ -1052,7 +1054,10 @@ mod tests {
             .expect("lookup with new aor should succeed");
         assert_eq!(locations_new.len(), 1, "new AoR must resolve");
         assert_eq!(
-            locations_new[0].destination.as_ref().map(|d| d.addr.to_string()),
+            locations_new[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "new location has correct destination"
         );

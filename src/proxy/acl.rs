@@ -2,11 +2,7 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{TransactionCookie, TrunkContext};
 use crate::{
     config::ProxyConfig,
-    proxy::{
-        routing::{
-            extract_from_user, extract_to_user, extract_trusted_ip, parse_trusted_proxy,
-        },
-    },
+    proxy::routing::{extract_from_user, extract_to_user, extract_trusted_ip, parse_trusted_proxy},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -284,10 +280,8 @@ impl AclModule {
                     continue;
                 };
                 if let Some((from_user, to_user)) = &invite_users
-                    && !trunk.matches_incoming_user_prefixes(
-                        from_user.as_deref(),
-                        to_user.as_deref(),
-                    )
+                    && !trunk
+                        .matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
                 {
                     continue;
                 }
@@ -453,7 +447,8 @@ impl ProxyModule for AclModule {
         }
 
         // 4. IP ACL check (allow/deny with trunk bypass)
-        let from_addr = self.extract_ip(tx)
+        let from_addr = self
+            .extract_ip(tx)
             .ok_or_else(|| anyhow::anyhow!("missing transport source address"))?;
         if let Some(ctx) = self.is_from_trunk_context(&from_addr, &tx.original) {
             debug!(
@@ -513,9 +508,7 @@ fn parse_rules(rules: Vec<String>) -> Vec<AclRule> {
 mod tests {
     use super::*;
     use crate::proxy::routing::{TrunkConfig, TrunkDirection};
-    use crate::proxy::tests::common::{
-        create_test_request, create_test_server_with_config,
-    };
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn create_test_config(rules: Vec<String>) -> Arc<ProxyConfig> {
@@ -714,9 +707,10 @@ mod tests {
             "rustpbx.com",
             None,
         );
-        assert!(acl
-            .is_from_trunk_context(&source_ip, &unmatched_request)
-            .is_none());
+        assert!(
+            acl.is_from_trunk_context(&source_ip, &unmatched_request)
+                .is_none()
+        );
 
         let cidr_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 25));
         assert_eq!(

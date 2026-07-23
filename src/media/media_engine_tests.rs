@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod media_engine_tests {
-use std::sync::Arc;
-use crate::media::LegId;
-use crate::media::media_stream::TrackMap;
-use crate::media::mixer::AudioMixer;
-use crate::media::engine::MediaCommand;
-use crate::media::engine::event::MediaEvent;
+    use crate::media::LegId;
+    use crate::media::engine::MediaCommand;
+    use crate::media::engine::event::MediaEvent;
+    use crate::media::media_stream::TrackMap;
+    use crate::media::mixer::AudioMixer;
+    use std::sync::Arc;
 
     // ── LegId ────────────────────────────────────────────────────────────
 
@@ -192,8 +192,20 @@ use crate::media::engine::event::MediaEvent;
 
     #[test]
     fn test_media_command_name() {
-        assert_eq!(MediaCommand::CreateSession { session_id: "x".into() }.name(), "create_session");
-        assert_eq!(MediaCommand::DestroySession { session_id: "x".into() }.name(), "destroy_session");
+        assert_eq!(
+            MediaCommand::CreateSession {
+                session_id: "x".into()
+            }
+            .name(),
+            "create_session"
+        );
+        assert_eq!(
+            MediaCommand::DestroySession {
+                session_id: "x".into()
+            }
+            .name(),
+            "destroy_session"
+        );
         assert_eq!(
             MediaCommand::Play {
                 session_id: "x".into(),
@@ -204,10 +216,40 @@ use crate::media::engine::event::MediaEvent;
             .name(),
             "play"
         );
-        assert_eq!(MediaCommand::BridgeLegs { session_id: "x".into(), leg_a: "a".into(), leg_b: "b".into() }.name(), "bridge_legs");
-        assert_eq!(MediaCommand::SendDtmf { session_id: "x".into(), leg_id: "a".into(), digits: "".into() }.name(), "send_dtmf");
-        assert_eq!(MediaCommand::MuteLeg { session_id: "x".into(), leg_id: "a".into() }.name(), "mute_leg");
-        assert_eq!(MediaCommand::UnmuteLeg { session_id: "x".into(), leg_id: "a".into() }.name(), "unmute_leg");
+        assert_eq!(
+            MediaCommand::BridgeLegs {
+                session_id: "x".into(),
+                leg_a: "a".into(),
+                leg_b: "b".into()
+            }
+            .name(),
+            "bridge_legs"
+        );
+        assert_eq!(
+            MediaCommand::SendDtmf {
+                session_id: "x".into(),
+                leg_id: "a".into(),
+                digits: "".into()
+            }
+            .name(),
+            "send_dtmf"
+        );
+        assert_eq!(
+            MediaCommand::MuteLeg {
+                session_id: "x".into(),
+                leg_id: "a".into()
+            }
+            .name(),
+            "mute_leg"
+        );
+        assert_eq!(
+            MediaCommand::UnmuteLeg {
+                session_id: "x".into(),
+                leg_id: "a".into()
+            }
+            .name(),
+            "unmute_leg"
+        );
     }
 
     // ── DashMap / TrackMap ──────────────────────────────────────────────
@@ -226,18 +268,33 @@ use crate::media::engine::event::MediaEvent;
         struct DummyTrack(String);
         #[async_trait::async_trait]
         impl crate::media::Track for DummyTrack {
-            fn id(&self) -> &str { &self.0 }
-            async fn handshake(&self, _: String) -> anyhow::Result<String> { Ok("".into()) }
-            async fn local_description(&self) -> anyhow::Result<String> { Ok("".into()) }
-            async fn set_remote_description(&self, _: &str) -> anyhow::Result<()> { Ok(()) }
+            fn id(&self) -> &str {
+                &self.0
+            }
+            async fn handshake(&self, _: String) -> anyhow::Result<String> {
+                Ok("".into())
+            }
+            async fn local_description(&self) -> anyhow::Result<String> {
+                Ok("".into())
+            }
+            async fn set_remote_description(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
             async fn stop(&self) {}
-            async fn get_peer_connection(&self) -> Option<rustrtc::PeerConnection> { None }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+            async fn get_peer_connection(&self) -> Option<rustrtc::PeerConnection> {
+                None
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
         }
 
-        map.insert("key".into(), std::sync::Arc::new(tokio::sync::Mutex::new(
-            Box::new(DummyTrack("key".into())) as Box<dyn crate::media::Track>
-        )));
+        map.insert(
+            "key".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                Box::new(DummyTrack("key".into())) as Box<dyn crate::media::Track>
+            )),
+        );
         assert_eq!(map.len(), 1);
         map.remove("key");
         assert!(map.is_empty());
@@ -268,7 +325,10 @@ use crate::media::engine::event::MediaEvent;
     }
 
     /// Helper: create a running MediaEngine for benchmarks.
-    fn bench_engine() -> (crate::media::engine::MediaEngine, tokio::sync::broadcast::Receiver<MediaEvent>) {
+    fn bench_engine() -> (
+        crate::media::engine::MediaEngine,
+        tokio::sync::broadcast::Receiver<MediaEvent>,
+    ) {
         use crate::media::engine::{MediaEngine, MediaEngineConfig};
         let (engine, handle) = MediaEngine::new(MediaEngineConfig {
             command_channel_capacity: 8192,
@@ -335,7 +395,9 @@ use crate::media::engine::event::MediaEvent;
         for i in 0..n {
             let sid = format!("bench-lc-{}", i);
             engine
-                .send(MediaCommand::CreateSession { session_id: sid.clone() })
+                .send(MediaCommand::CreateSession {
+                    session_id: sid.clone(),
+                })
                 .unwrap();
             let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
             engine
@@ -360,7 +422,7 @@ use crate::media::engine::event::MediaEvent;
         let n = 100_000usize;
         let start = std::time::Instant::now();
         for i in 0..n {
-            let payload = &[b'1', 10, 0, 0];    // digit=1, end=no, volume=10, duration=0
+            let payload = &[b'1', 10, 0, 0]; // digit=1, end=no, volume=10, duration=0
             let _ = detector.observe(payload, i as u32);
         }
         let elapsed = start.elapsed();

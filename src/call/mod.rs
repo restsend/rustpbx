@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use audio_codec::CodecType;
+use parking_lot::Mutex;
 use rsipstack::sip::{StatusCode, Transport};
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
@@ -12,7 +13,6 @@ use rsipstack::{
 };
 use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -257,7 +257,9 @@ impl Location {
             return true;
         }
         if let Some(last_modified) = self.last_modified {
-            let ttl = std::time::Duration::from_secs(self.expires as u64 + LOCATOR_EXPIRE_GRACE_SECS as u64);
+            let ttl = std::time::Duration::from_secs(
+                self.expires as u64 + LOCATOR_EXPIRE_GRACE_SECS as u64,
+            );
             return now.duration_since(last_modified) >= ttl;
         }
         false
@@ -304,8 +306,7 @@ impl TransferEndpoint {
         ];
 
         for (prefix, ctor) in prefixes {
-            if trimmed.len() >= prefix.len()
-                && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+            if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
             {
                 let name = trimmed[prefix.len()..].trim();
                 if name.is_empty() {
@@ -1300,9 +1301,7 @@ impl RoutingState {
         Self {
             round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
             policy_guard: None,
-            trunk_rate_limiter: Arc::new(
-                crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
-            ),
+            trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
         }
     }
 

@@ -124,9 +124,7 @@ pub async fn create_test_server_with_config(
             let _ = engine.spawn(handle);
             engine
         },
-        trunk_rate_limiter: Arc::new(
-            crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
-        ),
+        trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
     });
     // Add test users
     let enabled_user = SipUser {

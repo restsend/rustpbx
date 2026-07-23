@@ -1,16 +1,16 @@
 use super::locator_db::DbLocator;
 use crate::{
-    call::{Location, LOCATOR_EXPIRE_GRACE_SECS},
+    call::{LOCATOR_EXPIRE_GRACE_SECS, Location},
     config::{LocatorConfig, ProxyConfig},
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use dashmap::DashMap;
+use parking_lot::Mutex;
 use rsipstack::{
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
 };
-use dashmap::DashMap;
-use parking_lot::Mutex;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -925,8 +925,9 @@ mod tests {
 
     #[test]
     fn test_invalid_host_fallback_extracts_params() {
-        let uri: rsipstack::sip::Uri =
-            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob".try_into().unwrap();
+        let uri: rsipstack::sip::Uri = "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws;ob"
+            .try_into()
+            .unwrap();
         let fb = invalid_host_fallback(&uri).expect("should produce fallback");
         assert_eq!(fb.user, "qn27nogk");
         assert_eq!(fb.host, "2kbkhn3beiif.invalid");
@@ -960,18 +961,21 @@ mod tests {
             host: "2kbkhn3beiif.invalid".into(),
         };
         // Same user+host, different params → match
-        let aor: rsipstack::sip::Uri =
-            "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws".try_into().unwrap();
+        let aor: rsipstack::sip::Uri = "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         assert!(fb.matches_aor(&aor));
 
         // Different user → no match
-        let aor2: rsipstack::sip::Uri =
-            "sip:other@2kbkhn3beiif.invalid;transport=ws".try_into().unwrap();
+        let aor2: rsipstack::sip::Uri = "sip:other@2kbkhn3beiif.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         assert!(!fb.matches_aor(&aor2));
 
         // Different host → no match
-        let aor3: rsipstack::sip::Uri =
-            "sip:qn27nogk@other.invalid;transport=ws".try_into().unwrap();
+        let aor3: rsipstack::sip::Uri = "sip:qn27nogk@other.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         assert!(!fb.matches_aor(&aor3));
     }
 
@@ -1573,8 +1577,9 @@ mod tests {
         let instance_id = "urn:uuid:b8c9e0d0-1234-5678-9abc-def012345678".to_string();
 
         // First registration: old AoR + old destination
-        let old_aor: rsipstack::sip::Uri =
-            "sip:olduser@oldhost.invalid;transport=ws".try_into().unwrap();
+        let old_aor: rsipstack::sip::Uri = "sip:olduser@oldhost.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         let old_dest = SipAddr {
             r#type: Some(Transport::Wss),
             addr: HostWithPort::try_from("192.168.1.100:443").unwrap(),
@@ -1597,8 +1602,9 @@ mod tests {
             .unwrap();
 
         // Second registration: new AoR (different user@host) but same instance_id
-        let new_aor: rsipstack::sip::Uri =
-            "sip:newuser@newhost.invalid;transport=ws".try_into().unwrap();
+        let new_aor: rsipstack::sip::Uri = "sip:newuser@newhost.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         let new_dest = SipAddr {
             r#type: Some(Transport::Wss),
             addr: HostWithPort::try_from("10.0.0.1:8443").unwrap(),
@@ -1624,7 +1630,10 @@ mod tests {
         let locations = locator.lookup(&old_aor).await.unwrap();
         assert_eq!(locations.len(), 1, "old AoR must still resolve");
         assert_eq!(
-            locations[0].destination.as_ref().map(|d| d.addr.to_string()),
+            locations[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "old location's destination must be updated to new WS address"
         );
@@ -1633,7 +1642,10 @@ mod tests {
         let locations_new = locator.lookup(&new_aor).await.unwrap();
         assert_eq!(locations_new.len(), 1, "new AoR must resolve");
         assert_eq!(
-            locations_new[0].destination.as_ref().map(|d| d.addr.to_string()),
+            locations_new[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "new location has correct destination"
         );
@@ -1644,8 +1656,9 @@ mod tests {
         let locator = MemoryLocator::new();
         let instance_id = "urn:uuid:expired".to_string();
 
-        let old_aor: rsipstack::sip::Uri =
-            "sip:olduser@oldhost.invalid;transport=ws".try_into().unwrap();
+        let old_aor: rsipstack::sip::Uri = "sip:olduser@oldhost.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         let old_dest = SipAddr {
             r#type: Some(Transport::Wss),
             addr: HostWithPort::try_from("192.168.1.100:443").unwrap(),
@@ -1667,8 +1680,9 @@ mod tests {
             .await
             .unwrap();
 
-        let new_aor: rsipstack::sip::Uri =
-            "sip:newuser@newhost.invalid;transport=ws".try_into().unwrap();
+        let new_aor: rsipstack::sip::Uri = "sip:newuser@newhost.invalid;transport=ws"
+            .try_into()
+            .unwrap();
         let new_dest = SipAddr {
             r#type: Some(Transport::Wss),
             addr: HostWithPort::try_from("10.0.0.1:8443").unwrap(),
@@ -1692,9 +1706,6 @@ mod tests {
 
         // Old entry should have been removed (expired or overwritten) — no match
         let locations = locator.lookup(&old_aor).await.unwrap();
-        assert!(
-            locations.is_empty(),
-            "expired old AoR should not be found"
-        );
+        assert!(locations.is_empty(), "expired old AoR should not be found");
     }
 }

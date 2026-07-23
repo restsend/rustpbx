@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use audio_codec::create_encoder;
 use rustrtc::{
-    Attribute, MediaKind, PeerConnection, RtcConfiguration, config::BufferDropStrategy,
-    RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
+    Attribute, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
+    SessionDescription, TransceiverDirection, TransportMode,
+    config::BufferDropStrategy,
     media::{AudioFrame, MediaSample},
 };
 use std::collections::HashSet;

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use sea_orm::DatabaseConnection;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
@@ -34,26 +35,7 @@ impl SipFlowUploadHook {
         db: Option<DatabaseConnection>,
         rwi_gateway: Option<RwiGatewayRef>,
     ) -> Result<Self> {
-        let s3_storage = match &upload_config {
-            SipFlowUploadConfig::S3 {
-                vendor,
-                bucket,
-                region,
-                access_key,
-                secret_key,
-                endpoint,
-                ..
-            } => Some(Storage::new(&StorageConfig::S3 {
-                vendor: vendor.clone(),
-                bucket: bucket.clone(),
-                region: region.clone(),
-                access_key: access_key.clone(),
-                secret_key: secret_key.clone(),
-                endpoint: Some(endpoint.clone()),
-                prefix: None,
-            })?),
-            SipFlowUploadConfig::Http { .. } => None,
-        };
+        let s3_storage = build_s3_storage(&upload_config)?;
 
         Ok(Self {
             backend,
@@ -134,6 +116,13 @@ async fn do_upload(
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
 
+    let root = match upload_config {
+        SipFlowUploadConfig::S3 { root, .. } => root.as_str(),
+        SipFlowUploadConfig::Http { .. } => "",
+    };
+    let full_media_key = join_root(root, media_key);
+    let full_signaling_key = join_root(root, signaling_key);
+
     let media_enabled = !skip_media
         && match upload_config {
             SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
@@ -154,7 +143,7 @@ async fn do_upload(
             call_id,
             start,
             end,
-            media_key,
+            &full_media_key,
             db,
             duration_secs,
             client,
@@ -179,7 +168,7 @@ async fn do_upload(
             call_id,
             start,
             end,
-            signaling_key,
+            &full_signaling_key,
             signaling_file_name,
             client,
             s3_storage,
@@ -234,13 +223,13 @@ async fn do_upload(
 
 #[allow(clippy::too_many_arguments)]
 /// Returns the upload URL and file size on success, None otherwise.
-async fn upload_media(
+pub async fn upload_media(
     backend: &dyn SipFlowBackend,
     upload_config: &SipFlowUploadConfig,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
-    media_key: &str,
+    full_media_key: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
     client: &reqwest::Client,
@@ -270,16 +259,8 @@ async fn upload_media(
 
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
-            bucket,
-            endpoint,
-            root,
-            ..
+            bucket, endpoint, ..
         } => {
-            let full_key = if root.is_empty() {
-                media_key.to_string()
-            } else {
-                format!("{}/{}", root.trim_end_matches('/'), media_key)
-            };
             let wav_bytes = match tokio::fs::read(&temp_path).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -290,9 +271,9 @@ async fn upload_media(
             let Some(storage) = s3_storage else {
                 return None;
             };
-            upload_s3(storage, &full_key, wav_bytes)
+            upload_s3(storage, full_media_key, wav_bytes)
                 .await
-                .map(|_| sipflow_s3_url(endpoint, bucket, &full_key))
+                .map(|_| sipflow_s3_url(endpoint, bucket, full_media_key))
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
             upload_http_file(client, url, headers.as_ref(), call_id, &temp_path).await
@@ -332,44 +313,40 @@ async fn upload_media(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn upload_signaling_flow(
+/// Returns true if signaling was successfully uploaded, false otherwise.
+pub async fn upload_signaling_flow(
     upload_config: &SipFlowUploadConfig,
     backend: &dyn SipFlowBackend,
     call_id: &str,
     start: DateTime<Local>,
     end: DateTime<Local>,
-    signaling_key: &str,
+    full_signaling_key: &str,
     signaling_file_name: &str,
     client: &reqwest::Client,
     s3_storage: Option<&Storage>,
-) {
+) -> bool {
     let flow_items = match backend.query_flow(call_id, start, end).await {
         Ok(items) => items,
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: query_flow failed: {e}");
-            return;
+            return false;
         }
     };
 
     if flow_items.is_empty() {
-        return;
+        return false;
     }
 
     let jsonl = crate::sipflow::SipFlowQuery::export_jsonl(&flow_items);
     let data = jsonl.into_bytes();
 
     let result = match upload_config {
-        SipFlowUploadConfig::S3 { root, .. } => {
-            let full_key = if root.is_empty() {
-                signaling_key.to_string()
-            } else {
-                format!("{}/{}", root.trim_end_matches('/'), signaling_key)
-            };
+        SipFlowUploadConfig::S3 { .. } => {
             let Some(storage) = s3_storage else {
                 warn!(call_id, "SipFlowUploadHook: S3 storage is not initialized");
-                return;
+                return false;
             };
-            upload_s3(storage, &full_key, data).await
+            upload_s3(storage, full_signaling_key, data).await
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
             upload_http_jsonl(client, url, headers.as_ref(), signaling_file_name, data).await
@@ -379,11 +356,69 @@ async fn upload_signaling_flow(
     match result {
         Ok(_) => {
             info!(call_id, "SipFlowUploadHook: signaling uploaded");
+            true
         }
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: signaling upload failed: {e}");
+            false
         }
     }
+}
+
+// ── Shared helpers (used by bin and hook) ─────────────────────────────────────
+
+pub fn build_s3_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<Storage>> {
+    match upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            ..
+        } => Ok(Some(Storage::new(&StorageConfig::S3 {
+            vendor: vendor.clone(),
+            bucket: bucket.clone(),
+            region: region.clone(),
+            access_key: access_key.clone(),
+            secret_key: secret_key.clone(),
+            endpoint: Some(endpoint.clone()),
+            prefix: None,
+        })?)),
+        SipFlowUploadConfig::Http { .. } => Ok(None),
+    }
+}
+
+pub fn join_root(root: &str, key: &str) -> String {
+    if root.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), key)
+    }
+}
+
+// ── Wire types for POST /upload ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SipFlowUploadRequest {
+    pub call_id: String,
+    pub start: i64,
+    pub end: i64,
+    pub upload: SipFlowUploadConfig,
+    #[serde(default)]
+    pub media_key: Option<String>,
+    #[serde(default)]
+    pub signaling_key: Option<String>,
+    #[serde(default)]
+    pub signaling_file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SipFlowUploadResponse {
+    pub media_url: Option<String>,
+    pub media_size: u64,
+    pub signaling_uploaded: bool,
 }
 
 // ── Internal upload helpers ───────────────────────────────────────────────────

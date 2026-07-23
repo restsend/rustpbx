@@ -692,11 +692,7 @@ async fn resolve_audio_source(
     if let Some(data) = get_audio_from_sipflow(state, record, cdr_data).await {
         // Create temp file path
         let temp_dir = std::env::temp_dir();
-        let temp_file_name = format!(
-            "transcript_{}_{}.wav",
-            record.id,
-            uuid::Uuid::new_v4()
-        );
+        let temp_file_name = format!("transcript_{}_{}.wav", record.id, uuid::Uuid::new_v4());
         let temp_path = temp_dir.join(temp_file_name).to_string_lossy().into_owned();
         info!(call_id = %record.call_id, temp_path = %temp_path, "Using SipFlow audio data");
         return Some(AudioSource::SipFlowData { data, temp_path });
@@ -924,12 +920,7 @@ pub async fn download_model(
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|p| p.to_string())
-        .or_else(|| {
-            payload
-                .models_path
-                .as_ref()
-                .map(|p| p.trim().to_string())
-        })
+        .or_else(|| payload.models_path.as_ref().map(|p| p.trim().to_string()))
         .filter(|p| !p.is_empty());
 
     let models_path = match models_path {

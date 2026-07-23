@@ -15,7 +15,7 @@
 mod helpers;
 
 use helpers::sipbot_helper::TestUa;
-use helpers::test_server::{TestPbxInject, TestPbx};
+use helpers::test_server::{TestPbx, TestPbxInject};
 use rustpbx::call::SipUser;
 use rustpbx::config::{ProxyConfig, UserBackendConfig};
 use rustpbx::proxy::routing::RouteRule;
@@ -121,32 +121,17 @@ async fn test_publish_v1_then_v2_uses_latest_toml() {
     // Register both dest sipbots up front (they need valid credentials).
     let dest_a_port = portpicker::pick_unused_port().expect("destA port");
     let dest_b_port = portpicker::pick_unused_port().expect("destB port");
-    let dest_a = TestUa::registered_callee(
-        dest_a_port,
-        2,
-        "destA",
-        "pass",
-        &domain,
-        &proxy_addr,
-    )
-    .await;
-    let dest_b = TestUa::registered_callee(
-        dest_b_port,
-        2,
-        "destB",
-        "pass",
-        &domain,
-        &proxy_addr,
-    )
-    .await;
+    let dest_a =
+        TestUa::registered_callee(dest_a_port, 2, "destA", "pass", &domain, &proxy_addr).await;
+    let dest_b =
+        TestUa::registered_callee(dest_b_port, 2, "destB", "pass", &domain, &proxy_addr).await;
     // Let registrations settle.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // ── Call #1 against v1 TOML -> destA should answer ──────────────────
     let caller1_port = portpicker::pick_unused_port().expect("caller1 port");
     let target = format!("sip:ivr@127.0.0.1:{}", sip_port);
-    let caller1 =
-        TestUa::caller_with_dtmf(caller1_port, "caller1", target.clone(), "2s:1").await;
+    let caller1 = TestUa::caller_with_dtmf(caller1_port, "caller1", target.clone(), "2s:1").await;
     tokio::time::sleep(Duration::from_secs(12)).await;
 
     assert!(
@@ -169,8 +154,7 @@ async fn test_publish_v1_then_v2_uses_latest_toml() {
 
     // ── Call #2 against v2 TOML -> destB should answer ──────────────────
     let caller2_port = portpicker::pick_unused_port().expect("caller2 port");
-    let caller2 =
-        TestUa::caller_with_dtmf(caller2_port, "caller2", target, "2s:1").await;
+    let caller2 = TestUa::caller_with_dtmf(caller2_port, "caller2", target, "2s:1").await;
     tokio::time::sleep(Duration::from_secs(12)).await;
 
     assert!(

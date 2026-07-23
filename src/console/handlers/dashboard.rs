@@ -231,7 +231,7 @@ async fn build_dashboard_payload(
     state: &ConsoleState,
     range: &TimeRange,
 ) -> Result<DashboardPayload> {
-    let db = state.db();
+    let cdb = state.cdr_db(None).await;
 
     #[derive(Debug, FromQueryResult)]
     struct RecentStats {
@@ -251,7 +251,7 @@ async fn build_dashboard_payload(
         )
         .column_as(
             sum_i64(
-                db,
+                &cdb,
                 sea_query::Expr::case(
                     CallRecordColumn::Status.is_in(["answered", "completed"]),
                     CallRecordColumn::DurationSecs.into_expr(),
@@ -261,7 +261,7 @@ async fn build_dashboard_payload(
             "total_duration",
         )
         .into_model::<RecentStats>()
-        .one(db)
+        .one(&cdb)
         .await?
         .unwrap_or(RecentStats {
             total: 0,
@@ -275,7 +275,7 @@ async fn build_dashboard_payload(
         .ceil()
         .max(60.0) as i64;
 
-    let backend = db.get_database_backend();
+    let backend = cdb.get_database_backend();
     let start_timestamp = range.start.timestamp();
 
     let time_expr = match backend {
@@ -301,13 +301,13 @@ async fn build_dashboard_payload(
         .column_as(CallRecordColumn::Id.count(), "count")
         .group_by(sea_query::Expr::col(sea_query::Alias::new("bucket")))
         .into_model::<TimelineBucket>()
-        .all(db)
+        .all(&cdb)
         .await?;
 
     let previous_count = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.previous_start))
         .filter(CallRecordColumn::StartedAt.lt(range.previous_end))
-        .count(db)
+        .count(&cdb)
         .await?;
 
     let today_start = start_of_day(Utc::now());
@@ -327,7 +327,7 @@ async fn build_dashboard_payload(
         )
         .column_as(
             sum_i64(
-                db,
+                &cdb,
                 sea_query::Expr::case(
                     CallRecordColumn::Status.is_in(["answered", "completed"]),
                     CallRecordColumn::DurationSecs.into_expr(),
@@ -337,7 +337,7 @@ async fn build_dashboard_payload(
             "total_duration",
         )
         .into_model::<TodayStats>()
-        .one(db)
+        .one(&cdb)
         .await?
         .unwrap_or(TodayStats {
             answered_count: None,
@@ -358,7 +358,7 @@ async fn build_dashboard_payload(
         .column_as(CallRecordColumn::Id.count(), "count")
         .group_by(CallRecordColumn::Direction)
         .into_model::<DirectionStat>()
-        .all(db)
+        .all(&cdb)
         .await?;
 
     let (active_total, active_preview) = active_call_stats(state, 10).await;

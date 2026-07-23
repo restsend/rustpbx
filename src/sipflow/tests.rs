@@ -63,7 +63,8 @@ mod tests {
             block_cache_capacity_mb: 128,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed");
+        let backend = create_backend(&cfg, CancellationToken::new())
+            .expect("backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
 
@@ -87,8 +88,10 @@ mod tests {
             block_cache_capacity_mb: 128,
             upload: None,
         };
-        let backend: Arc<dyn SipFlowBackend> =
-            Arc::from(create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed"));
+        let backend: Arc<dyn SipFlowBackend> = Arc::from(
+            create_backend(&cfg, CancellationToken::new())
+                .expect("backend creation should succeed"),
+        );
 
         for _ in 0..5 {
             backend
@@ -123,6 +126,7 @@ mod tests {
             batch_flush_ms: 20,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new());
@@ -141,6 +145,7 @@ mod tests {
             batch_flush_ms: 20,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new());
@@ -168,6 +173,7 @@ mod tests {
             batch_flush_ms: 20,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new());
@@ -186,6 +192,7 @@ mod tests {
             batch_flush_ms: 20,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let result = create_backend(&cfg, CancellationToken::new());
@@ -213,7 +220,8 @@ mod tests {
             block_cache_capacity_mb: 16,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).expect("flowdb backend creation should succeed");
+        let backend = create_backend(&cfg, CancellationToken::new())
+            .expect("flowdb backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
 
@@ -238,8 +246,10 @@ mod tests {
             block_cache_capacity_mb: 16,
             upload: None,
         };
-        let backend: Arc<dyn SipFlowBackend> =
-            Arc::from(create_backend(&cfg, CancellationToken::new()).expect("backend creation should succeed"));
+        let backend: Arc<dyn SipFlowBackend> = Arc::from(
+            create_backend(&cfg, CancellationToken::new())
+                .expect("backend creation should succeed"),
+        );
 
         let base = chrono::Utc::now().timestamp_micros();
         let item = SipFlowItem {
@@ -355,7 +365,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             } => {
                 assert_eq!(batch_size, 256);
                 assert_eq!(batch_flush_ms, 20);
-                assert_eq!(channel_capacity, 8192);
+                assert_eq!(channel_capacity, 40000);
             }
             _ => panic!("expected Remote config"),
         }
@@ -393,6 +403,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             batch_flush_ms: 20,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");
@@ -465,6 +476,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             batch_flush_ms: 1,
             channel_capacity: 8192,
             dns_ttl_secs: 0,
+            delegate_upload: false,
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");

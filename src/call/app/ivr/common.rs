@@ -508,11 +508,7 @@ pub async fn execute_action(
                     if i > 0 {
                         target.push('&');
                     }
-                    target.push_str(&format!(
-                        "{}={}",
-                        k,
-                        urlencoding::encode(v)
-                    ));
+                    target.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
             }
             sess.variables.insert(
@@ -557,7 +553,8 @@ pub async fn execute_action(
             let uri = substitute_vars(create_room_uri, &sess.variables);
             sess.variables.insert("bridge_room_uri".into(), uri.clone());
             for (k, v) in headers {
-                sess.variables.insert(format!("bridge_hdr_{}", k), v.clone());
+                sess.variables
+                    .insert(format!("bridge_hdr_{}", k), v.clone());
             }
             let mut uri = uri;
             if let Some(ivr_name) = return_ivr {
@@ -565,8 +562,7 @@ pub async fn execute_action(
                 uri = format!("{}{}return_ivr={}", uri, sep, ivr_name);
             }
             if success.is_some() || failure.is_some() {
-                sess.variables
-                    .insert("bridge_branch".into(), "true".into());
+                sess.variables.insert("bridge_branch".into(), "true".into());
                 Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                     "bridge:{}",
                     uri

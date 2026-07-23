@@ -12,6 +12,10 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 
+/// Forward-declare AppRuntime so the hook method can accept it without
+/// creating a circular dependency at the module level.
+use crate::call::runtime::AppRuntime;
+
 /// Per-session typed extensions bag (like [`http::Extensions`]) wrapped in an
 /// [`Arc`] so it can be cheaply cloned (all clones share the same bag).
 /// Automatically cleaned up when the last reference is dropped (session ends).
@@ -125,5 +129,19 @@ pub trait CallSessionHook: Send + Sync {
         _reason: Option<&CallRecordHangupReason>,
         _duration_secs: u64,
     ) {
+    }
+
+    /// Called when the connected callee (agent) terminates while the caller
+    /// is still connected.  Return `true` to suppress normal hangup — the
+    /// hook takes over the caller session (e.g. starting a survey app).
+    ///
+    /// Fires *before* [`on_call_ended`] so the hook can transition the
+    /// session to a new app before final cleanup.
+    async fn on_agent_disconnected(
+        &self,
+        _ctx: &CallSessionContext,
+        _app_runtime: &dyn AppRuntime,
+    ) -> bool {
+        false
     }
 }

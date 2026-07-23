@@ -218,9 +218,11 @@ impl RwiCollector {
 
         while start.elapsed() < timeout {
             let responses = self.responses.read().await;
-            if let Some(resp) = responses.iter().rev().find(|&v| {
-                v.get("action_id").and_then(|a| a.as_str()) == Some(action_id)
-            }) {
+            if let Some(resp) = responses
+                .iter()
+                .rev()
+                .find(|&v| v.get("action_id").and_then(|a| a.as_str()) == Some(action_id))
+            {
                 return Some(resp.clone());
             }
             drop(responses);

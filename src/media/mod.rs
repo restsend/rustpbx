@@ -7,7 +7,10 @@
 
 pub mod audio_source;
 pub mod bridge;
+pub mod conference_mixer;
+pub mod dtmf;
 pub mod engine;
+pub mod file_track;
 pub mod forwarding_track;
 pub mod leg_id;
 pub mod media_stream;
@@ -19,22 +22,19 @@ pub mod rtc_track;
 pub mod rtp_track_builder;
 pub mod telephone_event;
 pub mod track;
-pub mod file_track;
 pub mod transcoder;
 pub mod transcoding_pipeline;
 pub mod wav_reader;
 pub mod wav_writer;
-pub mod conference_mixer;
-pub mod dtmf;
 
 #[cfg(test)]
 mod file_track_tests;
 #[cfg(test)]
-mod mixer_e2e_tests;
+mod media_engine_tests;
 #[cfg(test)]
 mod media_track_tests;
 #[cfg(test)]
-mod media_engine_tests;
+mod mixer_e2e_tests;
 #[cfg(test)]
 mod recorder_tests;
 #[cfg(test)]
@@ -44,20 +44,19 @@ mod unified_pc_tests;
 pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
-
 pub(crate) use file_track::FileTrackPlaybackSource;
-pub use file_track::{FileTrack, PlaybackEndReason, PlaybackEndCallback};
+#[cfg(test)]
+pub(crate) use file_track::audio_frame_timing;
+pub use file_track::{FileTrack, PlaybackEndCallback, PlaybackEndReason};
 pub use leg_id::LegId;
+pub use media_stream::TrackMap;
 pub use media_stream::{MediaStream, MediaStreamBuilder};
 pub use mixer::AudioMixer;
 pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;
 pub use track::Track;
-pub use media_stream::TrackMap;
-pub use transcoder::Transcoder;// Tests in `file_track_tests` need this via `use super::*`.
-#[cfg(test)]
-pub(crate) use file_track::audio_frame_timing;
+pub use transcoder::Transcoder; // Tests in `file_track_tests` need this via `use super::*`.
 
 // ── Shared utility types ────────────────────────────────────────────
 

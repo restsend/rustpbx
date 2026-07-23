@@ -250,20 +250,26 @@ impl Recorder {
                 // Walk the header chain to find total header size and
                 // the cumulative length of all redundant (non-primary) payloads.
                 let hdr_end;
-                let mut redundant_len = 0usize;  // total bytes of non-primary payloads
+                let mut redundant_len = 0usize; // total bytes of non-primary payloads
                 let mut pos = 0usize;
                 let mut ok = true;
                 loop {
-                    if pos >= encoded.len() { ok = false; break; }
+                    if pos >= encoded.len() {
+                        ok = false;
+                        break;
+                    }
                     let hdr = encoded[pos];
                     let f_bit = hdr & 0x80 != 0;
                     let _pt = hdr & 0x7F;
                     pos += 1;
                     if f_bit {
                         // Not-last block: 3 more header bytes (ts offset + length)
-                        if pos + 2 >= encoded.len() { ok = false; break; }
-                        let blen = ((encoded[pos + 1] as usize & 0x03) << 8)
-                            | encoded[pos + 2] as usize;
+                        if pos + 2 >= encoded.len() {
+                            ok = false;
+                            break;
+                        }
+                        let blen =
+                            ((encoded[pos + 1] as usize & 0x03) << 8) | encoded[pos + 2] as usize;
                         redundant_len += blen;
                         pos += 3;
                     } else {
@@ -515,9 +521,9 @@ impl Recorder {
             (duration as u64 * self.sample_rate as u64).div_ceil(clock_rate.max(1) as u64) as u32;
         let duration_ms = (duration as u64 * 1000).div_ceil(clock_rate.max(1) as u64) as u32;
 
-        let existing_state = self.active_dtmf_state(leg).filter(|state| {
-            state.digit_code == digit_code && state.rtp_timestamp == rtp_timestamp
-        });
+        let existing_state = self
+            .active_dtmf_state(leg)
+            .filter(|state| state.digit_code == digit_code && state.rtp_timestamp == rtp_timestamp);
         if existing_state.is_some_and(|state| duration_samples <= state.duration_samples) {
             return Ok(());
         }
@@ -566,12 +572,7 @@ impl Recorder {
         Ok(())
     }
 
-    pub fn write_dtmf(
-        &mut self,
-        leg: Leg,
-        digit: char,
-        duration_ms: u32,
-    ) -> Result<()> {
+    pub fn write_dtmf(&mut self, leg: Leg, digit: char, duration_ms: u32) -> Result<()> {
         let pcm = self.dtmf_gen.generate(digit, duration_ms);
         debug!(
             "Recording DTMF: leg={:?}, digit={}, duration={}ms, samples={}",
@@ -638,9 +639,9 @@ impl Recorder {
             let max_ts = max_ts_a.max(max_ts_b);
             let buffered = max_ts.saturating_sub(self.next_flush_ts);
             if buffered > self.sample_rate * 2 {
-                max_ts  // safety-valve: leading leg >2s ahead
+                max_ts // safety-valve: leading leg >2s ahead
             } else {
-                return Ok(());  // wait for slower leg
+                return Ok(()); // wait for slower leg
             }
         };
 
@@ -699,10 +700,14 @@ impl Recorder {
     /// Flush everything remaining — used by finalize() to write trailing data.
     fn flush_final(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
-        let max_ts_a = self.buffer_a.last_key_value()
+        let max_ts_a = self
+            .buffer_a
+            .last_key_value()
             .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
             .unwrap_or(0);
-        let max_ts_b = self.buffer_b.last_key_value()
+        let max_ts_b = self
+            .buffer_b
+            .last_key_value()
             .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
             .unwrap_or(0);
         let max_available_ts = max_ts_a.max(max_ts_b);

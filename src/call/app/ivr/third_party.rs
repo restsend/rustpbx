@@ -2,8 +2,8 @@ use super::common::SessionData;
 use super::config::{ActionNode, EntryAction};
 use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 

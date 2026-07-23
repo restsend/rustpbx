@@ -60,20 +60,11 @@ pub trait ClusterEventHandler: Send + Sync {
     ///
     /// Carries the full snapshot needed for ACD scheduling: status, skills,
     /// concurrency, priority, and the originating `instance_id`.
-    async fn on_agent_status_event(
-        &self,
-        _msg: &ClusterAgentStatusMessage,
-        _source: &EventSource,
-    ) {
+    async fn on_agent_status_event(&self, _msg: &ClusterAgentStatusMessage, _source: &EventSource) {
     }
 
     /// Queue event forwarded from a cluster peer (enqueue / dequeue / assign).
-    async fn on_queue_event(
-        &self,
-        _msg: &ClusterQueueEventMessage,
-        _source: &EventSource,
-    ) {
-    }
+    async fn on_queue_event(&self, _msg: &ClusterQueueEventMessage, _source: &EventSource) {}
 }
 
 // ── Cluster message body (serialised in SIP MESSAGE) ────────────────────────
@@ -463,11 +454,7 @@ impl ClusterEventHub {
     }
 
     /// Remote queue event (from peer MESSAGE).
-    pub async fn on_remote_queue_event(
-        &self,
-        msg: ClusterQueueEventMessage,
-        source: EventSource,
-    ) {
+    pub async fn on_remote_queue_event(&self, msg: ClusterQueueEventMessage, source: EventSource) {
         let handlers: Vec<Arc<dyn ClusterEventHandler>> =
             self.handlers.read().iter().cloned().collect();
         for h in &handlers {

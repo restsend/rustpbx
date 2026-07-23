@@ -305,11 +305,11 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
     })
 }
 
-fn build_forwarding_catalog(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
+async fn build_forwarding_catalog(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config)
+        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     }
@@ -363,7 +363,7 @@ async fn page_extension_detail(
     let realm = resolve_default_realm(state.as_ref());
     let locator_info =
         fetch_extension_locator_summary(state.sip_server(), &realm, &model.extension).await;
-    let forwarding_catalog = build_forwarding_catalog(&state);
+    let forwarding_catalog = build_forwarding_catalog(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
@@ -388,7 +388,7 @@ async fn page_extension_create(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    let forwarding_catalog = build_forwarding_catalog(&state);
+    let forwarding_catalog = build_forwarding_catalog(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/extension_detail.html",

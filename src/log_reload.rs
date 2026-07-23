@@ -69,7 +69,9 @@ pub fn set_log_filter_handle(handle: FilterHandle) {
 /// Preserves the same noisy-crate suppression as startup (`hyper_util=warn`,
 /// `rustls=warn`, `sqlx=warn`).
 pub fn apply_log_level(level: &str) -> Result<(), String> {
-    let mut filter: EnvFilter = level.parse().map_err(|e| format!("Invalid log level: {e}"))?;
+    let mut filter: EnvFilter = level
+        .parse()
+        .map_err(|e| format!("Invalid log level: {e}"))?;
     for noisy in &["hyper_util", "rustls", "sqlx"] {
         if let Ok(d) = format!("{}=warn", noisy).parse() {
             filter = filter.add_directive(d);

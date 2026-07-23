@@ -15,9 +15,9 @@ use crate::proxy::auth::{AuthBackend, AuthModule};
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
-use arc_swap::ArcSwap;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
+use arc_swap::ArcSwap;
 use rsipstack::EndpointBuilder;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::sip::Header;
@@ -81,7 +81,11 @@ async fn test_auth_module_invite_success() {
             .find_map(|part| {
                 let part = part.trim();
                 if part.starts_with("nonce=") {
-                    Some(part.trim_start_matches("nonce=").trim_matches('"').to_string())
+                    Some(
+                        part.trim_start_matches("nonce=")
+                            .trim_matches('"')
+                            .to_string(),
+                    )
                 } else {
                     None
                 }
@@ -526,9 +530,7 @@ async fn test_guest_call_allowed_extension() {
             let _ = engine.spawn(handle);
             engine
         },
-        trunk_rate_limiter: Arc::new(
-            crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
-        ),
+        trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 
@@ -1198,7 +1200,11 @@ async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
             .find_map(|part| {
                 let part = part.trim();
                 if part.starts_with("nonce=") {
-                    Some(part.trim_start_matches("nonce=").trim_matches('"').to_string())
+                    Some(
+                        part.trim_start_matches("nonce=")
+                            .trim_matches('"')
+                            .to_string(),
+                    )
                 } else {
                     None
                 }

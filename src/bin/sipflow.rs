@@ -1,14 +1,21 @@
 use anyhow::Result;
 use axum::{
-    Router,
+    Json, Router,
     extract::{Query, State},
+    http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{Local, TimeZone};
 use clap::Parser;
-use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
-use tokio_util::sync::CancellationToken;
+use rustpbx::callrecord::sipflow_upload::{
+    SipFlowUploadRequest, SipFlowUploadResponse, build_s3_storage, join_root, upload_media,
+    upload_signaling_flow,
+};
+use rustpbx::callrecord::{
+    sipflow_media_key_for, sipflow_signaling_file_name_for, sipflow_signaling_key_for,
+};
+use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
     perf::{PerfCounters, PerfDumper},
@@ -19,6 +26,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use tracing_appender::non_blocking;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -115,6 +124,9 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     backend: Arc<dyn SipFlowBackend>,
+    root: String,
+    subdirs: SipFlowSubdirs,
+    client: reqwest::Client,
 }
 
 fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
@@ -256,7 +268,7 @@ async fn main() -> Result<()> {
 
     let config = SipFlowConfig::Local {
         root: args.root.clone(),
-        subdirs,
+        subdirs: subdirs.clone(),
         flush_count: args.flush_count,
         flush_interval_secs: args.flush_interval,
         id_cache_size: args.id_cache_size,
@@ -269,11 +281,20 @@ async fn main() -> Result<()> {
         upload: None,
     };
 
-    let backend: Arc<dyn SipFlowBackend> = Arc::from(create_backend(&config, CancellationToken::new())?);
+    let backend: Arc<dyn SipFlowBackend> =
+        Arc::from(create_backend(&config, CancellationToken::new())?);
     let perf_counters = PerfCounters::new_arc();
+
+    let http_client = rustpbx::http_util::build_keepalive_client(
+        Some(std::time::Duration::from_secs(120)),
+        Some(std::time::Duration::from_secs(10)),
+    )?;
 
     let app_state = AppState {
         backend: backend.clone(),
+        root: args.root.clone(),
+        subdirs,
+        client: http_client,
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
@@ -411,6 +432,8 @@ async fn main() -> Result<()> {
         .route("/health", get(health_handler))
         .route("/flow", get(flow_handler))
         .route("/media", get(media_handler))
+        .route("/diag", get(diag_handler))
+        .route("/upload", post(upload_handler))
         .with_state(app_state);
 
     let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
@@ -514,6 +537,217 @@ async fn media_handler(
         .header("Content-Length", file_len)
         .body(body)
         .unwrap()
+}
+
+async fn diag_handler(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let call_id = params.get("callid").cloned().unwrap_or_default();
+    if call_id.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "status": "error",
+                "message": "Missing 'callid' query parameter"
+            })),
+        )
+            .into_response();
+    }
+
+    let start_dt = params
+        .get("start")
+        .and_then(|s| rustpbx::sipflow::diag::parse_datetime(s))
+        .unwrap_or_else(|| Local::now() - chrono::Duration::hours(1));
+
+    let end_dt = params
+        .get("end")
+        .and_then(|s| rustpbx::sipflow::diag::parse_datetime(s))
+        .unwrap_or_else(|| Local::now() + chrono::Duration::hours(1));
+
+    match rustpbx::sipflow::diag::run_diag(&call_id, &state.root, state.subdirs, start_dt, end_dt)
+        .await
+    {
+        Ok(report) => {
+            if report.is_empty() {
+                axum::Json(serde_json::json!({
+                    "status": "success",
+                    "callid": call_id,
+                    "found": false,
+                    "message": "No data found for this Call-ID"
+                }))
+                .into_response()
+            } else {
+                // Convert report to a clean JSON response
+                let sip_flow: Vec<serde_json::Value> = report
+                    .sip_messages
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "timestamp": item.timestamp,
+                            "time": rustpbx::sipflow::diag::dt_from_micros(item.timestamp as i64),
+                            "src_addr": item.src_addr,
+                            "dst_addr": item.dst_addr,
+                            "msg_type": item.msg_type,
+                            "message": rustpbx::sipflow::diag::sip_message_status(&item.payload),
+                        })
+                    })
+                    .collect();
+
+                let rtp_streams: Vec<serde_json::Value> = report
+                    .rtp_stats
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "leg": s.leg,
+                            "src": s.src,
+                            "codec": s.payload_type,
+                            "clock_rate": s.clock_rate,
+                            "packet_count": s.packet_count,
+                            "lost_packets": s.lost_packets,
+                            "loss_percent": s.loss_percent,
+                            "jitter_ms": s.jitter_ms,
+                            "ssrc": s.ssrc,
+                        })
+                    })
+                    .collect();
+
+                let rtp_detail =
+                    serde_json::to_value(&report.rtp_detail).unwrap_or(serde_json::Value::Null);
+
+                axum::Json(serde_json::json!({
+                    "status": "success",
+                    "callid": call_id,
+                    "found": true,
+                    "sip_count": report.sip_count,
+                    "rtp_streams_count": report.rtp_stats.len(),
+                    "duration_secs": report.duration_secs,
+                    "buckets_scanned": report.bucket_count,
+                    "sip_flow": sip_flow,
+                    "rtp_streams": rtp_streams,
+                    "rtp_detail": rtp_detail,
+                }))
+                .into_response()
+            }
+        }
+        Err(e) => axum::Json(serde_json::json!({
+            "status": "error",
+            "message": e.to_string()
+        }))
+        .into_response(),
+    }
+}
+
+async fn upload_handler(
+    State(state): State<AppState>,
+    Json(req): Json<SipFlowUploadRequest>,
+) -> Result<Json<SipFlowUploadResponse>, (StatusCode, String)> {
+    let s3_storage = match build_s3_storage(&req.upload) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Storage init failed: {e}"),
+            ));
+        }
+    };
+
+    let start = Local.timestamp_opt(req.start, 0).single().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid start timestamp".to_string(),
+        )
+    })?;
+    let end = Local
+        .timestamp_opt(req.end, 0)
+        .single()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid end timestamp".to_string()))?;
+
+    if let Err(e) = state.backend.flush().await {
+        warn!("upload: flush failed: {e}");
+    }
+
+    // Compute fallback keys
+    let default_media = sipflow_media_key_for(&req.call_id, start.to_utc());
+    let default_signaling = sipflow_signaling_key_for(&req.call_id, start.to_utc());
+    let default_sig_file = sipflow_signaling_file_name_for(&req.call_id);
+
+    let root = match &req.upload {
+        SipFlowUploadConfig::S3 { root, .. } => root.as_str(),
+        SipFlowUploadConfig::Http { .. } => "",
+    };
+
+    // Client-specified key → verbatim (final path); absent → join_root(root, default)
+    let full_media_key = match &req.media_key {
+        Some(k) if !k.is_empty() => k.clone(),
+        _ => join_root(root, &default_media),
+    };
+    let full_signaling_key = match &req.signaling_key {
+        Some(k) if !k.is_empty() => k.clone(),
+        _ => join_root(root, &default_signaling),
+    };
+    let sig_file_name = req
+        .signaling_file_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_sig_file);
+
+    // Media upload
+    let media_enabled = match &req.upload {
+        SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
+        SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
+    };
+
+    let (media_url, media_size) = if media_enabled {
+        match upload_media(
+            state.backend.as_ref(),
+            &req.upload,
+            &req.call_id,
+            start,
+            end,
+            &full_media_key,
+            None,
+            0,
+            &state.client,
+            s3_storage.as_ref(),
+        )
+        .await
+        {
+            Some((url, size)) => (Some(url), size),
+            None => (None, 0),
+        }
+    } else {
+        (None, 0)
+    };
+
+    // Signaling upload
+    let signaling_enabled = match &req.upload {
+        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
+        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
+    };
+
+    let signaling_uploaded = if signaling_enabled {
+        upload_signaling_flow(
+            &req.upload,
+            state.backend.as_ref(),
+            &req.call_id,
+            start,
+            end,
+            &full_signaling_key,
+            &sig_file_name,
+            &state.client,
+            s3_storage.as_ref(),
+        )
+        .await
+    } else {
+        false
+    };
+
+    Ok(Json(SipFlowUploadResponse {
+        media_url,
+        media_size,
+        signaling_uploaded,
+    }))
 }
 
 #[cfg(test)]

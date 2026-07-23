@@ -43,7 +43,7 @@ mod tests {
                         label: Some("Sales".to_string()),
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
-            params: HashMap::new(),
+                            params: HashMap::new(),
                         },
                     },
                     MenuEntry {
@@ -90,11 +90,11 @@ mod tests {
                         invalid_prompt: None,
                         timeout_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
-            params: HashMap::new(),
+                            params: HashMap::new(),
                         }),
                         max_retries_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
-            params: HashMap::new(),
+                            params: HashMap::new(),
                         }),
                         entries: vec![
                             MenuEntry {
@@ -102,7 +102,7 @@ mod tests {
                                 label: Some("Billing".to_string()),
                                 action: EntryAction::Transfer {
                                     target: "3001".to_string(),
-            params: HashMap::new(),
+                                    params: HashMap::new(),
                                 },
                             },
                             MenuEntry {
@@ -1312,7 +1312,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Billing".to_string()),
                     action: EntryAction::Transfer {
                         target: "3001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -1910,7 +1910,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Transfer".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -2015,7 +2015,7 @@ action = { type = "transfer", target = "100" }
                             label: Some("Billing".to_string()),
                             action: EntryAction::Transfer {
                                 target: "3001".to_string(),
-            params: HashMap::new(),
+                                params: HashMap::new(),
                             },
                         }],
                         ..Default::default()
@@ -2177,7 +2177,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -2267,7 +2267,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Sales".to_string()),
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
-            params: HashMap::new(),
+                            params: HashMap::new(),
                         },
                     },
                 ],
@@ -2349,7 +2349,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -2421,7 +2421,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -2682,7 +2682,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()
@@ -2745,7 +2745,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
-            params: HashMap::new(),
+                        params: HashMap::new(),
                     },
                 }],
                 ..Default::default()

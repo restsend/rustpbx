@@ -86,7 +86,7 @@ impl ProxyDataContext {
         let _ = ctx.reload_trunks(true, None).await?;
         let _ = ctx.reload_queues(false, None).await?;
         let _ = ctx.reload_routes(false, None).await?;
-        let _ = ctx.reload_acl_rules(false, None)?;
+        let _ = ctx.reload_acl_rules(false, None).await?;
         Ok(ctx)
     }
 
@@ -134,7 +134,7 @@ impl ProxyDataContext {
         self.acl_rules.read().unwrap().clone()
     }
 
-    pub fn resolve_queue_config(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+    pub async fn resolve_queue_config(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
         if reference.trim().is_empty() {
             return Ok(None);
         }
@@ -153,13 +153,13 @@ impl ProxyDataContext {
         }
 
         // Try to resolve by file path
-        if let Some(config) = self.load_queue_file(reference)? {
+        if let Some(config) = self.load_queue_file(reference).await? {
             return Ok(Some(config));
         }
 
         if reference.chars().all(|c| c.is_ascii_digit()) && !reference.is_empty() {
             let db_key = format!("db-{}", reference);
-            return self.resolve_queue_config(&db_key);
+            return Box::pin(self.resolve_queue_config(&db_key)).await;
         }
 
         let Some(key) = queue_utils::canonical_queue_key(reference) else {
@@ -184,7 +184,7 @@ impl ProxyDataContext {
         Ok(None)
     }
 
-    pub fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+    pub async fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
         let trimmed = reference.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -192,7 +192,7 @@ impl ProxyDataContext {
         let store = self.config_store();
         if store.is_db() {
             // In DB mode, try to read the queue file from config_entries
-            if let Ok(Some(content)) = store.read("queue", trimmed) {
+            if let Ok(Some(content)) = store.read("queue", trimmed).await {
                 let doc: queue_utils::QueueFileDocument = toml::from_str(&content)
                     .with_context(|| format!("failed to parse queue file from db: {}", trimmed))?;
                 return Ok(Some(doc.queue));
@@ -205,12 +205,13 @@ impl ProxyDataContext {
         Self::read_queue_document(path)
     }
 
-    pub fn resolve_ivr_file(&self, ivr_name: &str) -> String {
+    pub async fn resolve_ivr_file(&self, ivr_name: &str) -> String {
         let store = self.config_store();
         if store.is_db() {
             // In DB mode, check if the IVR exists in the config store
             if store
                 .exists("ivr", &format!("{}.generated.toml", ivr_name))
+                .await
                 .unwrap_or(false)
             {
                 return format!("db://ivr/{}.generated.toml", ivr_name);
@@ -218,6 +219,7 @@ impl ProxyDataContext {
             // Check for non-generated ivr file
             if store
                 .exists("ivr", &format!("{}.toml", ivr_name))
+                .await
                 .unwrap_or(false)
             {
                 return format!("db://ivr/{}.toml", ivr_name);
@@ -322,7 +324,7 @@ impl ProxyDataContext {
         let store = self.config_store();
         if store.is_db() {
             // In DB mode, load generated trunks directly from the config store
-            if let Ok(Some(content)) = store.read_async("trunks", "trunks.generated.toml").await
+            if let Ok(Some(content)) = store.read("trunks", "trunks.generated.toml").await
             {
                 let data: TrunkIncludeFile = match toml::from_str(&content) {
                     Ok(d) => d,
@@ -511,7 +513,7 @@ impl ProxyDataContext {
 
         let store = self.config_store();
         if store.is_db() {
-            if let Ok(Some(content)) = store.read_async("queue", "queues.generated.toml").await {
+            if let Ok(Some(content)) = store.read("queue", "queues.generated.toml").await {
                 match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
                     Ok(loaded) => {
                         let count = loaded.len();
@@ -630,7 +632,7 @@ impl ProxyDataContext {
         }
         let store = self.config_store();
         if store.is_db() {
-            if let Ok(Some(content)) = store.read_async("routes", "routes.generated.toml").await
+            if let Ok(Some(content)) = store.read("routes", "routes.generated.toml").await
             {
                 let data: RouteIncludeFile = match toml::from_str(&content) {
                     Ok(d) => d,
@@ -688,7 +690,7 @@ impl ProxyDataContext {
         })
     }
 
-    pub fn reload_acl_rules(
+    pub async fn reload_acl_rules(
         &self,
         _generated_toml: bool,
         config_override: Option<Arc<ProxyConfig>>,
@@ -728,7 +730,7 @@ impl ProxyDataContext {
 
         let store = self.config_store();
         if store.is_db() {
-            if let Ok(Some(content)) = store.read("acl", "acl.generated.toml") {
+            if let Ok(Some(content)) = store.read("acl", "acl.generated.toml").await {
                 match toml::from_str::<AclIncludeFile>(&content) {
                     Ok(data) => {
                         let count = data.acl_rules.len();
@@ -804,7 +806,7 @@ impl ProxyDataContext {
             entries = trunks.len();
             let toml = serialize_trunks_toml(&trunks)?;
             store
-                .write_async("trunks", "trunks.generated.toml", &toml)
+                .write("trunks", "trunks.generated.toml", &toml)
                 .await?;
             info!(entries, "generated trunks config to database");
             Ok(Some(GeneratedFileMetrics {
@@ -861,7 +863,7 @@ impl ProxyDataContext {
         if store.is_db() {
             let toml = serialize_routes_toml(&routes)?;
             store
-                .write_async("routes", "routes.generated.toml", &toml)
+                .write("routes", "routes.generated.toml", &toml)
                 .await?;
             info!(entries, "generated routes config to database");
             Ok(Some(GeneratedFileMetrics {
@@ -892,7 +894,7 @@ impl ProxyDataContext {
 #[async_trait]
 impl RouteResourceLookup for ProxyDataContext {
     async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>> {
-        self.resolve_queue_config(path)
+        self.resolve_queue_config(path).await
     }
 }
 
@@ -1345,6 +1347,7 @@ pub(crate) async fn load_routes_from_db(
     let mut routes = Vec::new();
     for model in models {
         if let Some(route) = convert_route(model, trunk_lookup, ivr_dir, config_store)
+            .await
             .context("convert route")?
         {
             routes.push(route);
@@ -1377,7 +1380,7 @@ struct RouteMetadataAction {
     ivr_file: Option<String>,
 }
 
-fn convert_route(
+async fn convert_route(
     model: routing::Model,
     trunk_lookup: &HashMap<i64, String>,
     ivr_dir: Option<&Path>,
@@ -1444,7 +1447,7 @@ fn convert_route(
         && let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata)
         && let Some(meta_action) = doc.action
     {
-        apply_route_metadata(&mut action, meta_action, ivr_dir, config_store);
+        apply_route_metadata(&mut action, meta_action, ivr_dir, config_store).await;
     }
 
     let mut source_trunks = Vec::new();
@@ -1499,7 +1502,7 @@ fn resolve_ivr_name_to_path(name: &str, ivr_dir: &Path) -> String {
     hand_written.to_string_lossy().to_string()
 }
 
-fn apply_route_metadata(
+async fn apply_route_metadata(
     action: &mut RouteAction,
     meta: RouteMetadataAction,
     ivr_dir: Option<&Path>,
@@ -1532,11 +1535,13 @@ fn apply_route_metadata(
                             "ivr",
                             &format!("{}.generated.toml", sanitize_ivr_filename(&file)),
                         )
+                        .await
                         .unwrap_or(false)
                     {
                         format!("db://ivr/{}.generated.toml", sanitize_ivr_filename(&file))
                     } else if store
                         .exists("ivr", &format!("{}.toml", sanitize_ivr_filename(&file)))
+                        .await
                         .unwrap_or(false)
                     {
                         format!("db://ivr/{}.toml", sanitize_ivr_filename(&file))
@@ -1833,8 +1838,8 @@ mod tests {
         assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
     }
 
-    #[test]
-    fn route_metadata_sets_queue_fields() {
+    #[tokio::test]
+    async fn route_metadata_sets_queue_fields() {
         let mut action = RouteAction::default();
         let meta = RouteMetadataAction {
             target_type: Some("queue".to_string()),
@@ -1842,12 +1847,12 @@ mod tests {
             voicemail_extension: None,
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta, None, None);
+        apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
     }
 
-    #[test]
-    fn route_metadata_sets_voicemail_fields() {
+    #[tokio::test]
+    async fn route_metadata_sets_voicemail_fields() {
         let mut action = RouteAction::default();
         let meta = RouteMetadataAction {
             target_type: Some("voicemail".to_string()),
@@ -1855,14 +1860,14 @@ mod tests {
             voicemail_extension: Some("1001".to_string()),
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta, None, None);
+        apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.app.as_deref(), Some("voicemail"));
         let params = action.app_params.unwrap();
         assert_eq!(params["extension"], "1001");
     }
 
-    #[test]
-    fn route_metadata_sets_ivr_fields() {
+    #[tokio::test]
+    async fn route_metadata_sets_ivr_fields() {
         let mut action = RouteAction::default();
         let meta = RouteMetadataAction {
             target_type: Some("ivr".to_string()),
@@ -1870,7 +1875,7 @@ mod tests {
             voicemail_extension: None,
             ivr_file: Some("config/ivr/main.toml".to_string()),
         };
-        apply_route_metadata(&mut action, meta, None, None);
+        apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.app.as_deref(), Some("ivr"));
         let params = action.app_params.unwrap();
         assert_eq!(params["file"], "config/ivr/main.toml");

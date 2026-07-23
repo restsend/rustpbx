@@ -472,7 +472,10 @@ pub enum WebhookResponse {
 impl WebhookResponse {
     pub fn into_entry_action(self) -> EntryAction {
         match self {
-            WebhookResponse::Transfer { target } => EntryAction::Transfer { target, params: HashMap::new() },
+            WebhookResponse::Transfer { target } => EntryAction::Transfer {
+                target,
+                params: HashMap::new(),
+            },
             WebhookResponse::Queue {
                 target,
                 return_to_ivr,

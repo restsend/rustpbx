@@ -5,7 +5,6 @@ use crate::{
     },
     config::{ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
-    models::call_record::DatabaseHook,
     proxy::{
         acl::AclModule,
         auth::AuthModule,
@@ -310,13 +309,14 @@ impl AppStateBuilder {
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else {
-            // Always build a CallRecordManager — DatabaseHook persists every
-            // call to the rustpbx_call_records table unconditionally.
+            // Always build a CallRecordManager. By default, records are
+            // persisted to the `rustpbx_call_records` table via the saver.
             // [callrecord], [sipflow.upload], and [recording] only add
             // optional extra sinks (JSON files, S3, HTTP, WAV upload, etc.)
-            // on top of the always-on database persistence.
-            let mut builder =
-                CallRecordManagerBuilder::new().with_cancel_token(token.child_token());
+            // on top of the default database persistence.
+            let mut builder = CallRecordManagerBuilder::new()
+                .with_cancel_token(token.child_token())
+                .with_main_db(db_conn.clone());
 
             if let Some(ref callrecord) = config.callrecord {
                 builder = builder.with_max_concurrent(callrecord.max_concurrent);
@@ -331,21 +331,39 @@ impl AppStateBuilder {
                 builder = builder.with_hook(Box::new(hook));
             }
 
-            builder = builder.with_hook(Box::new(DatabaseHook {
-                db: db_conn.clone(),
-            }));
-
-            // Attach SipFlow upload after DatabaseHook so recording URL updates
-            // target a row that has already been inserted.
-            if let (Some(backend), Some(upload_cfg)) =
-                (sipflow_backend_arc.as_ref(), sipflow_upload_config.as_ref())
-            {
-                builder = builder.with_hook(Box::new(SipFlowUploadHook::new(
-                    backend.clone(),
-                    upload_cfg.clone(),
-                    Some(db_conn.clone()),
-                    rwi_gateway.clone(),
-                )?));
+            // Attach SipFlow upload hooks (run after the saver has persisted
+            // the record).
+            if let Some(upload_cfg) = sipflow_upload_config.as_ref() {
+                match config.sipflow.as_ref() {
+                    // Remote + delegate_upload: POST upload params to the bin
+                    // instead of downloading WAV and re-uploading locally.
+                    Some(crate::config::SipFlowConfig::Remote {
+                        nodes,
+                        delegate_upload: true,
+                        ..
+                    }) => {
+                        builder = builder.with_hook(Box::new(
+                            crate::callrecord::sipflow_remote_upload::SipFlowRemoteUploadHook::new(
+                                nodes.clone(),
+                                upload_cfg.clone(),
+                                Some(db_conn.clone()),
+                                rwi_gateway.clone(),
+                            )?,
+                        ));
+                    }
+                    // Local or Remote without delegate: use the existing in-process
+                    // hook that calls generate_wav_file / query_flow on the backend.
+                    _ => {
+                        if let Some(backend) = sipflow_backend_arc.as_ref() {
+                            builder = builder.with_hook(Box::new(SipFlowUploadHook::new(
+                                backend.clone(),
+                                upload_cfg.clone(),
+                                Some(db_conn.clone()),
+                                rwi_gateway.clone(),
+                            )?));
+                        }
+                    }
+                }
             }
 
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
@@ -362,7 +380,12 @@ impl AppStateBuilder {
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
-                crate::console::ConsoleState::initialize(db_conn.clone(), console_config).await?,
+                crate::console::ConsoleState::initialize(
+                    db_conn.clone(),
+                    console_config,
+                    config.callrecord.clone(),
+                )
+                .await?,
             ),
             None => None,
         };
@@ -588,19 +611,11 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         router = router.route(
             ws_handler,
             axum::routing::get(
-                async move |client_ip: ClientAddr,
-                            ws: WebSocketUpgrade|
-                            -> Response {
+                async move |client_ip: ClientAddr, ws: WebSocketUpgrade| -> Response {
                     let token = token.clone();
 
                     ws.protocols(["sip"]).on_upgrade(async move |socket| {
-                        sip_ws_handler(
-                            token,
-                            client_ip,
-                            socket,
-                            endpoint_ref.clone(),
-                        )
-                        .await
+                        sip_ws_handler(token, client_ip, socket, endpoint_ref.clone()).await
                     })
                 },
             ),

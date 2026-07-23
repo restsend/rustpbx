@@ -70,8 +70,24 @@ file = "{}"
         ivr_path.display()
     );
     let users = vec![
-        SipUser { id: 0, enabled: true, username: "teivr".into(), password: None, realm: None, allow_guest_calls: true, ..Default::default() },
-        SipUser { id: 1, enabled: true, username: "destE".into(), password: Some("p".to_string()), realm: None, allow_guest_calls: true, ..Default::default() },
+        SipUser {
+            id: 0,
+            enabled: true,
+            username: "teivr".into(),
+            password: None,
+            realm: None,
+            allow_guest_calls: true,
+            ..Default::default()
+        },
+        SipUser {
+            id: 1,
+            enabled: true,
+            username: "destE".into(),
+            password: Some("p".to_string()),
+            realm: None,
+            allow_guest_calls: true,
+            ..Default::default()
+        },
     ];
     let pbx = TestPbx::start_with_inject(
         sip_port,

@@ -166,23 +166,58 @@ type = "extension"
 #                      # not [sipflow.upload].
 
 # ── CDR (Call Detail Records) ─────────────────────────────────────────────────
-# Call records are ALWAYS persisted to the database (rustpbx_call_records table)
-# and visible in the Web Console, regardless of this section.
+# Call records are persisted to the `rustpbx_call_records` table in the primary
+# database by default, even without any [callrecord] section.
 #
-# [callrecord] is OPTIONAL — it adds a secondary raw-CDR sink on top of the
-# always-on database persistence. Omit this section entirely if you only need
-# database CDRs (the common case).
+# [callrecord] is OPTIONAL — it overrides the default storage, lets you route
+# CDRs to an external database or file sink, and can disable the built-in table.
 #
 # Storage types:
-#   type = "local"    — write detailed CDR JSON files to a local directory
+#   type = "database" — write full CDR schema to a configurable database/table
+#                       (DEFAULT when no [callrecord] section is present)
+#   type = "local"    — write CDR JSON files to a local directory
 #   type = "s3"       — upload CDR JSON to S3-compatible object storage
 #   type = "http"     — POST CDR JSON to an HTTP webhook endpoint
-#   type = "database" — write to a separate, minimal CDR table
 #
+# When type = "database":
+#   - database_url     = None → use the main database (default)
+#   - table_name       = "rustpbx_call_records" (default)
+#   - skip_create_table = false    → true = assume table exists (skip DDL)
+#   - rotate           = "none"    → "daily" for SQLite daily files
+#
+#   rotate = "daily" with SQLite:
+#     The database_url path gets the date inserted before the extension,
+#     producing daily files: cdr.db → cdr-20260722.db, cdr-20260723.db, ...
+#     The Web Console CDR page queries today's file (or a specified date).
+#
+# IMPORTANT: When a non-default database/table/rotate config is used, the
+# Web Console and addon CDR queries (cc, wholesale, archive) may not see
+# the data — they query the primary `rustpbx_call_records` table. This is
+# an accepted trade-off for external / rotated CDR storage.
+#
+# [callrecord]
+# type = "database"
+# table_name = "rustpbx_call_records"
+# max_concurrent = 64
+#
+# External PostgreSQL:
+# [callrecord]
+# type = "database"
+# database_url = "postgres://user:pass@cdrhost/cdrs"
+# table_name = "my_cdrs"
+# skip_create_table = true
+#
+# SQLite daily rotation:
+# [callrecord]
+# type = "database"
+# database_url = "sqlite:///var/lib/cdr/cdr.db"
+# table_name = "rustpbx_call_records"
+# rotate = "daily"
+#
+# File sink (no CDB query support):
 # [callrecord]
 # type = "local"
 # root = "./config/cdr"
-# max_concurrent = 64
 
 # ── SipFlow ───────────────────────────────────────────────────────────────────
 # Unified SIP + RTP recording system (default).

@@ -19,7 +19,9 @@ use crate::{
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
         cluster_event::{ClusterEventHub, ClusterEventModule},
-        locator::{DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator},
+        locator::{
+            DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator,
+        },
         presence::PresenceManager,
     },
     sipflow::SipFlowBackend,
@@ -946,9 +948,7 @@ impl SipServerBuilder {
                 let _task = engine.spawn(handle);
                 engine
             },
-            trunk_rate_limiter: Arc::new(
-                crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new(),
-            ),
+            trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -1227,8 +1227,7 @@ impl SipServer {
                         .unwrap_or_else(|| "unknown".to_string());
                     if tx.original.method == rsipstack::sip::Method::Options {
                         let is_trunk = if let Some(ref ip) = via_ip {
-                            let inbound_trunks =
-                                self.inner.data_context.acl_inbound_trunks.load();
+                            let inbound_trunks = self.inner.data_context.acl_inbound_trunks.load();
                             let source_network = ipnet::IpNet::from(*ip);
                             inbound_trunks
                                 .cover_values(&source_network)
@@ -1406,13 +1405,12 @@ impl SipServerInner {
         }
 
         let external_ip_changed = old_rtp.external_ip != new_rtp.external_ip;
-        let ports_changed = old_rtp.start_port != new_rtp.start_port
-            || old_rtp.end_port != new_rtp.end_port;
+        let ports_changed =
+            old_rtp.start_port != new_rtp.start_port || old_rtp.end_port != new_rtp.end_port;
         let proxy_changed = **self.media_proxy.load() != config.proxy.media_proxy;
 
         self.rtp_config.store(Arc::new(new_rtp));
-        self.media_proxy
-            .store(Arc::new(config.proxy.media_proxy));
+        self.media_proxy.store(Arc::new(config.proxy.media_proxy));
 
         let mut parts = Vec::new();
         if external_ip_changed {
@@ -1441,14 +1439,17 @@ impl SipServerInner {
 
         let new_policy = config.proxy.recording.or(config.recording);
 
-        self.recording_policy
-            .store(Arc::new(new_policy.clone()));
+        self.recording_policy.store(Arc::new(new_policy.clone()));
 
         if let Some(ref policy) = new_policy {
             if policy.enabled.unwrap_or(false) {
                 Ok(format!(
                     "Recording policy applied (enabled, type={})",
-                    policy.recording_type.as_ref().map(|t| format!("{t:?}")).unwrap_or_else(|| "default".to_string())
+                    policy
+                        .recording_type
+                        .as_ref()
+                        .map(|t| format!("{t:?}"))
+                        .unwrap_or_else(|| "default".to_string())
                 ))
             } else {
                 Ok("Recording policy applied (disabled)".to_string())
@@ -1461,16 +1462,21 @@ impl SipServerInner {
         let config = crate::config::Config::load(config_path)
             .map_err(|e| anyhow!("Failed to load config: {e}"))?;
 
-        let old_mode = self.sipflow_config.load().as_ref().as_ref().map(|c| {
-            match c {
+        let old_mode = self
+            .sipflow_config
+            .load()
+            .as_ref()
+            .as_ref()
+            .map(|c| match c {
                 crate::config::SipFlowConfig::Local { .. } => "local",
                 crate::config::SipFlowConfig::Remote { .. } => "remote",
-            }
-        }).unwrap_or("none");
+            })
+            .unwrap_or("none");
 
         if let Some(ref new_cfg) = config.sipflow {
-            let new_backend = crate::sipflow::backend::create_backend(new_cfg, self.cancel_token.clone())
-                .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
+            let new_backend =
+                crate::sipflow::backend::create_backend(new_cfg, self.cancel_token.clone())
+                    .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
             let new_backend: Arc<dyn crate::sipflow::SipFlowBackend> = Arc::from(new_backend);
 
             let new_mode = match new_cfg {
@@ -1483,12 +1489,10 @@ impl SipServerInner {
             }
             self.sipflow_config.store(Arc::new(Some(new_cfg.clone())));
 
-            tracing::info!(
-                old_mode,
-                new_mode,
-                "SipFlow backend hot-reloaded"
-            );
-            Ok(format!("SipFlow backend hot-reloaded: {old_mode} → {new_mode}"))
+            tracing::info!(old_mode, new_mode, "SipFlow backend hot-reloaded");
+            Ok(format!(
+                "SipFlow backend hot-reloaded: {old_mode} → {new_mode}"
+            ))
         } else {
             if let Some(ref sf) = self.sip_flow {
                 sf.clear_backend();

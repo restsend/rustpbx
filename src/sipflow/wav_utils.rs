@@ -55,11 +55,7 @@ fn default_payload_descriptor(pt: u8) -> PayloadDescriptor {
     }
 }
 
-fn parse_borrowed_rtp_packet(
-    leg: i32,
-    capture_ts: u64,
-    raw: &[u8],
-) -> Option<RtpPacketView<'_>> {
+fn parse_borrowed_rtp_packet(leg: i32, capture_ts: u64, raw: &[u8]) -> Option<RtpPacketView<'_>> {
     if raw.len() < 12 || raw[0] >> 6 != 2 {
         return None;
     }
@@ -367,7 +363,14 @@ pub fn generate_wav_to_writer_ex<W: Write + Seek>(
     force_pcm: bool,
     writer: &mut W,
 ) -> Result<u64> {
-    generate_wav_to_writer(packets, &HashMap::new(), &HashMap::new(), force_pcm, false, writer)
+    generate_wav_to_writer(
+        packets,
+        &HashMap::new(),
+        &HashMap::new(),
+        force_pcm,
+        false,
+        writer,
+    )
 }
 
 pub(crate) fn generate_wav_from_packets_with_map_ex(
@@ -490,11 +493,9 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
             };
         }
         let codec = descriptor.codec;
-        let capture_target = (rtp.capture_ts - first_ts)
-            .saturating_mul(target_sample_rate as u64)
-            / 1_000_000;
-        let aligned_capture_target = capture_target
-            .saturating_add(u64::from(step_samples / 2))
+        let capture_target =
+            (rtp.capture_ts - first_ts).saturating_mul(target_sample_rate as u64) / 1_000_000;
+        let aligned_capture_target = capture_target.saturating_add(u64::from(step_samples / 2))
             / u64::from(step_samples)
             * u64::from(step_samples);
         let stream_key = (leg, rtp.ssrc);
@@ -939,7 +940,10 @@ mod tests {
     /// Slice to the contiguous region above `threshold` (the audible tone),
     /// robust to where exactly the export placed the DTMF in the timeline.
     fn active_region(samples: &[i16], threshold: i16) -> &[i16] {
-        let start = samples.iter().position(|s| s.abs() > threshold).unwrap_or(0);
+        let start = samples
+            .iter()
+            .position(|s| s.abs() > threshold)
+            .unwrap_or(0);
         let end = samples
             .iter()
             .rposition(|s| s.abs() > threshold)
@@ -963,8 +967,16 @@ mod tests {
         let mag_col = goertzel(tone, col_freq, sr);
         let rows = [697.0, 770.0, 852.0, 941.0];
         let cols = [1209.0, 1336.0, 1477.0, 1633.0];
-        let wrong_row = rows.iter().copied().find(|r| (r - row_freq).abs() > 1.0).unwrap_or(697.0);
-        let wrong_col = cols.iter().copied().find(|c| (c - col_freq).abs() > 1.0).unwrap_or(1209.0);
+        let wrong_row = rows
+            .iter()
+            .copied()
+            .find(|r| (r - row_freq).abs() > 1.0)
+            .unwrap_or(697.0);
+        let wrong_col = cols
+            .iter()
+            .copied()
+            .find(|c| (c - col_freq).abs() > 1.0)
+            .unwrap_or(1209.0);
         let mag_noise = goertzel(tone, 1000.0, sr);
         let mag_wrong_row = goertzel(tone, wrong_row, sr);
         let mag_wrong_col = goertzel(tone, wrong_col, sr);
@@ -976,10 +988,22 @@ mod tests {
         );
 
         let ratio = 4.0;
-        assert!(mag_row > mag_noise * ratio, "{label}: row {row_freq}Hz must beat noise ({mag_row:.0} vs {mag_noise:.0})");
-        assert!(mag_col > mag_noise * ratio, "{label}: col {col_freq}Hz must beat noise ({mag_col:.0} vs {mag_noise:.0})");
-        assert!(mag_row > mag_wrong_row * ratio, "{label}: row {row_freq}Hz must beat wrong row {wrong_row}Hz ({mag_row:.0} vs {mag_wrong_row:.0})");
-        assert!(mag_col > mag_wrong_col * ratio, "{label}: col {col_freq}Hz must beat wrong col {wrong_col}Hz ({mag_col:.0} vs {mag_wrong_col:.0})");
+        assert!(
+            mag_row > mag_noise * ratio,
+            "{label}: row {row_freq}Hz must beat noise ({mag_row:.0} vs {mag_noise:.0})"
+        );
+        assert!(
+            mag_col > mag_noise * ratio,
+            "{label}: col {col_freq}Hz must beat noise ({mag_col:.0} vs {mag_noise:.0})"
+        );
+        assert!(
+            mag_row > mag_wrong_row * ratio,
+            "{label}: row {row_freq}Hz must beat wrong row {wrong_row}Hz ({mag_row:.0} vs {mag_wrong_row:.0})"
+        );
+        assert!(
+            mag_col > mag_wrong_col * ratio,
+            "{label}: col {col_freq}Hz must beat wrong col {wrong_col}Hz ({mag_col:.0} vs {mag_wrong_col:.0})"
+        );
     }
 
     /// Build the captured (SIP + RTP) item stream for a single RFC 4733 digit.
@@ -1095,7 +1119,11 @@ mod tests {
         ] {
             let items = capture_digit_press(digit_code, 1600);
             let payload_map = build_payload_type_map(
-                &items.iter().filter(|i| i.msg_type == SipFlowMsgType::Sip).cloned().collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .filter(|i| i.msg_type == SipFlowMsgType::Sip)
+                    .cloned()
+                    .collect::<Vec<_>>(),
             );
             let packets: Vec<(i32, u64, Vec<u8>)> = items
                 .iter()
@@ -1129,12 +1157,7 @@ mod tests {
                 (
                     0,
                     capture_ts,
-                    build_rtp_packet_with_ssrc(
-                        8,
-                        i * 160,
-                        0xB055_1E55,
-                        &audio_payload,
-                    ),
+                    build_rtp_packet_with_ssrc(8, i * 160, 0xB055_1E55, &audio_payload),
                 )
             })
             .collect();
@@ -1319,7 +1342,11 @@ mod tests {
         // but spaced 20ms apart in wall-clock time.
         let packets = vec![
             (0i32, 0u64, build_rtp_packet(0, 100, &payload)),
-            (0i32, 20_000u64, build_rtp_packet(0, 4_000_000_000, &payload)),
+            (
+                0i32,
+                20_000u64,
+                build_rtp_packet(0, 4_000_000_000, &payload),
+            ),
         ];
 
         let wav = generate_wav_from_packets_ex(&packets, true)

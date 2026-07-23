@@ -812,6 +812,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         Some(CallRecordStorageConfig::Database {
             database_url,
             table_name,
+            ..
         }) => {
             let mut profile = Profile::new(
                 "callrecord-database",
@@ -1468,6 +1469,7 @@ fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> 
         CallRecordStorageConfig::Database {
             database_url,
             table_name,
+            ..
         } => Some(json!({
             "label": "Call record storage",
             "value": format!("Database ({})", table_name),
@@ -1544,7 +1546,7 @@ pub(crate) struct StorageSettingsPayload {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum CallRecordStoragePayload {
     Disabled,
     Local {
@@ -2183,7 +2185,8 @@ pub(crate) async fn update_security_settings(
             .sip_server()
             .inner
             .data_context
-            .reload_acl_rules(false, Some(Arc::new(config.proxy.clone())));
+            .reload_acl_rules(false, Some(Arc::new(config.proxy.clone())))
+            .await;
     }
 
     Json(json!({
@@ -3118,10 +3121,7 @@ pub(crate) async fn test_http_router(
         "direction": "internal"
     });
 
-    let req = state
-        .http_client()
-        .post(&payload.url)
-        .json(&test_request);
+    let req = state.http_client().post(&payload.url).json(&test_request);
     match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(resp) => Json(json!({
             "status": "ok",

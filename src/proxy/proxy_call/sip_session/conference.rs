@@ -191,9 +191,19 @@ impl SipSession {
             self.stop_caller_ingress_monitor().await;
         }
         let (peer, track_id) = if is_callee {
-            (self.callee_peer().cloned().ok_or_else(|| anyhow!("Missing callee peer"))?, Self::CALLEE_TRACK_ID)
+            (
+                self.callee_peer()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Missing callee peer"))?,
+                Self::CALLEE_TRACK_ID,
+            )
         } else {
-            (self.caller_peer().cloned().ok_or_else(|| anyhow!("Missing caller peer"))?, Self::CALLER_TRACK_ID)
+            (
+                self.caller_peer()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Missing caller peer"))?,
+                Self::CALLER_TRACK_ID,
+            )
         };
 
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);

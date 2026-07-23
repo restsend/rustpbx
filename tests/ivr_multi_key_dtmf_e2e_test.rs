@@ -160,7 +160,9 @@ file = "{}"
         assert!(
             routed,
             "digit '{}' should route to registered callee {}; callee stats={}",
-            digit, target_user, callee.rtp_stats_summary()
+            digit,
+            target_user,
+            callee.rtp_stats_summary()
         );
         info!("digit '{}' routed to {}", digit, target_user);
         caller.stop();

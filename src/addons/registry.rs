@@ -419,6 +419,27 @@ impl AddonRegistry {
         }
     }
 
+    /// Build a call app from the first enabled addon that handles the app name.
+    pub async fn build_call_app(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        context: &crate::call::app::ApplicationContext,
+    ) -> Option<Box<dyn crate::call::app::CallApp>> {
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), &context.config) {
+                continue;
+            }
+            if let Some(app) = addon
+                .build_call_app(app_name, params.clone(), context)
+                .await
+            {
+                return Some(app);
+            }
+        }
+        None
+    }
+
     /// Shutdown all addons, releasing resources.
     pub async fn shutdown_all(&self) {
         for addon in &self.addons {

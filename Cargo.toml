@@ -147,11 +147,11 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.21"
+rsipstack = "0.5.22"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
-rustrtc = "0.3.94"
+rustrtc = "0.3.95"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -289,6 +289,10 @@ path = "src/bin/rustpbx.rs"
 [[bin]]
 name = "sipflow"
 path = "src/bin/sipflow.rs"
+
+[[bin]]
+name = "sipflow-diag"
+path = "src/bin/sipflow-diag.rs"
 
 [[bin]]
 name = "verify-i18n"

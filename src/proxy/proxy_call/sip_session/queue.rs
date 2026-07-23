@@ -117,15 +117,16 @@ impl SipSession {
         };
 
         let result = match &plan.dial_strategy {
-            Some(DialStrategy::Sequential(_)) => self
-                .dial_queue_sequential(
+            Some(DialStrategy::Sequential(_)) => {
+                self.dial_queue_sequential(
                     &resolved_agents,
                     plan.ring_timeout,
                     callee_state_rx,
                     plan.no_trying_timeout,
                     plan.retry_codes.as_deref(),
                 )
-                .await,
+                .await
+            }
             Some(DialStrategy::Parallel(_)) => {
                 self.dial_queue_parallel(&resolved_agents, plan.ring_timeout, callee_state_rx)
                     .await
@@ -372,12 +373,14 @@ impl SipSession {
                     .map_err(super::map_queue_xfer_err),
                     TransferEndpoint::Ivr(ivr_name) => {
                         info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
-                        self.start_ivr_app(ivr_name, std::collections::HashMap::new()).await.map_err(|e| {
-                            into_callee_err(
-                                &StatusCode::ServerInternalError,
-                                Some(format!("Failed to start IVR: {}", e)),
-                            )
-                        })?;
+                        self.start_ivr_app(ivr_name, std::collections::HashMap::new())
+                            .await
+                            .map_err(|e| {
+                                into_callee_err(
+                                    &StatusCode::ServerInternalError,
+                                    Some(format!("Failed to start IVR: {}", e)),
+                                )
+                            })?;
                         Ok(())
                     }
                     TransferEndpoint::Voicemail(ext) => {

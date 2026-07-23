@@ -1055,14 +1055,15 @@ async fn test_inject_audio_recording_captures_injected_audio() {
     let rec_path = temp_dir.join("recording.wav");
 
     let recording_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let recorder_arc: std::sync::Arc<parking_lot::RwLock<Option<rustpbx::media::recorder::Recorder>>> =
-        std::sync::Arc::new(parking_lot::RwLock::new(Some(
-            rustpbx::media::recorder::Recorder::new(
-                &rec_path.to_string_lossy(),
-                audio_codec::CodecType::PCMU,
-            )
-            .unwrap(),
-        )));
+    let recorder_arc: std::sync::Arc<
+        parking_lot::RwLock<Option<rustpbx::media::recorder::Recorder>>,
+    > = std::sync::Arc::new(parking_lot::RwLock::new(Some(
+        rustpbx::media::recorder::Recorder::new(
+            &rec_path.to_string_lossy(),
+            audio_codec::CodecType::PCMU,
+        )
+        .unwrap(),
+    )));
 
     let bridge = BridgePeerBuilder::new("test-rec-bridge".into())
         .with_rtp_port_range(30400, 30500)

@@ -267,13 +267,15 @@ async fn update_settings(
             "status": "ok",
             "message": format!("SipFlow settings saved but apply failed: {err}"),
             "restart_required": false
-        })).into_response()
+        }))
+        .into_response()
     } else {
         Json(json!({
             "status": "ok",
             "message": format!("SipFlow settings applied. {reload_message}"),
             "restart_required": false
-        })).into_response()
+        }))
+        .into_response()
     }
 }
 

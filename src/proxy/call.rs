@@ -282,13 +282,11 @@ impl DefaultRouteInvite {
         let trunks_snapshot = self.data_context.trunks_snapshot();
         let routes_snapshot = self.data_context.routes_snapshot();
         let source_trunk = if matches!(direction, DialDirection::Inbound) {
-            cookie
-                .get_extension::<TrunkContext>()
-                .and_then(|context| {
-                    trunks_snapshot
-                        .get(&context.name)
-                        .and_then(|config| build_source_trunk(context.name, config, direction))
-                })
+            cookie.get_extension::<TrunkContext>().and_then(|context| {
+                trunks_snapshot
+                    .get(&context.name)
+                    .and_then(|config| build_source_trunk(context.name, config, direction))
+            })
         } else {
             None
         };
@@ -374,9 +372,8 @@ impl CallModule {
         // Share the trunk rate limiter between RoutingState (acquire during
         // routing) and SipSession (release on teardown) by taking the Arc from
         // the server inner.
-        let mut routing_state = RoutingState::with_trunk_rate_limiter(
-            server.trunk_rate_limiter.clone(),
-        );
+        let mut routing_state =
+            RoutingState::with_trunk_rate_limiter(server.trunk_rate_limiter.clone());
         let limiter = server
             .frequency_limiter
             .clone()
@@ -548,8 +545,8 @@ impl CallModule {
                 crate::call::TransferEndpoint::Uri(uri) => {
                     let realm = self.inner.config.select_realm("");
                     let normalized = crate::call::build_sip_uri(uri, &realm);
-                    let forwarded_uri =
-                        rsipstack::sip::Uri::try_from(normalized.as_str()).map_err(|e| {
+                    let forwarded_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
+                        .map_err(|e| {
                             RouteError::from((
                                 anyhow!("invalid always-forwarding target '{}': {}", uri, e),
                                 Some(rsipstack::sip::StatusCode::ServerInternalError),
@@ -578,6 +575,7 @@ impl CallModule {
                         .server
                         .data_context
                         .resolve_queue_config(lookup_ref.as_str())
+                        .await
                         .map_err(|e| {
                             RouteError::from((
                                 anyhow!(
@@ -618,7 +616,7 @@ impl CallModule {
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
                         )));
                     }
-                    let ivr_file = self.inner.server.data_context.resolve_ivr_file(name);
+                    let ivr_file = self.inner.server.data_context.resolve_ivr_file(name).await;
                     forced_pending_app = Some((
                         "ivr".to_string(),
                         Some(serde_json::json!({ "file": ivr_file })),
@@ -2395,11 +2393,9 @@ mod tests {
             _direction: &DialDirection,
             _cookie: &TransactionCookie,
         ) -> Result<RouteResult> {
-            option.caller = rsipstack::sip::Uri::try_from(
-                "sip:rewritten-caller@source.example.com",
-            )?;
-            option.callee =
-                rsipstack::sip::Uri::try_from("sip:001234@carrier.example.com:5060")?;
+            option.caller =
+                rsipstack::sip::Uri::try_from("sip:rewritten-caller@source.example.com")?;
+            option.callee = rsipstack::sip::Uri::try_from("sip:001234@carrier.example.com:5060")?;
             Ok(RouteResult::Forward(option, Some(Default::default())))
         }
     }

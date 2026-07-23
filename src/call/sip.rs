@@ -161,7 +161,10 @@ pub fn spawn_client_dialog_guard(
                 break;
             }
             let state = watch_rx.borrow();
-            if state.as_ref().map_or(true, |s| matches!(s, DialogState::Terminated(..))) {
+            if state
+                .as_ref()
+                .map_or(true, |s| matches!(s, DialogState::Terminated(..)))
+            {
                 break;
             }
         }

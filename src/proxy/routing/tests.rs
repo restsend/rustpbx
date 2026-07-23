@@ -2798,7 +2798,10 @@ async fn test_source_trunk_cps_limit_rejects() {
     .await
     .unwrap();
     assert!(
-        matches!(result, RouteResult::Forward(_, _) | RouteResult::NotHandled(_, _)),
+        matches!(
+            result,
+            RouteResult::Forward(_, _) | RouteResult::NotHandled(_, _)
+        ),
         "first call should pass"
     );
 
@@ -2876,12 +2879,7 @@ async fn test_source_trunk_concurrent_releases_on_reject_action() {
     // If a routing rule has a Reject action, the source-trunk slot acquired at
     // the beginning must be released so subsequent calls are not stuck.
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits(
-        "in",
-        (Some(1), None),
-        "out",
-        (None, None),
-    );
+    let trunks = make_trunks_with_limits("in", (Some(1), None), "out", (None, None));
     let routes = vec![RouteRule {
         name: "reject_all".to_string(),
         priority: 100,
@@ -2997,19 +2995,26 @@ async fn test_dest_trunk_reject_releases_source_slot() {
     let routing_state = Arc::new(RoutingState::new());
     let trunks = make_trunks_with_limits(
         "in",
-        (Some(5), None),  // source allows 5
+        (Some(5), None), // source allows 5
         "out",
-        (Some(1), None),  // dest allows 1
+        (Some(1), None), // dest allows 1
     );
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
     // First call: source acquires 1, dest acquires 1.
     let r1 = match_invite(
-        Some(&trunks), Some(&routes), None,
-        create_test_invite_option(), &create_test_request(),
-        Some(&source), routing_state.clone(), &DialDirection::Inbound,
-    ).await.unwrap();
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .unwrap();
     assert!(matches!(r1, RouteResult::Forward(_, _)));
     assert_eq!(routing_state.trunk_rate_limiter.concurrent_count("in"), 1);
     assert_eq!(routing_state.trunk_rate_limiter.concurrent_count("out"), 1);
@@ -3018,10 +3023,17 @@ async fn test_dest_trunk_reject_releases_source_slot() {
     // released (the first call's source slot stays at 1 because it's attached
     // to the first call's hints for session-level release).
     let r2 = match_invite(
-        Some(&trunks), Some(&routes), None,
-        create_test_invite_option(), &create_test_request(),
-        Some(&source), routing_state.clone(), &DialDirection::Inbound,
-    ).await.unwrap();
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .unwrap();
     assert!(matches!(r2, RouteResult::Abort(StatusCode::BusyHere, _)));
     assert_eq!(
         routing_state.trunk_rate_limiter.concurrent_count("in"),
@@ -3034,12 +3046,7 @@ async fn test_dest_trunk_reject_releases_source_slot() {
 #[tokio::test]
 async fn test_trunk_holds_attached_to_forward_hints() {
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits(
-        "in",
-        (Some(10), None),
-        "out",
-        (Some(10), None),
-    );
+    let trunks = make_trunks_with_limits("in", (Some(10), None), "out", (Some(10), None));
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -3078,12 +3085,7 @@ async fn test_trunk_holds_attached_to_forward_hints() {
 #[tokio::test]
 async fn test_no_limits_means_no_holds() {
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits(
-        "in",
-        (None, None),
-        "out",
-        (None, None),
-    );
+    let trunks = make_trunks_with_limits("in", (None, None), "out", (None, None));
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -3103,10 +3105,7 @@ async fn test_no_limits_means_no_holds() {
     match result {
         RouteResult::Forward(_, hints) => {
             let holds = hints.map(|h| h.trunk_concurrency_holds).unwrap_or_default();
-            assert!(
-                holds.is_empty(),
-                "no trunk holds when no limits configured"
-            );
+            assert!(holds.is_empty(), "no trunk holds when no limits configured");
         }
         _ => panic!("expected Forward"),
     }

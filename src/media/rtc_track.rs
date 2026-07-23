@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rustrtc::{
-    PeerConnection, RtcConfiguration, RtpCodecParameters,
-    SdpType, SessionDescription,
+    PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType, SessionDescription,
     media::SampleStreamSource,
 };
 use tracing::debug;

@@ -14,7 +14,10 @@
 
 mod helpers;
 
-use helpers::audio_verifier::{compute_rms, extract_audio_region, find_dominant_frequency, find_signal_start, generate_sine_wav, has_audio_content, read_wav_stereo};
+use helpers::audio_verifier::{
+    compute_rms, extract_audio_region, find_dominant_frequency, find_signal_start,
+    generate_sine_wav, has_audio_content, read_wav_stereo,
+};
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TestPbx, TestPbxInject};
 use rustpbx::call::SipUser;
@@ -126,21 +129,33 @@ file = "{}"
             got_audio = true;
             info!(
                 "IVR greeting delivered: caller total={} silence={} has_audio={}",
-                q.total_frames, q.silence_frames, q.has_audio()
+                q.total_frames,
+                q.silence_frames,
+                q.has_audio()
             );
             break;
         }
         sleep(Duration::from_millis(200)).await;
     }
-    assert!(got_audio, "caller should receive non-silent IVR greeting audio");
-    assert!(caller.has_rtp_rx(), "caller should have RX RTP from IVR greeting");
+    assert!(
+        got_audio,
+        "caller should receive non-silent IVR greeting audio"
+    );
+    assert!(
+        caller.has_rtp_rx(),
+        "caller should have RX RTP from IVR greeting"
+    );
 
     // Best-effort frequency check on the caller recording.
     caller.stop();
     sleep(Duration::from_millis(400)).await;
     if caller_record.exists() {
         let (rx_ch, _tx_ch, rec_sr) = read_wav_stereo(&caller_record);
-        info!("caller recording: {} RX samples at {} Hz", rx_ch.len(), rec_sr);
+        info!(
+            "caller recording: {} RX samples at {} Hz",
+            rx_ch.len(),
+            rec_sr
+        );
         if !rx_ch.is_empty() {
             let start = find_signal_start(&rx_ch, 0.01, rec_sr as usize / 50);
             let region = extract_audio_region(&rx_ch, rec_sr, start, 1500);
@@ -154,7 +169,9 @@ file = "{}"
                 info!("IVR greeting 440 Hz verified in caller recording");
             }
         } else {
-            info!("caller recording has 0 RX samples (sipbot caller recording limitation); verified via audio_quality instead");
+            info!(
+                "caller recording has 0 RX samples (sipbot caller recording limitation); verified via audio_quality instead"
+            );
         }
     }
 

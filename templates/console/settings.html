@@ -5410,10 +5410,10 @@
                 let callrecordPayload = null;
                 const crMode = this.storageDraft.callrecord_mode || 'disabled';
                 if (crMode === 'disabled') {
-                    callrecordPayload = { mode: 'disabled' };
+                    callrecordPayload = { type: 'disabled' };
                 } else if (crMode === 'local') {
                     callrecordPayload = {
-                        mode: 'local',
+                        type: 'local',
                         root: this.normalizeOptionalString(this.storageDraft.callrecord_root),
                     };
                 } else if (crMode === 's3') {
@@ -5430,7 +5430,7 @@
                         return;
                     }
                     callrecordPayload = {
-                        mode: 's3',
+                        type: 's3',
                         vendor: s3Vendor,
                         bucket: s3Bucket,
                         region: s3Region,

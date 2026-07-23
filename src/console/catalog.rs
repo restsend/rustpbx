@@ -42,11 +42,11 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-pub fn scan_ivr_catalog(ivr_dir: &Path, extra_patterns: &[String]) -> Vec<IvrCatalogEntry> {
-    scan_ivr_catalog_opt(ivr_dir, extra_patterns, None)
+pub async fn scan_ivr_catalog(ivr_dir: &Path, extra_patterns: &[String]) -> Vec<IvrCatalogEntry> {
+    scan_ivr_catalog_opt(ivr_dir, extra_patterns, None).await
 }
 
-pub fn scan_ivr_catalog_opt(
+pub async fn scan_ivr_catalog_opt(
     ivr_dir: &Path,
     extra_patterns: &[String],
     store: Option<&GeneratedConfigStore>,
@@ -56,7 +56,7 @@ pub fn scan_ivr_catalog_opt(
     if let Some(store) = store
         && store.is_db()
     {
-        if let Ok(names) = store.list_names("ivr") {
+        if let Ok(names) = store.list_names("ivr").await {
             for name in names {
                 if !name.ends_with(".toml") {
                     continue;
@@ -69,7 +69,7 @@ pub fn scan_ivr_catalog_opt(
                 if seen.contains_key(entry_name) {
                     continue;
                 }
-                if let Ok(Some(content)) = store.read("ivr", &name) {
+                if let Ok(Some(content)) = store.read("ivr", &name).await {
                     if let Ok(file_config) = toml::from_str::<IvrFileConfig>(&content) {
                         let desc = file_config.ivr.description.clone();
                         let ivr_mode = file_config
@@ -262,11 +262,11 @@ pub fn scan_ivr_catalog_opt(
     result
 }
 
-pub fn scan_queue_catalog(queue_dir: &Path, extra_patterns: &[String]) -> Vec<QueueCatalogEntry> {
-    scan_queue_catalog_opt(queue_dir, extra_patterns, None)
+pub async fn scan_queue_catalog(queue_dir: &Path, extra_patterns: &[String]) -> Vec<QueueCatalogEntry> {
+    scan_queue_catalog_opt(queue_dir, extra_patterns, None).await
 }
 
-pub fn scan_queue_catalog_opt(
+pub async fn scan_queue_catalog_opt(
     queue_dir: &Path,
     extra_patterns: &[String],
     store: Option<&GeneratedConfigStore>,
@@ -276,12 +276,12 @@ pub fn scan_queue_catalog_opt(
     if let Some(store) = store
         && store.is_db()
     {
-        if let Ok(names) = store.list_names("queue") {
+        if let Ok(names) = store.list_names("queue").await {
             for name in names {
                 if !name.ends_with(".toml") {
                     continue;
                 }
-                if let Ok(Some(content)) = store.read("queue", &name) {
+                if let Ok(Some(content)) = store.read("queue", &name).await {
                     if let Ok(doc) = toml::from_str::<QueueFileDocument>(&content) {
                         let generated = name.ends_with(".generated.toml");
                         if let Some(key) = canonical_queue_key(&doc.name) {
@@ -510,11 +510,11 @@ impl ForwardingCatalog {
     }
 }
 
-pub fn build_forwarding_catalog(proxy_config: &ProxyConfig) -> ForwardingCatalog {
-    build_forwarding_catalog_opt(proxy_config, None)
+pub async fn build_forwarding_catalog(proxy_config: &ProxyConfig) -> ForwardingCatalog {
+    build_forwarding_catalog_opt(proxy_config, None).await
 }
 
-pub fn build_forwarding_catalog_opt(
+pub async fn build_forwarding_catalog_opt(
     proxy_config: &ProxyConfig,
     store: Option<&GeneratedConfigStore>,
 ) -> ForwardingCatalog {
@@ -528,6 +528,7 @@ pub fn build_forwarding_catalog_opt(
         &proxy_config.queues_files,
         queue_store,
     )
+    .await
     .into_iter()
     .map(|q| ForwardingQueue {
         reference: q.key,
@@ -536,16 +537,20 @@ pub fn build_forwarding_catalog_opt(
     })
     .collect();
 
-    catalog.ivr_projects =
-        scan_ivr_catalog_opt(&proxy_config.generated_ivr_dir(), &proxy_config.ivr_files, ivr_store)
-            .into_iter()
-            .map(|i| ForwardingIvr {
-                name: i.name,
-                description: i.description,
-                ivr_mode: i.ivr_mode,
-                file_path: i.file_path,
-            })
-            .collect();
+    catalog.ivr_projects = scan_ivr_catalog_opt(
+        &proxy_config.generated_ivr_dir(),
+        &proxy_config.ivr_files,
+        ivr_store,
+    )
+    .await
+    .into_iter()
+    .map(|i| ForwardingIvr {
+        name: i.name,
+        description: i.description,
+        ivr_mode: i.ivr_mode,
+        file_path: i.file_path,
+    })
+    .collect();
 
     catalog
 }
@@ -560,8 +565,8 @@ pub fn load_proxy_config(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_scan_queue_catalog_with_multi_queue_file() {
+    #[tokio::test]
+    async fn test_scan_queue_catalog_with_multi_queue_file() {
         let dir = std::env::temp_dir().join("rustpbx_catalog_test_multi");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -586,7 +591,7 @@ mode = "sequential"
 "#;
         std::fs::write(dir.join("queues.generated.toml"), toml_content).unwrap();
 
-        let result = scan_queue_catalog(&dir, &[]);
+        let result = scan_queue_catalog(&dir, &[]).await;
         assert_eq!(result.len(), 2, "should have 2 queues, got: {:?}", result);
 
         let names: Vec<&str> = result.iter().map(|q| q.name.as_str()).collect();
@@ -606,8 +611,8 @@ mode = "sequential"
         assert!(keys.contains(&"db-2"), "should contain db-2: {:?}", keys);
     }
 
-    #[test]
-    fn test_scan_ivr_catalog_with_generated_file() {
+    #[tokio::test]
+    async fn test_scan_ivr_catalog_with_generated_file() {
         let dir = std::env::temp_dir().join("rustpbx_catalog_test_ivr");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -626,7 +631,7 @@ entries = []
 "#;
         std::fs::write(dir.join("abcd.generated.toml"), toml_content).unwrap();
 
-        let result = scan_ivr_catalog(&dir, &[]);
+        let result = scan_ivr_catalog(&dir, &[]).await;
         assert_eq!(result.len(), 1, "should have 1 IVR, got: {:?}", result);
         assert_eq!(result[0].name, "abcd");
         assert_eq!(result[0].ivr_mode, "tree");

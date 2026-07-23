@@ -1,10 +1,10 @@
 use super::*;
 use rustrtc::TransportMode;
-use tracing::debug;
 use rustrtc::media::MediaStreamTrack as _;
 use rustrtc::{MediaKind, PeerConnection, RtcConfiguration, TransceiverDirection};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -681,7 +681,9 @@ async fn test_file_track_session_id() {
     let track = FileTrack::new("sid-track".to_string())
         .with_session_id(session_id.clone())
         .with_path(test_file.clone())
-        .with_codec_info(negotiate::MediaNegotiator::codec_info_for_type(CodecType::PCMU))
+        .with_codec_info(negotiate::MediaNegotiator::codec_info_for_type(
+            CodecType::PCMU,
+        ))
         .with_loop(false);
 
     // Direct field access — session_id is pub(crate), accessible within the crate

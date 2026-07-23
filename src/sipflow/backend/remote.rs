@@ -8,14 +8,16 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use arc_swap::ArcSwap;
 use crate::config::SipFlowClusterNode;
 use crate::http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::sipflow::backend::SipFlowBackend;
+use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{
     MAX_BATCH_COUNT, MsgType, Packet, encode_batch_into, encode_packet_into,
 };
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
+use arc_swap::ArcSwap;
+use std::sync::atomic::Ordering;
 
 /// Jump Consistent Hash
 ///
@@ -94,6 +96,7 @@ pub struct RemoteBackend {
     nodes: Vec<RemoteNode>,
     client: reqwest::Client,
     cancel_token: CancellationToken,
+    perf: Arc<PerfCounters>,
 }
 
 impl RemoteBackend {
@@ -121,10 +124,7 @@ impl RemoteBackend {
                 let udp_host = n.udp.clone();
                 let udp_addr: SocketAddr =
                     (&*udp_host).to_socket_addrs()?.next().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Unable to resolve SipFlow UDP address: {}",
-                            n.udp
-                        )
+                        anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", n.udp)
                     })?;
                 Ok(RemoteNode {
                     udp_host,
@@ -160,11 +160,12 @@ impl RemoteBackend {
         // Clamp flush interval to at least MIN_BATCH_FLUSH_MS. Anything
         // tighter would defeat batching and risk spin-flushing under low
         // load.
-        let flush_duration =
-            Duration::from_millis(batch_flush_ms_cfg.max(MIN_BATCH_FLUSH_MS));
+        let flush_duration = Duration::from_millis(batch_flush_ms_cfg.max(MIN_BATCH_FLUSH_MS));
 
         let cancel_clone = cancel_token.clone();
         let nodes_clone = nodes.clone();
+        let perf = PerfCounters::new_arc();
+        let perf_clone = perf.clone();
 
         crate::utils::spawn(async move {
             worker_loop(
@@ -175,6 +176,7 @@ impl RemoteBackend {
                 batch_enabled,
                 flush_duration,
                 cancel_clone,
+                perf_clone,
             )
             .await;
         });
@@ -184,7 +186,9 @@ impl RemoteBackend {
         if dns_ttl_secs > 0 {
             let dns_nodes = nodes.clone();
             let dns_cancel = cancel_token.clone();
-            crate::utils::spawn(async move { dns_refresh_loop(dns_nodes, dns_ttl_secs, dns_cancel).await });
+            crate::utils::spawn(async move {
+                dns_refresh_loop(dns_nodes, dns_ttl_secs, dns_cancel).await
+            });
         }
 
         Ok(Self {
@@ -192,6 +196,7 @@ impl RemoteBackend {
             nodes,
             client,
             cancel_token,
+            perf,
         })
     }
 
@@ -287,6 +292,7 @@ async fn worker_loop(
     batch_enabled: bool,
     flush_duration: Duration,
     cancel: CancellationToken,
+    perf: Arc<PerfCounters>,
 ) {
     // One pending-packet buffer per destination node.
     let mut per_node: Vec<Vec<Packet>> = (0..nodes.len()).map(|_| Vec::new()).collect();
@@ -300,6 +306,13 @@ async fn worker_loop(
     // Cache the recv limit outside the select! arm to avoid simultaneous
     // mutable+immutable borrows of `scratch`.
     let recv_limit = scratch.capacity().max(1);
+
+    // Perf dump every 1 second: reports signaling/media sent and dropped
+    // counts since the last dump, and exports to `metrics`.
+    let mut perf_dumper = PerfDumper::with_interval(perf.clone(), Duration::from_secs(1));
+    let mut perf_interval = tokio::time::interval(Duration::from_secs(1));
+    // Skip the immediate first tick so we don't dump before any traffic.
+    perf_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -330,6 +343,13 @@ async fn worker_loop(
             _ = tokio::time::sleep_until(deadline) => {
                 flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
                 deadline = Instant::now() + flush_duration;
+            }
+            // 1-second perf dump: logs send/drop rates and exports metrics.
+            _ = perf_interval.tick() => {
+                perf.set_pending(rx.len() as i64);
+                if let Some(msg) = perf_dumper.try_dump() {
+                    tracing::info!("{msg}");
+                }
             }
         }
     }
@@ -404,11 +424,7 @@ async fn flush_all(
 /// Background task that periodically re-resolves each node's UDP hostname.
 /// When a resolved address changes, the node's [`ArcSwap`] is updated
 /// atomically so that subsequent sends use the new address.
-async fn dns_refresh_loop(
-    nodes: Vec<RemoteNode>,
-    ttl_secs: u64,
-    cancel: CancellationToken,
-) {
+async fn dns_refresh_loop(nodes: Vec<RemoteNode>, ttl_secs: u64, cancel: CancellationToken) {
     let interval = Duration::from_secs(ttl_secs);
     loop {
         tokio::select! {
@@ -451,12 +467,28 @@ impl SipFlowBackend for RemoteBackend {
         // (sustained overload) this returns `TrySendError::Full`, which
         // upstream callers already swallow — preferable to unbounded memory
         // growth under backpressure.
-        self.sender
+        let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
+        let result = self
+            .sender
             .try_send(Command::RecordItem {
                 call_id: call_id.to_string(),
                 item,
             })
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from);
+        if result.is_ok() {
+            // Count successful enqueues by type so we can report per-second
+            // signaling vs media send rates from the worker's perf dumper.
+            if is_signaling {
+                self.perf.signaling_sent.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.perf.media_sent.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            // Channel full: data is dropped. Bump the drop counter so the
+            // loss is visible in both the periodic log and metrics.
+            self.perf.items_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     async fn query_flow(
@@ -561,7 +593,13 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let bytes = fetch_bytes(&self.client, reqwest::Method::GET, &url, &HttpFetchOptions::new()).await?;
+        let bytes = fetch_bytes(
+            &self.client,
+            reqwest::Method::GET,
+            &url,
+            &HttpFetchOptions::new(),
+        )
+        .await?;
         Ok(bytes.to_vec())
     }
 
@@ -581,7 +619,13 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let bytes = fetch_bytes(&self.client, reqwest::Method::GET, &url, &HttpFetchOptions::new()).await?;
+        let bytes = fetch_bytes(
+            &self.client,
+            reqwest::Method::GET,
+            &url,
+            &HttpFetchOptions::new(),
+        )
+        .await?;
 
         let mut tmp = tempfile::Builder::new()
             .prefix("sipflow_wav_")

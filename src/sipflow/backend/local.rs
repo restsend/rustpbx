@@ -3,18 +3,19 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
+use crate::sipflow::flusher::SipFlowFlusher;
 use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet_with};
 use crate::sipflow::wav_utils::generate_wav_to_writer;
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
-use std::sync::atomic::Ordering;
 
 enum Command {
     RecordItem {
@@ -27,11 +28,13 @@ enum Command {
 }
 
 /// Local (embedded) backend that runs sipflow storage in a background task
+/// with a dedicated OS thread for SQLite writes.
 pub struct LocalBackend {
     sender: mpsc::UnboundedSender<Command>,
     root: String,
     subdirs: SipFlowSubdirs,
     cancel_token: CancellationToken,
+    _flusher: SipFlowFlusher,
 }
 
 impl LocalBackend {
@@ -45,21 +48,26 @@ impl LocalBackend {
     ) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
 
+        // Spawn the dedicated SQLite flush thread
+        let flusher = SipFlowFlusher::new(flush_count, flush_interval_secs, id_cache_size);
+        let flusher_tx = flusher.sender();
+        let dropped = flusher.dropped_count();
+
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         let cancel_token = CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
         let root_clone = root.clone();
         let subdirs_clone = subdirs.clone();
-        // Spawn background worker task
+
+        // Spawn background worker task (handles packet processing + raw file write)
         let perf = PerfCounters::new_arc();
         let perf_dumper = perf.clone();
         crate::utils::spawn(async move {
             let mut storage = StorageManager::new(
                 &PathBuf::from(&root_clone),
-                flush_count,
-                flush_interval_secs,
-                id_cache_size,
                 subdirs_clone,
+                Some(flusher_tx),
+                Some(dropped),
             );
 
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -68,14 +76,13 @@ impl LocalBackend {
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {
-                        let _ = storage.check_flush().await;
+                        let _ = storage.force_flush().await;
                         break;
                     }
                     Some(cmd) = rx.recv() => {
                         match cmd {
                             Command::RecordItem { call_id, item } => {
                                 perf.items_recorded.fetch_add(1, Ordering::Relaxed);
-                                // Convert SipFlowItem to Packet for storage
                                 let default_port = if matches!(&item.msg_type, SipFlowMsgType::Sip)
                                 {
                                     5060
@@ -105,11 +112,6 @@ impl LocalBackend {
                                     SipFlowMsgType::Sip => MsgType::Sip,
                                     SipFlowMsgType::Rtp => MsgType::Rtp,
                                 };
-                                // Pass the caller-provided call_id through for
-                                // both SIP and RTP; `process_packet` only falls
-                                // back to extracting the Call-ID header from
-                                // the payload when it is missing (the payload
-                                // may already be compressed at this point).
                                 let packet_call_id = if call_id.is_empty() {
                                     None
                                 } else {
@@ -137,14 +139,14 @@ impl LocalBackend {
                             Command::Flush { done } => {
                                 let _ = storage.force_flush().await;
                                 perf.flushes.fetch_add(1, Ordering::Relaxed);
-                                perf.set_pending(storage.batch_len() as i64);
+                                perf.set_pending(storage.dropped() as i64);
                                 let _ = done.send(());
                             }
                         }
                     }
                     _ = interval.tick() => {
                         let _ = storage.check_flush().await;
-                        perf.set_pending(storage.batch_len() as i64);
+                        perf.set_pending(storage.dropped() as i64);
                         if let Some(msg) = dumper.try_dump() {
                             tracing::info!("{msg}");
                         }
@@ -158,6 +160,7 @@ impl LocalBackend {
             root,
             subdirs,
             cancel_token,
+            _flusher: flusher,
         })
     }
 }
@@ -204,12 +207,11 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let mut items = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
             storage.query_flow(&call_id, start_time, end_time).await
         })
         .await??;
 
-        // Sort by seq or timestamp
         items.sort_by_key(|i| i.timestamp);
 
         Ok(items)
@@ -226,7 +228,7 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let stats = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
             storage
                 .query_media_stats(&call_id, start_time, end_time)
                 .await
@@ -247,7 +249,7 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let result = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
             let packets = storage.query_media(&call_id, start_time, end_time).await?;
             if packets.is_empty() {
                 return Ok(Vec::<u8>::new());
@@ -255,7 +257,14 @@ impl SipFlowBackend for LocalBackend {
             let payload_map =
                 build_payload_maps(&mut storage, &call_id, start_time, end_time).await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut cursor)?;
+            generate_wav_to_writer(
+                &packets,
+                &payload_map.0,
+                &payload_map.1,
+                true,
+                false,
+                &mut cursor,
+            )?;
             Ok::<Vec<u8>, anyhow::Error>(cursor.into_inner())
         })
         .await??;
@@ -275,7 +284,7 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let result = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
             let mut packets = storage.query_media(&call_id, start_time, end_time).await?;
             if let Some(leg) = stream_leg {
                 packets.retain(|(packet_leg, _, _)| *packet_leg == leg);
@@ -292,7 +301,14 @@ impl SipFlowBackend for LocalBackend {
             )
             .await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut cursor)?;
+            generate_wav_to_writer(
+                &packets,
+                &payload_map.0,
+                &payload_map.1,
+                true,
+                false,
+                &mut cursor,
+            )?;
             Ok::<Vec<u8>, anyhow::Error>(cursor.into_inner())
         })
         .await??;
@@ -312,7 +328,7 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let file = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
             let mut packets = storage.query_media(&call_id, start_time, end_time).await?;
             if let Some(leg) = stream_leg {
                 packets.retain(|(packet_leg, _, _)| *packet_leg == leg);
@@ -330,7 +346,14 @@ impl SipFlowBackend for LocalBackend {
             .await;
 
             let mut file = tempfile::NamedTempFile::new()?;
-            generate_wav_to_writer(&packets, &payload_map.0, &payload_map.1, true, false, &mut file)?;
+            generate_wav_to_writer(
+                &packets,
+                &payload_map.0,
+                &payload_map.1,
+                true,
+                false,
+                &mut file,
+            )?;
             std::io::Write::flush(&mut file)?;
             Ok::<Option<tempfile::NamedTempFile>, anyhow::Error>(Some(file))
         })
@@ -338,6 +361,12 @@ impl SipFlowBackend for LocalBackend {
         .ok_or_else(|| anyhow::anyhow!("No media packets found"))?;
 
         Ok(file)
+    }
+}
+
+impl Drop for LocalBackend {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
 
@@ -395,10 +424,4 @@ async fn build_payload_maps_filtered(
     let payload_map = build_payload_type_map(&flow);
     let leg_payload_map = build_payload_type_map_by_leg(&flow, &leg_sources);
     (payload_map, leg_payload_map)
-}
-
-impl Drop for LocalBackend {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
-    }
 }

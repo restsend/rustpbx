@@ -234,7 +234,7 @@ pub async fn page_queue_create(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config)
+        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };
@@ -287,7 +287,7 @@ pub async fn page_queue_edit(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config)
+        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };
@@ -767,14 +767,21 @@ pub async fn download_audio_handler(
     };
 
     // Create filename from URL — strip query string first
-    let url_basename = url.split('/').last().unwrap_or("audio.wav").split('?').next().unwrap_or("audio.wav");
+    let url_basename = url
+        .split('/')
+        .last()
+        .unwrap_or("audio.wav")
+        .split('?')
+        .next()
+        .unwrap_or("audio.wav");
     let filename = sanitize_filename(url_basename);
     let dest_path = sounds_dir.join(&filename);
 
     // Download
     let opts =
         crate::http_util::HttpFetchOptions::new().with_timeout(std::time::Duration::from_secs(30));
-    match crate::http_util::fetch_bytes(state.http_client(), reqwest::Method::GET, &url, &opts).await
+    match crate::http_util::fetch_bytes(state.http_client(), reqwest::Method::GET, &url, &opts)
+        .await
     {
         Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {

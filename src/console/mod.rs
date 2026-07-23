@@ -1,5 +1,6 @@
 use crate::app::AppStateInner;
-use crate::config::ConsoleConfig;
+use crate::callrecord::{derive_daily_url, today_string};
+use crate::config::{CallRecordConfig, ConsoleConfig};
 use crate::console::i18n::{I18n, LocaleConfig, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::models::rbac::{role_permission, user_role};
@@ -11,10 +12,12 @@ use lru::LruCache;
 use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
+use tracing::warn;
 
 pub mod auth;
 pub mod catalog;
@@ -61,6 +64,10 @@ pub struct ConsoleState {
     pub pending_reload: Arc<RwLock<BTreeSet<ReloadTarget>>>,
     /// Addon-specific state storage using http::Extensions for type-safe access
     addon_extensions: Arc<std::sync::RwLock<http::Extensions>>,
+    /// Call record config (for rotation-aware CDR queries).
+    callrecord_cfg: Option<CallRecordConfig>,
+    /// Connection cache for daily rotated SQLite files.
+    cdr_conn_cache: Arc<tokio::sync::RwLock<HashMap<String, DatabaseConnection>>>,
 }
 
 /// Trait for addon state types that can be stored in ConsoleState.
@@ -69,7 +76,11 @@ pub trait AddonState: std::any::Any + Send + Sync + Clone + 'static {}
 impl<T: std::any::Any + Send + Sync + Clone + 'static> AddonState for T {}
 
 impl ConsoleState {
-    pub async fn initialize(db: DatabaseConnection, config: ConsoleConfig) -> Result<Arc<Self>> {
+    pub async fn initialize(
+        db: DatabaseConnection,
+        config: ConsoleConfig,
+        callrecord_cfg: Option<CallRecordConfig>,
+    ) -> Result<Arc<Self>> {
         let key_material: [u8; 32] = Sha256::digest(config.session_secret.as_bytes()).into();
         let session_key = key_material.to_vec();
         let mut config = config;
@@ -92,7 +103,69 @@ impl ConsoleState {
             ))),
             pending_reload: Arc::new(RwLock::new(BTreeSet::new())),
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
+            callrecord_cfg,
+            cdr_conn_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }))
+    }
+
+    /// Return a connection for querying CDRs.
+    /// - When rotation is disabled: returns the main database connection.
+    /// - When rotation is enabled (SQLite daily): opens/returns a connection
+    ///   to the daily file for the given date (defaults to today).
+    pub async fn cdr_db(&self, date: Option<&str>) -> DatabaseConnection {
+        let Some(cfg) = &self.callrecord_cfg else {
+            return self.db.clone();
+        };
+        let crate::config::CallRecordStorageConfig::Database {
+            database_url: _,
+            table_name,
+            skip_create_table: _,
+            rotate,
+        } = &cfg.storage
+        else {
+            return self.db.clone();
+        };
+        if *rotate != crate::config::RotationMode::Daily {
+            return self.db.clone();
+        }
+        // Daily rotation: derive the file path and return (or cache) the
+        // connection.
+        let date_str = date.unwrap_or_else(|| Box::leak(today_string().into_boxed_str()));
+        let key = format!("{}{}", table_name, date_str);
+
+        // Check cache
+        {
+            let cache = self.cdr_conn_cache.read().await;
+            if let Some(conn) = cache.get(&key) {
+                return conn.clone();
+            }
+        }
+
+        // Build the daily URL and connect
+        // We reconstruct the database_url from config.
+        let daily_url = {
+            let base = match &cfg.storage {
+                crate::config::CallRecordStorageConfig::Database { database_url, .. } => {
+                    database_url
+                        .as_deref()
+                        .unwrap_or("sqlite:./call_records.db")
+                }
+                _ => "sqlite:./call_records.db",
+            };
+            derive_daily_url(base, date_str)
+        };
+
+        match crate::models::connect_db(&daily_url).await {
+            Ok(conn) => {
+                let mut cache = self.cdr_conn_cache.write().await;
+                cache.insert(key.clone(), conn.clone());
+                conn
+            }
+            Err(e) => {
+                warn!("Failed to open daily CDR file {}: {}", daily_url, e);
+                self.db.clone()
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -834,7 +907,7 @@ mod tests {
         config.base_path = "/admin".to_string();
         config.api_prefix = "/v1/api".to_string();
 
-        let state = ConsoleState::initialize(db, config)
+        let state = ConsoleState::initialize(db, config, None)
             .await
             .expect("initialize console state");
 

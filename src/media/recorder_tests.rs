@@ -311,8 +311,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_dtmf_progressive_duration_is_not_appended_repeatedly() {
-        let temp_path =
-            std::env::temp_dir().join("test_recorder_dtmf_progressive_duration.wav");
+        let temp_path = std::env::temp_dir().join("test_recorder_dtmf_progressive_duration.wav");
         let mut recorder = Recorder::new(temp_path.to_str().unwrap(), CodecType::PCMU).unwrap();
         let rtp_timestamp = 12_345;
 
@@ -1250,9 +1249,15 @@ mod recorder_advanced_tests {
         assert_eq!(&bytes[0..4], b"RIFF", "RIFF signature");
         assert_eq!(&bytes[8..12], b"WAVE", "WAVE signature");
         let format_tag = u16::from_le_bytes([bytes[20], bytes[21]]);
-        assert_eq!(format_tag, 7, "expected PCMU (WAV format tag 7), got {format_tag}");
+        assert_eq!(
+            format_tag, 7,
+            "expected PCMU (WAV format tag 7), got {format_tag}"
+        );
         let channels = u16::from_le_bytes([bytes[22], bytes[23]]) as usize;
-        assert_eq!(channels, 2, "expected stereo recording, got {channels} channels");
+        assert_eq!(
+            channels, 2,
+            "expected stereo recording, got {channels} channels"
+        );
         assert_eq!(&bytes[36..40], b"data", "data chunk marker");
         let data = &bytes[44..];
         let ch_bytes: Vec<u8> = data

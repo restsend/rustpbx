@@ -43,7 +43,7 @@ pub struct DefaultAppRuntime {
 /// Factory trait for creating CallApp instances
 #[async_trait::async_trait]
 pub trait AppFactory: Send + Sync {
-    fn create_app(
+    async fn create_app(
         &self,
         app_name: &str,
         params: Option<serde_json::Value>,
@@ -111,13 +111,11 @@ impl AppRuntime for DefaultAppRuntime {
         // Create cancel token
         let cancel_token = CancellationToken::new();
 
-        // Get the app from factory (try per-session factory first, then global registry)
+        // Get the app from factory
         let app = if let Some(factory) = &self.app_factory {
-            factory
-                .create_app(app_name, params.clone(), &self.context)
-                .or_else(|| lookup_custom_app(app_name, params.clone(), &self.context))
+            factory.create_app(app_name, params.clone(), &self.context).await
         } else {
-            lookup_custom_app(app_name, params.clone(), &self.context)
+            None
         };
 
         let app = match app {
@@ -347,85 +345,6 @@ fn parse_json_event(value: &serde_json::Value) -> AppResult<ControllerEvent> {
             event_type
         ))),
     }
-}
-
-// ── AppFactory Registry ───────────────────────────────────────────────────────
-
-/// Type for custom app factory functions.
-pub type AppFactoryFn = Arc<
-    dyn Fn(&str, Option<serde_json::Value>, &ApplicationContext) -> Option<Box<dyn CallApp>>
-        + Send
-        + Sync,
->;
-
-/// Register a custom call app factory.
-/// Stores to the per-context registry (ApplicationContext.app_factories).
-pub fn register_call_app(_name: &'static str, _factory: AppFactoryFn) {
-    tracing::warn!(
-        "register_call_app is deprecated — set app_factories on ApplicationContext instead"
-    );
-}
-
-/// Look up a custom call app, checking context.app_factories first.
-pub fn lookup_custom_app(
-    app_name: &str,
-    params: Option<serde_json::Value>,
-    context: &ApplicationContext,
-) -> Option<Box<dyn CallApp>> {
-    for (name, factory) in context.app_factories.iter() {
-        if *name == app_name {
-            let app = factory(app_name, params.clone(), context);
-            if app.is_some() {
-                return app;
-            }
-        }
-    }
-    None
-}
-
-/// PostCallHook allows addons to react when the connected callee (agent)
-/// disconnects after a queue call.  The hook can start a survey app, log
-/// results, etc.
-#[async_trait]
-pub trait PostCallHook: Send + Sync {
-    /// Called when the queue's connected callee (agent) disconnects.
-    /// If the hook returns `true`, the caller's session will NOT be hung up
-    /// (the hook is responsible for starting a survey app or taking other action).
-    /// If it returns `false`, normal hangup proceeds.
-    async fn on_agent_disconnected(
-        &self,
-        session_id: &str,
-        caller: &str,
-        agent_id: &str,
-        queue_name: &str,
-        app_runtime: &dyn AppRuntime,
-    ) -> bool;
-}
-
-/// Register a PostCallHook (deprecated — set post_call_hook on ApplicationContext).
-pub fn set_post_call_hook(_hook: Arc<dyn PostCallHook>) {
-    tracing::warn!(
-        "set_post_call_hook is deprecated — set post_call_hook on ApplicationContext instead"
-    );
-}
-
-/// Invoke the PostCallHook from the per-context hook, if registered.
-pub async fn invoke_post_call_hook(
-    session_id: &str,
-    caller: &str,
-    agent_id: &str,
-    queue_name: &str,
-    app_runtime: &dyn AppRuntime,
-) -> bool {
-    // Downcast to DefaultAppRuntime to access the per-call context
-    if let Some(runtime) = app_runtime.as_any().downcast_ref::<DefaultAppRuntime>() {
-        if let Some(ref hook) = runtime.context.post_call_hook {
-            return hook
-                .on_agent_disconnected(session_id, caller, agent_id, queue_name, app_runtime)
-                .await;
-        }
-    }
-    false
 }
 
 #[cfg(test)]

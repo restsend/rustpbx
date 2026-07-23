@@ -295,7 +295,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             let proxy_config = &app_state.config().proxy;
             let ivr_dir = proxy_config.generated_ivr_dir();
             let ivr_entries =
-                crate::console::catalog::scan_ivr_catalog(&ivr_dir, &proxy_config.ivr_files);
+                crate::console::catalog::scan_ivr_catalog(&ivr_dir, &proxy_config.ivr_files).await;
             for entry in &ivr_entries {
                 let mode_tag = if entry.ivr_mode == "step" {
                     " (step)"

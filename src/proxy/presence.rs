@@ -378,7 +378,9 @@ impl PresenceManager {
 
                     let new_status = match header_status {
                         Some("online" | "available" | "idle") => PresenceStatus::Idle,
-                        Some(s @ ("away" | "break" | "lunch" | "training" | "meeting" | "personal")) => PresenceStatus::Away(s.to_string()),
+                        Some(
+                            s @ ("away" | "break" | "lunch" | "training" | "meeting" | "personal"),
+                        ) => PresenceStatus::Away(s.to_string()),
                         Some("dnd") => PresenceStatus::Dnd,
                         Some("busy") => PresenceStatus::Busy,
                         Some("ringing") => PresenceStatus::Ringing,
@@ -713,7 +715,10 @@ impl PresenceModule {
                     status = PresenceStatus::Busy;
                 } else if lower.contains("away") {
                     status = PresenceStatus::Away(String::new());
-                } else if lower.contains("idle") || lower.contains("available") || lower.contains("open") {
+                } else if lower.contains("idle")
+                    || lower.contains("available")
+                    || lower.contains("open")
+                {
                     status = PresenceStatus::Idle;
                 }
             }
@@ -796,13 +801,10 @@ impl PresenceModule {
                 status: PidfStatus {
                     basic: basic_status.to_string(),
                 },
-                note: state
-                    .note
-                    .clone()
-                    .or_else(|| match &state.status {
-                        PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
-                        _ => Some(state.status.to_string()),
-                    }),
+                note: state.note.clone().or_else(|| match &state.status {
+                    PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
+                    _ => Some(state.status.to_string()),
+                }),
                 contact: Some(format!("sip:{}@{}", identity, domain)),
                 activities: match state.status {
                     PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {

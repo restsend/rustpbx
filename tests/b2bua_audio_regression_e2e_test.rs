@@ -109,7 +109,11 @@ async fn assert_b2bua_bidirectional_audio(
         if alice_q.has_audio() && bob_q.has_audio() {
             info!(
                 "[{}] bidirectional audio confirmed: alice total={} silence={}, bob total={} silence={}",
-                label, alice_q.total_frames, alice_q.silence_frames, bob_q.total_frames, bob_q.silence_frames
+                label,
+                alice_q.total_frames,
+                alice_q.silence_frames,
+                bob_q.total_frames,
+                bob_q.silence_frames
             );
             assert!(alice.has_rtp_rx(), "[{}] alice RX RTP missing", label);
             assert!(bob.has_rtp_rx(), "[{}] bob RX RTP missing", label);
@@ -129,8 +133,14 @@ async fn assert_b2bua_bidirectional_audio(
     panic!(
         "[{}] bidirectional audio timeout. alice rx={} tx={} total={} silence={}; bob rx={} tx={} total={} silence={}",
         label,
-        alice.has_rtp_rx(), alice.has_rtp_tx(), alice_q.total_frames, alice_q.silence_frames,
-        bob.has_rtp_rx(), bob.has_rtp_tx(), bob_q.total_frames, bob_q.silence_frames,
+        alice.has_rtp_rx(),
+        alice.has_rtp_tx(),
+        alice_q.total_frames,
+        alice_q.silence_frames,
+        bob.has_rtp_rx(),
+        bob.has_rtp_tx(),
+        bob_q.total_frames,
+        bob_q.silence_frames,
     );
 }
 
@@ -140,9 +150,7 @@ async fn assert_b2bua_bidirectional_audio(
 #[tokio::test]
 async fn test_b2bua_same_codec_fast_path_audio() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new("rustpbx=info").unwrap(),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new("rustpbx=info").unwrap())
         .try_init();
     let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
     assert_b2bua_bidirectional_audio(
@@ -161,9 +169,7 @@ async fn test_b2bua_same_codec_fast_path_audio() {
 #[tokio::test]
 async fn test_b2bua_transcode_slow_path_audio() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new("rustpbx=info").unwrap(),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new("rustpbx=info").unwrap())
         .try_init();
     let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
     assert_b2bua_bidirectional_audio(

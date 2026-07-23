@@ -671,7 +671,10 @@ mod tests {
     fn test_step_provider_endpoint_url_trims_whitespace_and_slash() {
         let provider = StepProvider::new(" http://127.0.0.1:28080/ivr/step/ ");
 
-        assert_eq!(provider.endpoint_url(None), "http://127.0.0.1:28080/ivr/step");
+        assert_eq!(
+            provider.endpoint_url(None),
+            "http://127.0.0.1:28080/ivr/step"
+        );
         assert_eq!(
             provider.endpoint_url(Some("start")),
             "http://127.0.0.1:28080/ivr/step/start"
@@ -773,8 +776,14 @@ mod tests {
     fn test_end_reason_from_str_all_variants() {
         assert!(matches!(EndReason::from("normal"), EndReason::Normal));
         assert!(matches!(EndReason::from("hangup"), EndReason::Hangup));
-        assert!(matches!(EndReason::from("user_hangup"), EndReason::UserHangup));
-        assert!(matches!(EndReason::from("transfer"), EndReason::Transfer(_)));
+        assert!(matches!(
+            EndReason::from("user_hangup"),
+            EndReason::UserHangup
+        ));
+        assert!(matches!(
+            EndReason::from("transfer"),
+            EndReason::Transfer(_)
+        ));
         assert!(matches!(
             EndReason::from("transfer_to_queue"),
             EndReason::TransferToQueue(_)

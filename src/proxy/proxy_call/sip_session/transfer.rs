@@ -1,6 +1,8 @@
 use super::SipSession;
 use crate::call::domain::{CallCommand, LegId, LegState};
 use crate::callrecord::CallRecordHangupReason;
+use crate::media::negotiate::MediaNegotiator;
+use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use rsipstack::dialog::dialog::DialogState;
@@ -10,10 +12,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 // Re-export for peer access
-use crate::call::runtime::conference_media_bridge::AudioReceiver;
-use crate::proxy::proxy_call::sip_session::PeerConnectionAudioReceiver;
-use rustrtc::media::SampleStreamSource;
 use rustrtc::PeerConnection;
+use rustrtc::media::SampleStreamSource;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -58,7 +58,8 @@ pub(crate) enum TransferTarget {
 /// Bare strings without a recognised prefix get `sip:` prepended.
 pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
     // 1. `bridge:` is too complex for TransferEndpoint – parse inline.
-    if let Some(rest) = target.strip_prefix("bridge:")
+    if let Some(rest) = target
+        .strip_prefix("bridge:")
         .or_else(|| target.strip_prefix("voip_bridge:"))
     {
         let raw = rest.trim();
@@ -140,7 +141,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 if queue_name.is_empty() {
                     TransferTarget::Sip(format!("sip:{}", target))
                 } else {
-            let mut return_ivr = None;
+                    let mut return_ivr = None;
                     let mut target_overrides = Vec::new();
                     if let Some(ref query) = query_str {
                         for pair in query.split('&') {
@@ -175,7 +176,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 let mut params = HashMap::new();
                 if let Some(ref query) = query_str {
                     for pair in query.split('&') {
-                        if pair.is_empty() { continue; }
+                        if pair.is_empty() {
+                            continue;
+                        }
                         let mut parts = pair.splitn(2, '=');
                         let key = parts.next().unwrap_or("");
                         let value = parts.next().unwrap_or("");
@@ -423,6 +426,7 @@ impl SipSession {
             .server
             .data_context
             .resolve_queue_config(queue_name)
+            .await
             .map_err(|e| anyhow!("Failed to resolve queue config: {}", e))?;
 
         let queue_config = match queue_config {
@@ -549,7 +553,7 @@ impl SipSession {
         ivr_name: &str,
         query_params: HashMap<String, String>,
     ) -> Result<()> {
-        let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name);
+        let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
         info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
         let mut app_params = serde_json::json!({"file": ivr_file});
         if !query_params.is_empty() {
@@ -647,7 +651,11 @@ impl SipSession {
             // is anchored on. The callee leg (if any) is on the opposite side.
             let is_caller = leg_id == LegId::from("caller");
             let caller_is_webrtc = self.is_caller_webrtc();
-            let sip_leg_is_webrtc = if is_caller { caller_is_webrtc } else { !caller_is_webrtc };
+            let sip_leg_is_webrtc = if is_caller {
+                caller_is_webrtc
+            } else {
+                !caller_is_webrtc
+            };
             bridge.stop_forwarding();
             if sip_leg_is_webrtc {
                 pc = Some(bridge.caller_pc().clone());
@@ -682,11 +690,13 @@ impl SipSession {
         let audio_sender = audio_sender.ok_or_else(|| anyhow!("No track sender for Bridge"))?;
         let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
 
-        // ── 3. Create audio receiver (call → raw PCM) ────────────────
-        let decoder = self
+        // ── 3. Create audio decoder (call → raw PCM) ────────────────
+        // The decoder lives inside the reverse loop; we read from the
+        // PeerConnection's track directly so we can also detect RFC 2833 DTMF.
+        let mut decoder = self
             .create_audio_decoder()
             .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
-        let mut audio_receiver = PeerConnectionAudioReceiver::new(pc, decoder);
+        let dec_sample_rate = decoder.sample_rate();
 
         // ── 4. Determine codec type for the forward encoder ───────────
         let codec_type = match codec.as_str() {
@@ -704,6 +714,34 @@ impl SipSession {
 
         // ── 5. Cancellation token (parent = session cancel) ──────────
         let cancel_token = self.cancel_token.child_token();
+
+        // ── 5b. DTMF payload types (from answer SDP) ─────────────────
+        let dtmf_payload_types: Vec<u8> = self
+            .media
+            .answer
+            .as_deref()
+            .map(|answer_sdp| {
+                let mut pts: Vec<u8> = MediaNegotiator::extract_dtmf_codecs(answer_sdp)
+                    .into_iter()
+                    .map(|c| c.payload_type)
+                    .collect();
+                if pts.is_empty() {
+                    if let Some(dtmf) = MediaNegotiator::extract_leg_profile(answer_sdp).dtmf {
+                        pts.push(dtmf.payload_type);
+                    }
+                }
+                pts.sort_unstable();
+                pts.dedup();
+                pts
+            })
+            .unwrap_or_default();
+
+        // ── 5c. DTMF JSON text-frame channel ─────────────────────────
+        let (dtmf_json_tx, mut dtmf_json_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        *self.bridge_dtmf_tx.write() = Some(dtmf_json_tx.clone());
+        let bridge_dtmf_tx_state = self.bridge_dtmf_tx.clone();
+
+        let cmd_tx_for_fwd = self.cmd_tx.clone();
 
         // ── 6. Forward loop: WS raw PCM16 → inject into call ─────────
         let forward_cancel = cancel_token.child_token();
@@ -769,6 +807,26 @@ impl SipSession {
                                         seq = seq.wrapping_add(1);
                                     }
                                 }
+                                Some(Ok(Message::Text(txt))) => {
+                                    // Outbound DTMF: WS service sends {"type":"dtmf","digit":"..."}
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                                        if val.get("type").and_then(|v| v.as_str()) == Some("dtmf") {
+                                            if let Some(digits) = val.get("digit").and_then(|v| v.as_str()) {
+                                                if let Some(ref tx) = cmd_tx_for_fwd {
+                                                    let cmd = CallCommand::SendDtmf {
+                                                        leg_id: leg_id.clone(),
+                                                        digits: digits.to_string(),
+                                                    };
+                                                    if tx.send(cmd).await.is_err() {
+                                                        warn!(%leg_id, "Bridge forward: cmd_tx closed");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
                                 Some(Ok(Message::Close(_))) | None => {
                                     info!(%leg_id, "Bridge WS closed remotely");
                                     break;
@@ -785,11 +843,28 @@ impl SipSession {
             })
         };
 
-        // ── 7. Reverse loop: call audio → raw PCM16 → WS ─────────────
+        // ── 7. Reverse loop: call audio → raw PCM16 → WS + DTMF JSON ─
+        //     Reads from the PeerConnection's audio track directly so we
+        //     can detect RFC 2833 telephone-event DTMF alongside audio.
         let reverse_cancel = cancel_token.child_token();
         let reverse_handle = {
             let leg_id = leg_id.clone();
             crate::utils::spawn(async move {
+                use rustrtc::media::MediaSample;
+
+                let mut det = RtpDtmfDetector::default();
+
+                // Capture audio track from PeerConnection
+                let track = loop {
+                    if let Some(t) = SipSession::find_audio_receiver_track(&pc).await {
+                        break t;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if reverse_cancel.is_cancelled() {
+                        return;
+                    }
+                };
+
                 loop {
                     tokio::select! {
                         biased;
@@ -797,33 +872,69 @@ impl SipSession {
                             info!(%leg_id, "Bridge reverse loop cancelled");
                             break;
                         }
-                        pcm = audio_receiver.recv() => {
-                            match pcm {
-                                Some(frame) => {
-                                    let samples = if frame.sample_rate != ws_sample_rate {
-                                        crate::call::runtime::conference_media_bridge::resample_linear(
-                                            &frame.samples, frame.sample_rate, ws_sample_rate,
-                                        )
-                                    } else {
-                                        frame.samples
-                                    };
-                                    let mut bytes = Vec::with_capacity(samples.len() * 2);
-                                    for s in &samples {
-                                        bytes.extend_from_slice(&s.to_ne_bytes());
-                                    }
-                                    if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
-                                        warn!(%leg_id, "Bridge WS write failed");
+                        json = dtmf_json_rx.recv() => {
+                            match json {
+                                Some(json) => {
+                                    if ws_write.send(Message::Text(json.into())).await.is_err() {
+                                        warn!(%leg_id, "Bridge WS DTMF json write failed");
                                         break;
                                     }
                                 }
-                                None => {
-                                    info!(%leg_id, "Bridge audio receiver closed");
+                                None => break,
+                            }
+                        }
+                        sample = track.recv() => {
+                            match sample {
+                                Ok(MediaSample::Audio(frame)) => {
+                                    let is_dtmf = frame.payload_type
+                                        .map_or(false, |pt| dtmf_payload_types.contains(&pt));
+
+                                    if is_dtmf {
+                                        // RFC 2833 telephone-event → detect digit
+                                        if let Some(digit) = det.observe(&frame.data, frame.rtp_timestamp) {
+                                            let json = serde_json::json!({
+                                                "type": "dtmf",
+                                                "digit": digit.to_string(),
+                                                "leg_id": leg_id,
+                                            });
+                                            info!(%leg_id, digit = %digit.to_string(), "Bridge reverse DTMF detected");
+                                            if ws_write.send(Message::Text(json.to_string().into())).await.is_err() {
+                                                warn!(%leg_id, "Bridge WS DTMF write failed");
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        // Regular audio frame — decode to PCM, resample, send as binary
+                                        let pcm = decoder.decode(&frame.data);
+                                        let samples = if dec_sample_rate != ws_sample_rate {
+                                            crate::call::runtime::conference_media_bridge::resample_linear(
+                                                &pcm, dec_sample_rate, ws_sample_rate,
+                                            )
+                                        } else {
+                                            pcm
+                                        };
+                                        let mut bytes = Vec::with_capacity(samples.len() * 2);
+                                        for s in &samples {
+                                            bytes.extend_from_slice(&s.to_ne_bytes());
+                                        }
+                                        if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
+                                            warn!(%leg_id, "Bridge reverse audio write failed");
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(%leg_id, "Bridge reverse track error: {}", e);
                                     break;
                                 }
                             }
                         }
                     }
                 }
+
+                // Cleanup: clear bridge_dtmf_tx so SIP INFO no longer tries to forward
+                *bridge_dtmf_tx_state.write() = None;
             })
         };
 

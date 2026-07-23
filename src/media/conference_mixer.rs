@@ -222,7 +222,8 @@ impl ConferenceAudioMixer {
             // or destination), so the routing table does not grow monotonically
             // as participants churn through a long-running conference.
             let before = self.route_gains.len();
-            self.route_gains.retain(|(src, dst), _| src != leg_id && dst != leg_id);
+            self.route_gains
+                .retain(|(src, dst), _| src != leg_id && dst != leg_id);
             let pruned = before - self.route_gains.len();
             if pruned > 0 {
                 debug!(

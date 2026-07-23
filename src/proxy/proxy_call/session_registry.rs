@@ -123,7 +123,11 @@ impl MixerRegistry {
         mixer
     }
 
-    pub fn create_conference_mixer(&self, room_id: String, _sample_rate: u32) -> Arc<SupervisorSession> {
+    pub fn create_conference_mixer(
+        &self,
+        room_id: String,
+        _sample_rate: u32,
+    ) -> Arc<SupervisorSession> {
         let mixer = Arc::new(SupervisorSession);
 
         let entry = MixerRegistryEntry {
@@ -272,7 +276,6 @@ impl MixerRegistry {
     }
 
     pub fn remove_mixer(&self, mixer_id: &str) -> bool {
-
         let participant_ids: Vec<String> = {
             let mixers = self.mixers.lock();
             if let Some(entry) = mixers.get(mixer_id) {

@@ -400,7 +400,7 @@ impl TestUa {
             Some(dtmf_flows.to_string()),
             None,
         )
-            .await
+        .await
     }
 
     async fn caller_with_options(

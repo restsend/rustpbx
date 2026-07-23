@@ -164,8 +164,7 @@ pub fn encode_packet_into(buf: &mut Vec<u8>, packet: &Packet) {
         buf.extend_from_slice(call_id.as_bytes());
         let metadata_len = (buf.len() - metadata_start) as u32;
         // Backfill the metadata length field.
-        buf[metadata_len_pos..metadata_len_pos + 4]
-            .copy_from_slice(&metadata_len.to_be_bytes());
+        buf[metadata_len_pos..metadata_len_pos + 4].copy_from_slice(&metadata_len.to_be_bytes());
     } else {
         buf.put_u32(0);
     }
@@ -198,10 +197,7 @@ pub fn encode_batch(packets: &[Packet]) -> anyhow::Result<Vec<u8>> {
 ///
 /// The buffer is NOT cleared; callers can `clear()` a reusable buffer
 /// before each call to keep allocations steady-state across batches.
-pub fn encode_batch_into(
-    buf: &mut Vec<u8>,
-    packets: &[Packet],
-) -> anyhow::Result<()> {
+pub fn encode_batch_into(buf: &mut Vec<u8>, packets: &[Packet]) -> anyhow::Result<()> {
     if packets.len() > MAX_BATCH_COUNT {
         anyhow::bail!(
             "batch too large: {} > MAX_BATCH_COUNT ({})",
@@ -238,10 +234,7 @@ pub fn parse_datagram(data: &[u8]) -> anyhow::Result<Vec<Packet>> {
     match magic {
         PACKET_MAGIC => Ok(vec![parse_packet(data)?]),
         BATCH_MAGIC => parse_batch(data),
-        other => Err(anyhow::anyhow!(
-            "Invalid datagram magic: 0x{:04X}",
-            other
-        )),
+        other => Err(anyhow::anyhow!("Invalid datagram magic: 0x{:04X}", other)),
     }
 }
 
@@ -403,7 +396,11 @@ mod tests {
 
     fn sample_packet(idx: u8) -> Packet {
         Packet {
-            msg_type: if idx.is_multiple_of(2) { MsgType::Rtp } else { MsgType::Sip },
+            msg_type: if idx.is_multiple_of(2) {
+                MsgType::Rtp
+            } else {
+                MsgType::Sip
+            },
             src: (IpAddr::from([10, 0, 0, idx]), 1000 + idx as u16),
             dst: (IpAddr::from([192, 168, 0, idx]), 2000 + idx as u16),
             timestamp: 1_000_000 + idx as u64,
@@ -447,8 +444,7 @@ mod tests {
             .map(|i| (i % 256) as u8)
             .map(sample_packet)
             .collect();
-        let encoded =
-            encode_batch(&packets).expect("encode at the boundary should succeed");
+        let encoded = encode_batch(&packets).expect("encode at the boundary should succeed");
         let decoded = parse_datagram(&encoded).expect("parse at boundary");
         assert_eq!(decoded.len(), MAX_BATCH_COUNT);
     }
@@ -513,8 +509,7 @@ mod tests {
 
     #[test]
     fn test_parse_batch_rejects_bad_version() {
-        let mut encoded =
-            encode_batch(&[sample_packet(0)]).expect("encode");
+        let mut encoded = encode_batch(&[sample_packet(0)]).expect("encode");
         // BATCH_VERSION sits at byte offset 2 (after the 2-byte magic).
         encoded[2] = BATCH_VERSION + 1;
         let err = parse_datagram(&encoded).expect_err("bad batch version");
@@ -523,8 +518,7 @@ mod tests {
 
     #[test]
     fn test_parse_batch_rejects_truncated_frame() {
-        let mut encoded =
-            encode_batch(&[sample_packet(0), sample_packet(1)]).expect("encode");
+        let mut encoded = encode_batch(&[sample_packet(0), sample_packet(1)]).expect("encode");
         // Truncate the tail so the last frame's declared length no longer fits.
         encoded.truncate(encoded.len() - 1);
         let err = parse_datagram(&encoded).expect_err("truncated frame");
@@ -536,8 +530,7 @@ mod tests {
 
     #[test]
     fn test_parse_batch_rejects_trailing_bytes() {
-        let mut encoded =
-            encode_batch(&[sample_packet(0)]).expect("encode");
+        let mut encoded = encode_batch(&[sample_packet(0)]).expect("encode");
         encoded.push(0xFF); // dangling byte after the declared frames
         let err = parse_datagram(&encoded).expect_err("trailing bytes");
         assert!(err.to_string().contains("trailing"));
@@ -563,12 +556,8 @@ mod tests {
         // Count
         assert_eq!(u16::from_be_bytes([encoded[3], encoded[4]]), 1);
         // First frame length prefix
-        let frame_len = u32::from_be_bytes([
-            encoded[5],
-            encoded[6],
-            encoded[7],
-            encoded[8],
-        ]) as usize;
+        let frame_len =
+            u32::from_be_bytes([encoded[5], encoded[6], encoded[7], encoded[8]]) as usize;
         // The frame body must be exactly the bytes that encode_packet produces.
         let expected_frame = encode_packet(&packets[0]);
         assert_eq!(frame_len, expected_frame.len());

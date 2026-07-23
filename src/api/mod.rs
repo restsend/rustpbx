@@ -38,7 +38,10 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     // Unified home for console-internal JSON endpoints (formerly nested inside
     // the console router). They all flow through the same api_auth_middleware.
     let mut api_routes = api_routes
-        .route("/pending-reloads", get(crate::console::handlers::pending_reloads_handler))
+        .route(
+            "/pending-reloads",
+            get(crate::console::handlers::pending_reloads_handler),
+        )
         .merge(crate::console::handlers::locales::api_urls())
         .merge(crate::console::handlers::presence::api_urls())
         .merge(crate::console::handlers::notifications::api_urls())

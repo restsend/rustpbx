@@ -275,7 +275,10 @@ async fn test_full_session_resume_flow() {
         // Verify each event has required fields
         for event in events {
             assert!(event["sequence"].is_u64(), "Event should have sequence");
-            assert!(event["timestamp"].is_string(), "Event should have timestamp");
+            assert!(
+                event["timestamp"].is_string(),
+                "Event should have timestamp"
+            );
             assert!(event["call_id"].is_string(), "Event should have call_id");
             assert!(event["event"].is_object(), "Event should have event data");
         }

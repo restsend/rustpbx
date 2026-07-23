@@ -11,8 +11,8 @@ mod tests {
     use crate::call::domain::CallCommand;
     use anyhow::Result;
     use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::Notify;
 
@@ -248,7 +248,9 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "9000");
         stack
-            .assert_cmd(100, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(100, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
 
         tokio::time::timeout(Duration::from_secs(1), entered.notified())

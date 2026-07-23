@@ -434,10 +434,7 @@ mod tests {
         let app = axum::Router::new().route(
             "/hook",
             axum::routing::post(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "boom",
-                )
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

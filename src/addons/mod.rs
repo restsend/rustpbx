@@ -216,7 +216,26 @@ pub trait Addon: Send + Sync {
     /// Return a phone auth token validator for the API auth middleware.
     /// Only the first non-None result across all addons is used.
     #[cfg(feature = "console")]
-    fn phone_auth_validator(&self, _state: &ConsoleState) -> Option<crate::auth::DynTokenValidator> {
+    fn phone_auth_validator(
+        &self,
+        _state: &ConsoleState,
+    ) -> Option<crate::auth::DynTokenValidator> {
+        None
+    }
+
+    // ── CallApp factory hook ─────────────────────────────────────────────────
+
+    /// Build a call application for the given app name.
+    ///
+    /// Addons can override this to provide custom call apps (e.g., voicemail,
+    /// contact center survey). Called before the built-in app factory, so addons
+    /// can override built-in apps like "voicemail".
+    async fn build_call_app(
+        &self,
+        _app_name: &str,
+        _params: Option<serde_json::Value>,
+        _context: &crate::call::app::ApplicationContext,
+    ) -> Option<Box<dyn crate::call::app::CallApp>> {
         None
     }
 

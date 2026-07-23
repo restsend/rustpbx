@@ -330,7 +330,6 @@ pub enum MediaCommand {
         recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
         paused: Arc<AtomicBool>,
     },
-
 }
 
 impl MediaCommand {

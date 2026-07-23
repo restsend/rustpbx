@@ -250,7 +250,8 @@ impl ForwardingTrack {
             }
         }
         if let (Some(tx), Some(shared)) = (&self.sipflow_tx, &shared) {
-            if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros)) {
+            if let Err(e) = tx.try_send((self.recorder_leg, Arc::clone(shared), received_at_micros))
+            {
                 trace!(track_id = %self.track_id, "ForwardingTrack sipflow channel full: {e}");
             }
         }
@@ -447,7 +448,8 @@ impl MediaStreamTrack for ForwardingTrack {
                     return Ok(result);
                 }
 
-                if let Some(result) = self.try_transcode_audio(frame, &audio_mapping, matched_audio) {
+                if let Some(result) = self.try_transcode_audio(frame, &audio_mapping, matched_audio)
+                {
                     // Capture the post-transcode egress (caller's output)
                     self.tee_egress_to_capture_channels(&result);
                     return Ok(result);
@@ -902,23 +904,54 @@ mod tests {
         let sr = 8000u32;
         let tone = {
             let start = pcm.iter().position(|s| s.abs() > 500).unwrap_or(0);
-            let end = pcm.iter().rposition(|s| s.abs() > 500).map(|i| i + 1).unwrap_or(pcm.len());
+            let end = pcm
+                .iter()
+                .rposition(|s| s.abs() > 500)
+                .map(|i| i + 1)
+                .unwrap_or(pcm.len());
             &pcm[start..end]
         };
-        assert!(tone.len() >= 400, "{label}: tone too short ({} samples)", tone.len());
+        assert!(
+            tone.len() >= 400,
+            "{label}: tone too short ({} samples)",
+            tone.len()
+        );
         let mag_row = goertzel(tone, row, sr);
         let mag_col = goertzel(tone, col, sr);
         let mag_noise = goertzel(tone, 1000.0, sr);
-        let wrong_row = if (row - 697.0).abs() < 1.0 { 770.0 } else { 697.0 };
-        let wrong_col = if (col - 1209.0).abs() < 1.0 { 1336.0 } else { 1209.0 };
+        let wrong_row = if (row - 697.0).abs() < 1.0 {
+            770.0
+        } else {
+            697.0
+        };
+        let wrong_col = if (col - 1209.0).abs() < 1.0 {
+            1336.0
+        } else {
+            1209.0
+        };
         let mag_wr = goertzel(tone, wrong_row, sr);
         let mag_wc = goertzel(tone, wrong_col, sr);
-        println!("{label}: row({row})={mag_row:.0} col({col})={mag_col:.0} noise={mag_noise:.0} wrow={mag_wr:.0} wcol={mag_wc:.0} len={}", tone.len());
+        println!(
+            "{label}: row({row})={mag_row:.0} col({col})={mag_col:.0} noise={mag_noise:.0} wrow={mag_wr:.0} wcol={mag_wc:.0} len={}",
+            tone.len()
+        );
         let min_ratio = 4.0;
-        assert!(mag_row > mag_noise * min_ratio, "{label}: row {row} vs noise");
-        assert!(mag_col > mag_noise * min_ratio, "{label}: col {col} vs noise");
-        assert!(mag_row > mag_wr * min_ratio, "{label}: row {row} vs wrong row {wrong_row}");
-        assert!(mag_col > mag_wc * min_ratio, "{label}: col {col} vs wrong col {wrong_col}");
+        assert!(
+            mag_row > mag_noise * min_ratio,
+            "{label}: row {row} vs noise"
+        );
+        assert!(
+            mag_col > mag_noise * min_ratio,
+            "{label}: col {col} vs noise"
+        );
+        assert!(
+            mag_row > mag_wr * min_ratio,
+            "{label}: row {row} vs wrong row {wrong_row}"
+        );
+        assert!(
+            mag_col > mag_wc * min_ratio,
+            "{label}: col {col} vs wrong col {wrong_col}"
+        );
     }
 
     // ── C1: audio written to file recorder ───────────────────────────────
@@ -939,7 +972,10 @@ mod tests {
         // decode the ingress codec (PCMU). Set the ingress profile accordingly.
         let ingress = make_profile_with_dtmf(CodecType::PCMU, 0, None);
         let egress = make_profile_with_dtmf(CodecType::PCMA, 8, None);
-        record.lock().unwrap().set_leg_profile(Leg::A, ingress.clone());
+        record
+            .lock()
+            .unwrap()
+            .set_leg_profile(Leg::A, ingress.clone());
 
         let (rec_tx, rec_rx) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         let sample = MediaSample::Audio(AudioFrame {
@@ -951,15 +987,23 @@ mod tests {
 
         let track = OneShotTrack::new(sample);
         let ft = ForwardingTrack::new(
-            "test-ft-recorder".into(), track, Some(rec_tx), None,
-            Leg::A, ingress, egress,
+            "test-ft-recorder".into(),
+            track,
+            Some(rec_tx),
+            None,
+            Leg::A,
+            ingress,
+            egress,
         );
 
         let rec_clone = record.clone();
         let drain = tokio::spawn(async move {
             let mut rx = rec_rx;
             while let Some((leg, s)) = rx.recv().await {
-                let _ = rec_clone.lock().unwrap().write_sample(leg, &s, None, None, None);
+                let _ = rec_clone
+                    .lock()
+                    .unwrap()
+                    .write_sample(leg, &s, None, None, None);
             }
             rec_clone.lock().unwrap().finalize().ok();
         });
@@ -967,7 +1011,11 @@ mod tests {
         let result = ft.recv().await.expect("recv");
         // egress should have been transcoded PCMU→PCMA (PT 8)
         if let MediaSample::Audio(f) = &result {
-            assert_eq!(f.payload_type, Some(8), "egress PT should be PCMA after transcode");
+            assert_eq!(
+                f.payload_type,
+                Some(8),
+                "egress PT should be PCMA after transcode"
+            );
         }
         // Drop tx so drain task exits and finalizes.
         drop(ft);
@@ -998,7 +1046,10 @@ mod tests {
 
         let ingress = make_profile_with_dtmf(CodecType::PCMU, 0, Some(101));
         let egress = make_profile_with_dtmf(CodecType::PCMA, 8, Some(96));
-        record.lock().unwrap().set_leg_profile(Leg::A, ingress.clone());
+        record
+            .lock()
+            .unwrap()
+            .set_leg_profile(Leg::A, ingress.clone());
 
         let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         // digit '5' (code 5), end bit, duration 1600 ticks @ 8 kHz = 200 ms
@@ -1012,14 +1063,23 @@ mod tests {
 
         let track = OneShotTrack::new(sample);
         let ft = ForwardingTrack::new(
-            "test-ft-dtmf".into(), track, Some(rec_tx), None,
-            Leg::A, ingress, egress,
+            "test-ft-dtmf".into(),
+            track,
+            Some(rec_tx),
+            None,
+            Leg::A,
+            ingress,
+            egress,
         );
 
         let result = ft.recv().await.expect("recv");
         // DTMF is passed through with the egress PT.
         if let MediaSample::Audio(f) = &result {
-            assert_eq!(f.payload_type, Some(96), "DTMF egress PT should be remapped");
+            assert_eq!(
+                f.payload_type,
+                Some(96),
+                "DTMF egress PT should be remapped"
+            );
         }
 
         let mut guard = record.lock().unwrap();
@@ -1030,7 +1090,11 @@ mod tests {
         drop(guard);
 
         let wav = std::fs::read(path_str).unwrap();
-        assert!(wav.len() > 1000, "WAV must contain DTMF tone (length {})", wav.len());
+        assert!(
+            wav.len() > 1000,
+            "WAV must contain DTMF tone (length {})",
+            wav.len()
+        );
 
         // Decode PCMU left channel → PCM → Goertzel
         let pcm = {
@@ -1055,35 +1119,59 @@ mod tests {
         let record = Arc::new(Mutex::new(
             Recorder::new(path_str, CodecType::PCMU).unwrap(),
         ));
-        record.lock().unwrap().set_leg_profile(Leg::A, NegotiatedLegProfile::default());
-        record.lock().unwrap().set_leg_profile(Leg::B, NegotiatedLegProfile::default());
+        record
+            .lock()
+            .unwrap()
+            .set_leg_profile(Leg::A, NegotiatedLegProfile::default());
+        record
+            .lock()
+            .unwrap()
+            .set_leg_profile(Leg::B, NegotiatedLegProfile::default());
 
         let (tx_a, mut rx_a) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         let track_a = OneShotTrack::new(audio_sample(0));
         let ft_a = ForwardingTrack::new(
-            "test-ft-a".into(), track_a, Some(tx_a), None, Leg::A,
-            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+            "test-ft-a".into(),
+            track_a,
+            Some(tx_a),
+            None,
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         let (tx_b, mut rx_b) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         let track_b = OneShotTrack::new(audio_sample(0));
         let ft_b = ForwardingTrack::new(
-            "test-ft-b".into(), track_b, Some(tx_b), None, Leg::B,
-            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+            "test-ft-b".into(),
+            track_b,
+            Some(tx_b),
+            None,
+            Leg::B,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         ft_a.recv().await.unwrap();
         ft_b.recv().await.unwrap();
 
         let mut guard = record.lock().unwrap();
-        if let Ok((leg, s)) = rx_a.try_recv() { let _ = guard.write_sample(leg, &s, None, None, None); }
-        if let Ok((leg, s)) = rx_b.try_recv() { let _ = guard.write_sample(leg, &s, None, None, None); }
+        if let Ok((leg, s)) = rx_a.try_recv() {
+            let _ = guard.write_sample(leg, &s, None, None, None);
+        }
+        if let Ok((leg, s)) = rx_b.try_recv() {
+            let _ = guard.write_sample(leg, &s, None, None, None);
+        }
         guard.finalize().ok();
         drop(guard);
 
         let wav = std::fs::read(path_str).unwrap();
         // 44-byte header + stereo PCMU data (2 bytes per tick, one per leg)
-        assert!(wav.len() >= 44 + 320, "WAV must contain stereo data (len={})", wav.len());
+        assert!(
+            wav.len() >= 44 + 320,
+            "WAV must contain stereo data (len={})",
+            wav.len()
+        );
 
         // Both channels should have audible samples; the key invariant is
         // that even-index bytes (leg A / left) and odd-index bytes (leg B /
@@ -1118,14 +1206,25 @@ mod tests {
         let video = MediaSample::Video(VideoFrame::default());
         let track = OneShotTrack::new(video);
         let ft = ForwardingTrack::new(
-            "test-ft-video".into(), track, Some(rec_tx), Some(sf_tx), Leg::A,
-            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+            "test-ft-video".into(),
+            track,
+            Some(rec_tx),
+            Some(sf_tx),
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         ft.recv().await.unwrap();
         // After the audio-only guard (B2), neither channel should receive video.
-        assert!(rec_rx.try_recv().is_err(), "recorder channel must NOT receive video");
-        assert!(sf_rx.try_recv().is_err(), "sipflow channel must NOT receive video");
+        assert!(
+            rec_rx.try_recv().is_err(),
+            "recorder channel must NOT receive video"
+        );
+        assert!(
+            sf_rx.try_recv().is_err(),
+            "sipflow channel must NOT receive video"
+        );
     }
 
     // ── C5: WebRTC / Opus transcoding — recorder gets pre-transcode ──────
@@ -1146,10 +1245,15 @@ mod tests {
         let ingress = make_profile_with_dtmf(CodecType::Opus, 111, Some(101));
         let egress = make_profile_with_dtmf(CodecType::PCMU, 0, Some(101));
         // Recorder set to Opus leg profile so it can decode Opus → PCMU internally
-        record.lock().unwrap().set_leg_profile(Leg::A, ingress.clone());
+        record
+            .lock()
+            .unwrap()
+            .set_leg_profile(Leg::A, ingress.clone());
 
         // Encode a short sine-wave into Opus
-        let pcm: Vec<i16> = (0..960).map(|i| ((i as f32 / 20.0).sin() * 5000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..960)
+            .map(|i| ((i as f32 / 20.0).sin() * 5000.0) as i16)
+            .collect();
         let mut encoder = create_encoder(CodecType::Opus);
         let opus_data = encoder.encode(&pcm);
         assert!(!opus_data.is_empty());
@@ -1164,8 +1268,13 @@ mod tests {
         let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, SharedMediaSample)>(256);
         let track = OneShotTrack::new(sample);
         let ft = ForwardingTrack::new(
-            "test-ft-opus".into(), track, Some(rec_tx), None,
-            Leg::A, ingress, egress,
+            "test-ft-opus".into(),
+            track,
+            Some(rec_tx),
+            None,
+            Leg::A,
+            ingress,
+            egress,
         );
 
         ft.recv().await.unwrap();
@@ -1180,7 +1289,11 @@ mod tests {
         drop(guard);
 
         let wav = std::fs::read(path_str).unwrap();
-        assert!(wav.len() > 100, "Opus → PCMU WAV must contain audio (len={})", wav.len());
+        assert!(
+            wav.len() > 100,
+            "Opus → PCMU WAV must contain audio (len={})",
+            wav.len()
+        );
         let _ = std::fs::remove_file(&temp_path);
     }
 
@@ -1192,14 +1305,20 @@ mod tests {
         let audio = audio_sample(0);
         let track = OneShotTrack::new(audio);
         let ft = ForwardingTrack::new(
-            "test-ft-sipflow".into(), track, None, Some(sf_tx), Leg::B,
-            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+            "test-ft-sipflow".into(),
+            track,
+            None,
+            Some(sf_tx),
+            Leg::B,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         ft.recv().await.unwrap();
 
-        let (leg, sample, received_at_micros) =
-            sf_rx.try_recv().expect("sipflow channel must receive audio");
+        let (leg, sample, received_at_micros) = sf_rx
+            .try_recv()
+            .expect("sipflow channel must receive audio");
         assert_eq!(leg, Leg::B);
         assert!(received_at_micros > 0);
         assert!(matches!(*sample, MediaSample::Audio(_)), "must be audio");
@@ -1218,7 +1337,13 @@ mod tests {
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample);
         let ft = ForwardingTrack::new(
-            "test-ft-c7".into(), track, Some(rec_tx), None, Leg::A, ingress, egress,
+            "test-ft-c7".into(),
+            track,
+            Some(rec_tx),
+            None,
+            Leg::A,
+            ingress,
+            egress,
         );
 
         // The forwarding track returns the TRANSCODED (egress) sample.
@@ -1228,9 +1353,15 @@ mod tests {
         }
 
         // The recorder channel should receive the INGRESS (pre-transcode) sample.
-        let (_, channel_sample) = rec_rx.try_recv().expect("recorder channel must have sample");
+        let (_, channel_sample) = rec_rx
+            .try_recv()
+            .expect("recorder channel must have sample");
         if let MediaSample::Audio(f) = &*channel_sample {
-            assert_eq!(f.payload_type, Some(0), "recorder channel PT should be ingress PCMU");
+            assert_eq!(
+                f.payload_type,
+                Some(0),
+                "recorder channel PT should be ingress PCMU"
+            );
         }
     }
 
@@ -1240,10 +1371,8 @@ mod tests {
     async fn egress_sipflow_captures_post_transcode_as_leg_b() {
         use audio_codec::CodecType;
 
-        let (egress_sf_tx, mut egress_sf_rx) =
-            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
-        let (_, mut ingress_sf_rx) =
-            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+        let (egress_sf_tx, mut egress_sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+        let (_, mut ingress_sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
 
         // PCMU ingress → PCMA egress (transcoding needed)
         let ingress = make_profile_with_dtmf(CodecType::PCMU, 0, None);
@@ -1285,7 +1414,8 @@ mod tests {
         assert!(received_at_micros > 0);
         if let MediaSample::Audio(f) = &*sf_sample {
             assert_eq!(
-                f.payload_type, Some(8),
+                f.payload_type,
+                Some(8),
                 "egress sipflow sample PT should be PCMA (post-transcode)"
             );
         }
@@ -1300,25 +1430,34 @@ mod tests {
 
         // Using new() (not with_egress) → no egress capture configured
         let ft = ForwardingTrack::new(
-            "test-ft-c8b".into(), track, None, Some(sf_tx), Leg::A,
-            NegotiatedLegProfile::default(), NegotiatedLegProfile::default(),
+            "test-ft-c8b".into(),
+            track,
+            None,
+            Some(sf_tx),
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         ft.recv().await.unwrap();
 
         // Ingress sipflow should have captured the sample as Leg::A.
-        let (leg, _, _) = sf_rx.try_recv().expect("ingress sipflow must receive sample");
+        let (leg, _, _) = sf_rx
+            .try_recv()
+            .expect("ingress sipflow must receive sample");
         assert_eq!(leg, Leg::A);
 
         // There should be only one sample in the sipflow channel (no duplicate egress).
-        assert!(sf_rx.try_recv().is_err(), "sipflow must not have a second sample from egress");
+        assert!(
+            sf_rx.try_recv().is_err(),
+            "sipflow must not have a second sample from egress"
+        );
     }
 
     #[tokio::test]
     async fn egress_sipflow_no_transcode_captures_unchanged_sample() {
         // When no transcoding is needed, the egress is the same as the ingress.
-        let (egress_sf_tx, mut egress_sf_rx) =
-            mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
+        let (egress_sf_tx, mut egress_sf_rx) = mpsc::channel::<(Leg, SharedMediaSample, u64)>(256);
 
         // Same codec → no transcoding needed
         let profile = make_profile_with_dtmf(audio_codec::CodecType::PCMU, 0, None);
