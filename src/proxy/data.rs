@@ -2061,4 +2061,115 @@ mod tests {
         let net = ProxyDataContext::dest_to_ipnet("sip:[::1]:5060");
         assert_eq!(net, Some("::1/128".parse().unwrap()));
     }
+
+    // ── resolve_ivr_file in DB mode ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_ivr_file_db_mode_returns_db_uri() {
+        // Setup DB with required tables
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        {
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
+            use sea_orm::Schema;
+            let schema = Schema::new(db.get_database_backend());
+            // config_entries table is needed for config store
+            let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+            // sip_trunks table is needed by ProxyDataContext::new -> reload_trunks
+            let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+        }
+        let store = GeneratedConfigStore::Database { db: db.clone() };
+
+        // Write an IVR entry to the store
+        store
+            .write("ivr", "my-ivr.generated.toml", "content")
+            .await
+            .unwrap();
+
+        // Create ProxyDataContext with generated_db = true
+        let generated_dir = tempfile::tempdir().unwrap();
+        let mut config = ProxyConfig::default();
+        config.generated_db = true;
+        config.acl_rules = None;
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
+
+        let context = ProxyDataContext::new(Arc::new(config), Some(db))
+            .await
+            .unwrap();
+
+        let uri = context.resolve_ivr_file("my-ivr").await;
+        assert_eq!(uri, "db://ivr/my-ivr.generated.toml");
+    }
+
+    #[tokio::test]
+    async fn resolve_ivr_file_db_mode_nonexistent_returns_name() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        {
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
+            use sea_orm::Schema;
+            let schema = Schema::new(db.get_database_backend());
+            // config_entries and sip_trunks tables are needed for ProxyDataContext
+            let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+            let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+        }
+
+        let generated_dir = tempfile::tempdir().unwrap();
+        let mut config = ProxyConfig::default();
+        config.generated_db = true;
+        config.acl_rules = None;
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
+
+        let context = ProxyDataContext::new(Arc::new(config), Some(db))
+            .await
+            .unwrap();
+
+        let uri = context.resolve_ivr_file("nonexistent-ivr").await;
+        // When not found, resolve_ivr_file returns the ivr_name itself as fallback
+        assert_eq!(uri, "nonexistent-ivr");
+    }
+
+    #[tokio::test]
+    async fn resolve_ivr_file_db_mode_respects_non_generated_file() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        {
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
+            use sea_orm::Schema;
+            let schema = Schema::new(db.get_database_backend());
+            // config_entries and sip_trunks tables are needed for ProxyDataContext
+            let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+            let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
+            let sql = stmt.to_string(SqliteQueryBuilder);
+            db.execute_unprepared(&sql).await.unwrap();
+        }
+        let store = GeneratedConfigStore::Database { db: db.clone() };
+
+        // Write a non-generated (hand-written) file
+        store
+            .write("ivr", "my-ivr.toml", "handwritten content")
+            .await
+            .unwrap();
+
+        let generated_dir = tempfile::tempdir().unwrap();
+        let mut config = ProxyConfig::default();
+        config.generated_db = true;
+        config.acl_rules = None;
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
+
+        let context = ProxyDataContext::new(Arc::new(config), Some(db))
+            .await
+            .unwrap();
+
+        // Should prefer .toml when no .generated.toml exists
+        let uri = context.resolve_ivr_file("my-ivr").await;
+        assert_eq!(uri, "db://ivr/my-ivr.toml");
+    }
 }

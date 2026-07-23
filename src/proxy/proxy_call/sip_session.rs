@@ -374,15 +374,50 @@ impl AppFactory for BuiltinAppFactory {
                     app = app.with_trace(context.ivr_trace.clone());
                     Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                 } else {
-                    // File-based: read TOML and detect mode from content
+                    // File-based: read TOML and detect mode from content.
+                    // Supports both filesystem paths and virtual `db://<category>/<name>` URIs
+                    // produced by `resolve_ivr_file` / `apply_route_metadata`
+                    // when the proxy runs with `generated_db = true`.
                     let file = params.as_ref()?.get("file")?.as_str()?;
-                    let content = match std::fs::read_to_string(file) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!("Failed to read IVR config '{}': {}", file, e);
-                            return None;
-                        }
-                    };
+                    let content =
+                        if let Some((category, name)) =
+                            crate::config_store::GeneratedConfigStore::parse_db_uri(file)
+                        {
+                            let store = crate::config_store::GeneratedConfigStore::from_config(
+                                &context.config,
+                                &context.db,
+                            );
+                            match store.read(category, name).await {
+                                Ok(Some(c)) => c,
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "IVR config '{}' not found in config store",
+                                        file
+                                    );
+                                    return None;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to read IVR config '{}' from store: {}",
+                                        file,
+                                        e
+                                    );
+                                    return None;
+                                }
+                            }
+                        } else {
+                            match std::fs::read_to_string(file) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to read IVR config '{}': {}",
+                                        file,
+                                        e
+                                    );
+                                    return None;
+                                }
+                            }
+                        };
 
                     let file_config: crate::call::app::ivr_config::IvrFileConfig =
                         match toml::from_str(&content) {
@@ -3222,6 +3257,26 @@ impl SipSession {
                 if connected_callee_terminated {
                     self.meta.connected_callee = None;
                     self.meta.connected_callee_dialog_id = None;
+
+                    // ── Return to IVR takes precedence over CSAT hook ──────────
+                    if !self.server_dialog.state().is_terminated() {
+                        if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
+                            info!(
+                                session = %self.id,
+                                %ivr_name,
+                                "B‑leg hung up; returning caller to IVR"
+                            );
+                            self.bridge.clear();
+                            if self.start_ivr_app(&ivr_name, HashMap::new()).await.is_ok() {
+                                return Ok(());
+                            }
+                            warn!(
+                                session = %self.id,
+                                %ivr_name,
+                                "Failed to restart IVR on B‑leg hangup; falling through to normal hangup"
+                            );
+                        }
+                    }
 
                     let hook_handled = if !self.server_dialog.state().is_terminated() {
                         // Give session hooks a chance to start a post-call
