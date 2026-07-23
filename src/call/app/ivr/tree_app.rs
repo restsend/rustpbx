@@ -92,6 +92,9 @@ pub struct IvrApp {
     pending_unknown_digit: Option<String>,
     /// Optional TTS service synthesized from the IVR's own TTS config.
     tts_service: Option<Arc<crate::tts::TtsService>>,
+    /// Menu to start from on `on_enter` (used by return-to-IVR resume).
+    /// When `Some`, `on_enter` navigates directly to this menu instead of "root".
+    start_menu: Option<String>,
     /// Number of nodes traversed (for IvrFlowCompleted).
     nodes_traversed: u32,
     /// Timestamp when IVR flow started (for total_duration_ms).
@@ -118,7 +121,14 @@ impl IvrApp {
             nodes_traversed: 0,
             flow_started_at: None,
             node_entered_at: None,
+            start_menu: None,
         }
+    }
+
+    /// Set a non-root starting menu (used for return-to-IVR resume).
+    pub fn with_start_menu(mut self, menu: String) -> Self {
+        self.start_menu = Some(menu);
+        self
     }
 
     /// Create a new `IvrApp` with an explicit TTS config override.
@@ -480,16 +490,36 @@ impl IvrApp {
             );
         }
         match action {
-            EntryAction::Transfer { target, params } => {
+            EntryAction::Transfer {
+                target,
+                params,
+                return_to_ivr,
+            } => {
                 let mut t = target.clone();
-                if !params.is_empty() {
-                    t.push('?');
-                    for (i, (k, v)) in params.iter().enumerate() {
-                        if i > 0 {
-                            t.push('&');
-                        }
-                        t.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+                let mut query = String::new();
+                for (i, (k, v)) in params.iter().enumerate() {
+                    if i > 0 {
+                        query.push('&');
                     }
+                    query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+                }
+                if let Some(ivr) = return_to_ivr
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                {
+                    if !query.is_empty() {
+                        query.push('&');
+                    }
+                    query.push_str(&format!("return_to_ivr={}", urlencoding::encode(ivr)));
+                    // Encode the current menu so the IVR can resume there
+                    let menu = self.current_menu_key().to_string();
+                    if !menu.is_empty() && menu != "root" {
+                        query.push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
+                    }
+                }
+                if !query.is_empty() {
+                    t.push('?');
+                    t.push_str(&query);
                 }
                 info!(ivr = %self.definition.name, target = %t, "IVR transferring call");
                 self.ivr_flow_completed(ctx, "transferred", Some(t.as_str()))
@@ -509,12 +539,25 @@ impl IvrApp {
                 );
                 self.ivr_flow_completed(ctx, "queue", Some(target)).await;
                 self.state = IvrState::Done;
-                if return_to_ivr.unwrap_or(false) {
+                if let Some(ivr) = return_to_ivr
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                {
                     // Encode return IVR name so the queue can come back on failure
-                    Ok(AppAction::Transfer(format!(
-                        "queue:{}?return_ivr={}",
-                        target, self.definition.name
-                    )))
+                    // and the transfer engine stores it for agent-hangup return
+                    let mut queue_target = format!(
+                        "queue:{}?return_to_ivr={}",
+                        target, urlencoding::encode(ivr)
+                    );
+                    // Encode the current menu for resume
+                    let menu = self.current_menu_key().to_string();
+                    if !menu.is_empty() && menu != "root" {
+                        queue_target.push_str(&format!(
+                            "&return_menu={}",
+                            urlencoding::encode(&menu)
+                        ));
+                    }
+                    Ok(AppAction::Transfer(queue_target))
                 } else {
                     Ok(AppAction::Transfer(format!("queue:{}", target)))
                 }
@@ -1164,7 +1207,12 @@ impl CallApp for IvrApp {
             });
         }
 
-        self.enter_menu("root", ctrl, ctx).await
+        let start = self.start_menu.clone().unwrap_or_else(|| "root".to_string());
+        if self.definition.get_menu(&start).is_some() {
+            self.enter_menu(&start, ctrl, ctx).await
+        } else {
+            self.enter_menu("root", ctrl, ctx).await
+        }
     }
 
     async fn on_dtmf(

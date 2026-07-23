@@ -3,6 +3,7 @@ use crate::call::domain::LegId;
 use anyhow::Result;
 use rsipstack::dialog::dialog::DialogState;
 use rsipstack::sip::StatusCode;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -366,6 +367,7 @@ impl SipSession {
                         LegId::from("caller"),
                         queue_name,
                         None,
+                        HashMap::new(),
                         Vec::new(),
                         callee_state_rx,
                     ))
@@ -373,7 +375,16 @@ impl SipSession {
                     .map_err(super::map_queue_xfer_err),
                     TransferEndpoint::Ivr(ivr_name) => {
                         info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
-                        self.start_ivr_app(ivr_name, std::collections::HashMap::new())
+                        let mut ivr_params = std::collections::HashMap::new();
+                        ivr_params.insert(
+                            "transferred_from".into(),
+                            "queue".into(),
+                        );
+                        ivr_params.insert(
+                            "return_reason".into(),
+                            "queue_fallback".into(),
+                        );
+                        self.start_ivr_app(ivr_name, ivr_params)
                             .await
                             .map_err(|e| {
                                 into_callee_err(
@@ -466,6 +477,7 @@ impl SipSession {
                         LegId::from("caller"),
                         name,
                         None,
+                        HashMap::new(),
                         Vec::new(),
                         callee_state_rx,
                     ))

@@ -1516,8 +1516,26 @@ async fn cluster_dispatch_command_handler(
             }
         };
 
+    let action = payload.action_name();
+    tracing::info!(
+        audit_event = "call_command",
+        action = action,
+        session_id = %session_id,
+        source = "cluster_forward",
+        result = "received",
+        "Cluster forwarded command received"
+    );
+
     let registry = state.sip_server().inner.active_call_registry.clone();
     if registry.get_handle(&session_id).is_none() {
+        tracing::info!(
+            audit_event = "call_command",
+            action = action,
+            session_id = %session_id,
+            source = "cluster_forward",
+            result = "not_found",
+            "Call not found on this node"
+        );
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "message": "Call not found" })),
@@ -1530,12 +1548,29 @@ async fn cluster_dispatch_command_handler(
     match dispatch_console_command(&registry, &session_id, payload) {
         Ok(result) => {
             if result.success {
+                tracing::info!(
+                    audit_event = "call_command",
+                    action = action,
+                    session_id = %session_id,
+                    source = "cluster_forward",
+                    result = "success",
+                    "Command dispatched locally from cluster forward"
+                );
                 let mut resp = serde_json::json!({ "message": "Command dispatched" });
                 if let Some(data) = result.data {
                     resp.as_object_mut().unwrap().insert("data".into(), data);
                 }
                 Json(resp).into_response()
             } else {
+                tracing::info!(
+                    audit_event = "call_command",
+                    action = action,
+                    session_id = %session_id,
+                    source = "cluster_forward",
+                    result = "failure",
+                    message = %result.message.as_deref().unwrap_or(""),
+                    "Cluster forwarded command failed"
+                );
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "message": result.message })),
@@ -1543,11 +1578,22 @@ async fn cluster_dispatch_command_handler(
                     .into_response()
             }
         }
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "message": format!("Failed to deliver command: {}", e) })),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::info!(
+                audit_event = "call_command",
+                action = action,
+                session_id = %session_id,
+                source = "cluster_forward",
+                result = "failure",
+                message = %e,
+                "Cluster forwarded command delivery failed"
+            );
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "message": format!("Failed to deliver command: {}", e) })),
+            )
+                .into_response()
+        }
     }
 }
 

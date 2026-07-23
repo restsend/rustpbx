@@ -300,6 +300,14 @@ async fn handle_text_message(
         RwiCommandPayload::Originate(_) | RwiCommandPayload::AttachCall { .. }
     );
 
+    tracing::info!(
+        audit_event = "call_command",
+        action = %action,
+        call_id = %call_id.as_deref().unwrap_or(""),
+        source = "rwi",
+        result = "received",
+        "RWI command received"
+    );
     let result = processor.process_command(command).await;
 
     // Auto-claim call ownership when originate or attach succeeds
@@ -317,6 +325,18 @@ async fn handle_text_message(
         );
     }
 
+    let outcome = match &result {
+        Ok(_) => "success",
+        Err(_) => "error",
+    };
+    tracing::info!(
+        audit_event = "call_command",
+        action = %action,
+        call_id = %call_id.as_deref().unwrap_or(""),
+        source = "rwi",
+        result = outcome,
+        "RWI command completed"
+    );
     let event = build_command_result_event(&action_id, &action, call_id.as_deref(), result);
     if let Ok(json) = serde_json::to_string(&event) {
         let _ = ws_tx.send(json);

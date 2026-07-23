@@ -487,7 +487,7 @@ fn test_queue_fallback_with_prompt_maps_to_play_then_hangup() {
 }
 
 #[tokio::test]
-async fn test_queue_transfer_without_return_ivr_keeps_hangup_fallback_when_no_agents() {
+async fn test_queue_transfer_without_return_to_ivr_keeps_hangup_fallback_when_no_agents() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),
         None,
@@ -503,11 +503,12 @@ async fn test_queue_transfer_without_return_ivr_keeps_hangup_fallback_when_no_ag
             LegId::from("caller"),
             "support",
             None,
+            HashMap::new(),
             Vec::new(),
             &mut callee_rx,
         )
         .await
-        .expect_err("without return_ivr, hangup fallback should surface failure");
+        .expect_err("without return_to_ivr, hangup fallback should surface failure");
     assert!(
         err.to_string().contains("Queue transfer failed"),
         "unexpected error: {}",
@@ -516,7 +517,7 @@ async fn test_queue_transfer_without_return_ivr_keeps_hangup_fallback_when_no_ag
 }
 
 #[tokio::test]
-async fn test_queue_transfer_return_ivr_overrides_hangup_fallback_when_no_agents() {
+async fn test_queue_transfer_return_to_ivr_overrides_hangup_fallback_when_no_agents() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),
         None,
@@ -535,11 +536,12 @@ async fn test_queue_transfer_return_ivr_overrides_hangup_fallback_when_no_agents
             LegId::from("caller"),
             "support",
             Some("hello".to_string()),
+            HashMap::new(),
             Vec::new(),
             &mut callee_rx,
         )
         .await
-        .expect("return_ivr should override hangup fallback and start IVR");
+        .expect("return_to_ivr should override hangup fallback and start IVR");
 
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
 }

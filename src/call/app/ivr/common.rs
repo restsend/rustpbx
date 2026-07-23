@@ -212,21 +212,48 @@ pub async fn execute_action(
     tts_service: Option<&Arc<TtsService>>,
 ) -> anyhow::Result<ActionResult> {
     match action {
-        EntryAction::Transfer { target, params } => {
+        EntryAction::Transfer {
+            target,
+            params,
+            return_to_ivr,
+        } => {
             let mut t = substitute_vars(target, &sess.variables);
-            if !params.is_empty() {
-                t.push('?');
-                for (i, (k, v)) in params.iter().enumerate() {
-                    if i > 0 {
-                        t.push('&');
-                    }
-                    t.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+            let mut query = String::new();
+            for (i, (k, v)) in params.iter().enumerate() {
+                if i > 0 {
+                    query.push('&');
                 }
+                query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+            }
+            if let Some(ivr) = return_to_ivr
+                .as_ref()
+                .filter(|s| !s.is_empty())
+            {
+                if !query.is_empty() {
+                    query.push('&');
+                }
+                query.push_str(&format!("return_to_ivr={}", urlencoding::encode(ivr)));
+            }
+            if !query.is_empty() {
+                t.push('?');
+                t.push_str(&query);
             }
             Ok(ActionResult::Terminal(TerminalAction::Transfer(t)))
         }
-        EntryAction::Queue { target, .. } => {
-            let t = substitute_vars(target, &sess.variables);
+        EntryAction::Queue {
+            target,
+            return_to_ivr,
+        } => {
+            let mut t = substitute_vars(target, &sess.variables);
+            if let Some(ivr) = return_to_ivr
+                .as_ref()
+                .filter(|s| !s.is_empty())
+            {
+                t.push_str(&format!(
+                    "?return_to_ivr={}",
+                    urlencoding::encode(ivr)
+                ));
+            }
             Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                 "queue:{}",
                 t
@@ -545,7 +572,7 @@ pub async fn execute_action(
         EntryAction::Bridge {
             create_room_uri,
             headers,
-            return_ivr,
+            return_to_ivr,
             success,
             failure,
             ..
@@ -557,9 +584,9 @@ pub async fn execute_action(
                     .insert(format!("bridge_hdr_{}", k), v.clone());
             }
             let mut uri = uri;
-            if let Some(ivr_name) = return_ivr {
+            if let Some(ivr_name) = return_to_ivr {
                 let sep = if uri.contains('?') { "&" } else { "?" };
-                uri = format!("{}{}return_ivr={}", uri, sep, ivr_name);
+                uri = format!("{}{}return_to_ivr={}", uri, sep, ivr_name);
             }
             if success.is_some() || failure.is_some() {
                 sess.variables.insert("bridge_branch".into(), "true".into());

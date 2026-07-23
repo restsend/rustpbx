@@ -90,7 +90,7 @@ fn default_latching_probation_max_packets() -> Option<u8> {
 }
 
 fn default_rtp_timeout() -> Option<u64> {
-    Some(30)
+    Some(15)
 }
 
 fn default_generated_config_dir() -> String {
@@ -484,6 +484,7 @@ pub struct CallRecordConfig {
 #[serde(rename_all = "snake_case")]
 pub enum CallRecordStorageConfig {
     Local {
+        #[serde(default = "default_call_record_local_root")]
         root: String,
     },
     S3 {
@@ -539,6 +540,10 @@ fn default_call_record_table() -> String {
 
 fn default_call_record_root() -> String {
     "cdr".to_string()
+}
+
+fn default_call_record_local_root() -> String {
+    "./config/cdr".to_string()
 }
 
 /// Directory structure for sipflow storage
@@ -1563,6 +1568,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(defaulted.max_concurrent, DEFAULT_CALL_RECORD_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn test_full_config_parses_callrecord_s3() {
+        let toml_str = r#"
+            http_addr = "0.0.0.0:8080"
+
+            [proxy]
+            addr = "0.0.0.0"
+
+            [callrecord]
+            type = "s3"
+            vendor = "aliyun"
+            bucket = "my-bucket"
+            region = "oss-cn-hangzhou"
+            access_key = "ak"
+            secret_key = "sk"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+        assert!(
+            config.callrecord.is_some(),
+            "callrecord should be Some when [callrecord] section is present"
+        );
+        assert!(matches!(
+            config.callrecord.as_ref().unwrap().storage,
+            CallRecordStorageConfig::S3 { .. }
+        ));
+    }
+
+    #[test]
+    fn test_full_config_without_callrecord() {
+        let toml_str = r#"
+            http_addr = "0.0.0.0:8080"
+
+            [proxy]
+            addr = "0.0.0.0"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+        assert!(
+            config.callrecord.is_none(),
+            "callrecord should be None when [callrecord] section is absent"
+        );
     }
 
     #[test]

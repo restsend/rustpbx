@@ -160,11 +160,13 @@ pub enum EntryAction {
         target: String,
         #[serde(default)]
         params: HashMap<String, String>,
+        #[serde(default)]
+        return_to_ivr: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
-        return_to_ivr: Option<bool>,
+        return_to_ivr: Option<String>,
     },
     Menu {
         menu: String,
@@ -357,7 +359,7 @@ pub enum EntryAction {
         #[serde(default)]
         timeout_ms: Option<u64>,
         #[serde(default)]
-        return_ivr: Option<String>,
+        return_to_ivr: Option<String>,
         #[serde(default)]
         success: Option<Box<ActionNode>>,
         #[serde(default)]
@@ -371,6 +373,7 @@ impl EntryAction {
         EntryAction::Transfer {
             target: target.into(),
             params: HashMap::new(),
+            return_to_ivr: None,
         }
     }
 }
@@ -416,11 +419,13 @@ impl ActionNode {
 pub enum WebhookResponse {
     Transfer {
         target: String,
+        #[serde(default)]
+        return_to_ivr: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
-        return_to_ivr: Option<bool>,
+        return_to_ivr: Option<String>,
     },
     Menu {
         menu: String,
@@ -472,9 +477,13 @@ pub enum WebhookResponse {
 impl WebhookResponse {
     pub fn into_entry_action(self) -> EntryAction {
         match self {
-            WebhookResponse::Transfer { target } => EntryAction::Transfer {
+            WebhookResponse::Transfer {
+                target,
+                return_to_ivr,
+            } => EntryAction::Transfer {
                 target,
                 params: HashMap::new(),
+                return_to_ivr,
             },
             WebhookResponse::Queue {
                 target,
@@ -724,6 +733,7 @@ action = { type = "menu", menu = "root" }
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
+                return_to_ivr: None,
             }),
         );
         let json = serde_json::to_value(&node).unwrap();
@@ -796,6 +806,7 @@ action = { type = "menu", menu = "root" }
                     ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
                         params: HashMap::new(),
+                        return_to_ivr: None,
                     }),
                 ),
                 (
@@ -823,7 +834,7 @@ action = { type = "menu", menu = "root" }
             create_room_uri: "https://voip.example.com/rooms".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer token123".into())]),
             timeout_ms: Some(30000),
-            return_ivr: None,
+            return_to_ivr: None,
             success: None,
             failure: None,
         });

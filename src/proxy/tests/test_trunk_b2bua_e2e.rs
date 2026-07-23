@@ -22,7 +22,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -1341,5 +1341,122 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
     callee_receiver.stop();
     server.stop();
     info!("test_trunk_b2bua_mid_call_reinvite PASSED");
+    Ok(())
+}
+
+// ─── RTP timeout: neither side sends BYE, RTP stops → proxy tears down ────────
+
+/// Verifies that when media is anchored (mediaproxy=all) and BOTH sides stop
+/// sending RTP without sending BYE, the proxy proactively tears the call down
+/// via rtp-timeout: it sends BYE on both dialogs and records CDR hangup reason
+/// `RtpTimeout`.
+///
+/// This exercises the session-level rtp-inactivity watchdog that covers the
+/// rewrite-bridge fast-path relay and the ForwardingTrack slow path (the
+/// BridgePeer has its own in-line detector). With a 3s timeout the adaptive
+/// tick is 1s, so teardown is expected a few seconds after RTP ceases.
+#[tokio::test]
+async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // 3s rtp_timeout → adaptive tick = clamp(3/5, 1s, 5s) = 1s.
+    // Latching is disabled to match start_with_mode: the test UAs use separate
+    // sender/receiver sockets, so the proxy must send relayed RTP to the
+    // SDP-declared (receiver) port rather than latching onto the sender port.
+    let mut proxy_config = test_helpers::test_proxy_config(0);
+    proxy_config.media_proxy = MediaProxyMode::All;
+    proxy_config.rtp_timeout = Some(3);
+    proxy_config.enable_latching = false;
+    let server = Arc::new(E2eTestServer::start_with_config(proxy_config).await?);
+
+    let caller_receiver = RtpReceiver::bind(0).await?;
+    let callee_receiver = RtpReceiver::bind(0).await?;
+    let caller_sender = RtpSender::bind().await?;
+    let callee_sender = RtpSender::bind().await?;
+
+    let caller_port = caller_receiver.port()?;
+    let callee_port = callee_receiver.port()?;
+
+    let (call, caller_ua, callee_ua) =
+        establish_call(&server, "alice", "bob", caller_port, callee_port).await?;
+
+    info!(session_id = ?call.caller_id, "Wholesale call established; exchanging RTP briefly to anchor media");
+
+    // Exchange RTP for ~2s so media is anchored and the watchdog baselines its
+    // per-leg counters on real traffic.
+    let (caller_stats, callee_stats) = exchange_rtp(
+        &caller_sender,
+        &callee_sender,
+        &caller_receiver,
+        &callee_receiver,
+        call.caller_target,
+        call.callee_target,
+        0,
+        2000,
+    )
+    .await?;
+
+    info!(
+        caller_received = caller_stats.packets_received,
+        callee_received = callee_stats.packets_received,
+        "Pre-silence RTP (sanity: both directions flowed)"
+    );
+    assert!(
+        caller_stats.packets_received > 0 && callee_stats.packets_received > 0,
+        "RTP must flow bidirectionally before the silence phase"
+    );
+
+    // `exchange_rtp` already stopped the senders. Neither side sends a BYE.
+    // The proxy must detect the RTP silence and tear the call down on its own.
+    info!("Both RTP senders stopped, no BYE sent — waiting for proxy-initiated teardown");
+
+    let silence_started = Instant::now();
+    let mut caller_bye = false;
+    let mut callee_bye = false;
+    // Generous bound: 3s timeout + 1s tick + slack for teardown signalling.
+    let deadline = silence_started + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        for event in caller_ua.process_dialog_events().await? {
+            if matches!(event, TestUaEvent::CallTerminated(_)) {
+                caller_bye = true;
+            }
+        }
+        for event in callee_ua.process_dialog_events().await? {
+            if matches!(event, TestUaEvent::CallTerminated(_)) {
+                callee_bye = true;
+            }
+        }
+        if caller_bye && callee_bye {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    let elapsed = silence_started.elapsed();
+    info!(
+        caller_bye,
+        callee_bye, elapsed_secs = elapsed.as_secs(), "Teardown observation result"
+    );
+    assert!(
+        caller_bye && callee_bye,
+        "Proxy must send BYE to both legs on rtp-timeout (caller_bye={}, callee_bye={}) within 15s",
+        caller_bye,
+        callee_bye
+    );
+
+    // CDR must reflect the system-initiated teardown reason.
+    wait_for_cdr(&server, 800).await?;
+    let records = server.cdr_capture.get_all_records().await;
+    let record = &records[0];
+    assert!(
+        matches!(record.hangup_reason, Some(CallRecordHangupReason::RtpTimeout)),
+        "Expected CDR hangup reason RtpTimeout, got {:?}",
+        record.hangup_reason
+    );
+
+    caller_receiver.stop();
+    callee_receiver.stop();
+    server.stop();
+    info!("test_trunk_b2bua_rtp_timeout_no_bye_tears_down PASSED");
     Ok(())
 }

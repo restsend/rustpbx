@@ -96,6 +96,27 @@ pub enum CallCommandPayload {
     ResumeRecording,
 }
 
+impl CallCommandPayload {
+    pub fn action_name(&self) -> &'static str {
+        match self {
+            Self::Hangup { .. } => "hangup",
+            Self::Accept { .. } => "accept",
+            Self::Transfer { .. } => "transfer",
+            Self::Hold { .. } => "hold",
+            Self::Unhold { .. } => "unhold",
+            Self::SendDtmf { .. } => "send_dtmf",
+            Self::Mute { .. } => "mute",
+            Self::Unmute { .. } => "unmute",
+            Self::Play { .. } => "play",
+            Self::StopPlayback { .. } => "stop_playback",
+            Self::StartRecording { .. } => "start_recording",
+            Self::StopRecording => "stop_recording",
+            Self::PauseRecording => "pause_recording",
+            Self::ResumeRecording => "resume_recording",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConsoleMediaSource {
@@ -123,11 +144,21 @@ pub async fn show_active_call(
 
 pub async fn dispatch_call_command(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(session_id): AxumPath<String>,
     Json(payload): Json<CallCommandPayload>,
 ) -> Response {
-    dispatch_call_command_inner(&state, &session_id, payload).await
+    let action = payload.action_name();
+    tracing::info!(
+        audit_event = "call_command",
+        action = action,
+        session_id = %session_id,
+        source = "console_api",
+        operator = %user.username,
+        result = "received",
+        "Call command received"
+    );
+    dispatch_call_command_inner(&state, &session_id, payload, &user.username).await
 }
 
 pub async fn list_active_calls_inner(
@@ -209,7 +240,10 @@ pub async fn dispatch_call_command_inner(
     state: &Arc<ConsoleState>,
     session_id: &str,
     payload: CallCommandPayload,
+    operator: &str,
 ) -> Response {
+    let action = payload.action_name();
+
     if let Some(server) = state.sip_server() {
         let registry = server.active_call_registry.clone();
 
@@ -219,12 +253,31 @@ pub async fn dispatch_call_command_inner(
             return match dispatch_console_command(&registry, session_id, payload) {
                 Ok(result) => {
                     if result.success {
+                        tracing::info!(
+                            audit_event = "call_command",
+                            action = action,
+                            session_id = %session_id,
+                            source = "console_api",
+                            operator = %operator,
+                            result = "success",
+                            "Command dispatched locally"
+                        );
                         let mut resp = json!({ "message": "Command dispatched" });
                         if let Some(data) = result.data {
                             resp.as_object_mut().unwrap().insert("data".into(), data);
                         }
                         Json(resp).into_response()
                     } else {
+                        tracing::info!(
+                            audit_event = "call_command",
+                            action = action,
+                            session_id = %session_id,
+                            source = "console_api",
+                            operator = %operator,
+                            result = "failure",
+                            message = %result.message.as_deref().unwrap_or(""),
+                            "Command failed"
+                        );
                         (
                             StatusCode::BAD_REQUEST,
                             Json(json!({ "message": result.message })),
@@ -232,11 +285,23 @@ pub async fn dispatch_call_command_inner(
                             .into_response()
                     }
                 }
-                Err(e) => (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "message": format!("Failed to deliver command: {}", e) })),
-                )
-                    .into_response(),
+                Err(e) => {
+                    tracing::info!(
+                        audit_event = "call_command",
+                        action = action,
+                        session_id = %session_id,
+                        source = "console_api",
+                        operator = %operator,
+                        result = "failure",
+                        message = %e,
+                        "Failed to deliver command"
+                    );
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "message": format!("Failed to deliver command: {}", e) })),
+                    )
+                        .into_response()
+                }
             };
         }
     }
@@ -245,9 +310,28 @@ pub async fn dispatch_call_command_inner(
     {
         let resp = forward_command_to_peers(state, session_id, &payload).await;
         if resp.is_some() {
+            tracing::info!(
+                audit_event = "call_command",
+                action = action,
+                session_id = %session_id,
+                source = "console_api",
+                operator = %operator,
+                result = "forwarded",
+                "Command forwarded to cluster peers"
+            );
             return resp.unwrap();
         }
     }
+
+    tracing::info!(
+        audit_event = "call_command",
+        action = action,
+        session_id = %session_id,
+        source = "console_api",
+        operator = %operator,
+        result = "not_found",
+        "Call not found locally or on peers"
+    );
 
     (
         StatusCode::NOT_FOUND,

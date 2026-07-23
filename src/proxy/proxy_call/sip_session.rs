@@ -372,6 +372,12 @@ impl AppFactory for BuiltinAppFactory {
                     }
                     app = app.with_rwi_gateway(context.rwi_gateway.clone());
                     app = app.with_trace(context.ivr_trace.clone());
+                    if let Some(ivp) = params.as_ref().and_then(|p| p.get("ivr_params")) {
+                        app = app.with_ivr_params(ivp.clone());
+                        if let Some(tf) = ivp.get("transferred_from").and_then(|v| v.as_str()) {
+                            app = app.with_transferred_from(Some(tf.to_string()));
+                        }
+                    }
                     Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                 } else {
                     // File-based: read TOML and detect mode from content.
@@ -456,6 +462,9 @@ impl AppFactory for BuiltinAppFactory {
                         app = app.with_trace(context.ivr_trace.clone());
                         if let Some(ivp) = params.as_ref().and_then(|p| p.get("ivr_params")) {
                             app = app.with_ivr_params(ivp.clone());
+                            if let Some(tf) = ivp.get("transferred_from").and_then(|v| v.as_str()) {
+                                app = app.with_transferred_from(Some(tf.to_string()));
+                            }
                         }
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
@@ -466,6 +475,14 @@ impl AppFactory for BuiltinAppFactory {
                                 serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
                         {
                             app = app.with_tts(Some(tts_cfg));
+                        }
+                        // Support return_menu for return-to-IVR resume
+                        if let Some(ivp) = params.as_ref().and_then(|p| p.get("ivr_params")) {
+                            if let Some(menu) = ivp.get("return_menu").and_then(|v| v.as_str()) {
+                                if !menu.is_empty() {
+                                    app = app.with_start_menu(menu.to_string());
+                                }
+                            }
                         }
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     }
@@ -1015,7 +1032,7 @@ impl SipSession {
         let initial = server_dialog.initial_request();
         let caller_offer = Self::extract_sdp(initial.body());
 
-        let session = Self {
+        let mut session = Self {
             id: session_id.clone(),
             state: SessionState::Initializing,
             policy: SessionPolicy::inbound_sip(),
@@ -1067,6 +1084,15 @@ impl SipSession {
             dtmf_digits: Vec::new(),
             engine_session_destroyed: false,
         };
+
+        // Create the rtp-timeout channel at construction time so the sender is
+        // available to every media path (fast-path relay, ForwardingTrack,
+        // BridgePeer) regardless of when `process` reaches its main loop — the
+        // answer handling can arm the watchdog slightly before `process` would
+        // otherwise create this pair, causing a lost-sender race.
+        let (rtp_timeout_tx, rtp_timeout_rx) = mpsc::channel::<String>(1);
+        session.media.rtp_timeout_tx = Some(rtp_timeout_tx);
+        session.media.rtp_timeout_rx = Some(rtp_timeout_rx);
 
         (session, sip_handle, cmd_rx)
     }
@@ -2142,8 +2168,14 @@ impl SipSession {
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
 
-        let (rtp_timeout_tx, mut rtp_timeout_rx) = mpsc::channel::<String>(1);
-        self.media.rtp_timeout_tx = Some(rtp_timeout_tx);
+        // Consume the rtp-timeout receiver created at session construction. If
+        // absent (defensive), fall back to a never-firing receiver so the
+        // select arm below still compiles.
+        let mut rtp_timeout_rx = self
+            .media
+            .rtp_timeout_rx
+            .take()
+            .unwrap_or_else(|| mpsc::channel::<String>(1).1);
 
         let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
             debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
@@ -3261,13 +3293,25 @@ impl SipSession {
                     // ── Return to IVR takes precedence over CSAT hook ──────────
                     if !self.server_dialog.state().is_terminated() {
                         if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
+                            let mut ivr_params = std::mem::take(
+                                &mut self.meta.transfer_return_params,
+                            );
+                            ivr_params.insert(
+                                "transferred_from".into(),
+                                "agent".into(),
+                            );
+                            ivr_params.insert(
+                                "return_reason".into(),
+                                "b_leg_hangup".into(),
+                            );
                             info!(
                                 session = %self.id,
                                 %ivr_name,
+                                ?ivr_params,
                                 "B‑leg hung up; returning caller to IVR"
                             );
                             self.bridge.clear();
-                            if self.start_ivr_app(&ivr_name, HashMap::new()).await.is_ok() {
+                            if self.start_ivr_app(&ivr_name, ivr_params).await.is_ok() {
                                 return Ok(());
                             }
                             warn!(
@@ -4300,7 +4344,11 @@ impl SipSession {
                 .rtp_timeout
                 .map(Duration::from_secs)
         });
-        if let (Some(tx), Some(timeout)) = (self.media.rtp_timeout_tx.take(), rtp_timeout) {
+        // Clone (not take) so the channel stays available for other detector
+        // paths (e.g. the anchored fast-path/ForwardingTrack rtp-timeout
+        // monitor). mpsc::Sender is Clone; the rx select arm tears down on the
+        // first message regardless of which sender fired.
+        if let (Some(tx), Some(timeout)) = (self.media.rtp_timeout_tx.clone(), rtp_timeout) {
             bridge_builder = bridge_builder.with_rtp_timeout_notify(tx, timeout);
         }
 
@@ -5859,6 +5907,9 @@ impl SipSession {
                         "Anchored media: RTP bridge fast-path activated (transport-level relay, ForwardingTrack bypassed)"
                     );
                     self.media.anchored_mode = AnchoredMediaMode::RelayOnly;
+                    // Arm the rtp-inactivity watchdog for the fast-path relay
+                    // (the bridge's own detector does not run here).
+                    self.start_anchored_rtp_timeout_monitor().await;
                     return;
                 }
                 warn!(
@@ -5887,6 +5938,8 @@ impl SipSession {
         )
         .await;
         self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
+        // Arm the rtp-inactivity watchdog for the ForwardingTrack slow path.
+        self.start_anchored_rtp_timeout_monitor().await;
     }
 
     /// Wire the ForwardingTrack "slow path" for both directions
@@ -6373,6 +6426,243 @@ impl SipSession {
                 warn!(
                     session_id = %self.context.session_id,
                     "Caller ingress monitor did not stop in time; aborting task"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    /// Start a lightweight RTP-inactivity watchdog for anchored media that does
+    /// NOT flow through a [`crate::media::bridge::BridgePeer`] — i.e. the
+    /// rewrite-bridge fast-path relay (`AnchoredMediaMode::RelayOnly`) and the
+    /// ForwardingTrack slow path. The BridgePeer performs its own in-line
+    /// rtp-timeout detection, so this monitor is skipped whenever a
+    /// `media_bridge` is active.
+    ///
+    /// It polls each leg's [`rustrtc::PeerConnection::received_rtp_packets`]
+    /// counter on an adaptive tick (`timeout / 5`, clamped to 1s..5s) and, the
+    /// moment a direction stays silent for `>= timeout`, signals the existing
+    /// `rtp_timeout_rx` select arm which tears the session down (send BYE on
+    /// every dialog, CDR hangup reason `rtpTimeout`).
+    ///
+    /// Idempotent: calling it again stops any previous monitor first.
+    async fn start_anchored_rtp_timeout_monitor(&mut self) {
+        // The BridgePeer path arms its own in-line detector; avoid duplicate
+        // monitoring by only running when no app/transport bridge is active.
+        if self.media.media_bridge.is_some() {
+            return;
+        }
+
+        // Effective timeout: per-call dialplan override > proxy-wide default.
+        let Some(timeout) = self
+            .context
+            .dialplan
+            .rtp_timeout
+            .or_else(|| self.server.proxy_config.rtp_timeout.map(Duration::from_secs))
+        else {
+            debug!(
+                session_id = %self.context.session_id,
+                "rtp-timeout disabled (no dialplan/proxy config); monitor not started"
+            );
+            return;
+        };
+
+        let Some(rtp_timeout_tx) = self.media.rtp_timeout_tx.clone() else {
+            warn!(
+                session_id = %self.context.session_id,
+                "Cannot start rtp-timeout monitor: no rtp_timeout_tx channel"
+            );
+            return;
+        };
+
+        // Stop any previously armed monitor before starting a fresh one.
+        self.stop_anchored_rtp_timeout_monitor().await;
+
+        let caller_pc = match self.caller_peer() {
+            Some(peer) => Self::get_peer_pc(peer, Self::CALLER_TRACK_ID).await,
+            None => None,
+        };
+        let callee_pc = match self.callee_peer() {
+            Some(peer) => Self::get_peer_pc(peer, Self::CALLEE_TRACK_ID).await,
+            None => None,
+        };
+        let (Some(caller_pc), Some(callee_pc)) = (caller_pc, callee_pc) else {
+            warn!(
+                session_id = %self.context.session_id,
+                "Cannot start rtp-timeout monitor: missing caller/callee PeerConnection"
+            );
+            return;
+        };
+
+        // Adaptive tick: check roughly 5 times per timeout window, bounded to
+        // [1s, 5s] so detection latency stays within (timeout, timeout+tick]
+        // while keeping polling cost negligible (two atomic loads per tick).
+        let tick = {
+            let t = timeout / 5;
+            if t < Duration::from_secs(1) {
+                Duration::from_secs(1)
+            } else if t > Duration::from_secs(5) {
+                Duration::from_secs(5)
+            } else {
+                t
+            }
+        };
+
+        let cancel = self.cancel_token.child_token();
+        let session_id = self.context.session_id.clone();
+        let monitor_cancel = cancel.clone();
+
+        let task = crate::utils::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Consume the immediate first tick so the first measured window is
+            // a full tick long (avoids a spurious zero-delta at t=0).
+            interval.tick().await;
+
+            let mut prev_caller = caller_pc.received_rtp_packets();
+            let mut prev_callee = callee_pc.received_rtp_packets();
+            let mut caller_silence: Option<Instant> = None;
+            let mut callee_silence: Option<Instant> = None;
+            let mut fired = false;
+
+            info!(
+                session_id = %session_id,
+                timeout_secs = timeout.as_secs(),
+                tick_ms = tick.as_millis() as u64,
+                "rtp-timeout monitor armed for anchored media (caller+callee), first poll in {:?}",
+                tick
+            );
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = monitor_cancel.cancelled() => {
+                        debug!(session_id = %session_id, "rtp-timeout monitor cancelled");
+                        return;
+                    }
+                    _ = interval.tick() => {}
+                }
+
+                if fired {
+                    continue;
+                }
+
+                let caller_now = caller_pc.received_rtp_packets();
+                let callee_now = callee_pc.received_rtp_packets();
+
+                // The cumulative counter is per-transport. A re-INVITE (or any
+                // ICE restart) replaces the RtpTransport inside the same
+                // PeerConnection, so the counter drops back towards 0. Detect
+                // that and reset the baseline + clear any pending silence, so
+                // a transport rebuild never looks like sustained silence
+                // (which would otherwise falsely trigger a timeout).
+                if caller_now < prev_caller {
+                    debug!(
+                        session_id = %session_id,
+                        prev = prev_caller,
+                        now = caller_now,
+                        "rtp-timeout monitor: caller counter reset (transport rebuild); re-baselining"
+                    );
+                    prev_caller = caller_now;
+                    caller_silence = None;
+                }
+                if callee_now < prev_callee {
+                    debug!(
+                        session_id = %session_id,
+                        prev = prev_callee,
+                        now = callee_now,
+                        "rtp-timeout monitor: callee counter reset (transport rebuild); re-baselining"
+                    );
+                    prev_callee = callee_now;
+                    callee_silence = None;
+                }
+
+                let caller_delta = caller_now.saturating_sub(prev_caller);
+                let callee_delta = callee_now.saturating_sub(prev_callee);
+                prev_caller = caller_now;
+                prev_callee = callee_now;
+
+                // Each direction is timed independently; first one to exceed
+                // the timeout tears the session down.
+                if caller_delta == 0 {
+                    caller_silence.get_or_insert(Instant::now());
+                } else {
+                    caller_silence = None;
+                }
+                if callee_delta == 0 {
+                    callee_silence.get_or_insert(Instant::now());
+                } else {
+                    callee_silence = None;
+                }
+
+                let caller_silent_for =
+                    caller_silence.map(|s| s.elapsed());
+                let callee_silent_for =
+                    callee_silence.map(|s| s.elapsed());
+
+                let fire_caller =
+                    caller_silent_for.is_some_and(|d| d >= timeout);
+                let fire_callee =
+                    callee_silent_for.is_some_and(|d| d >= timeout);
+
+                if fire_caller || fire_callee {
+                    fired = true;
+                    let (side, silent_for) = if fire_caller {
+                        ("caller", caller_silent_for.unwrap())
+                    } else {
+                        ("callee", callee_silent_for.unwrap())
+                    };
+                    warn!(
+                        session_id = %session_id,
+                        side = side,
+                        timeout_secs = timeout.as_secs(),
+                        silent_secs = silent_for.as_secs(),
+                        tick_ms = tick.as_millis() as u64,
+                        caller_delta = caller_delta,
+                        callee_delta = callee_delta,
+                        caller_silent_secs = caller_silent_for.map(|d| d.as_secs()),
+                        callee_silent_secs = callee_silent_for.map(|d| d.as_secs()),
+                        "RTP timeout: {} side silent for {:?} (>= {:?}); tearing down session",
+                        side,
+                        silent_for,
+                        timeout
+                    );
+                    // Reuses the existing select arm that sends BYE on all
+                    // dialogs and records CDR hangup reason = rtpTimeout.
+                    let _ = rtp_timeout_tx.try_send(side.to_string());
+                }
+            }
+        });
+
+        self.media.anchored_rtp_timeout_monitor = Some(
+            crate::proxy::proxy_call::media_state::AnchoredRtpTimeoutMonitor {
+                cancel_token: cancel,
+                task,
+            },
+        );
+    }
+
+    async fn stop_anchored_rtp_timeout_monitor(&mut self) {
+        let Some(monitor) = self.media.anchored_rtp_timeout_monitor.take() else {
+            return;
+        };
+        monitor.cancel_token.cancel();
+        let mut task = monitor.task;
+        tokio::select! {
+            result = &mut task => {
+                if let Err(error) = result {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        error = %error,
+                        "rtp-timeout monitor task ended with join error"
+                    );
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    "rtp-timeout monitor did not stop in time; aborting task"
                 );
                 task.abort();
                 let _ = task.await;
@@ -8294,6 +8584,7 @@ impl SipSession {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
 
         self.stop_caller_ingress_monitor().await;
+        self.stop_anchored_rtp_timeout_monitor().await;
 
         // Ensure the running app (IVR/voicemail/queue) is notified of session end.
         if self.app_runtime.is_running() {

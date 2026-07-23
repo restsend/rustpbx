@@ -219,7 +219,7 @@ impl ThirdPartyTreeProvider {
                 create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
                 headers: HashMap::new(),
                 timeout_ms: None,
-                return_ivr: None,
+                return_to_ivr: None,
                 success: None,
                 failure: None,
             },
@@ -239,7 +239,7 @@ impl ThirdPartyTreeProvider {
                     create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
                     headers: HashMap::new(),
                     timeout_ms: None,
-                    return_ivr: None,
+                    return_to_ivr: None,
                     success: if has_success {
                         Some(Box::new(ActionNode::new(EntryAction::Repeat)))
                     } else {
@@ -527,7 +527,7 @@ fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
             create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
             headers: HashMap::new(),
             timeout_ms: None,
-            return_ivr: None,
+            return_to_ivr: None,
             success: None,
             failure: None,
         },

@@ -199,8 +199,8 @@ RustPBX plays the prompt → on audio complete → automatically executes the dt
 
 | type | Purpose | Required | Optional | Notes |
 |------|---------|----------|----------|-------|
-| `transfer` | Blind‑transfer the call to a SIP URI, extension, or another IVR | `target: string` | `params: Map<string,string>` | When `target` is an `ivr:` URI (e.g. `ivr:other_ivr`), `params` are encoded as query string and passed to the target IVR as session variables |
-| `queue` | Send the caller into an ACD queue | `target: string` | `return_to_ivr: bool` | When `return_to_ivr=true`, the call returns to IVR if no agent answers |
+| `transfer` | Blind‑transfer the call to a SIP URI, extension, or another IVR | `target: string` | `params: Map<string,string>`, `return_to_ivr: string` | When `target` is an `ivr:` URI, `params` are passed as session variables. `return_to_ivr` (IVR id) specifies which IVR to return to when the B‑leg hangs up |
+| `queue` | Send the caller into an ACD queue | `target: string` | `return_to_ivr: string` | When `return_to_ivr` is set (an IVR id), the call returns to that IVR if no agent answers or when the connected agent hangs up |
 | `voicemail` | Forward the caller to a user's voicemail | `target: string` | — | The call leaves the IVR |
 | `hangup` | Terminate the call | — | `prompt: string or null` | If `prompt` is set, plays audio before hanging up |
 | `play_and_hangup` | Play an announcement then hang up with a SIP status code | — | `prompt: string or null`, `code: u16 or null` | `code` is the SIP response code (e.g. 486 busy, 404 not found) |

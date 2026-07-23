@@ -2,7 +2,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::state::SessionHangupMessage;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 pub struct CallMeta {
@@ -19,6 +19,17 @@ pub struct CallMeta {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub queue_name: Option<String>,
+    /// When set and the connected B‑leg terminates, the session returns the
+    /// caller to this IVR instead of hanging up.
+    /// Set by `handle_blind_transfer` for `TransferTarget::Sip` and
+    /// `handle_queue_transfer` (on successful agent connection) when the
+    /// user configures `return_to_ivr` on the action.
+    /// Consumed once by `handle_callee_state` so the return is one-shot.
+    pub transfer_return_to_ivr: Option<String>,
+    /// Extra return-context params extracted from the `return_*` query string
+    /// of the transfer target (e.g. `return_menu`, `return_step_id`).
+    /// Forwarded as `ivr_params` when restarting the IVR.
+    pub transfer_return_params: HashMap<String, String>,
 }
 
 impl CallMeta {
@@ -37,6 +48,8 @@ impl CallMeta {
             routed_contact: None,
             routed_destination: None,
             queue_name: None,
+            transfer_return_to_ivr: None,
+            transfer_return_params: HashMap::new(),
         }
     }
 }

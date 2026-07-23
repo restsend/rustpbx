@@ -25,7 +25,8 @@ use std::time::Duration;
 pub(crate) enum TransferTarget {
     Queue {
         name: String,
-        return_ivr: Option<String>,
+        return_to_ivr: Option<String>,
+        return_params: HashMap<String, String>,
         target_overrides: Vec<String>,
     },
     Ivr {
@@ -46,9 +47,16 @@ pub(crate) enum TransferTarget {
         codec: String,
         timeout_ms: Option<u64>,
         /// IVR name to return to when the bridge disconnects.
-        return_ivr: Option<String>,
+        return_to_ivr: Option<String>,
     },
-    Sip(String),
+    /// B2BUA SIP call leg, optionally with return-to-IVR on B‑leg hangup.
+    Sip {
+        uri: String,
+        /// IVR id to return the caller to when the connected B‑leg hangs up.
+        return_to_ivr: Option<String>,
+        /// Extra return_* query params from the target string (e.g. return_menu).
+        return_params: HashMap<String, String>,
+    },
 }
 
 /// Parse a raw transfer target string into a typed `TransferTarget`.
@@ -67,7 +75,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             let mut sample_rate = 8000u32;
             let mut codec = "pcm".to_string();
             let mut timeout_ms = None;
-            let mut return_ivr = None;
+            let mut return_to_ivr = None;
             let mut headers = HashMap::new();
             let mut passthrough_params = Vec::new();
 
@@ -95,8 +103,8 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             "timeout_ms" => {
                                 timeout_ms = value.parse().ok();
                             }
-                            "return_ivr" => {
-                                return_ivr = Some(decoded_val);
+                            "return_to_ivr" => {
+                                return_to_ivr = Some(decoded_val);
                             }
                             _ => passthrough_params.push(pair.to_string()),
                         }
@@ -121,7 +129,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     sample_rate,
                     codec,
                     timeout_ms,
-                    return_ivr,
+                    return_to_ivr,
                 };
             }
         }
@@ -130,7 +138,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
     // 2. Delegate to the canonical prefix parser.
     if let Some(ep) = crate::call::TransferEndpoint::parse(target) {
         return match ep {
-            // Queue: also extract query params (return_ivr, target overrides).
+            // Queue: also extract query params (return_to_ivr, target overrides).
             crate::call::TransferEndpoint::Queue(mut raw_name) => {
                 let query_str = raw_name.find('?').map(|pos| {
                     let qs = raw_name[pos + 1..].to_string();
@@ -139,9 +147,14 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 });
                 let queue_name = raw_name.trim().to_string();
                 if queue_name.is_empty() {
-                    TransferTarget::Sip(format!("sip:{}", target))
+                    TransferTarget::Sip {
+                        uri: format!("sip:{}", target),
+                        return_to_ivr: None,
+                            return_params: HashMap::new(),
+                    }
                 } else {
-                    let mut return_ivr = None;
+                    let mut return_to_ivr = None;
+                    let mut return_params = HashMap::new();
                     let mut target_overrides = Vec::new();
                     if let Some(ref query) = query_str {
                         for pair in query.split('&') {
@@ -153,15 +166,19 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             let value = parts.next().unwrap_or("");
                             let decoded = super::pct_decode_query(value);
                             match key {
-                                "return_ivr" => return_ivr = Some(decoded),
+                                "return_to_ivr" => return_to_ivr = Some(decoded),
                                 "target" => target_overrides.push(decoded),
+                                _ if key.starts_with("return_") => {
+                                    return_params.insert(key.to_string(), decoded);
+                                }
                                 _ => {}
                             }
                         }
                     }
                     TransferTarget::Queue {
                         name: queue_name,
-                        return_ivr,
+                        return_to_ivr,
+                        return_params,
                         target_overrides,
                     }
                 }
@@ -193,19 +210,59 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             }
             crate::call::TransferEndpoint::Conference(id) => TransferTarget::Conference { id },
             // Plain SIP/TEL URI – ensure at least the `sip:` scheme.
+            // Also extract `return_to_ivr` query param and strip it from the
+            // URI before it reaches the callee INVITE.
             crate::call::TransferEndpoint::Uri(uri) => {
                 let sip = if uri.starts_with("sip:") || uri.starts_with("tel:") {
                     uri
                 } else {
                     format!("sip:{}", uri)
                 };
-                TransferTarget::Sip(sip)
+                let mut return_to_ivr = None;
+                let mut return_params = HashMap::new();
+                let clean_uri = if let Some(qpos) = sip.find('?') {
+                    let base = &sip[..qpos];
+                    let qs = &sip[qpos + 1..];
+                    let mut kept = Vec::new();
+                    for pair in qs.split('&') {
+                        if pair.is_empty() {
+                            continue;
+                        }
+                        let mut parts = pair.splitn(2, '=');
+                        let key = parts.next().unwrap_or("");
+                        let value = parts.next().unwrap_or("");
+                        let decoded = super::pct_decode_query(value);
+                        if key == "return_to_ivr" {
+                            return_to_ivr = Some(decoded);
+                        } else if key.starts_with("return_") {
+                            return_params.insert(key.to_string(), decoded);
+                        } else {
+                            kept.push(pair);
+                        }
+                    }
+                    if kept.is_empty() {
+                        base.to_string()
+                    } else {
+                        format!("{}?{}", base, kept.join("&"))
+                    }
+                } else {
+                    sip
+                };
+                TransferTarget::Sip {
+                    uri: clean_uri,
+                    return_to_ivr,
+                    return_params,
+                }
             }
         };
     }
 
     // 3. Fallback (should not normally happen).
-    TransferTarget::Sip(format!("sip:{}", target))
+    TransferTarget::Sip {
+        uri: format!("sip:{}", target),
+        return_to_ivr: None,
+        return_params: HashMap::new(),
+    }
 }
 
 impl SipSession {
@@ -254,14 +311,16 @@ impl SipSession {
         match parse_transfer_target(&target) {
             TransferTarget::Queue {
                 name,
-                return_ivr,
+                return_to_ivr,
+                return_params,
                 target_overrides,
             } => {
-                info!(%leg_id, queue = %name, ?return_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
+                info!(%leg_id, queue = %name, ?return_to_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
                 self.handle_queue_transfer(
                     leg_id,
                     &name,
-                    return_ivr,
+                    return_to_ivr,
+                    return_params,
                     target_overrides,
                     callee_state_rx,
                 )
@@ -285,9 +344,9 @@ impl SipSession {
                 sample_rate,
                 codec,
                 timeout_ms,
-                return_ivr,
+                return_to_ivr,
             } => {
-                info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_ivr, "Handling Bridge transfer");
+                info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_to_ivr, "Handling Bridge transfer");
                 self.connect_bridge(
                     leg_id,
                     endpoint.clone(),
@@ -295,18 +354,27 @@ impl SipSession {
                     sample_rate,
                     codec.clone(),
                     timeout_ms,
-                    return_ivr.clone(),
+                    return_to_ivr.clone(),
                 )
                 .await
             }
-            TransferTarget::Sip(refer_to_str) => {
+            TransferTarget::Sip {
+                uri,
+                return_to_ivr,
+                return_params,
+            } => {
+                self.meta.transfer_return_to_ivr = return_to_ivr.filter(|s| !s.is_empty());
+                if self.meta.transfer_return_to_ivr.is_some() {
+                    self.meta.transfer_return_params = return_params;
+                }
+
                 let realm = self.server.proxy_config.select_realm("");
-                let normalized = crate::call::build_sip_uri(&refer_to_str, &realm);
+                let normalized = crate::call::build_sip_uri(&uri, &realm);
                 let refer_to_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
                     .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
                 if !self.server.proxy_config.blind_transfer_use_refer {
-                    info!(%leg_id, target = %refer_to_str, "Blind transfer via B-leg INVITE (B2BUA)");
+                    info!(%leg_id, target = %uri, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Blind transfer via B-leg INVITE (B2BUA)");
                     let location = crate::call::Location {
                         aor: refer_to_uri,
                         ..Default::default()
@@ -315,6 +383,7 @@ impl SipSession {
                         .try_single_target(&location, callee_state_rx, None, None)
                         .await;
                     return result.map_err(|(code, text, reason)| {
+                        self.meta.transfer_return_to_ivr = None;
                         anyhow!(
                             "B-leg transfer failed: {} {} - {}",
                             code,
@@ -324,7 +393,11 @@ impl SipSession {
                     });
                 }
 
-                // SIP REFER path
+                if self.meta.transfer_return_to_ivr.is_some() {
+                    warn!(%leg_id, "return_to_ivr not supported with SIP REFER; use B2BUA or set blind_transfer_use_refer=false");
+                    self.meta.transfer_return_to_ivr = None;
+                }
+
                 let referred_by = self
                     .context
                     .dialplan
@@ -337,7 +410,7 @@ impl SipSession {
                     format!("<{}>", referred_by),
                 )];
 
-                info!(%leg_id, target = %refer_to_str, "Sending REFER for blind transfer");
+                info!(%leg_id, target = %uri, "Sending REFER for blind transfer");
 
                 match self
                     .server_dialog
@@ -405,7 +478,7 @@ impl SipSession {
 
                 info!(
                     "Blind transfer initiated — call will be transferred to {}",
-                    refer_to_str
+                    uri
                 );
                 Ok(())
             }
@@ -416,11 +489,12 @@ impl SipSession {
         &mut self,
         leg_id: LegId,
         queue_name: &str,
-        return_ivr: Option<String>,
+        return_to_ivr: Option<String>,
+        return_params: HashMap<String, String>,
         target_overrides: Vec<String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        info!(%leg_id, queue = %queue_name, ?return_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
+        info!(%leg_id, queue = %queue_name, ?return_to_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
 
         let queue_config = self
             .server
@@ -479,7 +553,7 @@ impl SipSession {
             }
         }
 
-        let return_ivr_fallback_audio: Option<String> = if return_ivr.is_some() {
+        let return_to_ivr_fallback_audio: Option<String> = if return_to_ivr.is_some() {
             queue_plan.failure_audio.clone().or_else(|| {
                 if let Some(crate::call::QueueFallbackAction::Failure(
                     crate::call::FailureAction::PlayThenHangup { ref audio_file, .. },
@@ -493,24 +567,35 @@ impl SipSession {
         } else {
             None
         };
-        if let Some(ref ivr_name) = return_ivr {
+        let ivr_name = return_to_ivr.as_ref().and_then(|s| {
+            if s.is_empty() { None } else { Some(s.as_str()) }
+        });
+        if let Some(ivr_name) = ivr_name {
             info!(
                 queue = %queue_name,
                 ivr = %ivr_name,
                 "Queue transfer: will return to IVR on fallback"
             );
-            let name = ivr_name.clone();
             queue_plan.fallback = Some(crate::call::QueueFallbackAction::Failure(
-                crate::call::FailureAction::Transfer(crate::call::TransferEndpoint::Ivr(name)),
+                crate::call::FailureAction::Transfer(crate::call::TransferEndpoint::Ivr(
+                    ivr_name.to_string(),
+                )),
             ));
-            queue_plan.failure_audio = return_ivr_fallback_audio;
+            queue_plan.failure_audio = return_to_ivr_fallback_audio;
         }
 
         let queue_result = self.execute_queue(&queue_plan, callee_state_rx).await;
 
         match queue_result {
             Ok(()) => {
-                info!(queue = %queue_name, "Queue transfer completed successfully");
+                // Store return_to_ivr on meta so that when the connected agent
+                // (B‑leg) hangs up, handle_callee_state returns the caller to
+                // the IVR instead of tearing down the session.
+                self.meta.transfer_return_to_ivr = return_to_ivr.filter(|s| !s.is_empty());
+                if self.meta.transfer_return_to_ivr.is_some() {
+                    self.meta.transfer_return_params = return_params;
+                }
+                info!(queue = %queue_name, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Queue transfer completed successfully");
                 Ok(())
             }
             Err((code, text, reason)) => {
@@ -604,7 +689,7 @@ impl SipSession {
         sample_rate: u32,
         codec: String,
         timeout_ms: Option<u64>,
-        return_ivr: Option<String>,
+        return_to_ivr: Option<String>,
     ) -> Result<()> {
         info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
 
@@ -947,11 +1032,14 @@ impl SipSession {
             conf_id: Some(format!("bridge-{}", self.id.0)),
         };
 
-        // ── 9. Spawn monitor for return_ivr if configured ────────────
-        if let Some(ref ivr_name) = return_ivr {
+        // ── 9. Spawn monitor for return_to_ivr if configured ────────────
+        if let Some(ref ivr_name) = return_to_ivr {
             if let Some(ref cmd_tx) = self.cmd_tx {
                 let cancel = self.cancel_token.child_token();
-                let ivr_target = format!("ivr:{}", ivr_name);
+                let ivr_target = format!(
+                    "ivr:{}?transferred_from=bridge&return_reason=bridge_disconnect",
+                    ivr_name,
+                );
                 let tx = cmd_tx.clone();
                 let mon_leg_id = leg_id.clone();
                 let mon = crate::utils::spawn(async move {
@@ -1252,31 +1340,33 @@ mod tests {
     //   sequence of `starts_with` if-chains.  Without extraction into a
     //   standalone function there was nothing to call in a unit test; the logic
     //   was only reachable through a fully-wired SipSession, so the edge cases
-    //   (empty suffix, mixed casing, return_ivr param) were never exercised.
+    //   (empty suffix, mixed casing, return_to_ivr param) were never exercised.
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_parse_transfer_target_queue_with_return_ivr() {
-        let t = parse_transfer_target("queue:support?return_ivr=main");
+    fn test_parse_transfer_target_queue_with_return_to_ivr() {
+        let t = parse_transfer_target("queue:support?return_to_ivr=main");
         assert_eq!(
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: Some("main".to_string()),
+                return_to_ivr: Some("main".to_string()),
                 target_overrides: vec![],
+                return_params: HashMap::new(),
             }
         );
     }
 
     #[test]
-    fn test_parse_transfer_target_queue_without_return_ivr() {
+    fn test_parse_transfer_target_queue_without_return_to_ivr() {
         let t = parse_transfer_target("queue:support");
         assert_eq!(
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: None,
+                return_to_ivr: None,
                 target_overrides: vec![],
+                return_params: HashMap::new(),
             }
         );
     }
@@ -1288,8 +1378,9 @@ mod tests {
             t,
             TransferTarget::Queue {
                 name: "sales".to_string(),
-                return_ivr: None,
+                return_to_ivr: None,
                 target_overrides: vec![],
+                return_params: HashMap::new(),
             }
         );
     }
@@ -1301,8 +1392,9 @@ mod tests {
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: None,
+                return_to_ivr: None,
                 target_overrides: vec!["skillgroup:sales".to_string()],
+                return_params: HashMap::new(),
             }
         );
     }
@@ -1314,8 +1406,9 @@ mod tests {
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: None,
+                return_to_ivr: None,
                 target_overrides: vec!["sip:agent@pbx.com".to_string()],
+                return_params: HashMap::new(),
             }
         );
     }
@@ -1329,39 +1422,42 @@ mod tests {
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: None,
+                return_to_ivr: None,
                 target_overrides: vec![
                     "skillgroup:sales".to_string(),
                     "skillgroup:support".to_string(),
                 ],
+                return_params: HashMap::new(),
             }
         );
     }
 
     #[test]
-    fn test_parse_transfer_target_queue_with_target_and_return_ivr() {
-        let t = parse_transfer_target("queue:support?target=skillgroup:sales&return_ivr=main_menu");
+    fn test_parse_transfer_target_queue_with_target_and_return_to_ivr() {
+        let t = parse_transfer_target("queue:support?target=skillgroup:sales&return_to_ivr=main_menu");
         assert_eq!(
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: Some("main_menu".to_string()),
+                return_to_ivr: Some("main_menu".to_string()),
                 target_overrides: vec!["skillgroup:sales".to_string()],
+                return_params: HashMap::new(),
             }
         );
     }
 
     #[test]
-    fn test_parse_transfer_target_queue_with_multiple_targets_and_return_ivr() {
+    fn test_parse_transfer_target_queue_with_multiple_targets_and_return_to_ivr() {
         let t = parse_transfer_target(
-            "queue:support?target=sip:a@pbx&target=sip:b@pbx&return_ivr=ivr_main",
+            "queue:support?target=sip:a@pbx&target=sip:b@pbx&return_to_ivr=ivr_main",
         );
         assert_eq!(
             t,
             TransferTarget::Queue {
                 name: "support".to_string(),
-                return_ivr: Some("ivr_main".to_string()),
+                return_to_ivr: Some("ivr_main".to_string()),
                 target_overrides: vec!["sip:a@pbx".to_string(), "sip:b@pbx".to_string(),],
+                return_params: HashMap::new(),
             }
         );
     }
@@ -1415,25 +1511,25 @@ mod tests {
     #[test]
     fn test_parse_transfer_target_empty_voicemail_suffix_falls_through_to_sip() {
         let t = parse_transfer_target("voicemail:");
-        assert!(matches!(t, TransferTarget::Sip(_)));
+        assert!(matches!(t, TransferTarget::Sip { .. }));
     }
 
     #[test]
     fn test_parse_transfer_target_sip_uri_passthrough() {
         let t = parse_transfer_target("sip:1001@pbx.local");
-        assert_eq!(t, TransferTarget::Sip("sip:1001@pbx.local".to_string()));
+        assert_eq!(t, TransferTarget::Sip { uri: "sip:1001@pbx.local".to_string(), return_to_ivr: None, return_params: HashMap::new() });
     }
 
     #[test]
     fn test_parse_transfer_target_tel_uri_passthrough() {
         let t = parse_transfer_target("tel:+15551234567");
-        assert_eq!(t, TransferTarget::Sip("tel:+15551234567".to_string()));
+        assert_eq!(t, TransferTarget::Sip { uri: "tel:+15551234567".to_string(), return_to_ivr: None, return_params: HashMap::new() });
     }
 
     #[test]
     fn test_parse_transfer_target_bare_extension_gets_sip_prefix() {
         let t = parse_transfer_target("1001");
-        assert_eq!(t, TransferTarget::Sip("sip:1001".to_string()));
+        assert_eq!(t, TransferTarget::Sip { uri: "sip:1001".to_string(), return_to_ivr: None, return_params: HashMap::new() });
     }
 
     /// An empty `queue:` suffix must NOT produce a Queue — it falls through to
@@ -1443,14 +1539,14 @@ mod tests {
     fn test_parse_transfer_target_empty_queue_suffix_falls_through_to_sip() {
         let t = parse_transfer_target("queue:");
         // empty name → falls through to Sip
-        assert!(matches!(t, TransferTarget::Sip(_)));
+        assert!(matches!(t, TransferTarget::Sip { .. }));
     }
 
     /// Same guard for `ivr:`.
     #[test]
     fn test_parse_transfer_target_empty_ivr_suffix_falls_through_to_sip() {
         let t = parse_transfer_target("ivr:");
-        assert!(matches!(t, TransferTarget::Sip(_)));
+        assert!(matches!(t, TransferTarget::Sip { .. }));
     }
 
     // -------------------------------------------------------------------------
@@ -1584,7 +1680,7 @@ mod tests {
         let target = "voip_bridge:";
         let parsed = super::parse_transfer_target(target);
         assert!(
-            matches!(parsed, TransferTarget::Sip(_)),
+            matches!(parsed, TransferTarget::Sip { .. }),
             "empty voip_bridge should fall through to Sip, got {:?}",
             parsed
         );

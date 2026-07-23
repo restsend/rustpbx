@@ -11,6 +11,16 @@ pub(crate) struct CallerIngressMonitor {
     pub task: JoinHandle<()>,
 }
 
+/// Lightweight RTP-inactivity watchdog for anchored media that does NOT flow
+/// through a [`crate::media::bridge::BridgePeer`] (i.e. the rewrite-bridge
+/// fast-path relay `AnchoredMediaMode::RelayOnly` and the ForwardingTrack slow
+/// path). The bridge has its own in-line rtp-timeout detection, so this monitor
+/// is only armed when no app/transport `media_bridge` is active.
+pub(crate) struct AnchoredRtpTimeoutMonitor {
+    pub cancel_token: CancellationToken,
+    pub task: JoinHandle<()>,
+}
+
 #[derive(Debug, Clone)]
 pub enum RecordingPhase {
     Idle,
@@ -90,6 +100,11 @@ pub struct MediaState {
     pub recording_state: RecordingPhase,
     pub playback_tracks: HashMap<String, FileTrack>,
     pub caller_ingress_monitor: Option<CallerIngressMonitor>,
+    /// RTP-inactivity watchdog for anchored media that bypasses the BridgePeer
+    /// (rewrite-bridge fast-path relay and ForwardingTrack). `None` when the
+    /// call is not anchored, or when media flows through a `media_bridge`
+    /// (which performs its own in-line rtp-timeout detection).
+    pub anchored_rtp_timeout_monitor: Option<AnchoredRtpTimeoutMonitor>,
     pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
     pub caller_answer_uses_media_bridge: bool,
     pub callee_offer_uses_media_bridge: bool,
@@ -102,6 +117,11 @@ pub struct MediaState {
     pub media_bridge_started: bool,
     pub bridge_playback_track_ids: HashMap<String, String>,
     pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
+    /// Receiver end of the rtp-timeout channel, created at session construction
+    /// and consumed by `SipSession::process`'s select arm. Stored on MediaState
+    /// so the channel pair exists before any media path (which may race ahead
+    /// of `process`) tries to clone the sender.
+    pub rtp_timeout_rx: Option<mpsc::Receiver<String>>,
     /// How anchored media is currently forwarded between the two legs.
     ///
     /// `RelayOnly` = the RTP fast-path (transport-level rewrite bridge) is
@@ -167,6 +187,7 @@ impl MediaState {
             recording_state: RecordingPhase::Idle,
             playback_tracks: HashMap::new(),
             caller_ingress_monitor: None,
+            anchored_rtp_timeout_monitor: None,
             media_bridge: None,
             caller_answer_uses_media_bridge: false,
             callee_offer_uses_media_bridge: false,
@@ -174,6 +195,7 @@ impl MediaState {
             media_bridge_started: false,
             bridge_playback_track_ids: HashMap::new(),
             rtp_timeout_tx: None,
+            rtp_timeout_rx: None,
             anchored_mode: AnchoredMediaMode::default(),
         }
     }

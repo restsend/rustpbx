@@ -3,7 +3,7 @@ use crate::{
         CallRecordManagerBuilder, CallRecordSender, recording_upload::RecordingUploadHook,
         sipflow_upload::SipFlowUploadHook,
     },
-    config::{ClusterConfig, Config, UserBackendConfig},
+    config::{CallRecordStorageConfig, ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     proxy::{
         acl::AclModule,
@@ -309,18 +309,29 @@ impl AppStateBuilder {
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else {
-            // Always build a CallRecordManager. By default, records are
-            // persisted to the `rustpbx_call_records` table via the saver.
-            // [callrecord], [sipflow.upload], and [recording] only add
-            // optional extra sinks (JSON files, S3, HTTP, WAV upload, etc.)
-            // on top of the default database persistence.
+            // Always build a CallRecordManager. When [callrecord] is not
+            // configured, records default to the `rustpbx_call_records` DB
+            // table. When [callrecord] type is s3/http/local, records go
+            // exclusively to that storage — no DB writes.
             let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
                 .with_main_db(db_conn.clone());
 
-            if let Some(ref callrecord) = config.callrecord {
-                builder = builder.with_max_concurrent(callrecord.max_concurrent);
-                builder = builder.with_config(callrecord.clone());
+            match config.callrecord.as_ref() {
+                Some(cr) => {
+                    let ty = match &cr.storage {
+                        CallRecordStorageConfig::Database { .. } => "database",
+                        CallRecordStorageConfig::S3 { .. } => "s3",
+                        CallRecordStorageConfig::Http { .. } => "http",
+                        CallRecordStorageConfig::Local { .. } => "local",
+                    };
+                    tracing::info!(storage_type = ty, "callrecord config detected");
+                    builder = builder.with_max_concurrent(cr.max_concurrent);
+                    builder = builder.with_config(cr.clone());
+                }
+                None => {
+                    tracing::info!("no [callrecord] section, defaulting to database");
+                }
             }
 
             if let Some(policy) = recording_upload_policy.as_ref() {

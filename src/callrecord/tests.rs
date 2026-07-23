@@ -37,6 +37,25 @@ async fn in_memory_db() -> DatabaseConnection {
     crate::models::connect_db("sqlite::memory:").await.unwrap()
 }
 
+async fn count_rows(db: &DatabaseConnection, table: &str) -> i64 {
+    use sea_orm::{ConnectionTrait, Statement};
+    let backend = db.get_database_backend();
+    let result = db
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            &format!("SELECT COUNT(*) as c FROM {}", table),
+            Vec::new(),
+        ))
+        .await;
+    match result {
+        Ok(rows) => rows
+            .first()
+            .and_then(|r| r.try_get::<i64>("", "c").ok())
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 // ── CallRecordRow extraction ───────────────────────────────────────────────────
 
 #[test]
@@ -224,6 +243,185 @@ async fn test_database_saver_without_url_needs_main_db() {
         "error should mention database_url or main_db: {}",
         err
     );
+}
+
+// ── No config + no main_db → error ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_none_config_without_main_db_errors() {
+    let err = CallRecordManagerBuilder::new()
+        .build()
+        .await
+        .err()
+        .expect("should error when no config and no main_db");
+
+    assert!(
+        err.to_string().contains("main_db"),
+        "error should mention main_db: {}",
+        err
+    );
+}
+
+// ── Local config + no main_db → OK, writes to local file only ──────────────────
+
+#[tokio::test]
+async fn test_local_config_without_main_db_ok() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig {
+            max_concurrent: 4,
+            storage: CallRecordStorageConfig::Local {
+                root: root.clone(),
+            },
+        })
+        .build()
+        .await
+        .expect("Local config should not require main_db");
+
+    let record = make_record();
+    let result = manager.saver.save(&record).await;
+    assert!(result.is_ok(), "save should succeed: {:?}", result.err());
+
+    // File should exist on disk
+    let saved_path = result.unwrap();
+    assert!(
+        std::path::Path::new(&saved_path).exists(),
+        "local file should exist: {}",
+        saved_path
+    );
+}
+
+// ── HTTP config + no main_db → OK ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_http_config_without_main_db_ok() {
+    let manager = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig {
+            max_concurrent: 4,
+            storage: CallRecordStorageConfig::Http {
+                url: "http://127.0.0.1:1/cdr".to_string(),
+                headers: None,
+                with_media: None,
+                keep_media_copy: None,
+            },
+        })
+        .build()
+        .await
+        .expect("HTTP config should not require main_db");
+
+    // Saver is built; actual POST will fail (no server) but build() itself succeeds.
+    let record = make_record();
+    let _ = manager.saver.save(&record).await; // expected to fail (connection refused)
+}
+
+// ── S3 config + no main_db → OK (Storage::new doesn't actually connect) ────────
+
+#[tokio::test]
+async fn test_s3_config_without_main_db_ok() {
+    let manager = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig {
+            max_concurrent: 4,
+            storage: CallRecordStorageConfig::S3 {
+                vendor: crate::config::S3Vendor::Minio,
+                bucket: "test-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                access_key: "minioadmin".to_string(),
+                secret_key: "minioadmin".to_string(),
+                endpoint: Some("http://127.0.0.1:1".to_string()),
+                root: "cdr".to_string(),
+                with_media: None,
+                keep_media_copy: None,
+            },
+        })
+        .build()
+        .await
+        .expect("S3 config should not require main_db");
+
+    // Saver is built; actual upload will fail (no server) but build() succeeds.
+    let record = make_record();
+    let _ = manager.saver.save(&record).await; // expected to fail (connection refused)
+}
+
+// ── Database config + database_url + no main_db → OK ───────────────────────────
+
+#[tokio::test]
+async fn test_database_with_url_without_main_db_ok() {
+    let manager = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig {
+            max_concurrent: 4,
+            storage: CallRecordStorageConfig::Database {
+                database_url: Some("sqlite::memory:".to_string()),
+                table_name: "custom_cdr".to_string(),
+                skip_create_table: false,
+                rotate: RotationMode::None,
+            },
+        })
+        .build()
+        .await
+        .expect("Database config with database_url should not require main_db");
+
+    let record = make_record();
+    let result = manager.saver.save(&record).await;
+    assert!(result.is_ok(), "save should succeed: {:?}", result.err());
+}
+
+// ── S3/HTTP/Local savers do NOT touch the database ────────────────────────────
+
+#[tokio::test]
+async fn test_local_saver_does_not_write_to_db() {
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db.clone())
+        .with_config(CallRecordConfig {
+            max_concurrent: 4,
+            storage: CallRecordStorageConfig::Local {
+                root: root.clone(),
+            },
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let record = make_record();
+    manager.saver.save(&record).await.unwrap();
+
+    // Verify the DB table is empty — Local saver must not have written to it.
+    let count = count_rows(&db, "rustpbx_call_records").await;
+    assert_eq!(
+        count, 0,
+        "Local saver must not write any rows to the database"
+    );
+}
+
+#[tokio::test]
+async fn test_default_db_saver_writes_to_db() {
+    // Sanity check: when no [callrecord] is configured, the default DB saver
+    // DOES write to the database. This complements the above test.
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let record = make_record();
+    manager.saver.save(&record).await.unwrap();
+
+    let count = count_rows(&db, "rustpbx_call_records").await;
+    assert_eq!(count, 1, "default DB saver should write exactly one row");
 }
 
 #[tokio::test]

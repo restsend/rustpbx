@@ -300,6 +300,7 @@ impl TransferEndpoint {
 
         let prefixes: &[(&str, fn(String) -> TransferEndpoint)] = &[
             ("queue:", |v| TransferEndpoint::Queue(v)),
+            ("toivr:", |v| TransferEndpoint::Ivr(v)),
             ("ivr:", |v| TransferEndpoint::Ivr(v)),
             ("voicemail:", |v| TransferEndpoint::Voicemail(v)),
             ("conference:", |v| TransferEndpoint::Conference(v)),
