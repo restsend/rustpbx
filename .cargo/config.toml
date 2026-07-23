@@ -1,5 +1,5 @@
 [env]
-RUST_MIN_STACK = "16777216"
+RUST_MIN_STACK = "134217728"
 
 [alias]
 run-dev = "run --features commerce,wholesale,contact-center,addon-sbc --bin rustpbx -- --conf config.toml.dev"
