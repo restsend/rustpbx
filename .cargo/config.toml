@@ -1,0 +1,10 @@
+[env]
+RUST_MIN_STACK = "16777216"
+
+[alias]
+run-dev = "run --features commerce,wholesale,contact-center,addon-sbc --bin rustpbx -- --conf config.toml.dev"
+test-dev = "test --features commerce,wholesale,contact-center,addon-sbc"
+check-dev = "check --features commerce,wholesale,contact-center,addon-sbc"
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-args=-Wl,-no_compact_unwind"]
