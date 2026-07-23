@@ -667,13 +667,13 @@ impl CallRecordManagerBuilder {
                     region,
                     access_key,
                     secret_key,
-                    endpoint: Some(endpoint.clone()),
+                    endpoint: endpoint.clone(),
                     prefix: None,
                 })
                 .map_err(|e| {
                     warn!(
                         bucket,
-                        endpoint, "CallRecordManager failed to initialize S3 storage: {}", e
+                        ?endpoint, "CallRecordManager failed to initialize S3 storage: {}", e
                     );
                     e
                 })?;
@@ -786,7 +786,7 @@ impl CallRecordSaver for HttpCallRecordSaver {
 struct S3CallRecordSaver {
     root: String,
     bucket: String,
-    endpoint: String,
+    endpoint: Option<String>,
     storage: crate::storage::Storage,
 }
 
@@ -809,12 +809,19 @@ impl CallRecordSaver for S3CallRecordSaver {
             }
         }
 
-        Ok(format!(
-            "{}/{}/{}",
-            self.endpoint.trim_end_matches('/'),
+        let path = format!(
+            "{}/{}",
             self.bucket.trim_matches('/'),
             filename.trim_start_matches('/')
-        ))
+        );
+        Ok(match self.endpoint.as_ref() {
+            Some(ep) if !ep.is_empty() => format!(
+                "{}/{}",
+                ep.trim_end_matches('/'),
+                path
+            ),
+            _ => path,
+        })
     }
 }
 

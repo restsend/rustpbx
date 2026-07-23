@@ -75,7 +75,7 @@ pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrSt
                 region: region.clone(),
                 access_key: access_key.clone(),
                 secret_key: secret_key.clone(),
-                endpoint: Some(endpoint.clone()),
+                endpoint: endpoint.clone(),
                 prefix: Some(root.clone()),
             };
             let storage = Storage::new(&storage_config)?;

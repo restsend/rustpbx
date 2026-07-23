@@ -98,6 +98,14 @@ impl ObservabilityAddon {
         Ok(())
     }
 
+    /// Render all captured metrics in Prometheus text exposition format.
+    ///
+    /// Returns `None` when the recorder has not been installed via
+    /// [`ObservabilityAddon::install_recorder`].
+    pub fn render_prometheus() -> Option<String> {
+        PROMETHEUS_HANDLE.get().map(|h| h.render())
+    }
+
     /// Load configuration from addon-specific config file (async).
     pub async fn load_config(config_path: &Option<String>) -> Option<MetricsConfig> {
         if let Some(path) = config_path {

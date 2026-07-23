@@ -285,6 +285,15 @@ async fn main() -> Result<()> {
         Arc::from(create_backend(&config, CancellationToken::new())?);
     let perf_counters = PerfCounters::new_arc();
 
+    // Install global Prometheus recorder so all metrics::counter!/gauge!/histogram!
+    // calls in the process are captured. Idempotent — safe to call even when another
+    // crate installs it.
+    #[cfg(feature = "addon-observability")]
+    if let Err(e) = rustpbx::addons::observability::ObservabilityAddon::install_recorder() {
+        tracing::warn!("failed to install Prometheus recorder: {e}");
+    }
+    metrics::gauge!("sipflow_info", "version" => rustpbx::version::get_short_version()).set(1.0);
+
     let http_client = rustpbx::http_util::build_keepalive_client(
         Some(std::time::Duration::from_secs(120)),
         Some(std::time::Duration::from_secs(10)),
@@ -408,8 +417,12 @@ async fn main() -> Result<()> {
                     perf_worker.set_pending(rx.len() as i64);
                 }
                 _ = interval.tick() => {
+                    let flush_start = std::time::Instant::now();
                     let _ = storage_backend.flush().await;
+                    let flush_secs = flush_start.elapsed().as_secs_f64();
                     perf_worker.flushes.fetch_add(1, Ordering::Relaxed);
+                    metrics::histogram!("sipflow_flush_duration_seconds", "component" => "sipflow")
+                        .record(flush_secs);
                 }
             }
         }
@@ -434,6 +447,7 @@ async fn main() -> Result<()> {
         .route("/media", get(media_handler))
         .route("/diag", get(diag_handler))
         .route("/upload", post(upload_handler))
+        .route("/metrics", get(metrics_handler))
         .with_state(app_state);
 
     let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
@@ -748,6 +762,34 @@ async fn upload_handler(
         media_size,
         signaling_uploaded,
     }))
+}
+
+#[cfg(feature = "addon-observability")]
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    use axum::http::{StatusCode, header};
+    use rustpbx::addons::observability::ObservabilityAddon;
+    match ObservabilityAddon::render_prometheus() {
+        Some(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Prometheus recorder not initialised",
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(not(feature = "addon-observability"))]
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        "Prometheus support not enabled (build with --features addon-observability)",
+    )
+        .into_response()
 }
 
 #[cfg(test)]

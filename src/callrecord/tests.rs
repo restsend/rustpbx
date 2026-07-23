@@ -424,7 +424,7 @@ async fn test_save_with_s3_like_memory_store() {
             S3CallRecordSaver {
                 root: "./config/cdr".to_string(),
                 bucket,
-                endpoint,
+                endpoint: Some(endpoint),
                 storage,
             }
             .save(&record)
@@ -501,7 +501,7 @@ async fn test_save_with_s3_like_with_media() {
                 S3CallRecordSaver {
                     root: "./config/cdr".to_string(),
                     bucket,
-                    endpoint,
+                    endpoint: Some(endpoint),
                     storage,
                 }
                 .save(&record)

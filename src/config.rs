@@ -492,7 +492,9 @@ pub enum CallRecordStorageConfig {
         region: String,
         access_key: String,
         secret_key: String,
-        endpoint: String,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default = "default_call_record_root")]
         root: String,
         /// Deprecated and unused. Recording media upload is configured by `[recording]`.
         with_media: Option<bool>,
@@ -533,6 +535,10 @@ pub enum RotationMode {
 
 fn default_call_record_table() -> String {
     "rustpbx_call_records".to_string()
+}
+
+fn default_call_record_root() -> String {
+    "cdr".to_string()
 }
 
 /// Directory structure for sipflow storage
