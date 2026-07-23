@@ -6,5 +6,5 @@ run-dev = "run --features commerce,wholesale,contact-center,addon-sbc --bin rust
 test-dev = "test --features commerce,wholesale,contact-center,addon-sbc"
 check-dev = "check --features commerce,wholesale,contact-center,addon-sbc"
 
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "link-args=-Wl,-no_compact_unwind"]
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]

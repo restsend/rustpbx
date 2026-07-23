@@ -274,9 +274,7 @@ ctor = "1.0.7"
 chrono = "0.4"
 
 [profile.dev]
-split-debuginfo = "packed"
-debug = 1
-codegen-units = 256
+debug = 0
 
 [profile.release]
 strip = "symbols"

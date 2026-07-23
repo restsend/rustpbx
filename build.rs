@@ -8,6 +8,25 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
+    if env::var("PROFILE").as_deref() != Ok("release") {
+        let commercial = if env::var_os("CARGO_FEATURE_COMMERCE").is_some() {
+            "commerce"
+        } else {
+            "community"
+        };
+        println!("cargo:rustc-env=GIT_COMMIT_HASH=development");
+        println!("cargo:rustc-env=GIT_BRANCH=development");
+        println!("cargo:rustc-env=GIT_DIRTY=dirty");
+        println!("cargo:rustc-env=BUILD_TIME_FMT=development");
+        println!("cargo:rustc-env=BUILD_DATE=development");
+        println!(
+            "cargo:rustc-env=SHORT_VERSION={}-dev-{commercial}",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("cargo:rerun-if-changed=Cargo.toml");
+        return;
+    }
+
     let git_commit = get_git_commit_hash();
     println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_commit);
 
