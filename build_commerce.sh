@@ -37,6 +37,7 @@ echo "=========================================="
 # --- Step 1: Update submodules ---
 echo ""
 echo "[1/4] Updating git submodules..."
+git pull
 git submodule update --init --recursive
 
 # --- Check for clang (required for libsqlite3-sys bundled build) ---
@@ -49,7 +50,7 @@ export CC=clang
 # --- Step 2: Cargo build with all commercial features ---
 echo ""
 echo "[2/4] Building with cargo (features: default,commerce,wholesale,contact-center)..."
-RUST_MIN_STACK=33554432 cargo build --release \
+RUST_MIN_STACK=67108864 cargo build --release \
     --features default,commerce,wholesale,contact-center
 
 # --- Step 3: Prepare binaries for Docker ---
