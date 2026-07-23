@@ -13,7 +13,11 @@ use std::{
 use tracing::info;
 
 use crate::{
-    call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
+    call::{
+        DialDirection, RoutingState,
+        concurrent_call_limiter::ConcurrentCallLease,
+        policy::PolicyCheckStatus,
+    },
     config::{DialplanHints, MediaProxyMode, RouteResult},
     proxy::routing::{
         ActionType, MediaMode, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig,
@@ -154,42 +158,60 @@ async fn match_invite_impl(
     // are attached to the successful RouteResult (so the session can release
     // them on hangup) and released inline if the match aborts after acquisition.
     let mut concurrency_holds: Vec<crate::call::policy::ConcurrencyHold> = Vec::new();
-    // Trunk names whose per-trunk rate-limit slot was acquired during this match
-    // attempt (source inbound trunk and/or destination outbound trunk). Same
-    // attach/release discipline as `concurrency_holds`.
-    let mut trunk_holds: Vec<String> = Vec::new();
+    // All concurrent-call permits acquired during this match.
+    // Tenant/carrier integrations can use the same lease without adding fields.
+    let mut concurrent_call_lease = ConcurrentCallLease::default();
 
     // ── Source (inbound) trunk CPS / concurrent enforcement ────────────────
     //
     // Enforce the `max_cps` / `max_concurrent` columns of the SIP trunk the
     // INVITE arrived on, before any routing decision is made. A reject here
-    // returns 486/503 with no side effects (no slot was acquired).
+    // returns 503 for either CPS or concurrent-call capacity.
     if let Some(source) = source_trunk
         && let Some(trunk) = trunks.and_then(|trunks| trunks.get(&source.name))
-        && (trunk.max_calls.is_some() || trunk.max_cps.is_some())
     {
-        if let Err(reason) = routing_state.trunk_rate_limiter.try_acquire(
-            &source.name,
-            trunk.max_calls,
-            trunk.max_cps,
-        ) {
-            let code = rsipstack::sip::StatusCode::from(reason.status_code());
-            let phrase = reason.reason_phrase();
-            info!(
-                trunk = %source.name,
-                reason = %phrase,
-                "Source trunk rate limit exceeded, rejecting call"
-            );
-            if let Some(trace) = &mut trace {
-                trace.abort = Some(RouteAbortTrace {
-                    code: reason.status_code(),
-                    reason: Some(phrase.clone()),
-                });
+        if let Some(limiter) = &trunk.cps_limiter {
+            if let Err(reason) = limiter.try_acquire() {
+                let status_code = 503;
+                let code = rsipstack::sip::StatusCode::from(status_code);
+                let phrase = reason.to_string();
+                info!(
+                    trunk = %source.name,
+                    reason = %phrase,
+                    "Source trunk CPS limit exceeded, rejecting call"
+                );
+                if let Some(trace) = &mut trace {
+                    trace.abort = Some(RouteAbortTrace {
+                        code: status_code,
+                        reason: Some(phrase.clone()),
+                    });
+                }
+                return Ok(RouteResult::Abort(code, Some(phrase)));
             }
-            return Ok(RouteResult::Abort(code, Some(phrase)));
         }
-        // Slot acquired; remember to release it on session teardown.
-        trunk_holds.push(source.name.clone());
+
+        if let Some(limiter) = &trunk.concurrent_call_limiter {
+            match limiter.try_acquire() {
+                Ok(permit) => concurrent_call_lease.push(permit),
+                Err(reason) => {
+                    let status_code = 503;
+                    let code = rsipstack::sip::StatusCode::from(status_code);
+                    let phrase = reason.to_string();
+                    info!(
+                        trunk = %source.name,
+                        reason = %phrase,
+                        "Source trunk concurrent-call limit exceeded, rejecting call"
+                    );
+                    if let Some(trace) = &mut trace {
+                        trace.abort = Some(RouteAbortTrace {
+                            code: status_code,
+                            reason: Some(phrase.clone()),
+                        });
+                    }
+                    return Ok(RouteResult::Abort(code, Some(phrase)));
+                }
+            }
+        }
     }
 
     if let Some(trunk) =
@@ -203,7 +225,10 @@ async fn match_invite_impl(
         None => {
             // No routing rules configured; hand the source-trunk slot back to
             // the caller via hints so the session can release it on teardown.
-            attach_trunk_holds(&mut source_hints, std::mem::take(&mut trunk_holds));
+            attach_concurrent_call_lease(
+                &mut source_hints,
+                std::mem::take(&mut concurrent_call_lease),
+            );
             return Ok(RouteResult::NotHandled(option, source_hints));
         }
     };
@@ -326,7 +351,7 @@ async fn match_invite_impl(
                 // Rule policy rejection never acquires a slot, but release any
                 // holds defensively (none expected at this point).
                 release_holds(&routing_state, &mut concurrency_holds).await;
-                release_trunk_holds(&routing_state, &mut trunk_holds);
+                concurrent_call_lease.release_all();
                 return Ok(RouteResult::Abort(
                     rsipstack::sip::StatusCode::Forbidden,
                     Some(reason),
@@ -355,7 +380,7 @@ async fn match_invite_impl(
                             reason: reason.clone(),
                         });
                     }
-                    release_trunk_holds(&routing_state, &mut trunk_holds);
+                    concurrent_call_lease.release_all();
                     return Ok(RouteResult::Abort(reject_config.code.into(), reason));
                 } else {
                     if let Some(trace) = &mut trace {
@@ -364,7 +389,7 @@ async fn match_invite_impl(
                             reason: None,
                         });
                     }
-                    release_trunk_holds(&routing_state, &mut trunk_holds);
+                    concurrent_call_lease.release_all();
                     return Ok(RouteResult::Abort(
                         rsipstack::sip::StatusCode::Forbidden,
                         None,
@@ -378,7 +403,7 @@ async fn match_invite_impl(
                         reason: None,
                     });
                 }
-                release_trunk_holds(&routing_state, &mut trunk_holds);
+                concurrent_call_lease.release_all();
                 return Ok(RouteResult::Abort(
                     rsipstack::sip::StatusCode::BusyHere,
                     None,
@@ -410,30 +435,51 @@ async fn match_invite_impl(
                         // `max_concurrent` before any further processing. On
                         // reject, release everything acquired so far (source
                         // trunk slot, policy holds).
-                        if trunk_config.max_calls.is_some() || trunk_config.max_cps.is_some() {
-                            if let Err(reason) = routing_state.trunk_rate_limiter.try_acquire(
-                                &selected_trunk,
-                                trunk_config.max_calls,
-                                trunk_config.max_cps,
-                            ) {
-                                let code = rsipstack::sip::StatusCode::from(reason.status_code());
-                                let phrase = reason.reason_phrase();
+                        if let Some(limiter) = &trunk_config.cps_limiter {
+                            if let Err(reason) = limiter.try_acquire() {
+                                let status_code = 503;
+                                let code = rsipstack::sip::StatusCode::from(status_code);
+                                let phrase = reason.to_string();
                                 info!(
                                     trunk = %selected_trunk,
                                     reason = %phrase,
-                                    "Destination trunk rate limit exceeded, rejecting call"
+                                    "Destination trunk CPS limit exceeded, rejecting call"
                                 );
                                 if let Some(trace) = &mut trace {
                                     trace.abort = Some(RouteAbortTrace {
-                                        code: reason.status_code(),
+                                        code: status_code,
                                         reason: Some(phrase.clone()),
                                     });
                                 }
                                 release_holds(&routing_state, &mut concurrency_holds).await;
-                                release_trunk_holds(&routing_state, &mut trunk_holds);
+                                concurrent_call_lease.release_all();
                                 return Ok(RouteResult::Abort(code, Some(phrase)));
                             }
-                            trunk_holds.push(selected_trunk.clone());
+                        }
+
+                        if let Some(limiter) = &trunk_config.concurrent_call_limiter {
+                            match limiter.try_acquire() {
+                                Ok(permit) => concurrent_call_lease.push(permit),
+                                Err(reason) => {
+                                    let status_code = 503;
+                                    let code = rsipstack::sip::StatusCode::from(status_code);
+                                    let phrase = reason.to_string();
+                                    info!(
+                                        trunk = %selected_trunk,
+                                        reason = %phrase,
+                                        "Destination trunk concurrent-call limit exceeded, rejecting call"
+                                    );
+                                    if let Some(trace) = &mut trace {
+                                        trace.abort = Some(RouteAbortTrace {
+                                            code: status_code,
+                                            reason: Some(phrase.clone()),
+                                        });
+                                    }
+                                    release_holds(&routing_state, &mut concurrency_holds).await;
+                                    concurrent_call_lease.release_all();
+                                    return Ok(RouteResult::Abort(code, Some(phrase)));
+                                }
+                            }
                         }
 
                         // Check Trunk Policy
@@ -468,7 +514,7 @@ async fn match_invite_impl(
                                 // Trunk policy rejected AFTER rule policy may
                                 // have acquired a slot: release everything.
                                 release_holds(&routing_state, &mut concurrency_holds).await;
-                                release_trunk_holds(&routing_state, &mut trunk_holds);
+                                concurrent_call_lease.release_all();
                                 return Ok(RouteResult::Abort(
                                     rsipstack::sip::StatusCode::Forbidden,
                                     Some(reason),
@@ -493,7 +539,10 @@ async fn match_invite_impl(
                         .allow_codecs = Some(rule.codecs.clone());
                 }
                 attach_holds(&mut hints, std::mem::take(&mut concurrency_holds));
-                attach_trunk_holds(&mut hints, std::mem::take(&mut trunk_holds));
+                attach_concurrent_call_lease(
+                    &mut hints,
+                    std::mem::take(&mut concurrent_call_lease),
+                );
                 return Ok(RouteResult::Forward(option, hints));
             }
             ActionType::Queue => {
@@ -558,31 +607,51 @@ async fn match_invite_impl(
                             .and_then(|trunks| trunks.get(&selected_trunk))
                         {
                             // ── Destination trunk CPS / concurrent check (Queue path) ──
-                            if trunk_config.max_calls.is_some() || trunk_config.max_cps.is_some() {
-                                if let Err(reason) = routing_state.trunk_rate_limiter.try_acquire(
-                                    &selected_trunk,
-                                    trunk_config.max_calls,
-                                    trunk_config.max_cps,
-                                ) {
-                                    let code =
-                                        rsipstack::sip::StatusCode::from(reason.status_code());
-                                    let phrase = reason.reason_phrase();
+                            if let Some(limiter) = &trunk_config.cps_limiter {
+                                if let Err(reason) = limiter.try_acquire() {
+                                    let status_code = 503;
+                                    let code = rsipstack::sip::StatusCode::from(status_code);
+                                    let phrase = reason.to_string();
                                     info!(
                                         trunk = %selected_trunk,
                                         reason = %phrase,
-                                        "Destination trunk rate limit exceeded (queue path), rejecting call"
+                                        "Destination trunk CPS limit exceeded (queue path), rejecting call"
                                     );
                                     if let Some(trace) = &mut trace {
                                         trace.abort = Some(RouteAbortTrace {
-                                            code: reason.status_code(),
+                                            code: status_code,
                                             reason: Some(phrase.clone()),
                                         });
                                     }
                                     release_holds(&routing_state, &mut concurrency_holds).await;
-                                    release_trunk_holds(&routing_state, &mut trunk_holds);
+                                    concurrent_call_lease.release_all();
                                     return Ok(RouteResult::Abort(code, Some(phrase)));
                                 }
-                                trunk_holds.push(selected_trunk.clone());
+                            }
+
+                            if let Some(limiter) = &trunk_config.concurrent_call_limiter {
+                                match limiter.try_acquire() {
+                                    Ok(permit) => concurrent_call_lease.push(permit),
+                                    Err(reason) => {
+                                        let status_code = 503;
+                                        let code = rsipstack::sip::StatusCode::from(status_code);
+                                        let phrase = reason.to_string();
+                                        info!(
+                                            trunk = %selected_trunk,
+                                            reason = %phrase,
+                                            "Destination trunk concurrent-call limit exceeded (queue path), rejecting call"
+                                        );
+                                        if let Some(trace) = &mut trace {
+                                            trace.abort = Some(RouteAbortTrace {
+                                                code: status_code,
+                                                reason: Some(phrase.clone()),
+                                            });
+                                        }
+                                        release_holds(&routing_state, &mut concurrency_holds).await;
+                                        concurrent_call_lease.release_all();
+                                        return Ok(RouteResult::Abort(code, Some(phrase)));
+                                    }
+                                }
                             }
 
                             // Check Trunk Policy
@@ -615,7 +684,7 @@ async fn match_invite_impl(
                                         });
                                     }
                                     release_holds(&routing_state, &mut concurrency_holds).await;
-                                    release_trunk_holds(&routing_state, &mut trunk_holds);
+                                    concurrent_call_lease.release_all();
                                     return Ok(RouteResult::Abort(
                                         rsipstack::sip::StatusCode::Forbidden,
                                         Some(reason),
@@ -639,7 +708,10 @@ async fn match_invite_impl(
                         .allow_codecs = Some(rule.codecs.clone());
                 }
                 attach_holds(&mut hints, std::mem::take(&mut concurrency_holds));
-                attach_trunk_holds(&mut hints, std::mem::take(&mut trunk_holds));
+                attach_concurrent_call_lease(
+                    &mut hints,
+                    std::mem::take(&mut concurrent_call_lease),
+                );
                 return Ok(RouteResult::Queue {
                     option,
                     queue: queue_plan,
@@ -655,7 +727,10 @@ async fn match_invite_impl(
 
                 let mut app_hints = None;
                 attach_holds(&mut app_hints, std::mem::take(&mut concurrency_holds));
-                attach_trunk_holds(&mut app_hints, std::mem::take(&mut trunk_holds));
+                attach_concurrent_call_lease(
+                    &mut app_hints,
+                    std::mem::take(&mut concurrent_call_lease),
+                );
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
@@ -668,7 +743,10 @@ async fn match_invite_impl(
     }
 
     attach_holds(&mut source_hints, std::mem::take(&mut concurrency_holds));
-    attach_trunk_holds(&mut source_hints, std::mem::take(&mut trunk_holds));
+    attach_concurrent_call_lease(
+        &mut source_hints,
+        std::mem::take(&mut concurrent_call_lease),
+    );
     Ok(RouteResult::NotHandled(option, source_hints))
 }
 
@@ -694,19 +772,6 @@ async fn release_holds(
     }
 }
 
-/// Release all accumulated per-trunk rate-limit slots. Used when a match
-/// aborts after acquiring a trunk slot (e.g. source trunk slot acquired, then
-/// a later routing-policy check rejected the call).
-fn release_trunk_holds(routing_state: &Arc<RoutingState>, holds: &mut Vec<String>) {
-    if holds.is_empty() {
-        return;
-    }
-    let snapshot = std::mem::take(holds);
-    for trunk in &snapshot {
-        routing_state.trunk_rate_limiter.release_concurrent(trunk);
-    }
-}
-
 /// Attach concurrency holds to dialplan hints so they flow into the session
 /// and can be released on call teardown.
 fn attach_holds(
@@ -721,14 +786,16 @@ fn attach_holds(
         .concurrency_holds = holds;
 }
 
-/// Attach per-trunk rate-limit holds to dialplan hints so the session can
-/// release them on call teardown.
-fn attach_trunk_holds(hints: &mut Option<DialplanHints>, holds: Vec<String>) {
-    if holds.is_empty() {
+/// Attach all concurrent-call permits to dialplan hints.
+fn attach_concurrent_call_lease(
+    hints: &mut Option<DialplanHints>,
+    lease: ConcurrentCallLease,
+) {
+    if lease.is_empty() {
         return;
     }
     let h = hints.get_or_insert_with(DialplanHints::default);
-    h.trunk_concurrency_holds.extend(holds);
+    h.concurrent_call_lease = lease;
 }
 
 /// Context for rule matching to reduce function arguments

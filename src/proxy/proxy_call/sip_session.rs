@@ -167,6 +167,10 @@ pub struct SipSession {
     pub supervisor_mixer: Option<Arc<SupervisorSession>>,
 
     pub context: CallContext,
+    /// Shared owner for every concurrent-call permit held by this
+    /// call. Cleanup releases the complete set; Drop is the safety net.
+    pub concurrent_call_lease:
+        crate::call::concurrent_call_limiter::ConcurrentCallLease,
     pub call_record_sender: Option<CallRecordSender>,
 
     pub cancel_token: CancellationToken,
@@ -905,6 +909,7 @@ impl SipSession {
         let session_id_str = context.session_id.clone();
         let original_caller = context.original_caller.clone();
         let original_callee = context.original_callee.clone();
+        let concurrent_call_lease = context.dialplan.concurrent_call_lease.take();
 
         let session_id = SessionId::from(session_id_str.clone());
 
@@ -1065,6 +1070,7 @@ impl SipSession {
             },
             pending_hangup: HashSet::new(),
             context,
+            concurrent_call_lease,
             call_record_sender,
             cancel_token,
             meta,
@@ -8728,6 +8734,10 @@ impl SipSession {
     async fn cleanup(&mut self) {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
 
+        // The call has entered terminal cleanup. Release tenant, carrier, and
+        // trunk concurrent-call permits before any potentially slow cleanup.
+        self.concurrent_call_lease.release_all();
+
         self.stop_caller_ingress_monitor().await;
         self.stop_anchored_rtp_timeout_monitor().await;
 
@@ -8752,14 +8762,6 @@ impl SipSession {
                 )
                 .await;
             }
-        }
-
-        // Release per-trunk concurrent-call slots acquired during routing
-        // (source inbound trunk and/or destination outbound trunk).
-        let trunk_holds =
-            std::mem::take(&mut *self.context.dialplan.trunk_concurrency_holds.lock());
-        for trunk in &trunk_holds {
-            self.server.trunk_rate_limiter.release_concurrent(trunk);
         }
 
         self.callee_guards.clear();
@@ -11389,6 +11391,9 @@ impl Drop for SipSession {
     fn drop(&mut self) {
         self.cancel_token.cancel();
 
+        // Safety net for task abort, panic, or runtime shutdown before cleanup.
+        self.concurrent_call_lease.release_all();
+
         self.callee_guards.clear();
 
         self.callee_event_tx = None;
@@ -11437,18 +11442,6 @@ impl Drop for SipSession {
                     .await;
                 });
             }
-        }
-
-        // Safety net: release any per-trunk concurrent-call slots still held.
-        let remaining_trunk_holds =
-            std::mem::take(&mut *self.context.dialplan.trunk_concurrency_holds.lock());
-        if !remaining_trunk_holds.is_empty() {
-            let limiter = self.server.trunk_rate_limiter.clone();
-            crate::utils::spawn(async move {
-                for trunk in &remaining_trunk_holds {
-                    limiter.release_concurrent(trunk);
-                }
-            });
         }
 
         // Safety net: ensure the engine session is destroyed even if

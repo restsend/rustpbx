@@ -13,6 +13,7 @@ use std::{
     fs,
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -20,6 +21,10 @@ use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
+    call::{
+        concurrent_call_limiter::ConcurrentCallLimiter,
+        cps_limiter::CpsLimiter,
+    },
     config::{ProxyConfig, RecordingPolicy},
     config_store::GeneratedConfigStore,
     models::{routing, sip_trunk},
@@ -367,6 +372,18 @@ impl ProxyDataContext {
                     }
                 }
             }
+        }
+
+        for trunk in trunks.values_mut() {
+            trunk.cps_limiter = trunk
+                .max_cps
+                .and_then(NonZeroU32::new)
+                .map(CpsLimiter::new)
+                .map(Arc::new);
+            trunk.concurrent_call_limiter = trunk
+                .max_calls
+                .map(ConcurrentCallLimiter::new)
+                .map(Arc::new);
         }
 
         let len = trunks.len();
@@ -1764,6 +1781,8 @@ mod tests {
             name: Set("database-inbound".to_string()),
             direction: Set(sip_trunk::SipTrunkDirection::Inbound),
             allowed_ips: Set(Some(serde_json::json!(["203.0.113.10"]))),
+            max_cps: Set(Some(3)),
+            max_concurrent: Set(Some(4)),
             is_active: Set(true),
             ..Default::default()
         }
@@ -1801,6 +1820,17 @@ mod tests {
             .expect("active database trunk should be loaded at startup");
         assert_eq!(trunk.id, Some(active.id));
         assert_eq!(trunk.inbound_hosts, vec!["203.0.113.10"]);
+        assert_eq!(
+            trunk.cps_limiter.as_ref().map(|limiter| limiter.limit()),
+            Some(3)
+        );
+        assert_eq!(
+            trunk
+                .concurrent_call_limiter
+                .as_ref()
+                .map(|limiter| limiter.limit()),
+            Some(4)
+        );
         assert!(!trunks.contains_key("inactive-database-inbound"));
         assert!(
             generated_dir

@@ -1,5 +1,9 @@
 use crate::{
-    call::{DialDirection, DialStrategy, Location},
+    call::{
+        DialDirection, DialStrategy, Location,
+        concurrent_call_limiter::ConcurrentCallLimiter,
+        cps_limiter::CpsLimiter,
+    },
     config::RecordingPolicy,
 };
 use anyhow::{Result, anyhow};
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 use tokio::net::lookup_host;
@@ -58,8 +63,14 @@ pub struct TrunkConfig {
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_calls: Option<u32>,
+    /// Runtime-only concurrent-call limiter built from `max_calls`.
+    #[serde(skip)]
+    pub concurrent_call_limiter: Option<Arc<ConcurrentCallLimiter>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cps: Option<u32>,
+    /// Runtime-only CPS limiter built from `max_cps`.
+    #[serde(skip)]
+    pub cps_limiter: Option<Arc<CpsLimiter>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weight: Option<u32>,
     #[serde(default)]
@@ -270,7 +281,9 @@ impl Default for TrunkConfig {
             codec: Vec::new(),
             disabled: None,
             max_calls: None,
+            concurrent_call_limiter: None,
             max_cps: None,
+            cps_limiter: None,
             weight: None,
             transport: None,
             id: None,

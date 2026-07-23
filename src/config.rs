@@ -1096,7 +1096,7 @@ fn default_passthrough_failure() -> bool {
     true
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct DialplanHints {
     pub enable_recording: Option<bool>,
     pub recording: Option<RecordingPolicy>,
@@ -1119,16 +1119,10 @@ pub struct DialplanHints {
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
-    /// Trunk names whose per-trunk concurrent-call slot was acquired by the
-    /// [`crate::proxy::trunk_rate_limiter::TrunkRateLimiter`] during routing.
-    /// Each entry must be released exactly once when the call ends so the
-    /// trunk's `max_concurrent` budget is not leaked.
-    pub trunk_concurrency_holds: Vec<String>,
-    /// Wholesale tenant concurrent-call slot acquired during routing.
-    /// The permit releases when the last holder drops.
-    #[cfg(feature = "addon-wholesale")]
-    pub wholesale_tenant_concurrency_hold:
-        Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+    /// All concurrent-call permits acquired during routing.
+    /// Tenant, carrier, and trunk permits share this call-lifetime lease.
+    pub concurrent_call_lease:
+        crate::call::concurrent_call_limiter::ConcurrentCallLease,
 }
 
 impl std::fmt::Debug for DialplanHints {

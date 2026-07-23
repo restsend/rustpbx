@@ -23,7 +23,9 @@ pub const LOCATOR_EXPIRE_GRACE_SECS: i64 = 30;
 
 pub mod adapters;
 pub mod app;
+pub mod concurrent_call_limiter;
 pub mod cookie;
+pub mod cps_limiter;
 pub mod domain;
 pub mod policy;
 pub mod queue_config;
@@ -945,15 +947,9 @@ pub struct Dialplan {
     /// session on hangup/teardown. Held in an `Arc<Mutex<..>>` so the shared
     /// `Arc<Dialplan>` (inside `CallContext`) can still drain them on cleanup.
     pub concurrency_holds: Arc<Mutex<Vec<crate::call::policy::ConcurrencyHold>>>,
-    /// Trunk names whose per-trunk concurrent-call slot was acquired during
-    /// routing (source inbound trunk and/or destination outbound trunk).
-    /// Released by the session on teardown against the shared
-    /// `TrunkRateLimiter`.
-    pub trunk_concurrency_holds: Arc<Mutex<Vec<String>>>,
-    /// Wholesale tenant concurrent-call slot acquired during routing.
-    /// The permit releases when the last holder drops.
-    #[cfg(feature = "addon-wholesale")]
-    pub wholesale_tenant_concurrency_hold: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    /// All concurrent-call permits acquired during routing.
+    /// The session explicitly releases the shared lease during cleanup.
+    pub concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -1015,9 +1011,8 @@ impl Dialplan {
             audio_profile: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
-            trunk_concurrency_holds: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(feature = "addon-wholesale")]
-            wholesale_tenant_concurrency_hold: None,
+            concurrent_call_lease:
+                concurrent_call_limiter::ConcurrentCallLease::default(),
         }
     }
 
@@ -1286,9 +1281,6 @@ pub struct RoutingState {
     /// Round-robin counters for each destination group
     round_robin_counters: Arc<Mutex<HashMap<String, usize>>>,
     pub policy_guard: Option<Arc<crate::call::policy::PolicyGuard>>,
-    /// Per-trunk CPS / concurrent-call rate limiter. Enforces the
-    /// `max_cps` and `max_concurrent` columns configured on each SIP trunk.
-    pub trunk_rate_limiter: Arc<crate::proxy::trunk_rate_limiter::TrunkRateLimiter>,
 }
 
 impl Default for RoutingState {
@@ -1302,20 +1294,6 @@ impl RoutingState {
         Self {
             round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
             policy_guard: None,
-            trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
-        }
-    }
-
-    /// Build a `RoutingState` that shares the given trunk rate limiter (usually
-    /// the one from `SipServerInner`) so acquire-in-routing and release-in-
-    /// teardown operate on the same counters.
-    pub fn with_trunk_rate_limiter(
-        limiter: Arc<crate::proxy::trunk_rate_limiter::TrunkRateLimiter>,
-    ) -> Self {
-        Self {
-            round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
-            policy_guard: None,
-            trunk_rate_limiter: limiter,
         }
     }
 

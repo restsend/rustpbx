@@ -776,3 +776,33 @@ fn parse_unknown_returns_none() {
     let cmd = SipSession::parse_info_command("nonexistent", parsed.get("params"), &parsed);
     assert!(cmd.is_none());
 }
+
+#[tokio::test]
+async fn test_session_drop_releases_all_grouped_concurrent_call_permits() {
+    let first = crate::call::concurrent_call_limiter::ConcurrentCallLimiter::new(1);
+    let second = crate::call::concurrent_call_limiter::ConcurrentCallLimiter::new(1);
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    dialplan
+        .concurrent_call_lease
+        .push(first.try_acquire().unwrap());
+    dialplan
+        .concurrent_call_lease
+        .push(second.try_acquire().unwrap());
+    let session = build_session(dialplan).await;
+    assert!(
+        session
+            .context
+            .dialplan
+            .concurrent_call_lease
+            .is_empty(),
+        "session construction must take the permits out of the dialplan"
+    );
+    assert_eq!(session.concurrent_call_lease.len(), 2);
+    assert_eq!(first.current(), 1);
+    assert_eq!(second.current(), 1);
+
+    drop(session);
+
+    assert_eq!(first.current(), 0);
+    assert_eq!(second.current(), 0);
+}

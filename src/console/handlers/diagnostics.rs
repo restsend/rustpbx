@@ -681,6 +681,8 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         disabled: Some(!model.is_active),
         max_calls: model.max_concurrent.map(|value| value as u32),
         max_cps: model.max_cps.map(|value| value as u32),
+        cps_limiter: None,
+        concurrent_call_limiter: None,
         weight: None,
         transport: Some(model.sip_transport.as_str().to_string()),
         id: Some(model.id),

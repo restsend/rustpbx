@@ -1,4 +1,8 @@
-use crate::call::{DialDirection, DialStrategy, RoutingState};
+use crate::call::{
+    DialDirection, DialStrategy, RoutingState,
+    concurrent_call_limiter::ConcurrentCallLimiter,
+    cps_limiter::CpsLimiter,
+};
 use crate::call::{FailureAction, QueueFallbackAction};
 use crate::config::{MediaProxyMode, RecordingPolicy, RouteResult};
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
@@ -11,6 +15,7 @@ use crate::proxy::routing::{
 use async_trait::async_trait;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::StatusCode;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::{collections::HashMap, net::IpAddr};
 
@@ -2732,6 +2737,15 @@ fn make_trunks_with_limits(
             inbound_hosts: vec!["192.168.3.7".to_string()],
             max_calls: inbound_limits.0,
             max_cps: inbound_limits.1,
+            cps_limiter: inbound_limits
+                .1
+                .and_then(NonZeroU32::new)
+                .map(CpsLimiter::new)
+                .map(Arc::new),
+            concurrent_call_limiter: inbound_limits
+                .0
+                .map(ConcurrentCallLimiter::new)
+                .map(Arc::new),
             ..Default::default()
         },
     );
@@ -2743,6 +2757,15 @@ fn make_trunks_with_limits(
             direction: Some(TrunkDirection::Outbound),
             max_calls: outbound_limits.0,
             max_cps: outbound_limits.1,
+            cps_limiter: outbound_limits
+                .1
+                .and_then(NonZeroU32::new)
+                .map(CpsLimiter::new)
+                .map(Arc::new),
+            concurrent_call_limiter: outbound_limits
+                .0
+                .map(ConcurrentCallLimiter::new)
+                .map(Arc::new),
             ..Default::default()
         },
     );
@@ -2772,15 +2795,26 @@ fn inbound_source_trunk(name: &str) -> SourceTrunk {
     }
 }
 
+fn trunk_concurrent_count(
+    trunks: &HashMap<String, TrunkConfig>,
+    name: &str,
+) -> u32 {
+    trunks
+        .get(name)
+        .and_then(|trunk| trunk.concurrent_call_limiter.as_ref())
+        .map(|limiter| limiter.current())
+        .unwrap_or(0)
+}
+
 #[tokio::test]
 async fn test_source_trunk_cps_limit_rejects() {
-    let routing_state = Arc::new(RoutingState::new());
     let trunks = make_trunks_with_limits(
         "in",
         (None, Some(1)), // max_cps = 1
         "out",
         (None, None),
     );
+    let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -2828,13 +2862,13 @@ async fn test_source_trunk_cps_limit_rejects() {
 
 #[tokio::test]
 async fn test_source_trunk_concurrent_limit_rejects() {
-    let routing_state = Arc::new(RoutingState::new());
     let trunks = make_trunks_with_limits(
         "in",
         (Some(1), None), // max_concurrent = 1
         "out",
         (None, None),
     );
+    let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -2853,7 +2887,7 @@ async fn test_source_trunk_concurrent_limit_rejects() {
     .unwrap();
     assert!(matches!(result, RouteResult::Forward(_, _)));
 
-    // Second call without releasing should be rejected with 486.
+    // Second call without releasing should be rejected with 503.
     let result2 = match_invite(
         Some(&trunks),
         Some(&routes),
@@ -2868,9 +2902,9 @@ async fn test_source_trunk_concurrent_limit_rejects() {
     .unwrap();
     match result2 {
         RouteResult::Abort(code, _) => {
-            assert_eq!(code, StatusCode::BusyHere);
+            assert_eq!(code, StatusCode::ServiceUnavailable);
         }
-        _ => panic!("expected 486 abort, got unexpected RouteResult variant"),
+        _ => panic!("expected 503 abort, got unexpected RouteResult variant"),
     }
 }
 
@@ -2878,8 +2912,13 @@ async fn test_source_trunk_concurrent_limit_rejects() {
 async fn test_source_trunk_concurrent_releases_on_reject_action() {
     // If a routing rule has a Reject action, the source-trunk slot acquired at
     // the beginning must be released so subsequent calls are not stuck.
+    let trunks = make_trunks_with_limits(
+        "in",
+        (Some(1), None),
+        "out",
+        (None, None),
+    );
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits("in", (Some(1), None), "out", (None, None));
     let routes = vec![RouteRule {
         name: "reject_all".to_string(),
         priority: 100,
@@ -2914,7 +2953,7 @@ async fn test_source_trunk_concurrent_releases_on_reject_action() {
 
     // Counter must be back to 0 after the reject released the slot.
     assert_eq!(
-        routing_state.trunk_rate_limiter.concurrent_count("in"),
+        trunk_concurrent_count(&trunks, "in"),
         0,
         "source trunk slot must be released after Reject action"
     );
@@ -2934,7 +2973,7 @@ async fn test_source_trunk_concurrent_releases_on_reject_action() {
     .unwrap();
     assert!(matches!(result2, RouteResult::Abort(_, _)));
     assert_eq!(
-        routing_state.trunk_rate_limiter.concurrent_count("in"),
+        trunk_concurrent_count(&trunks, "in"),
         0,
         "source trunk slot must be released again"
     );
@@ -2942,13 +2981,13 @@ async fn test_source_trunk_concurrent_releases_on_reject_action() {
 
 #[tokio::test]
 async fn test_dest_trunk_concurrent_limit_rejects() {
-    let routing_state = Arc::new(RoutingState::new());
     let trunks = make_trunks_with_limits(
         "in",
         (None, None),
         "out",
         (Some(1), None), // dest trunk max_concurrent = 1
     );
+    let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -2982,9 +3021,9 @@ async fn test_dest_trunk_concurrent_limit_rejects() {
     .unwrap();
     match result2 {
         RouteResult::Abort(code, _) => {
-            assert_eq!(code, StatusCode::BusyHere);
+            assert_eq!(code, StatusCode::ServiceUnavailable);
         }
-        _ => panic!("expected 486 abort for dest trunk, got unexpected RouteResult variant"),
+        _ => panic!("expected 503 abort for dest trunk, got unexpected RouteResult variant"),
     }
 }
 
@@ -2992,13 +3031,13 @@ async fn test_dest_trunk_concurrent_limit_rejects() {
 async fn test_dest_trunk_reject_releases_source_slot() {
     // When the dest trunk is at capacity and the call is aborted, the source
     // trunk slot acquired earlier must also be released.
-    let routing_state = Arc::new(RoutingState::new());
     let trunks = make_trunks_with_limits(
         "in",
         (Some(5), None), // source allows 5
         "out",
         (Some(1), None), // dest allows 1
     );
+    let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -3016,27 +3055,23 @@ async fn test_dest_trunk_reject_releases_source_slot() {
     .await
     .unwrap();
     assert!(matches!(r1, RouteResult::Forward(_, _)));
-    assert_eq!(routing_state.trunk_rate_limiter.concurrent_count("in"), 1);
-    assert_eq!(routing_state.trunk_rate_limiter.concurrent_count("out"), 1);
+    assert_eq!(trunk_concurrent_count(&trunks, "in"), 1);
+    assert_eq!(trunk_concurrent_count(&trunks, "out"), 1);
 
     // Second call: dest is full → abort. Source slot for THIS call must be
     // released (the first call's source slot stays at 1 because it's attached
     // to the first call's hints for session-level release).
     let r2 = match_invite(
-        Some(&trunks),
-        Some(&routes),
-        None,
-        create_test_invite_option(),
-        &create_test_request(),
-        Some(&source),
-        routing_state.clone(),
-        &DialDirection::Inbound,
-    )
-    .await
-    .unwrap();
-    assert!(matches!(r2, RouteResult::Abort(StatusCode::BusyHere, _)));
+        Some(&trunks), Some(&routes), None,
+        create_test_invite_option(), &create_test_request(),
+        Some(&source), routing_state.clone(), &DialDirection::Inbound,
+    ).await.unwrap();
+    assert!(matches!(
+        r2,
+        RouteResult::Abort(StatusCode::ServiceUnavailable, _)
+    ));
     assert_eq!(
-        routing_state.trunk_rate_limiter.concurrent_count("in"),
+        trunk_concurrent_count(&trunks, "in"),
         1,
         "only the first (successful) call's source slot should remain; \
          the second call's source slot must be released on dest reject"
@@ -3044,9 +3079,14 @@ async fn test_dest_trunk_reject_releases_source_slot() {
 }
 
 #[tokio::test]
-async fn test_trunk_holds_attached_to_forward_hints() {
+async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
+    let trunks = make_trunks_with_limits(
+        "in",
+        (Some(10), None),
+        "out",
+        (Some(10), None),
+    );
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits("in", (Some(10), None), "out", (Some(10), None));
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -3066,12 +3106,18 @@ async fn test_trunk_holds_attached_to_forward_hints() {
     match result {
         RouteResult::Forward(_, Some(hints)) => {
             assert_eq!(
-                hints.trunk_concurrency_holds.len(),
+                hints.concurrent_call_lease.len(),
                 2,
                 "both source and dest trunk holds should be attached"
             );
-            assert!(hints.trunk_concurrency_holds.contains(&"in".to_string()));
-            assert!(hints.trunk_concurrency_holds.contains(&"out".to_string()));
+            assert_eq!(
+                trunk_concurrent_count(&trunks, "in"),
+                1
+            );
+            assert_eq!(
+                trunk_concurrent_count(&trunks, "out"),
+                1
+            );
             let ctx = hints
                 .extensions
                 .get::<crate::call::OutboundTrunkContext>()
@@ -3084,8 +3130,13 @@ async fn test_trunk_holds_attached_to_forward_hints() {
 
 #[tokio::test]
 async fn test_no_limits_means_no_holds() {
+    let trunks = make_trunks_with_limits(
+        "in",
+        (None, None),
+        "out",
+        (None, None),
+    );
     let routing_state = Arc::new(RoutingState::new());
-    let trunks = make_trunks_with_limits("in", (None, None), "out", (None, None));
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
 
@@ -3104,8 +3155,13 @@ async fn test_no_limits_means_no_holds() {
 
     match result {
         RouteResult::Forward(_, hints) => {
-            let holds = hints.map(|h| h.trunk_concurrency_holds).unwrap_or_default();
-            assert!(holds.is_empty(), "no trunk holds when no limits configured");
+            let holds = hints
+                .map(|h| h.concurrent_call_lease)
+                .unwrap_or_default();
+            assert!(
+                holds.is_empty(),
+                "no trunk holds when no limits configured"
+            );
         }
         _ => panic!("expected Forward"),
     }

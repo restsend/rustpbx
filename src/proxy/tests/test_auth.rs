@@ -480,7 +480,6 @@ async fn test_guest_call_allowed_extension() {
             .await
             .expect("failed to init proxy data context for auth test"),
     );
-
     let server_inner = Arc::new(SipServerInner {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
@@ -530,7 +529,6 @@ async fn test_guest_call_allowed_extension() {
             let _ = engine.spawn(handle);
             engine
         },
-        trunk_rate_limiter: Arc::new(crate::proxy::trunk_rate_limiter::TrunkRateLimiter::new()),
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 
