@@ -2130,28 +2130,81 @@ impl SipSession {
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
 
-        // Send proactive 183 early media if trunk has configured ringback.ring tone
+        // Start watching before 183/setup. The same receiver is reused by the
+        // established-call loop below.
+        let mut rtp_timeout_rx = self
+            .media
+            .rtp_timeout_rx
+            .take()
+            .unwrap_or_else(|| mpsc::channel::<String>(1).1);
+
         let ring_audio = self
             .context
             .dialplan
             .audio_profile
             .as_ref()
             .and_then(|p| p.ring.clone());
-        if let Some(ref audio) = ring_audio {
-            info!(
-                session_id = %self.context.session_id,
-                audio = %audio,
-                "Sending proactive 183 Session Progress with ringback tone"
-            );
-            if let Err(e) = self.send_early_media_tone(audio).await {
-                warn!(session_id = %self.context.session_id, error = %e, "Failed to send proactive 183");
+
+        let setup_cancel_token = self.cancel_token.clone();
+        let mut setup_rtp_timeout = None;
+        let setup_result = {
+            let setup = async {
+                if let Some(ref audio) = ring_audio {
+                    info!(
+                        session_id = %self.context.session_id,
+                        audio = %audio,
+                        "Sending proactive 183 Session Progress with ringback tone"
+                    );
+                    if let Err(e) = self.send_early_media_tone(audio).await {
+                        warn!(session_id = %self.context.session_id, error = %e, "Failed to send proactive 183");
+                    }
+                }
+
+                if self.context.dialplan.is_empty() {
+                    Ok(())
+                } else {
+                    self.execute_dialplan(&mut callee_state_rx).await
+                }
+            };
+            tokio::pin!(setup);
+
+            tokio::select! {
+                biased;
+                result = &mut setup => result,
+                Some(reason) = rtp_timeout_rx.recv() => {
+                    setup_rtp_timeout = Some(reason);
+                    Ok(())
+                }
+                _ = setup_cancel_token.cancelled() => Err(into_callee_err(
+                    &StatusCode::RequestTerminated,
+                    Some("Call cancelled during setup".to_string()),
+                )),
             }
+        };
+
+        if let Some(reason) = setup_rtp_timeout {
+            warn!(
+                session_id = %self.context.session_id,
+                reason = %reason,
+                "RTP timeout detected during call setup, terminating session"
+            );
+            self.meta.hangup_reason = Some(CallRecordHangupReason::RtpTimeout);
+            if let Err(e) = self
+                .server_dialog
+                .reject(Some(StatusCode::RequestTimeout), None)
+            {
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to reject caller after setup RTP timeout"
+                );
+            }
+            self.cancel_token.cancel();
+            self.cleanup().await;
+            return Err(anyhow!("RTP timeout during call setup: {}", reason));
         }
 
-        if !self.context.dialplan.is_empty()
-            && let Err((status_code, text, reason)) =
-                self.execute_dialplan(&mut callee_state_rx).await
-        {
+        if let Err((status_code, text, reason)) = setup_result {
             warn!(session_id = %self.context.session_id, ?status_code, ?text, ?reason, "Dialplan execution failed");
 
             if matches!(status_code, 408 | 480 | 486 | 487) {}
@@ -2176,15 +2229,6 @@ impl SipSession {
         let mut cancelled = false;
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
-
-        // Consume the rtp-timeout receiver created at session construction. If
-        // absent (defensive), fall back to a never-firing receiver so the
-        // select arm below still compiles.
-        let mut rtp_timeout_rx = self
-            .media
-            .rtp_timeout_rx
-            .take()
-            .unwrap_or_else(|| mpsc::channel::<String>(1).1);
 
         let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
             debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
@@ -2300,6 +2344,7 @@ impl SipSession {
                         "RTP timeout detected, terminating session"
                     );
                     self.meta.hangup_reason = Some(CallRecordHangupReason::RtpTimeout);
+                    self.pending_hangup.insert(self.server_dialog.id());
                     self.cancel_token.cancel();
                 }
 
@@ -15146,4 +15191,3 @@ max_retries = 3
         );
     }
 }
-
