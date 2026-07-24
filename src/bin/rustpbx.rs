@@ -678,8 +678,40 @@ fn main() -> Result<()> {
 
 async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
+    use sea_orm_migration::MigratorTrait;
 
     let db = rustpbx::models::create_db(database_url).await?;
+
+    // ── Run addon migrations so all tables are created ──────────────
+    #[cfg(feature = "addon-cc")]
+    if let Err(e) = rustpbx::addons::cc::migration::Migrator::up(&db, None).await {
+        eprintln!("[dump_ddl] CC migration warning: {e}");
+    }
+    #[cfg(feature = "addon-wholesale")]
+    if let Err(e) = rustpbx::addons::wholesale::migration::Migrator::up(&db, None).await {
+        eprintln!("[dump_ddl] wholesale migration warning: {e}");
+    }
+    #[cfg(feature = "addon-endpoint-manager")]
+    if let Err(e) =
+        rustpbx::addons::endpoint_manager::migration::Migrator::up(&db, None).await
+    {
+        eprintln!("[dump_ddl] endpoint_manager migration warning: {e}");
+    }
+    #[cfg(feature = "addon-enterprise-auth")]
+    if let Err(e) =
+        rustpbx::addons::enterprise_auth::migration::Migrator::up(&db, None).await
+    {
+        eprintln!("[dump_ddl] enterprise_auth migration warning: {e}");
+    }
+    #[cfg(feature = "addon-ivr-editor")]
+    if let Err(e) = rustpbx::addons::ivr_editor::migration::Migrator::up(&db, None).await {
+        eprintln!("[dump_ddl] ivr_editor migration warning: {e}");
+    }
+    #[cfg(feature = "addon-voicemail")]
+    if let Err(e) = rustpbx::addons::voicemail::migration::Migrator::up(&db, None).await {
+        eprintln!("[dump_ddl] voicemail migration warning: {e}");
+    }
+
     let backend = db.get_database_backend();
 
     let show_tables_sql = match backend {
