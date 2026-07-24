@@ -612,15 +612,14 @@ impl Locator for MemoryLocator {
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
-        let now: Instant = Instant::now();
         let uri_string = uri.to_string();
         let mut direct_hits = Vec::new();
 
-        // Prune expired bindings (DashMap retain is concurrent per shard).
-        self.locations.retain(|_, map| {
-            map.retain(|_, loc| !loc.is_expired_at(now));
-            !map.is_empty()
-        });
+        // NOTE: expired bindings are NOT pruned here.  GC is handled by the
+        // background sweep_expired() task (every 15 s).  Removing the inline
+        // prune avoids a race where a binding expires moments before a BYE
+        // lookup, causing the in-dialog request to fail with DNS resolution
+        // on a .invalid WebRTC contact.
 
         // Direct match by AOR or GRUU.
         for map_ref in self.locations.iter() {
