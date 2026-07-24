@@ -2012,15 +2012,37 @@ impl BridgePeer {
         let sub_tasks = self.sub_tasks.clone();
         let cancel = self.cancel_token.clone();
 
+        let monitor_session_id = self.session_id.clone();
+        let caller_state_rx = caller_pc.subscribe_peer_state();
+        let callee_state_rx = callee_pc.subscribe_peer_state();
+
         crate::utils::media_spawn(async move {
             let mut caller_recv = Box::pin(caller_pc.recv());
             let mut callee_recv = Box::pin(callee_pc.recv());
+            let mut caller_state_rx = caller_state_rx;
+            let mut callee_state_rx = callee_state_rx;
+            let mut caller_last_state = *caller_state_rx.borrow();
+            let mut callee_last_state = *callee_state_rx.borrow();
 
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         debug!(bridge_id = %bridge_id, "Bidirectional forwarder cancelled");
                         break;
+                    }
+                    _ = caller_state_rx.changed() => {
+                        let state = *caller_state_rx.borrow();
+                        if state != caller_last_state {
+                            debug!(bridge_id = %bridge_id, session_id = ?monitor_session_id, leg = "caller", from = ?caller_last_state, to = ?state, "PC state changed");
+                            caller_last_state = state;
+                        }
+                    }
+                    _ = callee_state_rx.changed() => {
+                        let state = *callee_state_rx.borrow();
+                        if state != callee_last_state {
+                            debug!(bridge_id = %bridge_id, session_id = ?monitor_session_id, leg = "callee", from = ?callee_last_state, to = ?state, "PC state changed");
+                            callee_last_state = state;
+                        }
                     }
                     event = &mut caller_recv => {
                         match Self::handle_direction_event(
