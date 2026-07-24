@@ -30,8 +30,11 @@ COPY ./templates /app/templates
 COPY ./locales /app/locales
 
 # Sounds (config + voicemail)
+# Placed in /app/sounds/ with a symlink at /app/config/sounds/ so both
+# the normalized ("sounds/") and legacy ("config/sounds/") path conventions work.
 COPY ./config/sounds /app/sounds
 COPY ./src/addons/voicemail/sounds /app/sounds
+RUN mkdir -p /app/config && ln -s /app/sounds /app/config/sounds
 
 # --- Addon static ---
 COPY ./src/addons/acme/static /app/static/acme

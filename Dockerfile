@@ -29,7 +29,11 @@ COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
 COPY ./static /app/static
 COPY ./templates /app/templates
 COPY ./locales /app/locales
+# Sounds are placed in /app/sounds/ for the normalized ("sounds/") convention
+# and symlinked from /app/config/sounds/ for the legacy ("config/sounds/") path.
+# This ensures both QueuePlan defaults and the serve_sound_handler resolve correctly.
 COPY ./config/sounds /app/sounds
+RUN mkdir -p /app/config && ln -s /app/sounds /app/config/sounds
 
 # Copy addon static and templates
 COPY ./src/addons/acme/static /app/static/acme

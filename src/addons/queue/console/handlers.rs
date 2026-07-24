@@ -437,6 +437,11 @@ pub async fn create_queue(
     match active.insert(db).await {
         Ok(model) => {
             export_queue_async(state.as_ref(), model.id).await;
+            if let Some(app) = state.app_state() {
+                if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                    warn!("failed to reload queues after create: {}", e);
+                }
+            }
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
         Err(err) => {
@@ -529,6 +534,11 @@ pub async fn update_queue(
     match active.update(db).await {
         Ok(updated) => {
             export_queue_async(state.as_ref(), updated.id).await;
+            if let Some(app) = state.app_state() {
+                if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                    warn!("failed to reload queues after update: {}", e);
+                }
+            }
             Json(json!({"status": "ok", "id": updated.id})).into_response()
         }
         Err(err) => {
@@ -580,6 +590,11 @@ pub async fn delete_queue(
             } else {
                 if let Some(entry) = export_entry {
                     remove_queue_export(state.as_ref(), entry).await;
+                }
+                if let Some(app) = state.app_state() {
+                    if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                        warn!("failed to reload queues after delete: {}", e);
+                    }
                 }
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }

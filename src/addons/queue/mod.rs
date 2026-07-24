@@ -143,7 +143,7 @@ impl ExportReloadHandler for QueueExportReloadHandler {
 
     async fn export_and_reload(&self, app_state: &AppState) -> Result<JsonValue, String> {
         let db = app_state.db();
-        let proxy_cfg = crate::config::ProxyConfig::default();
+        let proxy_cfg = app_state.config().proxy.clone();
         let exporter = crate::addons::queue::services::exporter::QueueExporter::new(db.clone());
 
         exporter

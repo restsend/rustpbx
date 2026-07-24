@@ -15082,5 +15082,75 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             bridge.stop().await;
         }
     }
+
+    // ── BuiltinAppFactory IVR from DB store ──────────────────────────────────
+
+    #[tokio::test]
+    async fn builtin_app_factory_creates_ivr_from_db_store() {
+        use sea_orm::{ConnectionTrait, Database, sea_query::SqliteQueryBuilder};
+
+        // Setup in-memory SQLite with config_entries table
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let schema = sea_orm::Schema::new(db.get_database_backend());
+        let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
+        let sql = stmt.to_string(SqliteQueryBuilder);
+        db.execute_unprepared(&sql).await.unwrap();
+        db.execute_unprepared(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_config_entries_category_name \
+             ON config_entries (category, entry_name)",
+        )
+        .await
+        .unwrap();
+
+        // Write a valid IVR entry into the DB store
+        let store = crate::config_store::GeneratedConfigStore::Database { db: db.clone() };
+        let ivr_toml = r#"
+[ivr]
+name = "test-ivr"
+ivr_mode = "tree"
+
+[ivr.root]
+greeting = "sounds/welcome.wav"
+timeout_ms = 30000
+max_retries = 3
+"#;
+        store
+            .write("ivr", "test_ivr.generated.toml", ivr_toml)
+            .await
+            .unwrap();
+
+        // Config with generated_db = true (must match server's real config)
+        let mut config = crate::config::Config::default();
+        config.proxy.generated_db = true;
+
+        let call_info = crate::call::app::CallInfo {
+            session_id: "test-session".to_string(),
+            caller: "caller".to_string(),
+            callee: "1000".to_string(),
+            direction: "inbound".to_string(),
+            started_at: chrono::Utc::now(),
+            sip_headers: std::collections::HashMap::new(),
+            route_name: None,
+        };
+        let app_ctx = crate::call::app::ApplicationContext::new(
+            db,
+            call_info,
+            std::sync::Arc::new(config),
+        );
+
+        let factory = BuiltinAppFactory {
+            addon_registry: None,
+        };
+
+        let params = Some(serde_json::json!({
+            "file": "db://ivr/test_ivr.generated.toml"
+        }));
+        let app = factory.create_app("ivr", params, &app_ctx).await;
+
+        assert!(
+            app.is_some(),
+            "BuiltinAppFactory should create IVR app from DB store when generated_db=true"
+        );
+    }
 }
 

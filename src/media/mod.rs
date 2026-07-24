@@ -38,6 +38,8 @@ mod mixer_e2e_tests;
 #[cfg(test)]
 mod recorder_tests;
 #[cfg(test)]
+mod info_recording_tests;
+#[cfg(test)]
 mod unified_pc_tests;
 
 // ── Re-exports ──────────────────────────────────────────────────────

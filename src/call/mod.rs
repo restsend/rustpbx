@@ -72,20 +72,20 @@ pub trait CallFailureHandler: Send + Sync {
 }
 
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
-pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
+pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
-pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.wav";
+pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
 
 // --- Built-in voice prompts for queue events ---
 
-pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "config/sounds/queue-transfer-zh.wav";
-pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "config/sounds/queue-transfer-en.wav";
-pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "config/sounds/queue-busy-zh.wav";
-pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "config/sounds/queue-busy-en.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "config/sounds/queue-off-hours-zh.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "config/sounds/queue-off-hours-en.wav";
-pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "config/sounds/queue-no-answer-zh.wav";
-pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "config/sounds/queue-no-answer-en.wav";
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "sounds/queue-transfer-zh.wav";
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "sounds/queue-transfer-en.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "sounds/queue-busy-zh.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "sounds/queue-busy-en.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "sounds/queue-no-answer-zh.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "sounds/queue-no-answer-en.wav";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoicePrompts {

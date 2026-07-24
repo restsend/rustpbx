@@ -457,4 +457,38 @@ mod tests {
         let content = store.read("ivr", "nonexistent.toml").await.unwrap();
         assert_eq!(content, None);
     }
+
+    // ── from_config ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn from_config_uses_db_when_generated_db_is_true() {
+        let db = setup_db().await;
+        let mut config = crate::config::Config::default();
+        config.proxy.generated_db = true;
+
+        let store = GeneratedConfigStore::from_config(&config, &db);
+
+        assert!(store.is_db(), "should use Database variant when generated_db=true");
+
+        // Verify read/write works through the from_config path
+        store
+            .write("ivr", "from_config_test.toml", "hello from_config")
+            .await
+            .unwrap();
+        let content = store
+            .read("ivr", "from_config_test.toml")
+            .await
+            .unwrap();
+        assert_eq!(content, Some("hello from_config".to_string()));
+    }
+
+    #[tokio::test]
+    async fn from_config_uses_fs_when_generated_db_is_false() {
+        let db = setup_db().await;
+        let config = crate::config::Config::default(); // generated_db = false
+
+        let store = GeneratedConfigStore::from_config(&config, &db);
+
+        assert!(!store.is_db(), "should use FileSystem variant when generated_db=false");
+    }
 }
