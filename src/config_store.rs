@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, SqlErr,
 };
 use std::path::{Path, PathBuf};
 
@@ -212,6 +212,26 @@ impl GeneratedConfigStore {
         name: &str,
         content: &str,
     ) -> Result<()> {
+        let now = chrono::Utc::now();
+
+        // Try INSERT first — this is atomic and catches the duplicate-key race.
+        let model = config_entry::ActiveModel {
+            category: Set(category.to_string()),
+            entry_name: Set(name.to_string()),
+            content: Set(content.to_string()),
+            is_generated: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+
+        match model.insert(db).await {
+            Ok(_) => return Ok(()),
+            Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {}
+            Err(e) => return Err(anyhow!("db config insert error: {e}")),
+        }
+
+        // Duplicate key on (category, entry_name) — UPDATE instead.
         let existing = config_entry::Entity::find()
             .filter(config_entry::Column::Category.eq(category))
             .filter(config_entry::Column::EntryName.eq(name))
@@ -219,43 +239,16 @@ impl GeneratedConfigStore {
             .await
             .map_err(|e| anyhow!("db config check error: {e}"))?;
 
-        let now = chrono::Utc::now();
         if let Some(record) = existing {
             let mut active: config_entry::ActiveModel = record.into();
             active.set(config_entry::Column::Content, content.into());
             active.set(config_entry::Column::UpdatedAt, now.into());
-            match active.update(db).await {
-                Ok(_) => {}
-                Err(DbErr::RecordNotUpdated) => {
-                    config_entry::ActiveModel {
-                        category: Set(category.to_string()),
-                        entry_name: Set(name.to_string()),
-                        content: Set(content.to_string()),
-                        is_generated: Set(true),
-                        created_at: Set(now),
-                        updated_at: Set(now),
-                        ..Default::default()
-                    }
-                    .insert(db)
-                    .await
-                    .map_err(|e| anyhow!("db config insert error: {e}"))?;
-                }
-                Err(e) => return Err(anyhow!("db config update error: {e}")),
-            }
-        } else {
-            config_entry::ActiveModel {
-                category: Set(category.to_string()),
-                entry_name: Set(name.to_string()),
-                content: Set(content.to_string()),
-                is_generated: Set(true),
-                created_at: Set(now),
-                updated_at: Set(now),
-                ..Default::default()
-            }
-            .insert(db)
-            .await
-            .map_err(|e| anyhow!("db config insert error: {e}"))?;
+            active
+                .update(db)
+                .await
+                .map_err(|e| anyhow!("db config update error: {e}"))?;
         }
+
         Ok(())
     }
 
@@ -353,6 +346,13 @@ mod tests {
         use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
         let sql = stmt.to_string(SqliteQueryBuilder);
         db.execute_unprepared(&sql).await.unwrap();
+        // Create the unique index on (category, entry_name) — same as the migration
+        db.execute_unprepared(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_config_entries_category_name \
+             ON config_entries (category, entry_name)",
+        )
+        .await
+        .unwrap();
         db
     }
 
