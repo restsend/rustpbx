@@ -564,11 +564,26 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
 async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
         Some(proxy_config) => {
-            let catalog = crate::console::catalog::build_forwarding_catalog(&proxy_config).await;
+            let store = state.app_state().and_then(|app| {
+                let config = app.config();
+                if config.proxy.use_db_config() {
+                    Some(crate::config_store::GeneratedConfigStore::from_config(
+                        config,
+                        app.db(),
+                    ))
+                } else {
+                    None
+                }
+            });
+            let catalog = crate::console::catalog::build_forwarding_catalog_opt(
+                &proxy_config,
+                store.as_ref(),
+            )
+            .await;
             tracing::info!(
                 queue_count = catalog.queues.len(),
                 ivr_count = catalog.ivr_projects.len(),
-                "load_catalogs: scanned file catalogs for routing form"
+                "load_catalogs: scanned catalogs for routing form"
             );
             catalog
         }

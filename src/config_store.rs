@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use std::path::{Path, PathBuf};
 
@@ -124,8 +124,9 @@ impl GeneratedConfigStore {
                     Ok(entries) => entries,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                     Err(e) => {
-                        return Err(e)
-                            .with_context(|| format!("failed to read directory {}", dir.display()));
+                        return Err(e).with_context(|| {
+                            format!("failed to read directory {}", dir.display())
+                        });
                     }
                 };
                 let mut names = Vec::new();
@@ -223,10 +224,24 @@ impl GeneratedConfigStore {
             let mut active: config_entry::ActiveModel = record.into();
             active.set(config_entry::Column::Content, content.into());
             active.set(config_entry::Column::UpdatedAt, now.into());
-            active
-                .update(db)
-                .await
-                .map_err(|e| anyhow!("db config update error: {e}"))?;
+            match active.update(db).await {
+                Ok(_) => {}
+                Err(DbErr::RecordNotUpdated) => {
+                    config_entry::ActiveModel {
+                        category: Set(category.to_string()),
+                        entry_name: Set(name.to_string()),
+                        content: Set(content.to_string()),
+                        is_generated: Set(true),
+                        created_at: Set(now),
+                        updated_at: Set(now),
+                        ..Default::default()
+                    }
+                    .insert(db)
+                    .await
+                    .map_err(|e| anyhow!("db config insert error: {e}"))?;
+                }
+                Err(e) => return Err(anyhow!("db config update error: {e}")),
+            }
         } else {
             config_entry::ActiveModel {
                 category: Set(category.to_string()),
@@ -289,12 +304,24 @@ mod tests {
     #[test]
     fn parse_db_uri_non_db_paths() {
         // Absolute filesystem path
-        assert_eq!(GeneratedConfigStore::parse_db_uri("/etc/ivr/main.toml"), None);
+        assert_eq!(
+            GeneratedConfigStore::parse_db_uri("/etc/ivr/main.toml"),
+            None
+        );
         // Relative filesystem path
-        assert_eq!(GeneratedConfigStore::parse_db_uri("config/ivr/main.toml"), None);
+        assert_eq!(
+            GeneratedConfigStore::parse_db_uri("config/ivr/main.toml"),
+            None
+        );
         // Random protocol
-        assert_eq!(GeneratedConfigStore::parse_db_uri("http://example.com/x"), None);
-        assert_eq!(GeneratedConfigStore::parse_db_uri("file:///tmp/x.toml"), None);
+        assert_eq!(
+            GeneratedConfigStore::parse_db_uri("http://example.com/x"),
+            None
+        );
+        assert_eq!(
+            GeneratedConfigStore::parse_db_uri("file:///tmp/x.toml"),
+            None
+        );
         // Empty
         assert_eq!(GeneratedConfigStore::parse_db_uri(""), None);
     }
@@ -348,10 +375,7 @@ mod tests {
         let db = setup_db().await;
         let store = GeneratedConfigStore::Database { db: db.clone() };
 
-        store
-            .write("ivr", "exists_test.toml", "x")
-            .await
-            .unwrap();
+        store.write("ivr", "exists_test.toml", "x").await.unwrap();
 
         assert!(store.exists("ivr", "exists_test.toml").await.unwrap());
         assert!(!store.exists("ivr", "nonexistent.toml").await.unwrap());
@@ -408,14 +432,8 @@ mod tests {
         let db = setup_db().await;
         let store = GeneratedConfigStore::Database { db: db.clone() };
 
-        store
-            .write("ivr", "upsert.toml", "first")
-            .await
-            .unwrap();
-        store
-            .write("ivr", "upsert.toml", "second")
-            .await
-            .unwrap();
+        store.write("ivr", "upsert.toml", "first").await.unwrap();
+        store.write("ivr", "upsert.toml", "second").await.unwrap();
 
         let content = store.read("ivr", "upsert.toml").await.unwrap();
         assert_eq!(content, Some("second".to_string()));

@@ -324,8 +324,7 @@ impl ProxyDataContext {
         let store = self.config_store();
         if store.is_db() {
             // In DB mode, load generated trunks directly from the config store
-            if let Ok(Some(content)) = store.read("trunks", "trunks.generated.toml").await
-            {
+            if let Ok(Some(content)) = store.read("trunks", "trunks.generated.toml").await {
                 let data: TrunkIncludeFile = match toml::from_str(&content) {
                     Ok(d) => d,
                     Err(e) => {
@@ -337,7 +336,8 @@ impl ProxyDataContext {
                 info!(count, "loading trunks from database config store");
                 generated_entries = count;
                 for (name, mut trunk) in data.trunks {
-                    trunk.origin = ConfigOrigin::from_file("db://trunks/trunks.generated.toml".to_string());
+                    trunk.origin =
+                        ConfigOrigin::from_file("db://trunks/trunks.generated.toml".to_string());
                     trunks.insert(name, trunk);
                 }
             }
@@ -370,8 +370,7 @@ impl ProxyDataContext {
         }
 
         let len = trunks.len();
-        let mut acl_inbound_trunks: JointPrefixMap<IpNet, Vec<String>> =
-            JointPrefixMap::new();
+        let mut acl_inbound_trunks: JointPrefixMap<IpNet, Vec<String>> = JointPrefixMap::new();
         let mut inbound_trunks = trunks
             .iter()
             .filter(|(_, trunk)| !matches!(trunk.direction, Some(TrunkDirection::Outbound)))
@@ -445,8 +444,7 @@ impl ProxyDataContext {
         }
         // Publish the backing trunk repository before its ACL name index.
         *self.trunks.write().unwrap() = trunks.clone();
-        self.acl_inbound_trunks
-            .store(Arc::new(acl_inbound_trunks));
+        self.acl_inbound_trunks.store(Arc::new(acl_inbound_trunks));
 
         let acl_enabled = config
             .modules
@@ -632,8 +630,7 @@ impl ProxyDataContext {
         }
         let store = self.config_store();
         if store.is_db() {
-            if let Ok(Some(content)) = store.read("routes", "routes.generated.toml").await
-            {
+            if let Ok(Some(content)) = store.read("routes", "routes.generated.toml").await {
                 let data: RouteIncludeFile = match toml::from_str(&content) {
                     Ok(d) => d,
                     Err(e) => {
@@ -644,7 +641,8 @@ impl ProxyDataContext {
                 let count = data.routes.len();
                 info!(count, "loading routes from database config store");
                 for mut route in data.routes {
-                    route.origin = ConfigOrigin::from_file("db://routes/routes.generated.toml".to_string());
+                    route.origin =
+                        ConfigOrigin::from_file("db://routes/routes.generated.toml".to_string());
                     upsert_route(&mut routes, route);
                 }
             }
@@ -746,7 +744,8 @@ impl ProxyDataContext {
             let generated_acl_path = config.generated_acl_dir().join("acl.generated.toml");
             if generated_acl_path.exists() {
                 let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
-                let (generated_rules, generated_files) = load_acl_rules_from_files(&generated_pattern)?;
+                let (generated_rules, generated_files) =
+                    load_acl_rules_from_files(&generated_pattern)?;
                 if !generated_files.is_empty() {
                     files.extend(generated_files);
                 }
@@ -815,11 +814,9 @@ impl ProxyDataContext {
                 backup: None,
             }))
         } else {
-            let Some(target_path) = resolve_generated_path(
-                &config.trunks_files,
-                default_dir,
-                "trunks.generated.toml",
-            ) else {
+            let Some(target_path) =
+                resolve_generated_path(&config.trunks_files, default_dir, "trunks.generated.toml")
+            else {
                 return Ok(None);
             };
             let trunks = load_trunks_from_db(db).await?;
@@ -872,11 +869,9 @@ impl ProxyDataContext {
                 backup: None,
             }))
         } else {
-            let Some(target_path) = resolve_generated_path(
-                &config.routes_files,
-                default_dir,
-                "routes.generated.toml",
-            ) else {
+            let Some(target_path) =
+                resolve_generated_path(&config.routes_files, default_dir, "routes.generated.toml")
+            else {
                 return Ok(None);
             };
             let backup = backup_existing_file(&target_path)?;
@@ -1089,8 +1084,7 @@ fn serialize_trunks_toml(trunks: &HashMap<String, TrunkConfig>) -> Result<String
             .map(|(name, trunk)| (name.clone(), trunk.clone()))
             .collect(),
     };
-    toml::to_string_pretty(&data)
-        .with_context(|| "failed to serialize trunks toml".to_string())
+    toml::to_string_pretty(&data).with_context(|| "failed to serialize trunks toml".to_string())
 }
 
 fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
@@ -1105,8 +1099,7 @@ fn serialize_routes_toml(routes: &[RouteRule]) -> Result<String> {
     let data = RouteIncludeFile {
         routes: routes.to_vec(),
     };
-    toml::to_string_pretty(&data)
-        .with_context(|| "failed to serialize routes toml".to_string())
+    toml::to_string_pretty(&data).with_context(|| "failed to serialize routes toml".to_string())
 }
 
 fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
@@ -1545,6 +1538,8 @@ async fn apply_route_metadata(
                         .unwrap_or(false)
                     {
                         format!("db://ivr/{}.toml", sanitize_ivr_filename(&file))
+                    } else if let Some(dir) = ivr_dir {
+                        resolve_ivr_name_to_path(&file, dir)
                     } else {
                         file
                     }
@@ -1787,10 +1782,7 @@ mod tests {
         let generated_dir = tempfile::tempdir().expect("create temporary generated config dir");
         let mut config = ProxyConfig::default();
         config.acl_rules = None;
-        config.generated_dir = generated_dir
-            .path()
-            .to_string_lossy()
-            .to_string();
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
 
         let context = ProxyDataContext::new(Arc::new(config), Some(db))
             .await
@@ -2069,8 +2061,8 @@ mod tests {
         // Setup DB with required tables
         let db = Database::connect("sqlite::memory:").await.unwrap();
         {
-            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             use sea_orm::Schema;
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             let schema = Schema::new(db.get_database_backend());
             // config_entries table is needed for config store
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
@@ -2108,8 +2100,8 @@ mod tests {
     async fn resolve_ivr_file_db_mode_nonexistent_returns_name() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         {
-            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             use sea_orm::Schema;
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             let schema = Schema::new(db.get_database_backend());
             // config_entries and sip_trunks tables are needed for ProxyDataContext
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
@@ -2139,8 +2131,8 @@ mod tests {
     async fn resolve_ivr_file_db_mode_respects_non_generated_file() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         {
-            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             use sea_orm::Schema;
+            use sea_orm::{ConnectionTrait, sea_query::SqliteQueryBuilder};
             let schema = Schema::new(db.get_database_backend());
             // config_entries and sip_trunks tables are needed for ProxyDataContext
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);

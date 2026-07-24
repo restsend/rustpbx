@@ -73,12 +73,18 @@ pub async fn page_queues(
     let has_file_queues = state
         .app_state()
         .map(|app| {
-            app.sip_server()
+            if app
+                .sip_server()
                 .inner
                 .data_context
                 .queues_snapshot()
                 .values()
                 .any(|q| matches!(q.origin, ConfigOrigin::File(_)))
+            {
+                return true;
+            }
+            let config = app.config();
+            config.proxy.use_db_config()
         })
         .unwrap_or(false);
     state.render_with_headers(
@@ -192,6 +198,49 @@ pub async fn query_queues(
                 }
             })
             .collect();
+
+        // In DB mode, supplement with file-only queues from the config store scan
+        let config = app_state.config();
+        if config.proxy.use_db_config() {
+            if let Some(proxy_config) = crate::console::catalog::load_proxy_config(Some(&app_state))
+            {
+                let store =
+                    crate::config_store::GeneratedConfigStore::from_config(config, app_state.db());
+                let catalog = crate::console::catalog::scan_queue_catalog_opt(
+                    &proxy_config.generated_queue_dir(),
+                    &proxy_config.queues_files,
+                    Some(&store),
+                )
+                .await;
+                let managed: std::collections::HashSet<String> = items
+                    .iter()
+                    .filter_map(|v| v["name"].as_str().map(|s| s.to_ascii_lowercase()))
+                    .collect();
+                let existing: std::collections::HashSet<String> = file_items
+                    .iter()
+                    .filter_map(|v| v["name"].as_str().map(|s| s.to_ascii_lowercase()))
+                    .collect();
+                for entry in catalog {
+                    let key = entry.name.to_ascii_lowercase();
+                    if managed.contains(&key) || existing.contains(&key) {
+                        continue;
+                    }
+                    file_items.push(json!({
+                        "id": null,
+                        "name": entry.name,
+                        "description": entry.description,
+                        "source": "file",
+                        "source_file": entry.file_path,
+                        "readonly": true,
+                        "is_active": true,
+                        "spec": null,
+                        "tags": [],
+                        "updated_at": null,
+                    }));
+                }
+            }
+        }
+
         file_items.sort_by(|a, b| {
             let a_name = a["name"].as_str().unwrap_or("");
             let b_name = b["name"].as_str().unwrap_or("");
@@ -234,7 +283,18 @@ pub async fn page_queue_create(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
+        let store = state.app_state().and_then(|app| {
+            let config = app.config();
+            if config.proxy.use_db_config() {
+                Some(crate::config_store::GeneratedConfigStore::from_config(
+                    config,
+                    app.db(),
+                ))
+            } else {
+                None
+            }
+        });
+        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };
@@ -287,7 +347,18 @@ pub async fn page_queue_edit(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
+        let store = state.app_state().and_then(|app| {
+            let config = app.config();
+            if config.proxy.use_db_config() {
+                Some(crate::config_store::GeneratedConfigStore::from_config(
+                    config,
+                    app.db(),
+                ))
+            } else {
+                None
+            }
+        });
+        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };

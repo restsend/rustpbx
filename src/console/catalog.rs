@@ -91,9 +91,6 @@ pub async fn scan_ivr_catalog_opt(
                 }
             }
         }
-        let mut catalog: Vec<IvrCatalogEntry> = seen.into_values().collect();
-        catalog.sort_by(|a, b| a.name.cmp(&b.name));
-        return catalog;
     }
 
     if ivr_dir.exists() {
@@ -262,7 +259,10 @@ pub async fn scan_ivr_catalog_opt(
     result
 }
 
-pub async fn scan_queue_catalog(queue_dir: &Path, extra_patterns: &[String]) -> Vec<QueueCatalogEntry> {
+pub async fn scan_queue_catalog(
+    queue_dir: &Path,
+    extra_patterns: &[String],
+) -> Vec<QueueCatalogEntry> {
     scan_queue_catalog_opt(queue_dir, extra_patterns, None).await
 }
 
@@ -303,9 +303,6 @@ pub async fn scan_queue_catalog_opt(
                 }
             }
         }
-        let mut catalog: Vec<QueueCatalogEntry> = seen.into_values().collect();
-        catalog.sort_by(|a, b| a.name.cmp(&b.name));
-        return catalog;
     }
 
     if queue_dir.exists() {

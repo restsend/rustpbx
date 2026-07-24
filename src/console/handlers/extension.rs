@@ -305,11 +305,24 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
     })
 }
 
-async fn build_forwarding_catalog(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
+async fn build_forwarding_catalog(
+    state: &ConsoleState,
+) -> crate::console::catalog::ForwardingCatalog {
     if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
-        crate::console::catalog::build_forwarding_catalog(&proxy_config).await
+        let store = state.app_state().and_then(|app| {
+            let config = app.config();
+            if config.proxy.use_db_config() {
+                Some(crate::config_store::GeneratedConfigStore::from_config(
+                    config,
+                    app.db(),
+                ))
+            } else {
+                None
+            }
+        });
+        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     }
