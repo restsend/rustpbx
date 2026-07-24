@@ -963,7 +963,10 @@ impl SipSession {
                 .clone()
                 .unwrap_or(sea_orm::DatabaseConnection::Disconnected),
             call_info,
-            Arc::new(crate::config::Config::default()),
+            Arc::new(crate::config::Config {
+                proxy: (*server.proxy_config).clone(),
+                ..Default::default()
+            }),
         );
         app_ctx.rwi_gateway = server.rwi_gateway.clone();
         app_ctx.ivr_trace = server.ivr_trace.clone();
@@ -11616,7 +11619,76 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
 mod tests {
     use super::*;
     use rustrtc::media::MediaStreamTrack;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::media::wav_reader::{SampleFormat, WavSpec, WavWriter};
+
+    // ---- helpers for codec / audio-content verification ----
+    fn generate_sine_wav(path: &Path, freq: f64, duration_secs: f64, sample_rate: u32) {
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(path, spec).unwrap();
+        let n = (sample_rate as f64 * duration_secs) as usize;
+        for i in 0..n {
+            let t = i as f64 / sample_rate as f64;
+            let s = (0.5 * (2.0 * std::f64::consts::PI * freq * t).sin() * 32767.0) as i16;
+            writer.write_sample(s).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn cross_correlate(signal: &[i16], reference: &[i16]) -> f64 {
+        if signal.is_empty() || reference.is_empty() || signal.len() < reference.len() {
+            return 0.0;
+        }
+        let n = reference.len();
+        let ref_mean: f64 = reference.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
+        let ref_var: f64 = reference
+            .iter()
+            .map(|&s| {
+                let d = s as f64 - ref_mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
+        if ref_var < 1e-20 {
+            return 0.0;
+        }
+        let ref_std = ref_var.sqrt();
+        let max_offset = signal.len() - n;
+        let step = std::cmp::max(1, max_offset / 200);
+        let mut best = 0.0;
+        for offset in (0..=max_offset).step_by(step) {
+            let w = &signal[offset..offset + n];
+            let wm: f64 = w.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
+            let wv: f64 = w
+                .iter()
+                .map(|&s| {
+                    let d = s as f64 - wm;
+                    d * d
+                })
+                .sum::<f64>()
+                / n as f64;
+            if wv < 1e-20 {
+                continue;
+            }
+            let ws = wv.sqrt();
+            let num: f64 = w
+                .iter()
+                .zip(reference.iter())
+                .map(|(&a, &b)| (a as f64 - wm) * (b as f64 - ref_mean))
+                .sum();
+            let c = num / (n as f64 * ws * ref_std);
+            if c > best {
+                best = c;
+            }
+        }
+        best
+    }
 
     #[test]
     fn test_sdp_transport_mode_classification() {
@@ -14548,4 +14620,467 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             bridge.stop().await;
         }
     }
+
+    // ── Layer 2: media.play → codec + sample rate verification ──
+    //
+    // Content verification (cross-correlation, frequency analysis) is done
+    // at the Recorder level in src/media/info_recording_tests.rs (Layer 4)
+    // because bridge get_callee_track() exposes the RECEIVE path (audio from
+    // callee), not the SEND path where handle_play injects the file.
+
+    #[tokio::test]
+    async fn test_play_pcmu_selects_correct_codec_and_rate() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _h, _rx) = SipSession::new(
+            server, CancellationToken::new(), None,
+            CallContext {
+                session_id: "test-pcmu".to_string(),
+                dialplan: Arc::new(Dialplan::new("test-pcmu".to_string(), original_request, DialDirection::Inbound)),
+                cookie: TransactionCookie::default(),
+                start_time: Instant::now(),
+                original_caller: "sip:alice@rustpbx.com".to_string(),
+                original_callee: "sip:bob@microsip.net".to_string(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            },
+            server_dialog, false, caller_peer, callee_peer,
+        );
+        setup_pcmu_offers(&mut session);
+        enable_bridge_for_callee(&mut session).await;
+        play_test_file(&mut session, "pcmu", LegId::from("callee")).await;
+        let ci = session.media.playback_tracks.get("pcmu-callee")
+            .and_then(|t| t.codec_info()).cloned().unwrap();
+        assert_eq!(ci.codec, audio_codec::CodecType::PCMU, "codec");
+        assert_eq!(ci.payload_type, 0, "PT");
+        assert_eq!(ci.clock_rate, 8000, "clock_rate");
+        clean_bridge(&mut session).await;
+    }
+
+    #[tokio::test]
+    async fn test_play_pcma_selects_correct_codec_and_rate() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _h, _rx) = SipSession::new(
+            server, CancellationToken::new(), None,
+            CallContext {
+                session_id: "test-pcma".to_string(),
+                dialplan: Arc::new(Dialplan::new("test-pcma".to_string(), original_request, DialDirection::Inbound)),
+                cookie: TransactionCookie::default(),
+                start_time: Instant::now(),
+                original_caller: "sip:alice@rustpbx.com".to_string(),
+                original_callee: "sip:bob@microsip.net".to_string(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            },
+            server_dialog, false, caller_peer, callee_peer,
+        );
+        setup_pcma_offers(&mut session);
+        enable_bridge_for_callee(&mut session).await;
+        play_test_file(&mut session, "pcma", LegId::from("callee")).await;
+        let ci = session.media.playback_tracks.get("pcma-callee")
+            .and_then(|t| t.codec_info()).cloned().unwrap();
+        assert_eq!(ci.codec, audio_codec::CodecType::PCMA, "codec");
+        assert_eq!(ci.payload_type, 8, "PT");
+        assert_eq!(ci.clock_rate, 8000, "clock_rate");
+        clean_bridge(&mut session).await;
+    }
+
+    #[tokio::test]
+    async fn test_play_opus_selects_correct_codec_and_rate() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _h, _rx) = SipSession::new(
+            server, CancellationToken::new(), None,
+            CallContext {
+                session_id: "test-opus".to_string(),
+                dialplan: Arc::new(Dialplan::new("test-opus".to_string(), original_request, DialDirection::Inbound)),
+                cookie: TransactionCookie::default(),
+                start_time: Instant::now(),
+                original_caller: "sip:alice@rustpbx.com".to_string(),
+                original_callee: "sip:bob@microsip.net".to_string(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            },
+            server_dialog, false, caller_peer, callee_peer,
+        );
+        setup_opus_offers(&mut session);
+        enable_bridge_for_callee(&mut session).await;
+        play_test_file(&mut session, "opus", LegId::from("callee")).await;
+        let ci = session.media.playback_tracks.get("opus-callee")
+            .and_then(|t| t.codec_info()).cloned().unwrap();
+        assert_eq!(ci.codec, audio_codec::CodecType::Opus, "codec");
+        assert_eq!(ci.payload_type, 111, "PT");
+        assert_eq!(ci.clock_rate, 48000, "clock_rate");
+        clean_bridge(&mut session).await;
+    }
+
+    // ── Layer 3: hold/unhold SDP direction ──
+
+    #[tokio::test]
+    async fn test_hold_sdp_contains_sendonly() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server.dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _h, _rx) = SipSession::new(
+            server, CancellationToken::new(), None,
+            CallContext {
+                session_id: "test-hold-sdp".to_string(),
+                dialplan: Arc::new(Dialplan::new("test-hold-sdp".to_string(), original_request, DialDirection::Inbound)),
+                cookie: TransactionCookie::default(),
+                start_time: Instant::now(),
+                original_caller: "sip:alice@rustpbx.com".to_string(),
+                original_callee: "sip:bob@rustpbx.com".to_string(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            },
+            server_dialog, false, caller_peer, callee_peer,
+        );
+
+        // Hold SDP: sendrecv → sendonly
+        let sendrecv_sdp = concat!(
+            "v=0\r\n",
+            "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+            "s=Talk\r\n",
+            "c=IN IP4 192.0.2.10\r\n",
+            "t=0 0\r\n",
+            "m=audio 40000 RTP/AVP 0 101\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n",
+            "a=rtpmap:101 telephone-event/8000\r\n",
+            "a=sendrecv\r\n",
+        ).to_string();
+        // The method reads answer first, then caller_offer
+        session.media.answer = Some(sendrecv_sdp);
+
+        let hold_sdp = session.generate_hold_sdp().await.expect("hold SDP");
+        assert!(hold_sdp.contains("a=sendonly"), "hold SDP must be sendonly, got: {}", hold_sdp);
+        assert!(!hold_sdp.contains("a=sendrecv"), "hold SDP must NOT contain sendrecv");
+
+        let unhold_sdp = session.generate_unhold_sdp().await.expect("unhold SDP");
+        assert!(unhold_sdp.contains("a=sendrecv"), "unhold SDP must be sendrecv, got: {}", unhold_sdp);
+        assert!(!unhold_sdp.contains("a=sendonly"), "unhold SDP must NOT contain sendonly");
+    }
+
+    // ── Layer 1: parse_info_command dispatch (pure function, no session needed) ──
+
+    #[test]
+    fn test_parse_info_media_play() {
+        let params = serde_json::json!({"source": {"source_type": "file", "uri": "/tmp/test.wav"}, "loop": true});
+        let cmd = SipSession::parse_info_command("media.play", Some(&params), &params)
+            .expect("parse_info_command returned None");
+        match cmd {
+            CallCommand::Play { source: crate::call::domain::MediaSource::File { ref path }, ref options, .. } => {
+                assert_eq!(path, "/tmp/test.wav");
+                assert!(options.as_ref().unwrap().loop_playback);
+            }
+            _ => panic!("expected Play with File source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_info_media_stop() {
+        let json = serde_json::json!({"leg_id": "callee"});
+        let cmd = SipSession::parse_info_command("media.stop", Some(&json), &json).unwrap();
+        assert!(matches!(&cmd, CallCommand::StopPlayback { leg_id } if leg_id == &Some(LegId::from("callee"))));
+    }
+
+    #[test]
+    fn test_parse_info_record_start() {
+        let json = serde_json::json!({"path": "/tmp/rec.wav", "beep": false});
+        let cmd = SipSession::parse_info_command("record.start", Some(&json), &json).unwrap();
+        assert!(matches!(&cmd, CallCommand::StartRecording { config } if config.path == "/tmp/rec.wav" && !config.beep));
+    }
+
+    #[test]
+    fn test_parse_info_record_stop() {
+        assert!(matches!(
+            SipSession::parse_info_command("record.stop", None, &serde_json::json!({})),
+            Some(CallCommand::StopRecording),
+        ));
+    }
+
+    #[test]
+    fn test_parse_info_hold() {
+        let json = serde_json::json!({"leg_id": "callee"});
+        let cmd = SipSession::parse_info_command("hold", Some(&json), &json).unwrap();
+        assert!(matches!(&cmd, CallCommand::Hold { leg_id, music } if leg_id == &LegId::from("callee") && music.is_none()));
+    }
+
+    #[test]
+    fn test_parse_info_unhold() {
+        let json = serde_json::json!({"leg_id": "callee"});
+        let cmd = SipSession::parse_info_command("unhold", Some(&json), &json).unwrap();
+        assert!(matches!(&cmd, CallCommand::Unhold { leg_id } if leg_id == &LegId::from("callee")));
+    }
+
+    #[test]
+    fn test_parse_info_hold_with_music() {
+        let json = serde_json::json!({"music": {"source_type": "file", "uri": "/tmp/hold.wav"}});
+        let cmd = SipSession::parse_info_command("hold", Some(&json), &json).unwrap();
+        assert!(matches!(&cmd, CallCommand::Hold { music: Some(_), .. }));
+    }
+
+    #[test]
+    fn test_parse_info_consult_initiate() {
+        let parsed = serde_json::json!({});
+        let json = serde_json::json!({"leg_id": "caller"});
+        let cmd = SipSession::parse_info_command("consult.initiate", Some(&json), &parsed).unwrap();
+        assert!(matches!(&cmd, CallCommand::Hold { leg_id, music: None } if leg_id == &LegId::from("caller")));
+    }
+
+    #[test]
+    fn test_parse_info_consult_cancel() {
+        let parsed = serde_json::json!({"call_id": "dynamic-leg"});
+        let cmd = SipSession::parse_info_command("consult.cancel", None, &parsed).unwrap();
+        assert!(matches!(&cmd, CallCommand::Unhold { leg_id } if leg_id == &LegId::from("dynamic-leg")));
+    }
+
+    #[test]
+    fn test_parse_info_unknown_action() {
+        assert!(SipSession::parse_info_command("unknown.action", None, &serde_json::json!({})).is_none());
+    }
+
+    // ── Layer 2 helpers (take &mut SipSession only, no complex types) ──
+
+    fn setup_pcmu_offers(session: &mut SipSession) {
+        session.media.caller_offer = Some(concat!(
+            "v=0
+", "o=alice 1 1 IN IP4 192.0.2.10
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.10
+", "t=0 0
+",
+            "m=audio 40000 RTP/AVP 0 101
+",
+            "a=rtpmap:0 PCMU/8000
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_offer = Some(concat!(
+            "v=0
+", "o=bob 1 1 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40050 RTP/AVP 0 101
+",
+            "a=rtpmap:0 PCMU/8000
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_answer_sdp = Some(concat!(
+            "v=0
+", "o=bob 2 2 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40060 RTP/AVP 0
+",
+            "a=rtpmap:0 PCMU/8000
+", "a=sendrecv
+",
+        ).to_string());
+        set_rtp_transports(session);
+    }
+
+    fn setup_pcma_offers(session: &mut SipSession) {
+        session.media.caller_offer = Some(concat!(
+            "v=0
+", "o=alice 1 1 IN IP4 192.0.2.10
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.10
+", "t=0 0
+",
+            "m=audio 40000 RTP/AVP 0 101
+",
+            "a=rtpmap:0 PCMU/8000
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_offer = Some(concat!(
+            "v=0
+", "o=bob 1 1 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40050 RTP/AVP 8 101
+",
+            "a=rtpmap:8 PCMA/8000
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_answer_sdp = Some(concat!(
+            "v=0
+", "o=bob 2 2 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40060 RTP/AVP 8
+",
+            "a=rtpmap:8 PCMA/8000
+", "a=sendrecv
+",
+        ).to_string());
+        set_rtp_transports(session);
+    }
+
+    fn setup_opus_offers(session: &mut SipSession) {
+        session.media.caller_offer = Some(concat!(
+            "v=0
+", "o=alice 1 1 IN IP4 192.0.2.10
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.10
+", "t=0 0
+",
+            "m=audio 40000 RTP/AVP 0 101
+",
+            "a=rtpmap:0 PCMU/8000
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_offer = Some(concat!(
+            "v=0
+", "o=bob 1 1 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40050 RTP/AVP 111 101
+",
+            "a=rtpmap:111 opus/48000/2
+",
+            "a=rtpmap:101 telephone-event/8000
+", "a=sendrecv
+",
+        ).to_string());
+        session.media.callee_answer_sdp = Some(concat!(
+            "v=0
+", "o=bob 2 2 IN IP4 192.0.2.20
+",
+            "s=Talk
+", "c=IN IP4 192.0.2.20
+", "t=0 0
+",
+            "m=audio 40060 RTP/AVP 111
+",
+            "a=rtpmap:111 opus/48000/2
+", "a=sendrecv
+",
+        ).to_string());
+        set_rtp_transports(session);
+    }
+
+    fn set_rtp_transports(session: &mut SipSession) {
+        session.legs.set_transport(LegId::from("caller"), rustrtc::TransportMode::WebRtc);
+        session.legs.set_transport(LegId::from("callee"), rustrtc::TransportMode::Rtp);
+    }
+
+    async fn enable_bridge_for_callee(session: &mut SipSession) {
+        let _answer = session.prepare_app_caller_media_bridge().await;
+        assert!(session.media.media_bridge.is_some());
+        session.media.callee_offer_uses_media_bridge = true;
+        if let Some(ref bridge) = session.media.media_bridge {
+            bridge.open_caller_gate();
+        }
+    }
+
+    async fn play_test_file(session: &mut SipSession, tag: &str, leg: LegId) {
+        use crate::call::domain::{MediaSource, PlayOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let wav_path = dir.path().join(format!("{}_sine_440.wav", tag));
+        generate_sine_wav(&wav_path, 440.0, 0.5, 8000);
+        session.handle_play(
+            Some(leg),
+            MediaSource::File { path: wav_path.to_str().unwrap().to_string() },
+            Some(PlayOptions { track_id: Some(tag.to_string()), ..Default::default() }),
+        ).await.expect("play");
+    }
+
+    async fn clean_bridge(session: &mut SipSession) {
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
 }
+
