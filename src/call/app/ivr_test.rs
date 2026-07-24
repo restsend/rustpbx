@@ -2860,4 +2860,89 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
+
+    // ── 14. ivr.exec: IvrExecResult written to extensions on transfer ──
+
+    #[tokio::test]
+    async fn test_ivr_exec_writes_result_to_extensions() {
+        use crate::call::app::ivr_config::*;
+        use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
+        use crate::proxy::proxy_call::session_hooks::SessionExtensions;
+        use chrono::Utc;
+
+        let ivr = build_simple_ivr();
+        let ext = SessionExtensions::new();
+
+        // Pre-set IvrExecState to simulate ivr.exec flow.
+        {
+            let mut guard = ext.write();
+            guard.insert(IvrExecState {
+                request_id: "test-req".into(),
+                held_leg: Some(crate::call::domain::LegId::from("callee")),
+                initiator_leg: crate::call::domain::LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".into(),
+                metadata: serde_json::Value::Null,
+            });
+        }
+
+        // Build ApplicationContext with pre-seeded session_extensions.
+        let app_ctx = crate::call::app::ApplicationContext {
+            session_vars: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            queue_name: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            db: sea_orm::DatabaseConnection::Disconnected,
+            http_client: reqwest::Client::new(),
+            call_info: crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "caller".into(),
+                callee: "1000".into(),
+                direction: "inbound".into(),
+                started_at: Utc::now(),
+                sip_headers: HashMap::new(),
+                route_name: None,
+            },
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            rwi_gateway: None,
+            ivr_trace: None,
+            session_extensions: ext.clone(),
+            pending_queue: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        };
+
+        let mut stack = crate::call::app::testing::MockCallStack::run_with_context(
+            Box::new(IvrApp::new(ivr)),
+            app_ctx,
+        );
+
+        // Answer + play greeting
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Greeting complete → DTMF "1" → Transfer
+        stack.audio_complete("default");
+        stack.dtmf("1");
+
+        // IVR should emit Transfer command and write IvrExecResult.
+        stack
+            .assert_cmd(200, "Transfer", |c| matches!(c, CallCommand::Transfer { .. }))
+            .await;
+
+        // Verify IvrExecResult was written to extensions.
+        let guard = ext.read();
+        let result = guard.get::<IvrExecResult>().cloned();
+        assert!(result.is_some(), "IvrExecResult should be written");
+        let result = result.unwrap();
+        assert_eq!(result.status, "transferred");
+        assert_eq!(result.reason, "agent_transfer");
+        assert!(
+            result.routing_target.is_some(),
+            "routing_target should be set for Transfer"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
 }

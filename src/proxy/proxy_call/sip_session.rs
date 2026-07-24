@@ -2896,43 +2896,21 @@ impl SipSession {
         Ok(())
     }
 
-    /// Handle a rustpbx JSON command received via SIP INFO with
-    /// `application/vnd.rustpbx+json` content type.  The command is dispatched
-    /// asynchronously through the session command channel and the INFO request
-    /// is always acknowledged with 200 OK.
-    async fn handle_rustpbx_info_command(
-        &mut self,
-        body: &str,
-        tx_handle: &TransactionHandle,
-    ) -> Result<()> {
-        let parsed: serde_json::Value = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    session_id = %self.context.session_id,
-                    error = %e,
-                    body = %body,
-                    "SIP INFO rustpbx command: invalid JSON"
-                );
-                tx_handle
-                    .respond(rsipstack::sip::StatusCode::OK, None, None)
-                    .await
-                    .ok();
-                return Ok(());
-            }
-        };
+    /// Parse the music parameter from INFO command params, returning an
+    /// optional [`MediaSource`] that can be passed to Hold or used directly.
+    fn parse_info_music_param(params: &serde_json::Value) -> Option<crate::call::domain::MediaSource> {
+        params.get("music").and_then(Self::parse_info_media_source)
+    }
 
-        // Determine action — support both `action` and legacy `cmd` fields
-        let action = parsed
-            .get("action")
-            .and_then(|v| v.as_str())
-            .or_else(|| parsed.get("cmd").and_then(|v| v.as_str()))
-            .unwrap_or_default()
-            .to_string();
-
-        let params = parsed.get("params");
-
-        let cmd: Option<CallCommand> = match action.as_str() {
+    /// Pure function: map an INFO action + params to a [`CallCommand`].
+    /// Does NOT access `self` — can be unit-tested in isolation.
+    /// Returns `None` for unknown/no-op actions.
+    pub(crate) fn parse_info_command(
+        action: &str,
+        params: Option<&serde_json::Value>,
+        parsed: &serde_json::Value,
+    ) -> Option<CallCommand> {
+        match action {
             "media.play" | "media.inject_start" => {
                 let source = params
                     .and_then(|p| p.get("source"))
@@ -2993,7 +2971,7 @@ impl SipSession {
                         .and_then(|v| v.as_str())
                         .unwrap_or("caller"),
                 ),
-                music: None,
+                music: params.and_then(Self::parse_info_music_param),
             }),
             "unhold" => Some(CallCommand::Unhold {
                 leg_id: LegId::new(
@@ -3022,44 +3000,203 @@ impl SipSession {
                         .unwrap_or("caller"),
                 ),
             }),
-            other => {
+            _ => None,
+        }
+    }
+
+    /// Handle a rustpbx JSON command received via SIP INFO with
+    /// `application/vnd.rustpbx+json` content type.  The command is dispatched
+    /// asynchronously through the session command channel and the INFO request
+    /// is always acknowledged with 200 OK.
+    ///
+    /// For `ivr.exec` the handler performs the hold synchronously and then
+    /// enqueues the `StartApp` command, so the callee is held before the IVR
+    /// starts on the caller side.
+    async fn handle_rustpbx_info_command(
+        &mut self,
+        body: &str,
+        tx_handle: &TransactionHandle,
+    ) -> Result<()> {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
                 warn!(
                     session_id = %self.context.session_id,
-                    action = %other,
-                    "SIP INFO rustpbx command: unknown action"
+                    error = %e,
+                    body = %body,
+                    "SIP INFO rustpbx command: invalid JSON"
                 );
-                None
+                tx_handle
+                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .await
+                    .ok();
+                return Ok(());
             }
         };
 
+        // Determine action — support both `action` and legacy `cmd` fields
+        let action = parsed
+            .get("action")
+            .and_then(|v| v.as_str())
+            .or_else(|| parsed.get("cmd").and_then(|v| v.as_str()))
+            .unwrap_or_default()
+            .to_string();
+
+        let params = parsed.get("params");
+
+        // ── ivr.exec: bundled IVR execution (hold callee + start app) ──
+        if action == "ivr.exec" {
+            return self
+                .handle_ivr_exec_command(params.cloned(), tx_handle)
+                .await;
+        }
+
+        // ── app.start / app.stop: generic non-bundled app control ──
+        if action == "app.start" {
+            let app_name = params
+                .and_then(|p| p.get("app_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("ivr")
+                .to_string();
+            let app_params = params.and_then(|p| p.get("app_params")).cloned();
+            let cmd = CallCommand::StartApp {
+                app_name,
+                params: app_params,
+                auto_answer: false,
+            };
+            Self::send_or_log_cmd(&self.cmd_tx, cmd, &action, &self.context.session_id);
+            tx_handle
+                .respond(rsipstack::sip::StatusCode::OK, None, None)
+                .await
+                .ok();
+            return Ok(());
+        }
+
+        if action == "app.stop" {
+            let cmd = CallCommand::StopApp { reason: None };
+            Self::send_or_log_cmd(&self.cmd_tx, cmd, &action, &self.context.session_id);
+            tx_handle
+                .respond(rsipstack::sip::StatusCode::OK, None, None)
+                .await
+                .ok();
+            return Ok(());
+        }
+
+        let cmd: Option<CallCommand> = Self::parse_info_command(&action, params, &parsed);
+
         match cmd {
-            Some(cmd) => {
-                if let Some(ref tx) = self.cmd_tx {
-                    if let Err(e) = tx.try_send(cmd) {
-                        warn!(
-                            session_id = %self.context.session_id,
-                            action = %action,
-                            error = %e,
-                            "SIP INFO rustpbx command: failed to enqueue"
-                        );
-                    } else {
-                        info!(
-                            session_id = %self.context.session_id,
-                            action = %action,
-                            "SIP INFO rustpbx command accepted"
-                        );
-                    }
-                }
-            }
+            Some(cmd) => Self::send_or_log_cmd(&self.cmd_tx, cmd, &action, &self.context.session_id),
             None => {
-                info!(
+                warn!(
                     session_id = %self.context.session_id,
                     action = %action,
-                    "SIP INFO rustpbx command ignored (unknown action or no-op)"
+                    "SIP INFO rustpbx command: unknown action"
                 );
             }
         }
 
+        tx_handle
+            .respond(rsipstack::sip::StatusCode::OK, None, None)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    /// Helper to send a command to the session command channel with logging.
+    fn send_or_log_cmd(
+        cmd_tx: &Option<mpsc::Sender<CallCommand>>,
+        cmd: CallCommand,
+        action: &str,
+        session_id: &str,
+    ) {
+        if let Some(tx) = cmd_tx {
+            if let Err(e) = tx.try_send(cmd) {
+                warn!(
+                    session_id = %session_id,
+                    action = %action,
+                    error = %e,
+                    "SIP INFO rustpbx command: failed to enqueue"
+                );
+            } else {
+                info!(
+                    session_id = %session_id,
+                    action = %action,
+                    "SIP INFO rustpbx command accepted"
+                );
+            }
+        }
+    }
+
+    /// Handle `ivr.exec` — bundled IVR execution.
+    ///
+    /// 1. Writes [`IvrExecState`] to session extensions
+    /// 2. Holds callee + plays hold music (reuses the propagate-hold path)
+    /// 3. Enqueues `StartApp` via the command channel
+    async fn handle_ivr_exec_command(
+        &mut self,
+        params: Option<serde_json::Value>,
+        tx_handle: &TransactionHandle,
+    ) -> Result<()> {
+        let session_id = self.context.session_id.clone();
+        let p = params.as_ref();
+        let request_id = p
+            .and_then(|p| p.get("request_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let app_name = p
+            .and_then(|p| p.get("app"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("ivr")
+            .to_string();
+        let ivr_params = p.and_then(|p| p.get("ivr_params")).cloned();
+        let hold_agent = p
+            .and_then(|p| p.get("hold_agent"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let webhook_url = p
+            .and_then(|p| p.get("webhook_url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let metadata = p
+            .and_then(|p| p.get("metadata"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let override_music = p
+            .and_then(|p| p.get("music"))
+            .and_then(Self::parse_info_media_source);
+
+        // 1. Write IvrExecState so the post-exit hook can reconstruct the result.
+        {
+            let mut ext = self.extensions.write();
+            ext.insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+                request_id: request_id.clone(),
+                held_leg: if hold_agent {
+                    Some(LegId::from("callee"))
+                } else {
+                    None
+                },
+                initiator_leg: LegId::from("callee"),
+                webhook_url,
+                app_name: app_name.clone(),
+                metadata,
+            });
+        }
+
+        // 2. Hold callee + play music (use override_music if provided, else default).
+        if hold_agent {
+            self.propagate_hold_to_callee(&[], override_music).await?;
+        }
+
+        // 3. Start the app on the caller leg.
+        let cmd = CallCommand::StartApp {
+            app_name,
+            params: ivr_params,
+            auto_answer: false,
+        };
+        Self::send_or_log_cmd(&self.cmd_tx, cmd, "ivr.exec", &session_id);
+
+        // Ack the INFO immediately.
         tx_handle
             .respond(rsipstack::sip::StatusCode::OK, None, None)
             .await
@@ -7927,7 +8064,7 @@ impl SipSession {
                     };
                     if let Some(is_hold) = callee_transition {
                         if is_hold {
-                            if let Err(e) = self.propagate_hold_to_callee(request_headers).await {
+                            if let Err(e) = self.propagate_hold_to_callee(request_headers, None).await {
                                 warn!(error = %e, "Failed to propagate hold to callee");
                             }
                         } else {
@@ -7972,16 +8109,21 @@ impl SipSession {
     /// Called when caller initiates hold (sendonly/inactive).
     /// Propagates the hold to the callee side: updates leg state, sends hold
     /// re-INVITE (if no media bridge), and starts hold music (if media bridge).
+    ///
+    /// `override_music`, if `Some`, is used instead of the normal
+    /// header/extension/config resolution chain.
     async fn propagate_hold_to_callee(
         &mut self,
         request_headers: &[rsipstack::sip::Header],
+        override_music: Option<crate::call::domain::MediaSource>,
     ) -> Result<()> {
         info!("Propagating hold to callee");
 
         self.update_leg_state(&LegId::from("callee"), LegState::Hold);
 
         if self.media.media_bridge.is_some() {
-            if let Some(music) = self.resolve_hold_music(request_headers) {
+            let music = override_music.or_else(|| self.resolve_hold_music(request_headers));
+            if let Some(music) = music {
                 let path = match &music {
                     crate::call::domain::MediaSource::File { path } => path.clone(),
                     crate::call::domain::MediaSource::Url { url } => url.clone(),
@@ -9762,8 +9904,122 @@ impl SipSession {
                 CommandResult::failure(reason)
             }
 
+            CallCommand::AppExited => self.handle_app_exited().await,
+
+            CallCommand::SendInfo {
+                leg_id,
+                content_type,
+                body,
+            } => Self::ok_or_failure(self.handle_send_info(leg_id, content_type, body).await),
+
             _ => CommandResult::not_supported("Command not yet implemented"),
         }
+    }
+
+    /// Handle app exit: iterate hooks and run post-exit actions (unhold, send result INFO).
+    async fn handle_app_exited(&mut self) -> CommandResult {
+        if self.server.session_hooks.is_empty() {
+            return CommandResult::success();
+        }
+
+        let ctx = self.session_hook_ctx();
+
+        // Collect completion intents from hooks while holding only an immutable
+        // reference to self, then apply them with a mutable reference.
+        let completions: Vec<_> = {
+            let hooks = self.server.session_hooks.clone();
+            let mut results = Vec::new();
+            for hook in hooks.iter() {
+                if let Some(completion) = hook.on_app_exited(&ctx).await {
+                    results.push(completion);
+                }
+            }
+            results
+        };
+
+        for completion in completions {
+            // Unhold leg if requested.
+            if let Some(leg_id) = &completion.unhold_leg {
+                if leg_id.as_str() == "callee" {
+                    if let Err(e) = self.propagate_unhold_to_callee().await {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %e,
+                            "Failed to unhold callee after app exit"
+                        );
+                    }
+                }
+            }
+
+            // Send result INFO if requested.
+            if let Some(spec) = completion.result_info {
+                if let Err(e) = self
+                    .handle_send_info(spec.leg_id, spec.content_type, spec.body)
+                    .await
+                {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        error = %e,
+                        "Failed to send result INFO after app exit"
+                    );
+                }
+            }
+        }
+
+        CommandResult::success()
+    }
+
+    /// Send a SIP INFO request to the dialog identified by the given leg.
+    /// Currently supports `leg_id = "callee"` using `connected_callee_dialog_id`.
+    async fn handle_send_info(
+        &self,
+        leg_id: LegId,
+        content_type: String,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let dialog_id = match leg_id.as_str() {
+            "callee" => self.meta.connected_callee_dialog_id.clone(),
+            other => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    leg_id = %other,
+                    "SendInfo: unsupported leg"
+                );
+                return Err(anyhow::anyhow!("Unsupported leg for SendInfo: {}", other));
+            }
+        };
+
+        let Some(dialog_id) = dialog_id else {
+            warn!(
+                session_id = %self.context.session_id,
+                leg_id = %leg_id.0,
+                "SendInfo: no dialog found for leg"
+            );
+            return Err(anyhow::anyhow!("No dialog found for leg: {}", leg_id));
+        };
+
+        let Some(dlg) = self.server.dialog_layer.get_dialog(&dialog_id) else {
+            warn!(
+                session_id = %self.context.session_id,
+                dialog_id = %dialog_id,
+                "SendInfo: dialog not found"
+            );
+            return Err(anyhow::anyhow!("Dialog not found: {}", dialog_id));
+        };
+
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            rsipstack::sip::headers::ContentType::from(content_type.as_str()),
+        )];
+
+        info!(
+            session_id = %self.context.session_id,
+            leg_id = %leg_id.0,
+            content_type = %content_type,
+            body_len = body.len(),
+            "Sending SIP INFO via SendInfo command"
+        );
+
+        Self::send_info_to_dialog(&dlg, headers, body).await
     }
 
     async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {

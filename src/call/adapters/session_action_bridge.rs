@@ -266,7 +266,9 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::StartApp { .. }
         | CallCommand::StopApp { .. }
         | CallCommand::InjectAppEvent { .. }
-        | CallCommand::DtmfCollect { .. } => {
+        | CallCommand::DtmfCollect { .. }
+        | CallCommand::AppExited
+        | CallCommand::SendInfo { .. } => {
             Err(AdapterError::NotSupported(format!("{:?}", cmd)).into())
         }
 

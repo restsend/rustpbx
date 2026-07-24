@@ -170,6 +170,17 @@ impl AppRuntime for DefaultAppRuntime {
 
             // Clear the app event sender so the session knows the app has exited.
             handle.set_app_event_sender(None);
+
+            // Notify the session that the app has exited so it can run
+            // post-exit hooks (e.g. IVR-exec unhold + result delivery).
+            if let Err(e) = handle.send_command(CallCommand::AppExited) {
+                tracing::warn!(
+                    "Failed to send AppExited for session {}: {}",
+                    session_id_for_log,
+                    e
+                );
+            }
+
             tracing::info!(
                 "App {} exited for session {}",
                 app_name_owned,

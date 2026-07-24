@@ -72,6 +72,8 @@ pub enum TestUaEvent {
     Referred(DialogId, String),
     /// SIP INFO with DTMF (application/dtmf-relay) received on this dialog
     DtmfInfo(DialogId, String),
+    /// SIP INFO (non-DTMF) received: (dialog_id, content_type, body)
+    InfoReceived(DialogId, String, Vec<u8>),
 }
 
 impl TestUa {
@@ -707,13 +709,19 @@ impl TestUa {
                     }
                     DialogState::Info(id, request, tx_handle) => {
                         tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
-                        let is_dtmf = request.headers.iter().any(|h| {
-                            if let rsipstack::sip::Header::ContentType(ct) = h {
-                                ct.value().to_lowercase().contains("application/dtmf-relay")
-                            } else {
-                                false
-                            }
-                        });
+                        let content_type = request
+                            .headers
+                            .iter()
+                            .find_map(|h| {
+                                if let rsipstack::sip::Header::ContentType(ct) = h {
+                                    Some(ct.value().to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default();
+                        let is_dtmf =
+                            content_type.to_lowercase().contains("application/dtmf-relay");
                         if is_dtmf {
                             let body = String::from_utf8_lossy(request.body());
                             for line in body.lines() {
@@ -734,6 +742,18 @@ impl TestUa {
                                     }
                                 }
                             }
+                        } else {
+                            debug!(
+                                "TestUa: Received non-DTMF INFO on {}: ct={} body_len={}",
+                                id,
+                                content_type,
+                                request.body().len()
+                            );
+                            events.push(TestUaEvent::InfoReceived(
+                                id.clone(),
+                                content_type,
+                                request.body().to_vec(),
+                            ));
                         }
                     }
                     DialogState::Refer(id, request, tx_handle) => {

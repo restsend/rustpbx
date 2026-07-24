@@ -1057,24 +1057,26 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config".to_string());
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S%f");
     let backup_name = format!("{}.{}.bak", file_name, timestamp);
     let backup_path = path.with_file_name(backup_name);
-    fs::rename(path, &backup_path).with_context(|| {
-        format!(
-            "failed to backup {} to {}",
-            path.display(),
-            backup_path.display()
-        )
-    })?;
-    Ok(Some(backup_path))
+    match fs::rename(path, &backup_path) {
+        Ok(_) => Ok(Some(backup_path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "failed to backup {} to {}",
+                path.display(),
+                backup_path.display()
+            )
+        }),
+    }
 }
 
 fn serialize_trunks_toml(trunks: &HashMap<String, TrunkConfig>) -> Result<String> {

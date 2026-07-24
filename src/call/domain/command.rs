@@ -428,6 +428,22 @@ pub enum CallCommand {
         /// Failure reason
         reason: String,
     },
+
+    /// Application exited (async notification sent by app runtime when the
+    /// running CallApp event loop finishes, for any reason).
+    AppExited,
+
+    /// Send a SIP INFO request to a specific dialog with a custom body and
+    /// content-type.  Used by the IVR-exec flow to deliver the result back
+    /// to the cc-phone agent.
+    SendInfo {
+        /// Dialog leg ID to send to (e.g. "callee").
+        leg_id: LegId,
+        /// Content-Type header value.
+        content_type: String,
+        /// Body bytes.
+        body: Vec<u8>,
+    },
 }
 
 /// Point-to-point bridge mode

@@ -442,3 +442,37 @@ rtc_cname = "my-pbx-01"
 ```
 
 When neither is specified, both default to the same randomly generated hex string, making the PBX instance identifiable without revealing implementation details.
+
+---
+
+## Session Hooks
+
+Session hooks allow addons to observe and influence the call lifecycle. Hooks are registered
+programmatically via [`SipServerBuilder::with_session_hook`].
+
+### Built-in Hooks
+
+| Hook | Module | Trigger | Purpose |
+|------|--------|---------|---------|
+| `CcCallSessionHook` | `addons::cc` | connected / held / ended / agent_disconnected | CC lifecycle events + CDR push |
+| `IvrExecHook` | `proxy::proxy_call::ivr_exec_hook` | `on_app_exited` | IVR exec auto-unhold + result delivery |
+
+### IvrExecHook
+
+The `IvrExecHook` handles the `ivr.exec` post-exit flow: when an application started via
+`ivr.exec` exits, the hook reads the execution state from session extensions, writes
+the result (or sends a webhook), and instructs the session to unhold the callee and
+send a result SIP INFO back.
+
+Registration (already done automatically when CC addon is enabled):
+
+```rust
+use std::sync::Arc;
+use crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook;
+
+SipServerBuilder::new(config)
+    .with_session_hook(Arc::new(IvrExecHook))
+    // ...
+```
+
+For the complete `ivr.exec` protocol reference, see [`docs/ivr_exec.md`](../ivr_exec.md).

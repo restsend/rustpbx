@@ -1,7 +1,7 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config, create_transaction,
 };
-use crate::call::domain::{LegId, MediaCapability, MediaPathMode};
+use crate::call::domain::{CallCommand, LegId, MediaCapability, MediaPathMode};
 use crate::call::runtime::{AppDescriptor, AppRuntime, AppRuntimeError, AppStatus};
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
@@ -681,4 +681,98 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
         session.meta.connected_callee,
         Some("sip:b@example.com".to_string())
     );
+}
+
+// ── parse_info_command pure function tests ──
+
+#[test]
+fn parse_hold() {
+    let parsed = serde_json::json!({"action":"hold","params":{"leg_id":"caller"}});
+    let cmd = SipSession::parse_info_command("hold", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Hold { leg_id, .. }) if leg_id.as_str() == "caller"));
+}
+
+#[test]
+fn parse_hold_with_music() {
+    let parsed = serde_json::json!({
+        "action":"hold",
+        "params":{"leg_id":"caller","music":{"source_type":"file","uri":"music.wav"}}
+    });
+    let cmd = SipSession::parse_info_command("hold", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Hold { leg_id, music: Some(_), .. }) if leg_id.as_str() == "caller"));
+}
+
+#[test]
+fn parse_hold_default_leg() {
+    let parsed = serde_json::json!({"action":"hold","params":{}});
+    let cmd = SipSession::parse_info_command("hold", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Hold { leg_id, .. }) if leg_id.as_str() == "caller"));
+}
+
+#[test]
+fn parse_unhold() {
+    let parsed = serde_json::json!({"action":"unhold","params":{"leg_id":"callee"}});
+    let cmd = SipSession::parse_info_command("unhold", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Unhold { leg_id }) if leg_id.as_str() == "callee"));
+}
+
+#[test]
+fn parse_media_play() {
+    let parsed = serde_json::json!({
+        "action":"media.play",
+        "params":{"source":{"source_type":"file","uri":"prompt.wav"},"loop":true}
+    });
+    let cmd = SipSession::parse_info_command("media.play", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Play { .. })));
+}
+
+#[test]
+fn parse_media_stop() {
+    let parsed = serde_json::json!({"action":"media.stop","params":{"leg_id":"caller"}});
+    let cmd = SipSession::parse_info_command("media.stop", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::StopPlayback { .. })));
+}
+
+#[test]
+fn parse_record_start() {
+    let parsed = serde_json::json!({
+        "action":"record.start",
+        "params":{"path":"/tmp/rec.wav","beep":true}
+    });
+    let cmd = SipSession::parse_info_command("record.start", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::StartRecording { .. })));
+}
+
+#[test]
+fn parse_record_stop() {
+    let parsed = serde_json::json!({"action":"record.stop","params":{}});
+    let cmd = SipSession::parse_info_command("record.stop", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::StopRecording)));
+}
+
+#[test]
+fn parse_consult_initiate() {
+    let parsed = serde_json::json!({
+        "action":"consult.initiate",
+        "params":{"leg_id":"caller"}
+    });
+    let cmd = SipSession::parse_info_command("consult.initiate", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Hold { .. })));
+}
+
+#[test]
+fn parse_consult_cancel() {
+    let parsed = serde_json::json!({
+        "action":"consult.cancel",
+        "params":{"leg_id":"caller"}
+    });
+    let cmd = SipSession::parse_info_command("consult.cancel", parsed.get("params"), &parsed);
+    assert!(matches!(cmd, Some(CallCommand::Unhold { .. })));
+}
+
+#[test]
+fn parse_unknown_returns_none() {
+    let parsed = serde_json::json!({"action":"nonexistent","params":{}});
+    let cmd = SipSession::parse_info_command("nonexistent", parsed.get("params"), &parsed);
+    assert!(cmd.is_none());
 }

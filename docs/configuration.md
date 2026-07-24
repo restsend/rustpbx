@@ -30,3 +30,6 @@ RustPBX configuration is split into several logical sections. The application lo
 
 9. [SipFlow](config/08-sipflow.md)  
    *SIP signalling capture, RTP recording, Storage backends, WAV export.*
+
+10. [IVR Exec — 通话中插入 IVR](ivr_exec.md)  
+    *SIP INFO 命令参考、Webhook 回调、cc-phone SDK 接入、数据结构。*

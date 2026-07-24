@@ -163,16 +163,45 @@ impl IvrApp {
     }
 
     /// Emit IvrFlowCompleted when the IVR flow ends via a terminal action.
+    /// Also writes [`IvrExecResult`] to session extensions if the IVR was
+    /// started via `ivr.exec`, so the post-exit hook can send the result back.
+    ///
+    /// `status` is the coarse outcome category (`"completed"`, `"transferred"`,
+    /// `"hangup"`, etc.) and `reason` provides finer detail (e.g.
+    /// `"agent_transfer"`, `"queue"`, `"voicemail"`, `"caller_hangup"`).
     async fn ivr_flow_completed(
         &self,
         ctx: &ApplicationContext,
-        final_result: &str,
+        status: &str,
+        reason: &str,
         target: Option<&str>,
     ) {
         let total_duration_ms = self
             .flow_started_at
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
+        let completion_time = chrono::Utc::now().to_rfc3339();
+
+        // If this IVR was started via ivr.exec, write result to extensions.
+        if ctx
+            .session_extensions
+            .read()
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+            .is_some()
+        {
+            ctx.session_extensions.write().insert(
+                crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
+                    status: status.to_string(),
+                    reason: reason.to_string(),
+                    routing_target: target.map(|s| s.to_string()),
+                    collected: self.collected_variables.clone(),
+                    trace: vec![],
+                    duration_ms: total_duration_ms,
+                    completion_time: completion_time.clone(),
+                },
+            );
+        }
+
         self.emit_rwi_event_typed(
             ctx,
             &crate::rwi::IvrFlowCompleted {
@@ -180,8 +209,8 @@ impl IvrApp {
                 app_id: self.definition.name.clone(),
                 total_nodes_traversed: self.nodes_traversed,
                 total_duration_ms: total_duration_ms as u32,
-                final_result: final_result.to_string(),
-                completion_time: chrono::Utc::now().to_rfc3339(),
+                final_result: status.to_string(),
+                completion_time,
                 final_routing_target: target.map(|s| s.to_string()),
                 extra: None,
             },
@@ -522,7 +551,7 @@ impl IvrApp {
                     t.push_str(&query);
                 }
                 info!(ivr = %self.definition.name, target = %t, "IVR transferring call");
-                self.ivr_flow_completed(ctx, "transferred", Some(t.as_str()))
+                self.ivr_flow_completed(ctx, "transferred", "agent_transfer", Some(t.as_str()))
                     .await;
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(t))
@@ -537,7 +566,7 @@ impl IvrApp {
                     return_to_ivr = ?return_to_ivr,
                     "IVR sending to queue"
                 );
-                self.ivr_flow_completed(ctx, "queue", Some(target)).await;
+                self.ivr_flow_completed(ctx, "transferred", "queue", Some(target)).await;
                 self.state = IvrState::Done;
                 if let Some(ivr) = return_to_ivr
                     .as_ref()
@@ -573,7 +602,7 @@ impl IvrApp {
             }
             EntryAction::Voicemail { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring to voicemail");
-                self.ivr_flow_completed(ctx, "voicemail", Some(target))
+                self.ivr_flow_completed(ctx, "transferred", "voicemail", Some(target))
                     .await;
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(format!("voicemail:{}", target)))
@@ -628,7 +657,7 @@ impl IvrApp {
                     Ok(AppAction::Continue)
                 } else {
                     info!(ivr = %self.definition.name, "IVR hanging up");
-                    self.ivr_flow_completed(ctx, "hangup", None).await;
+                    self.ivr_flow_completed(ctx, "hangup", "caller_hangup", None).await;
                     self.state = IvrState::Done;
                     Ok(AppAction::Hangup {
                         reason: None,

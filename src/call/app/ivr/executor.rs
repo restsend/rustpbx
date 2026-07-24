@@ -79,6 +79,9 @@ pub struct StepIvrApp {
     /// Structured trigger that caused the current step (e.g. dtmf with digit detail).
     current_trigger: Option<crate::rwi::TriggerInfo>,
     runtime_vars: Option<Arc<RwLock<HashMap<String, String>>>>,
+    /// Session extensions clone stashed in on_enter for use in on_exit.
+    /// Only populated when the IVR was started via `ivr.exec`.
+    session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
 }
 
 #[derive(Clone)]
@@ -125,6 +128,7 @@ impl StepIvrApp {
             current_trigger: None,
             runtime_vars: None,
             ivr_params: None,
+            session_extensions: None,
         }
     }
 
@@ -160,6 +164,7 @@ impl StepIvrApp {
             current_trigger: None,
             runtime_vars: None,
             ivr_params: None,
+            session_extensions: None,
         }
     }
 
@@ -961,6 +966,7 @@ impl CallApp for StepIvrApp {
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         self.runtime_vars = Some(context.session_vars.clone());
+        self.session_extensions = Some(context.session_extensions.clone());
         self.set_runtime_status(context, "starting").await;
         ctrl.answer().await?;
 
@@ -1390,6 +1396,40 @@ impl CallApp for StepIvrApp {
             self.current_track_id = None;
         }
         self.pending_menu = None;
+
+        // If this IVR was started via ivr.exec, write result to extensions.
+        if let Some(ref ext) = self.session_extensions {
+            let is_exec = ext
+                .read()
+                .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+                .is_some();
+            if is_exec {
+                let collected: std::collections::HashMap<String, String> = self
+                    .sess
+                    .variables
+                    .iter()
+                    .filter(|(k, _)| {
+                        ![
+                            "session_id", "caller", "callee", "direction",
+                        ]
+                        .contains(&k.as_str())
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                ext.write().insert(
+                    crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
+                        status: status.clone(),
+                        reason: end_reason_label.clone(),
+                        routing_target: self.last_transfer_target.clone(),
+                        collected,
+                        trace: vec![],
+                        duration_ms: 0,
+                        completion_time: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+            }
+        }
+
         Ok(())
     }
 

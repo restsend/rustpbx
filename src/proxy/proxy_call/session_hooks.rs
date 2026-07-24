@@ -103,6 +103,25 @@ impl fmt::Debug for CallSessionContext {
     }
 }
 
+/// Completion intent returned by [`CallSessionHook::on_app_exited`].
+/// The session uses this to decide what post-exit actions to take.
+pub struct IvrExecCompletion {
+    /// If set, the session will unhold this leg (restore to sendrecv).
+    pub unhold_leg: Option<LegId>,
+    /// If set, the session will send a SIP INFO to this leg with the given
+    /// content-type and body.
+    pub result_info: Option<SendInfoSpec>,
+}
+
+/// Describes a SIP INFO request to be sent to a specific dialog.
+pub struct SendInfoSpec {
+    pub leg_id: LegId,
+    pub content_type: String,
+    pub body: Vec<u8>,
+}
+
+use crate::call::domain::LegId;
+
 /// Observer trait for call-session lifecycle events.
 ///
 /// Implementations must be `Send + Sync` so they can be stored in a shared
@@ -143,5 +162,17 @@ pub trait CallSessionHook: Send + Sync {
         _app_runtime: &dyn AppRuntime,
     ) -> bool {
         false
+    }
+
+    /// Called after an application exits (CallApp event loop finished).
+    /// Return an [`IvrExecCompletion`] to instruct the session to perform
+    /// post-exit actions (unhold, send INFO result, etc.).
+    ///
+    /// The default implementation returns `None` (no action).
+    async fn on_app_exited(
+        &self,
+        _ctx: &CallSessionContext,
+    ) -> Option<IvrExecCompletion> {
+        None
     }
 }
