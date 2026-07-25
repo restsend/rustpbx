@@ -11,8 +11,8 @@ use axum::{
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QuerySelect, sea_query,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, ExprTrait, FromQueryResult,
+    PaginatorTrait, QueryFilter, QuerySelect, sea_query,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,6 +28,7 @@ where
         DatabaseBackend::Sqlite => "INTEGER",
         DatabaseBackend::MySql => "SIGNED",
         DatabaseBackend::Postgres => "BIGINT",
+        _ => "BIGINT",
     };
 
     sea_query::SimpleExpr::from(sea_query::Func::sum(expr))
@@ -104,8 +105,8 @@ pub struct DashboardPayload {
 
 impl DashboardPayload {
     fn empty(range: TimeRange) -> Self {
-        let bucket_count = range.bucket_count.max(1);
-        let total_seconds = range.duration().num_seconds().max(60);
+        let bucket_count = std::cmp::Ord::max(range.bucket_count, 1);
+        let total_seconds = std::cmp::Ord::max(range.duration().num_seconds(), 60);
         let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
             .ceil()
             .max(60.0) as i64;
@@ -269,8 +270,8 @@ async fn build_dashboard_payload(
             total_duration: None,
         });
 
-    let bucket_count = range.bucket_count.max(1);
-    let total_seconds = range.duration().num_seconds().max(60);
+    let bucket_count = std::cmp::Ord::max(range.bucket_count, 1);
+    let total_seconds = std::cmp::Ord::max(range.duration().num_seconds(), 60);
     let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
         .ceil()
         .max(60.0) as i64;
@@ -291,6 +292,7 @@ async fn build_dashboard_payload(
             "CAST(FLOOR((EXTRACT(EPOCH FROM started_at) - {}) / {}) AS BIGINT)",
             start_timestamp, bucket_seconds
         )),
+        _ => unreachable!(),
     };
 
     let timeline_buckets = CallRecordEntity::find()
@@ -454,7 +456,7 @@ fn build_timeline_from_buckets(
     range: &TimeRange,
     bucket_seconds: i64,
 ) -> (Vec<i64>, Vec<String>) {
-    let bucket_count = range.bucket_count.max(1);
+    let bucket_count = std::cmp::Ord::max(range.bucket_count, 1);
     let mut series = vec![0i64; bucket_count];
 
     for b in buckets {
@@ -515,9 +517,9 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<Ac
             let start_time = call.started_at;
             let started_at = start_time.format("%H:%M").to_string();
             let duration_secs = if let Some(answered_at) = call.answered_at {
-                (Utc::now() - answered_at).num_seconds().max(0)
+                std::cmp::Ord::max((Utc::now() - answered_at).num_seconds(), 0)
             } else {
-                (Utc::now() - start_time).num_seconds().max(0)
+                std::cmp::Ord::max((Utc::now() - start_time).num_seconds(), 0)
             };
 
             previews.push(ActiveCallPreview {
@@ -573,7 +575,7 @@ fn calc_util(value: u32, capacity: u32) -> u32 {
     if capacity == 0 {
         0
     } else {
-        ((value.min(capacity) as f64 / capacity as f64) * 100.0)
+        ((std::cmp::Ord::min(value, capacity) as f64 / capacity as f64) * 100.0)
             .round()
             .clamp(0.0, 100.0) as u32
     }
@@ -584,7 +586,7 @@ fn calc_duration_util(seconds: i64) -> u32 {
         return 0;
     }
     let reference = 5 * 60;
-    ((seconds.min(reference) as f64 / reference as f64) * 100.0)
+    ((std::cmp::Ord::min(seconds, reference) as f64 / reference as f64) * 100.0)
         .round()
         .clamp(0.0, 100.0) as u32
 }

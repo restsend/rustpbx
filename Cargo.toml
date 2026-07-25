@@ -51,7 +51,6 @@ addon-wholesale = [
     "dep:async-stream",
     "dep:async-compression",
     "dep:country-emoji",
-    "dep:crossbeam-utils",
     "dep:hex",
     "dep:iso_currency",
 ]
@@ -128,30 +127,28 @@ serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.52.2", features = ["full", "tracing", "test-util"] }
+tokio = { version = "1.53", features = ["full", "tracing", "test-util"] }
 socket2 = "0.6"
 parking_lot = "0.12"
 dashmap = "6"
 tokio-util = "0.7.18"
-tokio-tungstenite = { version = "0.29.0", features = [
-    "rustls-tls-native-roots",
-] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing = "0.1.43"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1.23.3", features = ["v4"] }
 clap = { version = "4.6.1", features = ["derive"] }
-toml = "1.1.2"
+toml = "1.1"
 toml_edit = { version = "0.25.12", features = ["serde"] }
-rand = "0.10.1"
+rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.5.22"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
-rustrtc = "0.3.96"
+rustrtc = "0.3.99"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -164,7 +161,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "http2",
     "charset",
 ] }
-base64 = "0.22.1"
+base64 = "0.23"
 hmac = "0.13.0"
 sha2 = "0.11.0"
 dotenvy = "0.15.7"
@@ -183,14 +180,14 @@ sqlx = { version = "0.9.0", features = [
     "mysql",
     "any",
 ] }
-sea-orm = { version = "1.1.20", features = [
+sea-orm = { version = "2", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "sqlx-mysql",
     "sqlx-postgres",
     "sqlite-use-returning-for-3_35",
 ] }
-sea-orm-migration = { version = "1.1.20", features = [
+sea-orm-migration = { version = "2", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "sqlx-mysql",
@@ -215,9 +212,7 @@ async-compression = { version = "0.4", default-features = false, features = [
 ], optional = true }
 flate2 = "1"
 console-subscriber = "0.5.0"
-crossbeam-channel = "0.5"
-crossbeam-utils = { version = "0.8", optional = true }
-lru = "0.18.0"
+lru = "0.18"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = [
     "http-listener",
@@ -256,11 +251,11 @@ ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
-arc-swap = "1.7.1"
+arc-swap = "1.9.2"
 iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
-flowdb = { version = "0.7.4", default-features = false }
+flowdb = { version = "0.8.2", default-features = false }
 
 
 [dev-dependencies]
@@ -273,12 +268,6 @@ ctor = "1.0.7"
 [build-dependencies]
 chrono = "0.4"
 
-[profile.dev]
-debug = 0
-
-[profile.release]
-strip = "symbols"
-lto = "thin"
 
 [[bin]]
 name = "rustpbx"

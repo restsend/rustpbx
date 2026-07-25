@@ -966,7 +966,7 @@ impl SipSession {
             server
                 .database
                 .clone()
-                .unwrap_or(sea_orm::DatabaseConnection::Disconnected),
+                .unwrap_or_default(),
             call_info,
             Arc::new(crate::config::Config {
                 proxy: (*server.proxy_config).clone(),

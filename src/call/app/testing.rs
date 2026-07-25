@@ -66,7 +66,7 @@ impl MockCallStack {
     pub fn run(app: Box<dyn CallApp>, caller: &str, callee: &str) -> Self {
         // Minimal ApplicationContext (no DB, no storage).
         let ctx = ApplicationContext::new(
-            DatabaseConnection::Disconnected,
+            DatabaseConnection::default(),
             CallInfo {
                 session_id: "test-session".into(),
                 caller: caller.into(),

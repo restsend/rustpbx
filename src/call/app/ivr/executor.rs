@@ -1537,7 +1537,7 @@ mod tests {
 
     fn make_test_context() -> ApplicationContext {
         ApplicationContext::new(
-            DatabaseConnection::Disconnected,
+            DatabaseConnection::default(),
             CallInfo {
                 session_id: "test-session".into(),
                 caller: "1001".into(),

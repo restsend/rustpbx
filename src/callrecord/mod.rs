@@ -978,7 +978,7 @@ impl CallRecordSaver for CustomDatabaseSaver {
             .columns(call_record_columns())
             .values_panic(build_call_record_values(&row));
         self.db
-            .execute(self.db.get_database_backend().build(&insert))
+            .execute_raw(self.db.get_database_backend().build(&insert))
             .await?;
         Ok(format!("{}/{}", self.table_name, record.call_id))
     }
@@ -1024,7 +1024,7 @@ impl CallRecordSaver for RotatingSqliteSaver {
             .into_table(Alias::new(&self.table_name))
             .columns(call_record_columns())
             .values_panic(build_call_record_values(&row));
-        db.execute(db.get_database_backend().build(&insert)).await?;
+        db.execute_raw(db.get_database_backend().build(&insert)).await?;
         Ok(format!(
             "{}/{}/{}",
             self.base_url, self.table_name, record.call_id
@@ -1169,7 +1169,7 @@ pub(crate) async fn create_call_record_table(
         .col(timestamp_null(Alias::new("archived_at")))
         .to_owned();
 
-    db.execute(db.get_database_backend().build(&create)).await?;
+    db.execute_raw(db.get_database_backend().build(&create)).await?;
 
     // Add unique index on call_id + basic query indexes (must run after CREATE TABLE)
     let indexes = [
@@ -1192,7 +1192,7 @@ pub(crate) async fn create_call_record_table(
     ];
     for index in indexes {
         let stmt = db.get_database_backend().build(&index);
-        if let Err(e) = db.execute(stmt).await {
+        if let Err(e) = db.execute_raw(stmt).await {
             warn!("failed to create index on {}: {}", table_name, e);
         }
     }

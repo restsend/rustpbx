@@ -1,7 +1,7 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use crossbeam_channel::{RecvTimeoutError, Sender, bounded};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::sync::{Arc, Mutex};
@@ -111,7 +111,7 @@ struct Backend(Option<Arc<dyn SipFlowBackend>>);
 struct SipFlowInner {
     shared_backend: Arc<ArcSwap<Backend>>,
     inspectors: Vec<Box<dyn MessageInspector>>,
-    writer_tx: Option<Sender<WriteCommand>>,
+    writer_tx: Option<SyncSender<WriteCommand>>,
     pool: Arc<ItemPool>,
     local_addrs: Vec<String>,
 }
@@ -141,7 +141,7 @@ impl SipFlow {
         let shared_backend = Arc::new(ArcSwap::new(Arc::new(Backend(backend))));
 
         let writer_tx = if enable_async_writer && shared_backend.load().0.is_some() {
-            let (tx, rx) = bounded(CHANNEL_CAPACITY);
+            let (tx, rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
             let sb_for_writer = shared_backend.clone();
 
             // Use dedicated OS thread instead of tokio task
@@ -184,23 +184,19 @@ impl SipFlow {
     /// the backend can be hot-swapped at runtime via [`SipFlow::swap_backend`].
     fn batch_writer_thread(
         shared_backend: Arc<ArcSwap<Backend>>,
-        rx: crossbeam_channel::Receiver<WriteCommand>,
+        rx: mpsc::Receiver<WriteCommand>,
         pool: Arc<ItemPool>,
     ) {
         let mut batch: Vec<(String, SipFlowItem, Option<usize>)> = Vec::with_capacity(BATCH_SIZE);
         let mut last_flush = std::time::Instant::now();
 
         loop {
-            // Calculate deadline for recv
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(BATCH_FLUSH_MS);
-
             // Obtain a snapshot of the current backend on each iteration
             // so that a runtime swap takes effect within one batch cycle.
             let current_backend = shared_backend.load().0.clone();
 
             // Batch recv with timeout
-            match rx.recv_deadline(deadline) {
+            match rx.recv_timeout(std::time::Duration::from_millis(BATCH_FLUSH_MS)) {
                 Ok(cmd) => match cmd {
                     WriteCommand::Record {
                         call_id,

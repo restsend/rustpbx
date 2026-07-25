@@ -2,7 +2,7 @@ use crate::call::app::ivr::trace::IvrTraceCollector;
 use crate::config::Config;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DatabaseConnectionType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -168,9 +168,10 @@ impl ApplicationContext {
 
     /// Get a usable database connection reference, or None if disconnected.
     pub fn db_connection(&self) -> Option<&DatabaseConnection> {
-        match &self.db {
-            DatabaseConnection::Disconnected => None,
-            conn => Some(conn),
+        if matches!(&self.db.inner, DatabaseConnectionType::Disconnected) {
+            None
+        } else {
+            Some(&self.db)
         }
     }
 }

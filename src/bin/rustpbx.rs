@@ -722,10 +722,11 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
         sea_orm::DbBackend::Postgres => {
             "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public'".to_string()
         }
+        _ => return Ok(()),
     };
 
     let rows = db
-        .query_all(Statement::from_string(backend.clone(), show_tables_sql))
+        .query_all_raw(Statement::from_string(backend.clone(), show_tables_sql))
         .await?;
 
     let mut tables: Vec<String> = Vec::new();
@@ -749,10 +750,11 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
                 println!("-- TABLE: {} (not supported)", table);
                 continue;
             }
+            _ => continue,
         };
 
         let result = db
-            .query_one(Statement::from_string(backend.clone(), ddl_sql))
+            .query_one_raw(Statement::from_string(backend.clone(), ddl_sql))
             .await?;
 
         if let Some(row) = result {

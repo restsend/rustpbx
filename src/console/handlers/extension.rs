@@ -24,8 +24,8 @@ use rsipstack::sip::Uri;
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Order, Query as SeaQuery};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ExprTrait, ModelTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
