@@ -273,12 +273,15 @@ impl AppStateBuilder {
         // Building it here ensures only one backend instance is ever created for a given
         // spool directory, avoiding concurrent SQLite writes.
         let sipflow_backend_arc: Option<Arc<dyn crate::sipflow::SipFlowBackend>> =
-            config.sipflow.as_ref().and_then(|cfg| {
+            if let Some(cfg) = config.sipflow.as_ref() {
                 crate::sipflow::backend::create_backend(cfg, token.clone())
+                    .await
                     .map(|b| Arc::from(b) as Arc<dyn crate::sipflow::SipFlowBackend>)
                     .map_err(|e| warn!("Failed to create sipflow backend: {e}"))
                     .ok()
-            });
+            } else {
+                None
+            };
 
         // The upload hook is wired in when [sipflow.upload] is configured
         // for either Local or Remote backend.
@@ -643,14 +646,14 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     } else {
         // Auto-detect from config/certs
         let cert_dir = std::path::Path::new("config/certs");
-        if cert_dir.exists()
-            && let Ok(entries) = std::fs::read_dir(cert_dir)
+        if tokio::fs::try_exists(cert_dir).await.unwrap_or(false)
+            && let Ok(mut entries) = tokio::fs::read_dir(cert_dir).await
         {
-            for entry in entries.flatten() {
+            while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("crt") {
                     let key_path = path.with_extension("key");
-                    if key_path.exists() {
+                    if tokio::fs::try_exists(&key_path).await.unwrap_or(false) {
                         ssl_config = Some((
                             path.to_string_lossy().to_string(),
                             key_path.to_string_lossy().to_string(),

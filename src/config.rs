@@ -1476,6 +1476,21 @@ impl Config {
         Ok(config)
     }
 
+    pub async fn load_async(path: &str) -> Result<Self, Error> {
+        let contents = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}: {}", e, path))?;
+        let mut config: Self = toml::from_str(&contents)?;
+        if std::env::var("RUSTPBX_DEMO_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+        {
+            config.demo_mode = true;
+        }
+        config.ensure_recording_defaults();
+        Ok(config)
+    }
+
     pub fn rtp_config(&self) -> RtpConfig {
         RtpConfig {
             external_ip: self.external_ip.clone(),

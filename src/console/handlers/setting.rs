@@ -412,7 +412,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         let mut loaded_config: Option<Config> = None;
 
         if let Some(path) = app_state.config_path.as_ref() {
-            match Config::load(path) {
+            match Config::load_async(path).await {
                 Ok(cfg) => {
                     loaded_config = Some(cfg);
                 }
@@ -669,7 +669,7 @@ async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize
     let context = app_state.sip_server().inner.data_context.clone();
     let snapshot = context.acl_rules_snapshot();
     let embedded = if let Some(path) = app_state.config_path.as_ref() {
-        match Config::load(path) {
+        match Config::load_async(path).await {
             Ok(cfg) => cfg
                 .proxy
                 .acl_rules
@@ -2056,6 +2056,7 @@ pub(crate) async fn update_storage_settings(
             .sip_server()
             .inner
             .reload_recording_settings(&config_path)
+            .await
         {
             Ok(msg) => {
                 recording_applied = true;
@@ -2608,11 +2609,14 @@ async fn cluster_reload_sse_handler(
 #[cfg(feature = "commerce")]
 async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
     let config_path = app.config_path.clone();
-    let config_override = config_path.as_ref().and_then(|path| {
-        crate::config::Config::load(path)
+    let config_override = if let Some(path) = config_path.as_ref() {
+        crate::config::Config::load_async(path)
+            .await
             .ok()
             .map(|cfg| std::sync::Arc::new(cfg.proxy))
-    });
+    } else {
+        None
+    };
 
     match app
         .sip_server()
@@ -2637,11 +2641,14 @@ async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_js
 #[cfg(feature = "commerce")]
 async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
     let config_path = app.config_path.clone();
-    let config_override = config_path.as_ref().and_then(|path| {
-        crate::config::Config::load(path)
+    let config_override = if let Some(path) = config_path.as_ref() {
+        crate::config::Config::load_async(path)
+            .await
             .ok()
             .map(|cfg| std::sync::Arc::new(cfg.proxy))
-    });
+    } else {
+        None
+    };
 
     match app
         .sip_server()

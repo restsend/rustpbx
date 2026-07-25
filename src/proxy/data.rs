@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
     collections::HashMap,
-    fs,
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
@@ -207,7 +206,7 @@ impl ProxyDataContext {
         let config = self.config.read().unwrap().clone();
         let base = config.generated_queue_dir();
         let path = Self::resolve_reference_path(base.as_path(), trimmed);
-        Self::read_queue_document(path)
+        Self::read_queue_document(path).await
     }
 
     pub async fn resolve_ivr_file(&self, ivr_name: &str) -> String {
@@ -245,8 +244,8 @@ impl ProxyDataContext {
         }
     }
 
-    fn read_queue_document(path: PathBuf) -> Result<Option<RouteQueueConfig>> {
-        match fs::read_to_string(&path) {
+    async fn read_queue_document(path: PathBuf) -> Result<Option<RouteQueueConfig>> {
+        match tokio::fs::read_to_string(&path).await {
             Ok(contents) => {
                 let doc: queue_utils::QueueFileDocument = toml::from_str(&contents)
                     .with_context(|| format!("failed to parse queue file {}", path.display()))?;
@@ -307,8 +306,14 @@ impl ProxyDataContext {
             generated_entries = info.entries;
         }
         let generated_path = if generated.is_none() {
-            resolve_generated_path(&config.trunks_files, &default_dir, "trunks.generated.toml")
-                .filter(|p| p.exists())
+            match resolve_generated_path(
+                &config.trunks_files,
+                &default_dir,
+                "trunks.generated.toml",
+            ) {
+                Some(path) if tokio::fs::try_exists(&path).await.unwrap_or(false) => Some(path),
+                _ => None,
+            }
         } else {
             None
         };
@@ -348,7 +353,8 @@ impl ProxyDataContext {
             }
         } else {
             if !config.trunks_files.is_empty() {
-                let (file_trunks, file_paths) = load_trunks_from_files(&config.trunks_files)?;
+                let (file_trunks, file_paths) =
+                    load_trunks_from_files(&config.trunks_files).await?;
                 file_count = file_trunks.len();
                 if !file_paths.is_empty() {
                     files.extend(file_paths);
@@ -357,12 +363,12 @@ impl ProxyDataContext {
             }
             if let Some(ref info) = generated {
                 let generated_pattern = vec![info.path.clone()];
-                let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
+                let (generated_trunks, _) = load_trunks_from_files(&generated_pattern).await?;
                 trunks.extend(generated_trunks);
             } else if let Some(ref path) = generated_path {
                 info!(path = %path.display(), "loading previously generated trunks file");
                 let generated_pattern = vec![path.to_string_lossy().to_string()];
-                match load_trunks_from_files(&generated_pattern) {
+                match load_trunks_from_files(&generated_pattern).await {
                     Ok((generated_trunks, _)) => {
                         generated_entries = generated_trunks.len();
                         trunks.extend(generated_trunks);
@@ -542,7 +548,7 @@ impl ProxyDataContext {
             }
         } else {
             if !config.queues_files.is_empty() {
-                match queue_utils::load_queues_from_files(&config.queues_files) {
+                match queue_utils::load_queues_from_files(&config.queues_files).await {
                     Ok((file_queues, file_paths)) => {
                         file_count = file_queues.len();
                         if !file_paths.is_empty() {
@@ -565,8 +571,11 @@ impl ProxyDataContext {
             }
 
             let generated_file = config.generated_queue_dir().join("queues.generated.toml");
-            if generated_file.exists() {
-                match fs::read_to_string(&generated_file) {
+            if tokio::fs::try_exists(&generated_file)
+                .await
+                .unwrap_or(false)
+            {
+                match tokio::fs::read_to_string(&generated_file).await {
                     Ok(content) => {
                         match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
                             Ok(loaded) => {
@@ -665,7 +674,8 @@ impl ProxyDataContext {
             }
         } else {
             if !config.routes_files.is_empty() {
-                let (file_routes, file_paths) = load_routes_from_files(&config.routes_files)?;
+                let (file_routes, file_paths) =
+                    load_routes_from_files(&config.routes_files).await?;
                 file_count = file_routes.len();
                 if !file_paths.is_empty() {
                     files.extend(file_paths);
@@ -676,7 +686,7 @@ impl ProxyDataContext {
             }
             if let Some(ref info) = generated {
                 let generated_pattern = vec![info.path.clone()];
-                let (generated_routes, _) = load_routes_from_files(&generated_pattern)?;
+                let (generated_routes, _) = load_routes_from_files(&generated_pattern).await?;
                 for route in generated_routes {
                     upsert_route(&mut routes, route);
                 }
@@ -735,7 +745,8 @@ impl ProxyDataContext {
         }
 
         if !config.acl_files.is_empty() {
-            let (file_rules, file_paths) = load_acl_rules_from_files(&config.acl_files)?;
+            let (file_rules, file_paths) =
+                load_acl_rules_from_files(&config.acl_files).await?;
             file_count = file_rules.len();
             if !file_paths.is_empty() {
                 files.extend(file_paths);
@@ -759,10 +770,13 @@ impl ProxyDataContext {
             }
         } else {
             let generated_acl_path = config.generated_acl_dir().join("acl.generated.toml");
-            if generated_acl_path.exists() {
+            if tokio::fs::try_exists(&generated_acl_path)
+                .await
+                .unwrap_or(false)
+            {
                 let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
                 let (generated_rules, generated_files) =
-                    load_acl_rules_from_files(&generated_pattern)?;
+                    load_acl_rules_from_files(&generated_pattern).await?;
                 if !generated_files.is_empty() {
                     files.extend(generated_files);
                 }
@@ -838,8 +852,8 @@ impl ProxyDataContext {
             };
             let trunks = load_trunks_from_db(db).await?;
             entries = trunks.len();
-            let backup = backup_existing_file(&target_path)?;
-            write_trunks_file(&target_path, &trunks)?;
+            let backup = backup_existing_file(&target_path).await?;
+            write_trunks_file(&target_path, &trunks).await?;
             info!(path = %target_path.display(), entries, "generated trunks file from database");
             Ok(Some(GeneratedFileMetrics {
                 entries,
@@ -891,8 +905,8 @@ impl ProxyDataContext {
             else {
                 return Ok(None);
             };
-            let backup = backup_existing_file(&target_path)?;
-            write_routes_file(&target_path, &routes)?;
+            let backup = backup_existing_file(&target_path).await?;
+            write_routes_file(&target_path, &routes).await?;
             info!(path = %target_path.display(), entries, "generated routes file from database");
             Ok(Some(GeneratedFileMetrics {
                 entries,
@@ -928,7 +942,7 @@ struct AclIncludeFile {
     acl_rules: Vec<String>,
 }
 
-fn load_trunks_from_files(
+async fn load_trunks_from_files(
     patterns: &[String],
 ) -> Result<(HashMap<String, TrunkConfig>, Vec<String>)> {
     let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
@@ -940,7 +954,8 @@ fn load_trunks_from_files(
             let path =
                 entry.map_err(|e| anyhow!("failed to read trunk include glob entry: {}", e))?;
             let path_display = path.display().to_string();
-            let contents = fs::read_to_string(&path)
+            let contents = tokio::fs::read_to_string(&path)
+                .await
                 .with_context(|| format!("failed to read trunk include file {}", path_display))?;
             let data: TrunkIncludeFile = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse trunk include file {}", path_display))?;
@@ -960,7 +975,7 @@ fn load_trunks_from_files(
     Ok((trunks, files))
 }
 
-fn load_routes_from_files(patterns: &[String]) -> Result<(Vec<RouteRule>, Vec<String>)> {
+async fn load_routes_from_files(patterns: &[String]) -> Result<(Vec<RouteRule>, Vec<String>)> {
     let mut routes: Vec<RouteRule> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     for pattern in patterns {
@@ -970,7 +985,8 @@ fn load_routes_from_files(patterns: &[String]) -> Result<(Vec<RouteRule>, Vec<St
             let path =
                 entry.map_err(|e| anyhow!("failed to read route include glob entry: {}", e))?;
             let path_display = path.display().to_string();
-            let contents = fs::read_to_string(&path)
+            let contents = tokio::fs::read_to_string(&path)
+                .await
                 .with_context(|| format!("failed to read route include file {}", path_display))?;
             let data: RouteIncludeFile = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse route include file {}", path_display))?;
@@ -990,7 +1006,7 @@ fn load_routes_from_files(patterns: &[String]) -> Result<(Vec<RouteRule>, Vec<St
     Ok((routes, files))
 }
 
-fn load_acl_rules_from_files(patterns: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+async fn load_acl_rules_from_files(patterns: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut rules: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     for pattern in patterns {
@@ -1000,7 +1016,8 @@ fn load_acl_rules_from_files(patterns: &[String]) -> Result<(Vec<String>, Vec<St
             let path =
                 entry.map_err(|e| anyhow!("failed to read acl include glob entry: {}", e))?;
             let path_display = path.display().to_string();
-            let contents = fs::read_to_string(&path)
+            let contents = tokio::fs::read_to_string(&path)
+                .await
                 .with_context(|| format!("failed to read acl include file {}", path_display))?;
             let data: AclIncludeFile = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse acl include file {}", path_display))?;
@@ -1062,18 +1079,18 @@ fn resolve_generated_path(
     Some(default_dir.join(default_name))
 }
 
-fn ensure_parent_dir(path: &Path) -> Result<()> {
+async fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
-        && !parent.exists()
     {
-        fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
     Ok(())
 }
 
-fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
+async fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1081,7 +1098,7 @@ fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
     let timestamp = Utc::now().format("%Y%m%d%H%M%S%f");
     let backup_name = format!("{}.{}.bak", file_name, timestamp);
     let backup_path = path.with_file_name(backup_name);
-    match fs::rename(path, &backup_path) {
+    match tokio::fs::rename(path, &backup_path).await {
         Ok(_) => Ok(Some(backup_path)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(None)
@@ -1106,10 +1123,11 @@ fn serialize_trunks_toml(trunks: &HashMap<String, TrunkConfig>) -> Result<String
     toml::to_string_pretty(&data).with_context(|| "failed to serialize trunks toml".to_string())
 }
 
-fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
-    ensure_parent_dir(path)?;
+async fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
+    ensure_parent_dir(path).await?;
     let toml = serialize_trunks_toml(trunks)?;
-    fs::write(path, toml)
+    tokio::fs::write(path, toml)
+        .await
         .with_context(|| format!("failed to write trunks file {}", path.display()))?;
     Ok(())
 }
@@ -1121,10 +1139,11 @@ fn serialize_routes_toml(routes: &[RouteRule]) -> Result<String> {
     toml::to_string_pretty(&data).with_context(|| "failed to serialize routes toml".to_string())
 }
 
-fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
-    ensure_parent_dir(path)?;
+async fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
+    ensure_parent_dir(path).await?;
     let toml = serialize_routes_toml(routes)?;
-    fs::write(path, toml)
+    tokio::fs::write(path, toml)
+        .await
         .with_context(|| format!("failed to write routes file {}", path.display()))?;
     Ok(())
 }

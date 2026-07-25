@@ -217,7 +217,7 @@ pub async fn trigger_call_record_transcript(
         .unwrap_or("sensevoice-cli")
         .to_string();
 
-    if !command_exists(&command) {
+    if !command_exists(&command).await {
         return (
             StatusCode::FAILED_DEPENDENCY,
             Json(json!({
@@ -793,7 +793,7 @@ pub async fn update_settings(
         Err(resp) => return *resp,
     };
 
-    let mut doc = match load_document(&config_path) {
+    let mut doc = match load_document(&config_path).await {
         Ok(doc) => doc,
         Err(resp) => return *resp,
     };
@@ -860,7 +860,7 @@ pub async fn update_settings(
         transcript_table["hf_endpoint"] = value(v);
     }
 
-    if let Err(resp) = persist_document(&config_path, doc.to_string()) {
+    if let Err(resp) = persist_document(&config_path, doc.to_string()).await {
         return *resp;
     }
 
@@ -900,7 +900,7 @@ pub async fn download_model(
         .unwrap_or("sensevoice-cli")
         .to_string();
 
-    if !command_exists(&command) {
+    if !command_exists(&command).await {
         return (
             StatusCode::FAILED_DEPENDENCY,
             Json(json!({
@@ -1071,8 +1071,8 @@ fn get_config_path(state: &ConsoleState) -> Result<String, Box<Response>> {
     Ok(path)
 }
 
-fn load_document(path: &str) -> Result<DocumentMut, Box<Response>> {
-    let content = match std::fs::read_to_string(path) {
+async fn load_document(path: &str) -> Result<DocumentMut, Box<Response>> {
+    let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) => {
             return Err(Box::new(
@@ -1096,8 +1096,8 @@ fn load_document(path: &str) -> Result<DocumentMut, Box<Response>> {
     }
 }
 
-fn persist_document(path: &str, content: String) -> Result<(), Box<Response>> {
-    match std::fs::write(path, content) {
+async fn persist_document(path: &str, content: String) -> Result<(), Box<Response>> {
+    match tokio::fs::write(path, content).await {
         Ok(_) => Ok(()),
         Err(e) => Err(Box::new(
             (

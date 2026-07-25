@@ -211,7 +211,7 @@ async fn list_transactions(State(state): State<AppState>) -> Response {
 async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     info!(%client_ip, "Reload SIP trunks via /reload/trunks endpoint");
 
-    let config_override = match load_proxy_config_override(&state) {
+    let config_override = match load_proxy_config_override(&state).await {
         Ok(cfg) => cfg,
         Err(response) => return response,
     };
@@ -268,7 +268,7 @@ async fn trunk_registrations_handler(State(state): State<AppState>) -> Response 
 async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     info!(%client_ip, "Reload routing rules via /reload/routes endpoint");
 
-    let config_override = match load_proxy_config_override(&state) {
+    let config_override = match load_proxy_config_override(&state).await {
         Ok(cfg) => cfg,
         Err(response) => return response,
     };
@@ -313,7 +313,7 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
     info!(%client_ip, "Reload ACL rules via /reload/acl endpoint");
     let context = state.sip_server().inner.data_context.clone();
 
-    let config_override = match load_proxy_config_override(&state) {
+    let config_override = match load_proxy_config_override(&state).await {
         Ok(cfg) => cfg,
         Err(response) => return response,
     };
@@ -345,14 +345,14 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
 }
 
 #[allow(clippy::result_large_err)]
-pub(crate) fn load_proxy_config_override(
+pub(crate) async fn load_proxy_config_override(
     state: &AppState,
 ) -> Result<Option<Arc<ProxyConfig>>, Response> {
     let Some(path) = state.config_path.as_ref() else {
         return Ok(None);
     };
 
-    match Config::load(path) {
+    match Config::load_async(path).await {
         Ok(cfg) => Ok(Some(Arc::new(cfg.proxy))),
         Err(err) => {
             warn!(path = %path, ?err, "configuration reload failed during parsing");
@@ -402,7 +402,7 @@ async fn reload_app_handler(
             .into_response();
     };
 
-    let proposed = match crate::config::Config::load(&config_path) {
+    let proposed = match crate::config::Config::load_async(&config_path).await {
         Ok(cfg) => cfg,
         Err(err) => {
             warn!(%client_ip, path = %config_path, error = %err, "Configuration reload failed during parsing");
@@ -1249,7 +1249,7 @@ async fn cluster_reload_sync_handler(
 
 #[cfg(feature = "commerce")]
 async fn reload_trunks_on_node(state: &AppState, _node: &str) -> serde_json::Value {
-    let config_override = match load_proxy_config_override(state) {
+    let config_override = match load_proxy_config_override(state).await {
         Ok(cfg) => cfg,
         Err(_) => {
             return serde_json::json!({ "addon": "trunks", "status": "error", "message": "Failed to load config" });
@@ -1279,7 +1279,7 @@ async fn reload_trunks_on_node(state: &AppState, _node: &str) -> serde_json::Val
 
 #[cfg(feature = "commerce")]
 async fn reload_routes_on_node(state: &AppState, _node: &str) -> serde_json::Value {
-    let config_override = match load_proxy_config_override(state) {
+    let config_override = match load_proxy_config_override(state).await {
         Ok(cfg) => cfg,
         Err(_) => {
             return serde_json::json!({ "addon": "routes", "status": "error", "message": "Failed to load config" });

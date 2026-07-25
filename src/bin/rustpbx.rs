@@ -494,7 +494,7 @@ fn main() -> Result<()> {
         let config = if let Some(cfg) = cached_config.take() {
             cfg
         } else if let Some(ref path) = next_config_path {
-            match Config::load(path) {
+            match Config::load_async(path).await {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     retry_count += 1;

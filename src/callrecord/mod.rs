@@ -639,8 +639,8 @@ impl CallRecordManagerBuilder {
             }
             // Local, S3, Http → existing savers
             Some(CallRecordStorageConfig::Local { root }) => {
-                if !Path::new(&root).exists() {
-                    match std::fs::create_dir_all(&root) {
+                if !tokio::fs::try_exists(&root).await.unwrap_or(false) {
+                    match tokio::fs::create_dir_all(&root).await {
                         Ok(_) => {
                             info!("CallRecordManager created directory: {}", root);
                         }

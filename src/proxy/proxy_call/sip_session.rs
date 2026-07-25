@@ -416,7 +416,7 @@ impl AppFactory for BuiltinAppFactory {
                                 }
                             }
                         } else {
-                            match std::fs::read_to_string(file) {
+                            match tokio::fs::read_to_string(file).await {
                                 Ok(c) => c,
                                 Err(e) => {
                                     tracing::warn!(

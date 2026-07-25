@@ -54,7 +54,7 @@ addon-wholesale = [
     "dep:hex",
     "dep:iso_currency",
 ]
-addon-archive = []
+addon-archive = ["dep:async-compression", "dep:csv-async"]
 addon-endpoint-manager = []
 addon-enterprise-auth = ["dep:ldap3", "dep:ring"]
 addon-transcript = []
@@ -243,6 +243,7 @@ axum-server = { version = "0.8.0", default-features = false, features = [
     "tls-rustls-no-provider",
 ] }
 csv = "1.4.0"
+csv-async = { version = "1.3.1", features = ["tokio", "with_serde"], optional = true }
 quick-xml = { version = "0.40.1", features = ["serialize"] }
 ruzstd = "0.8"
 minimp3 = "0.6.1"

@@ -4,15 +4,16 @@ use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use futures::TryStreamExt;
 use sqlx::{Connection, SqliteConnection};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -147,7 +148,7 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
     }
 }
 
-fn seek_or_read_through(
+async fn seek_or_read_through(
     raw_file: &mut File,
     current_pos: &mut Option<u64>,
     target_pos: u64,
@@ -160,29 +161,29 @@ fn seek_or_read_through(
         let mut discard = [0u8; 8192];
         while remaining > 0 {
             let len = remaining.min(discard.len() as u64) as usize;
-            raw_file.read_exact(&mut discard[..len])?;
+            raw_file.read_exact(&mut discard[..len]).await?;
             remaining -= len as u64;
         }
         *current_pos = Some(target_pos);
         return Ok(());
     }
 
-    raw_file.seek(SeekFrom::Start(target_pos))?;
+    raw_file.seek(SeekFrom::Start(target_pos)).await?;
     *current_pos = Some(target_pos);
     Ok(())
 }
 
-fn read_raw_payload(
+async fn read_raw_payload(
     raw_file: &mut File,
     current_pos: &mut Option<u64>,
     offset: u64,
     size: usize,
 ) -> std::io::Result<Vec<u8>> {
     let payload_offset = offset + RAW_RECORD_HEADER_LEN;
-    seek_or_read_through(raw_file, current_pos, payload_offset)?;
+    seek_or_read_through(raw_file, current_pos, payload_offset).await?;
 
     let mut buf = vec![0u8; size];
-    raw_file.read_exact(&mut buf)?;
+    raw_file.read_exact(&mut buf).await?;
     *current_pos = Some(payload_offset + size as u64);
 
     if buf.starts_with(&ZSTD_MAGIC) {
@@ -235,12 +236,15 @@ impl StorageManager {
             .raw_file
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
-        let offset = file.metadata()?.len();
+        let offset = file.metadata().await?.len();
 
-        file.write_all(&0x5346u16.to_be_bytes())?; // Magic
-        file.write_all(&(processed.orig_size as u32).to_be_bytes())?;
-        file.write_all(&(processed.comp_size as u32).to_be_bytes())?;
-        file.write_all(&processed.payload)?;
+        let mut header = [0u8; RAW_RECORD_HEADER_LEN as usize];
+        let mut header_buf = &mut header[..];
+        header_buf.put_u16(0x5346);
+        header_buf.put_u32(processed.orig_size as u32);
+        header_buf.put_u32(processed.comp_size as u32);
+        let mut record = Buf::chain(&header[..], processed.payload.as_ref());
+        file.write_all_buf(&mut record).await?;
 
         if let Some(ref tx) = self.flusher_tx {
             let meta = FlushMeta {
@@ -297,7 +301,7 @@ impl StorageManager {
             SipFlowSubdirs::None => String::new(),
         };
         let dir = self.base_path.join(subdir);
-        std::fs::create_dir_all(&dir)?;
+        tokio::fs::create_dir_all(&dir).await?;
 
         let db_path = dir.join("sipflow.db");
         let raw_path = dir.join("data.raw");
@@ -305,7 +309,8 @@ impl StorageManager {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(raw_path)?;
+            .open(raw_path)
+            .await?;
 
         self.raw_file = Some(file);
 
@@ -343,14 +348,16 @@ impl StorageManager {
             let db_path = dir.join("sipflow.db");
             let raw_path = dir.join("data.raw");
 
-            if !db_path.exists() || !raw_path.exists() {
+            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+            {
                 continue;
             }
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path)?;
+            let mut raw_file = File::open(raw_path).await?;
             let mut current_pos = None;
 
             // Query using JOIN with call_meta
@@ -376,7 +383,8 @@ impl StorageManager {
             for row in rows {
                 let offset = u64::try_from(row.offset)?;
                 let size = usize::try_from(row.size)?;
-                let raw_msg = read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
+                let raw_msg =
+                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
 
                 results.push(SipFlowItem {
                     src_addr: row.src,
@@ -407,14 +415,16 @@ impl StorageManager {
             let db_path = dir.join("sipflow.db");
             let raw_path = dir.join("data.raw");
 
-            if !db_path.exists() || !raw_path.exists() {
+            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+            {
                 continue;
             }
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path)?;
+            let mut raw_file = File::open(raw_path).await?;
             let mut current_pos = None;
 
             let rows = sqlx::query_as::<_, SipPacketRow>(
@@ -436,7 +446,8 @@ impl StorageManager {
             for row in rows {
                 let offset = u64::try_from(row.offset)?;
                 let size = usize::try_from(row.size)?;
-                let raw_msg = read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
+                let raw_msg =
+                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
 
                 results.push(SipFlowItem {
                     src_addr: row.src,
@@ -493,7 +504,7 @@ impl StorageManager {
         for dir in folders {
             let db_path = dir.join("sipflow.db");
 
-            if !db_path.exists() {
+            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false) {
                 continue;
             }
 
@@ -541,14 +552,16 @@ impl StorageManager {
             let db_path = dir.join("sipflow.db");
             let raw_path = dir.join("data.raw");
 
-            if !db_path.exists() || !raw_path.exists() {
+            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+            {
                 continue;
             }
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path)?;
+            let mut raw_file = File::open(raw_path).await?;
             let mut current_pos = None;
 
             let rows = sqlx::query_as::<_, MediaPacketRow>(
@@ -573,7 +586,8 @@ impl StorageManager {
             for row in rows {
                 let offset = u64::try_from(row.offset)?;
                 let size = usize::try_from(row.size)?;
-                let payload = read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
+                let payload =
+                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
 
                 results.push(StoredMediaPacket {
                     leg: row.leg,

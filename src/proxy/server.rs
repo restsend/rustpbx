@@ -492,7 +492,7 @@ impl SipServerBuilder {
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         #[cfg(unix)]
-        log_rlimit_nofile();
+        log_rlimit_nofile().await;
         let transport_layer = TransportLayer::new(cancel_token.clone());
         // Clone of TLS listener for hot-reload support (initialized inside if !self.no_bind block)
         let mut tls_listener_clone: Option<rsipstack::transport::TlsListenerConnection> = None;
@@ -706,12 +706,16 @@ impl SipServerBuilder {
         ));
 
         let mut sip_flow = None;
-        let sipflow_backend = self.sipflow_backend.take().or_else(|| {
-            self.sipflow_config
-                .as_ref()
-                .and_then(|cfg| create_backend(cfg, cancel_token.clone()).ok())
+        let sipflow_backend = if let Some(backend) = self.sipflow_backend.take() {
+            Some(backend)
+        } else if let Some(cfg) = self.sipflow_config.as_ref() {
+            create_backend(cfg, cancel_token.clone())
+                .await
+                .ok()
                 .map(|b| Arc::from(b) as Arc<dyn SipFlowBackend>)
-        });
+        } else {
+            None
+        };
         if let Some(backend) = sipflow_backend {
             info!("Sipflow backend initialized");
             let local_addr_strs: Vec<String> = endpoint_local_addrs
@@ -1382,7 +1386,8 @@ impl SipServerInner {
     /// mode) from the on-disk configuration. New calls will use the updated
     /// settings immediately; existing calls are unaffected.
     pub async fn reload_platform_settings(&self, config_path: &str) -> Result<String> {
-        let config = crate::config::Config::load(config_path)
+        let config = crate::config::Config::load_async(config_path)
+            .await
             .map_err(|e| anyhow!("Failed to load config: {e}"))?;
 
         let mut new_rtp = config.rtp_config();
@@ -1427,8 +1432,9 @@ impl SipServerInner {
 
     /// Hot-reload recording policy from the on-disk configuration. New calls
     /// will use the updated policy immediately; existing calls are unaffected.
-    pub fn reload_recording_settings(&self, config_path: &str) -> Result<String> {
-        let config = crate::config::Config::load(config_path)
+    pub async fn reload_recording_settings(&self, config_path: &str) -> Result<String> {
+        let config = crate::config::Config::load_async(config_path)
+            .await
             .map_err(|e| anyhow!("Failed to load config: {e}"))?;
 
         let new_policy = config.proxy.recording.or(config.recording);
@@ -1453,7 +1459,8 @@ impl SipServerInner {
         }
     }
     pub async fn reload_sipflow(&self, config_path: &str) -> Result<String> {
-        let config = crate::config::Config::load(config_path)
+        let config = crate::config::Config::load_async(config_path)
+            .await
             .map_err(|e| anyhow!("Failed to load config: {e}"))?;
 
         let old_mode = self
@@ -1470,6 +1477,7 @@ impl SipServerInner {
         if let Some(ref new_cfg) = config.sipflow {
             let new_backend =
                 crate::sipflow::backend::create_backend(new_cfg, self.cancel_token.clone())
+                    .await
                     .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
             let new_backend: Arc<dyn crate::sipflow::SipFlowBackend> = Arc::from(new_backend);
 
@@ -1587,8 +1595,8 @@ impl MessageInspector for CompositeMessageInspector {
 }
 
 #[cfg(unix)]
-fn log_rlimit_nofile() {
-    if let Ok(content) = std::fs::read_to_string("/proc/self/limits") {
+async fn log_rlimit_nofile() {
+    if let Ok(content) = tokio::fs::read_to_string("/proc/self/limits").await {
         for line in content.lines() {
             if line.contains("open files") || line.contains("Max open files") {
                 info!("{line}");
@@ -1597,8 +1605,11 @@ fn log_rlimit_nofile() {
         }
     }
     // Fallback: check current fd count vs a reasonable estimate
-    let count = std::fs::read_dir("/proc/self/fd")
-        .map(|d| d.count())
-        .unwrap_or(0);
+    let mut count = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir("/proc/self/fd").await {
+        while let Ok(Some(_)) = entries.next_entry().await {
+            count += 1;
+        }
+    }
     info!("RLIMIT_NOFILE: current fd count ~{count}");
 }

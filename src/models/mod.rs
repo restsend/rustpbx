@@ -28,7 +28,7 @@ pub mod sip_trunk;
 pub mod system_notification;
 pub mod user;
 
-pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
+pub async fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     let Some(path_part) = database_url.strip_prefix("sqlite://") else {
         return Ok(());
     };
@@ -42,7 +42,7 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).with_context(|| {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
             format!(
                 "failed to create directory for console database at {}",
                 parent.display()
@@ -50,12 +50,13 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
         })?;
     }
 
-    if !path.exists() {
-        std::fs::OpenOptions::new()
+    if !tokio::fs::try_exists(path).await? {
+        tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(path)
+            .await
             .with_context(|| {
                 format!(
                     "failed to create console database file at {}",
@@ -69,7 +70,7 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
 
 pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
-        prepare_sqlite_database(database_url).map_err(|e| {
+        prepare_sqlite_database(database_url).await.map_err(|e| {
             tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
             let msg = format!("failed to prepare SQLite database {database_url}: {e}");
             anyhow::anyhow!(msg)
@@ -87,7 +88,7 @@ pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
 
 pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
-        prepare_sqlite_database(database_url).map_err(|e| {
+        prepare_sqlite_database(database_url).await.map_err(|e| {
             tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
             let msg = format!("failed to prepare SQLite database {database_url}: {e}");
             anyhow::anyhow!(msg)

@@ -297,8 +297,8 @@ impl ArchiveAddon {
         task_status: Arc<RwLock<ManualTaskStatus>>,
     ) -> anyhow::Result<()> {
         use crate::models::call_record;
-        use flate2::Compression;
         use sea_orm::PaginatorTrait;
+        use tokio::io::AsyncWriteExt;
 
         // Count total records for progress tracking
         let start_dt: DateTime<Utc> =
@@ -349,9 +349,9 @@ impl ArchiveAddon {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let file = std::fs::File::create(&tmp_filename)?;
-            let encoder = flate2::write::GzEncoder::new(file, Compression::default());
-            let mut wtr = csv::Writer::from_writer(encoder);
+            let file = tokio::fs::File::create(&tmp_filename).await?;
+            let encoder = async_compression::tokio::write::GzipEncoder::new(file);
+            let mut wtr = csv_async::AsyncSerializer::from_writer(encoder);
             let mut day_archived = 0usize;
 
             loop {
@@ -373,7 +373,7 @@ impl ArchiveAddon {
                 last_id = *batch_ids.last().unwrap();
 
                 for record in batch {
-                    wtr.serialize(archive_csv_record(record))?;
+                    wtr.serialize(archive_csv_record(record)).await?;
                 }
                 day_archived += batch_len;
                 total_archived += batch_len;
@@ -394,7 +394,8 @@ impl ArchiveAddon {
                 }
             }
 
-            wtr.into_inner()?.finish()?;
+            let mut encoder = wtr.into_inner().await?;
+            encoder.shutdown().await?;
 
             if day_archived > 0 {
                 tokio::fs::rename(&tmp_filename, &filename).await?;
@@ -501,7 +502,7 @@ impl ArchiveAddon {
         archive_dir: &str,
     ) -> anyhow::Result<()> {
         use crate::models::call_record;
-        use flate2::Compression;
+        use tokio::io::AsyncWriteExt;
 
         let archive_after_days = config.archive_after_days as i64;
 
@@ -572,9 +573,9 @@ impl ArchiveAddon {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let file = std::fs::File::create(&tmp_filename)?;
-            let encoder = flate2::write::GzEncoder::new(file, Compression::default());
-            let mut wtr = csv::Writer::from_writer(encoder);
+            let file = tokio::fs::File::create(&tmp_filename).await?;
+            let encoder = async_compression::tokio::write::GzipEncoder::new(file);
+            let mut wtr = csv_async::AsyncSerializer::from_writer(encoder);
 
             loop {
                 let batch = call_record::Entity::find()
@@ -595,7 +596,7 @@ impl ArchiveAddon {
                 last_id = *batch_ids.last().unwrap();
 
                 for record in batch {
-                    wtr.serialize(archive_csv_record(record))?;
+                    wtr.serialize(archive_csv_record(record)).await?;
                 }
                 total_archived += batch_len;
 
@@ -607,7 +608,8 @@ impl ArchiveAddon {
             }
 
             // Drop writer to flush+finish the gzip stream
-            wtr.into_inner()?.finish()?;
+            let mut encoder = wtr.into_inner().await?;
+            encoder.shutdown().await?;
 
             if total_archived > 0 {
                 // Rename tmp file to final name

@@ -245,7 +245,7 @@ pub async fn upload_media(
         };
 
     let temp_path = temp_file.path().to_owned();
-    let file_size = match std::fs::metadata(&temp_path) {
+    let file_size = match tokio::fs::metadata(&temp_path).await {
         Ok(m) => m.len() as usize,
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: temp file metadata failed: {e}");

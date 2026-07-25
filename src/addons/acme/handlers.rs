@@ -85,7 +85,7 @@ pub async fn ui_index(
     #[cfg(feature = "console")]
     {
         if let Some(console) = &state.console {
-            let certs = list_certificates().unwrap_or_default();
+            let certs = list_certificates().await.unwrap_or_default();
             let status = acme_state.status.read().unwrap().clone();
             return console.render_with_headers(
                 "acme/acme_index.html",
@@ -102,15 +102,15 @@ pub async fn ui_index(
     Html("Console feature not enabled".to_string()).into_response()
 }
 
-fn list_certificates() -> anyhow::Result<Vec<CertInfo>> {
+async fn list_certificates() -> anyhow::Result<Vec<CertInfo>> {
     let cert_dir = StdPath::new("config/certs");
-    if !cert_dir.exists() {
+    if !tokio::fs::try_exists(cert_dir).await? {
         return Ok(vec![]);
     }
 
     let mut certs = Vec::new();
-    for entry in std::fs::read_dir(cert_dir)? {
-        let entry = entry?;
+    let mut entries = tokio::fs::read_dir(cert_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("crt") {
             let domain = path
@@ -118,7 +118,7 @@ fn list_certificates() -> anyhow::Result<Vec<CertInfo>> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let metadata = entry.metadata()?;
+            let metadata = entry.metadata().await?;
             let created = metadata.created().unwrap_or(std::time::SystemTime::now());
             let created_at = humantime::format_rfc3339(created).to_string();
 
@@ -438,7 +438,8 @@ async fn process_acme(
                 enable_https,
                 enable_sip_tls,
                 &app_state,
-            )?;
+            )
+            .await?;
             // Reload TLS certificates after successful save
             reload_certificates(&app_state, &domain, enable_https, enable_sip_tls).await?;
             return Ok(());
@@ -464,7 +465,8 @@ async fn process_acme(
         enable_https,
         enable_sip_tls,
         &app_state,
-    )?;
+    )
+    .await?;
 
     // Reload TLS certificates after successful save
     reload_certificates(&app_state, &domain, enable_https, enable_sip_tls).await?;
@@ -477,7 +479,7 @@ async fn process_acme(
     Ok(())
 }
 
-fn save_cert_and_update_config(
+async fn save_cert_and_update_config(
     cert: &str,
     private_key_pem: &str,
     domain: &str,
@@ -491,13 +493,13 @@ fn save_cert_and_update_config(
     }
 
     let cert_dir = StdPath::new("config/certs");
-    std::fs::create_dir_all(cert_dir)?;
+    tokio::fs::create_dir_all(cert_dir).await?;
 
     let cert_path = cert_dir.join(format!("{}.crt", domain));
     let key_path = cert_dir.join(format!("{}.key", domain));
 
-    std::fs::write(&cert_path, cert)?;
-    std::fs::write(&key_path, private_key_pem)?;
+    tokio::fs::write(&cert_path, cert).await?;
+    tokio::fs::write(&key_path, private_key_pem).await?;
 
     info!("Certificate saved to {:?}", cert_path);
 
@@ -506,7 +508,7 @@ fn save_cert_and_update_config(
             .config_path
             .clone()
             .unwrap_or_else(|| "config.toml".to_string());
-        let config_content = std::fs::read_to_string(&config_path)?;
+        let config_content = tokio::fs::read_to_string(&config_path).await?;
         let mut doc = config_content.parse::<DocumentMut>()?;
 
         let needs_proxy_init = doc
@@ -539,7 +541,7 @@ fn save_cert_and_update_config(
             }
         }
 
-        std::fs::write(&config_path, doc.to_string())?;
+        tokio::fs::write(&config_path, doc.to_string()).await?;
         info!("Updated config.toml with new certificate paths");
     }
     Ok(())
@@ -582,7 +584,7 @@ pub async fn get_auto_renew_config(
     Extension(acme_state): Extension<super::AcmeState>,
 ) -> impl IntoResponse {
     let config = acme_state.auto_renew_config.read().await.clone();
-    let (current_domain, cert_expiry) = get_current_cert_info();
+    let (current_domain, cert_expiry) = get_current_cert_info().await;
 
     Json(AutoRenewConfigResponse {
         config,
@@ -628,19 +630,19 @@ pub async fn set_auto_renew_config(
 }
 
 /// Get information about the currently managed certificate
-fn get_current_cert_info() -> (Option<String>, Option<String>) {
+async fn get_current_cert_info() -> (Option<String>, Option<String>) {
     let cert_dir = StdPath::new("config/certs");
-    if !cert_dir.exists() {
+    if !tokio::fs::try_exists(cert_dir).await.unwrap_or(false) {
         return (None, None);
     }
 
     // Find the first .crt file
-    if let Ok(entries) = std::fs::read_dir(cert_dir) {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir(cert_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("crt") {
                 let domain = path.file_stem().and_then(|s| s.to_str()).map(String::from);
-                let expiry = get_cert_expiry(&path).ok().map(|t| {
+                let expiry = get_cert_expiry(&path).await.ok().map(|t| {
                     let datetime: chrono::DateTime<chrono::Utc> = t.into();
                     datetime.format("%Y-%m-%d %H:%M:%S UTC").to_string()
                 });
@@ -652,8 +654,8 @@ fn get_current_cert_info() -> (Option<String>, Option<String>) {
 }
 
 /// Parse certificate expiry date from PEM file
-fn get_cert_expiry(cert_path: &StdPath) -> anyhow::Result<std::time::SystemTime> {
-    let cert_data = std::fs::read(cert_path)?;
+async fn get_cert_expiry(cert_path: &StdPath) -> anyhow::Result<std::time::SystemTime> {
+    let cert_data = tokio::fs::read(cert_path).await?;
     let cert_pem = String::from_utf8_lossy(&cert_data);
 
     // Find the certificate from PEM data
@@ -750,7 +752,7 @@ pub async fn spawn_auto_renew_checker(
         // Find domain to check
         let domain = if let Some(ref d) = config.domain {
             d.clone()
-        } else if let (Some(d), _) = get_current_cert_info() {
+        } else if let (Some(d), _) = get_current_cert_info().await {
             d
         } else {
             debug!("No certificate domain found for auto-renew check");
@@ -761,12 +763,12 @@ pub async fn spawn_auto_renew_checker(
 
         let cert_path = StdPath::new("config/certs").join(format!("{}.crt", domain));
 
-        if !cert_path.exists() {
+        if !tokio::fs::try_exists(&cert_path).await.unwrap_or(false) {
             debug!("Certificate file not found for domain: {}", domain);
             continue;
         }
 
-        match get_cert_expiry(&cert_path) {
+        match get_cert_expiry(&cert_path).await {
             Ok(expiry) => {
                 let now = std::time::SystemTime::now();
                 let duration_until_expiry = expiry.duration_since(now).unwrap_or_default();

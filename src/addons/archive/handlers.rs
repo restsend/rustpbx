@@ -165,21 +165,22 @@ pub async fn update_config(
         archive_dir: new_archive_dir,
     };
 
-    let res = (|| -> anyhow::Result<()> {
+    let res = async {
         if let Some(parent) = archive_config_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let config_content = toml::to_string_pretty(&new_config)?;
-        std::fs::write(&archive_config_path, config_content)?;
+        tokio::fs::write(&archive_config_path, config_content).await?;
         info!(
             "Updated archive config in {}",
             archive_config_path.display()
         );
-        Ok(())
-    })();
+        anyhow::Ok(())
+    }
+    .await;
 
     match res {
         Ok(_) => {

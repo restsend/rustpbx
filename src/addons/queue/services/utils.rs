@@ -223,7 +223,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn load_queues_from_files(
+pub async fn load_queues_from_files(
     patterns: &[String],
 ) -> Result<(HashMap<String, RouteQueueConfig>, Vec<String>)> {
     let mut queues: HashMap<String, RouteQueueConfig> = HashMap::new();
@@ -238,7 +238,8 @@ pub fn load_queues_from_files(
             let path =
                 entry.map_err(|e| anyhow!("failed to read queue include glob entry: {}", e))?;
             let path_display = path.display().to_string();
-            let contents = fs::read_to_string(&path)
+            let contents = tokio::fs::read_to_string(&path)
+                .await
                 .with_context(|| format!("failed to read queue include file {}", path_display))?;
             let doc: QueueFileDocument = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse queue include file {}", path_display))?;

@@ -479,7 +479,7 @@ async fn query_media(
     {
         Ok(temp_file) => {
             let temp_path = temp_file.path().to_owned();
-            let file_len = match std::fs::metadata(&temp_path) {
+            let file_len = match tokio::fs::metadata(&temp_path).await {
                 Ok(m) => m.len(),
                 Err(_) => 0,
             };
@@ -526,7 +526,7 @@ async fn query_media(
                 .body(body)
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
 
-            let _ = std::fs::remove_file(&path_str);
+            let _ = tokio::fs::remove_file(&path_str).await;
             response
         }
         Err(e) => (

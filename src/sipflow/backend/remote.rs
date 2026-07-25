@@ -1,9 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
+use tokio::net::{UdpSocket, lookup_host};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -101,7 +101,7 @@ pub struct RemoteBackend {
 
 impl RemoteBackend {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub async fn new(
         config_nodes: Vec<SipFlowClusterNode>,
         timeout_secs: u64,
         batch_size_cfg: usize,
@@ -114,25 +114,22 @@ impl RemoteBackend {
         // backend, while dropping/reloading this backend must not stop the server.
         let cancel_token = cancel_token.child_token();
 
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-        socket.set_nonblocking(true)?;
-        let udp_socket = Arc::new(UdpSocket::from_std(socket)?);
+        let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-        let nodes: Vec<RemoteNode> = config_nodes
-            .iter()
-            .map(|n| {
-                let udp_host = n.udp.clone();
-                let udp_addr: SocketAddr =
-                    (&*udp_host).to_socket_addrs()?.next().ok_or_else(|| {
-                        anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", n.udp)
-                    })?;
-                Ok(RemoteNode {
-                    udp_host,
-                    http_addr: n.http.clone(),
-                    udp_addr: Arc::new(ArcSwap::new(Arc::new(udp_addr))),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut nodes = Vec::with_capacity(config_nodes.len());
+        for node in config_nodes {
+            let udp_addr: SocketAddr = lookup_host(node.udp.as_str())
+                .await?
+                .next()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", node.udp)
+                })?;
+            nodes.push(RemoteNode {
+                udp_host: node.udp,
+                http_addr: node.http,
+                udp_addr: Arc::new(ArcSwap::new(Arc::new(udp_addr))),
+            });
+        }
 
         let client = crate::http_util::build_keepalive_client(
             Some(std::time::Duration::from_secs(timeout_secs)),
@@ -432,7 +429,7 @@ async fn dns_refresh_loop(nodes: Vec<RemoteNode>, ttl_secs: u64, cancel: Cancell
             _ = tokio::time::sleep(interval) => {}
         }
         for node in &nodes {
-            match (&*node.udp_host).to_socket_addrs() {
+            match lookup_host(node.udp_host.as_str()).await {
                 Ok(mut addrs) => {
                     if let Some(new_addr) = addrs.next() {
                         let old = **node.udp_addr.load();

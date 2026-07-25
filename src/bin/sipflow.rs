@@ -282,7 +282,7 @@ async fn main() -> Result<()> {
     };
 
     let backend: Arc<dyn SipFlowBackend> =
-        Arc::from(create_backend(&config, CancellationToken::new())?);
+        Arc::from(create_backend(&config, CancellationToken::new()).await?);
     let perf_counters = PerfCounters::new_arc();
 
     // Install global Prometheus recorder so all metrics::counter!/gauge!/histogram!

@@ -426,7 +426,7 @@ async fn stream_call_recording(
 
         if let Ok(temp_file) = wav_result {
             let temp_path = temp_file.path().to_owned();
-            let file_len = match std::fs::metadata(&temp_path) {
+            let file_len = match tokio::fs::metadata(&temp_path).await {
                 Ok(m) => m.len(),
                 Err(_) => 0,
             };
@@ -443,10 +443,9 @@ async fn stream_call_recording(
             }
 
             let mut header_buf = [0u8; 4];
-            if let Ok(mut f) = std::fs::File::open(&temp_path) {
-                use std::io::{Read, Seek, SeekFrom};
-                let _ = f.seek(SeekFrom::Start(40));
-                let _ = f.read_exact(&mut header_buf);
+            if let Ok(mut f) = tokio::fs::File::open(&temp_path).await {
+                let _ = f.seek(std::io::SeekFrom::Start(40)).await;
+                let _ = f.read_exact(&mut header_buf).await;
             }
             let data_size = u32::from_le_bytes(header_buf);
             if record.duration_secs > 1 && data_size <= 1280 {
@@ -463,7 +462,7 @@ async fn stream_call_recording(
             let tmp_path = temp_file.into_temp_path();
             let path_str = tmp_path.to_string_lossy().to_string();
             let response = stream_file_with_range(&path_str, file_len, &headers).await;
-            let _ = std::fs::remove_file(&path_str);
+            let _ = tokio::fs::remove_file(&path_str).await;
             drop(tmp_path);
             return response;
         }

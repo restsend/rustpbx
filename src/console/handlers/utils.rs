@@ -15,21 +15,21 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn check_path_candidate(path: &Path) -> bool {
-    match fs::metadata(path) {
+async fn check_path_candidate(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
         Ok(metadata) => metadata.file_type().is_file() && is_executable(&metadata),
         Err(_) => false,
     }
 }
 
-pub fn command_exists(command: &str) -> bool {
+pub async fn command_exists(command: &str) -> bool {
     if command.trim().is_empty() {
         return false;
     }
 
     let has_separator = command.contains('/') || command.contains('\\');
     if has_separator {
-        return check_path_candidate(Path::new(command));
+        return check_path_candidate(Path::new(command)).await;
     }
 
     let path_var = match std::env::var_os("PATH") {
@@ -42,7 +42,7 @@ pub fn command_exists(command: &str) -> bool {
             continue;
         }
         let candidate = path.join(command);
-        if check_path_candidate(&candidate) {
+        if check_path_candidate(&candidate).await {
             return true;
         }
     }
