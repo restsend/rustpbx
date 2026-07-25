@@ -10,6 +10,7 @@ use tracing::{info, warn};
 /// Per-session state written before an IVR exec starts.
 /// Only present when `ivr.exec` is the active flow.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct IvrExecState {
     /// Correlator that will be echoed back in the result.
     pub request_id: String,
@@ -28,6 +29,7 @@ pub struct IvrExecState {
 
 /// Result collected by the IVR app on exit and stored in extensions.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct IvrExecResult {
     pub status: String,
     pub reason: String,
@@ -41,6 +43,7 @@ pub struct IvrExecResult {
 /// Payload sent via webhook POST or SIP INFO result.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 struct IvrExecResultPayload {
     event: String,
     request_id: String,
@@ -59,11 +62,13 @@ struct IvrExecResultPayload {
     completion_time: String,
 }
 
+#[allow(dead_code)]
 const RESULT_CT: &str = "application/vnd.rustpbx.result+json";
 
 /// Hook that handles the `ivr.exec` flow: on app exit, automatically unholds
 /// the callee leg and sends the IVR result back as a SIP INFO with
 /// `application/vnd.rustpbx.result+json` content-type.
+#[allow(dead_code)]
 pub struct IvrExecHook;
 
 #[async_trait]

@@ -24,6 +24,7 @@ use tracing::info;
 
 /// Spawn a WS echo server that records the number of connections and allows
 /// sending/receiving PCM data via the returned control channels.
+#[allow(dead_code)]
 struct WsEchoServer {
     pub addr: std::net::SocketAddr,
     pub connections: Arc<Mutex<u32>>,
@@ -94,6 +95,7 @@ impl WsEchoServer {
         *self.connections.lock().await
     }
 
+    #[allow(dead_code)]
     async fn dtmf_json(&self) -> Option<String> {
         self.last_dtmf_json.lock().await.clone()
     }

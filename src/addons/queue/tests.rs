@@ -18,7 +18,7 @@ mod tests {
         let builder = db.get_database_backend();
         let schema = Schema::new(builder);
         let stmt = schema.create_table_from_entity(queue::Entity);
-        db.execute(builder.build(&stmt)).await.unwrap();
+        db.execute_raw(builder.build(&stmt)).await.unwrap();
 
         // Insert data
         let model1 = queue::ActiveModel {

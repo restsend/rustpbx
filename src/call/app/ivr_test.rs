@@ -2865,7 +2865,6 @@ action = { type = "transfer", target = "100" }
 
     #[tokio::test]
     async fn test_ivr_exec_writes_result_to_extensions() {
-        use crate::call::app::ivr_config::*;
         use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
         use crate::proxy::proxy_call::session_hooks::SessionExtensions;
         use chrono::Utc;
@@ -2890,7 +2889,7 @@ action = { type = "transfer", target = "100" }
         let app_ctx = crate::call::app::ApplicationContext {
             session_vars: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             queue_name: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            db: sea_orm::DatabaseConnection::Disconnected,
+            db: Default::default(),
             http_client: reqwest::Client::new(),
             call_info: crate::call::app::CallInfo {
                 session_id: "test-session".into(),

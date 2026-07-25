@@ -41,7 +41,7 @@ async fn count_rows(db: &DatabaseConnection, table: &str) -> i64 {
     use sea_orm::{ConnectionTrait, Statement};
     let backend = db.get_database_backend();
     let result = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             &format!("SELECT COUNT(*) as c FROM {}", table),
             Vec::new(),
@@ -115,7 +115,7 @@ async fn test_create_call_record_table() {
     create_call_record_table(&db, "test_cdrs").await.unwrap();
     // Verify table exists by querying it
     let rows = db
-        .execute(sea_orm::Statement::from_string(
+        .execute_raw(sea_orm::Statement::from_string(
             db.get_database_backend(),
             "SELECT COUNT(*) AS cnt FROM test_cdrs",
         ))

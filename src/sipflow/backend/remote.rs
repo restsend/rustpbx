@@ -660,6 +660,7 @@ mod tests {
             0,
             server_cancel.clone(),
         )
+        .await
         .expect("remote backend should be created");
         let backend_cancel = backend.cancel_token.clone();
 
@@ -683,6 +684,7 @@ mod tests {
             0,
             server_cancel.clone(),
         )
+        .await
         .expect("remote backend should be created");
         let backend_cancel = backend.cancel_token.clone();
 

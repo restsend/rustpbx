@@ -11679,6 +11679,7 @@ mod tests {
         writer.finalize().unwrap();
     }
 
+    #[allow(dead_code)]
     fn cross_correlate(signal: &[i16], reference: &[i16]) -> f64 {
         if signal.is_empty() || reference.is_empty() || signal.len() < reference.len() {
             return 0.0;

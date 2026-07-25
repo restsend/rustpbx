@@ -64,6 +64,7 @@ mod tests {
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new())
+            .await
             .expect("backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
@@ -90,6 +91,7 @@ mod tests {
         };
         let backend: Arc<dyn SipFlowBackend> = Arc::from(
             create_backend(&cfg, CancellationToken::new())
+                .await
                 .expect("backend creation should succeed"),
         );
 
@@ -129,7 +131,7 @@ mod tests {
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new());
+        let backend = create_backend(&cfg, CancellationToken::new()).await;
         assert!(backend.is_ok(), "legacy format should create backend");
     }
 
@@ -148,7 +150,7 @@ mod tests {
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new());
+        let backend = create_backend(&cfg, CancellationToken::new()).await;
         assert!(backend.is_ok(), "domain UDP address should create backend");
     }
 
@@ -176,13 +178,13 @@ mod tests {
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new());
+        let backend = create_backend(&cfg, CancellationToken::new()).await;
         assert!(backend.is_ok(), "multi-node format should create backend");
     }
 
     /// RemoteBackend with neither nodes nor legacy fields must fail
-    #[test]
-    fn test_remote_backend_missing_config() {
+    #[tokio::test]
+    async fn test_remote_backend_missing_config() {
         let cfg = SipFlowConfig::Remote {
             nodes: vec![],
             udp_addr: None,
@@ -195,7 +197,7 @@ mod tests {
             delegate_upload: false,
             upload: None,
         };
-        let result = create_backend(&cfg, CancellationToken::new());
+        let result = create_backend(&cfg, CancellationToken::new()).await;
         assert!(
             result.is_err(),
             "expected error when neither nodes nor udp_addr/http_addr provided"
@@ -221,6 +223,7 @@ mod tests {
             upload: None,
         };
         let backend = create_backend(&cfg, CancellationToken::new())
+            .await
             .expect("flowdb backend creation should succeed");
         backend.flush().await.expect("flush should not error");
     }
@@ -248,6 +251,7 @@ mod tests {
         };
         let backend: Arc<dyn SipFlowBackend> = Arc::from(
             create_backend(&cfg, CancellationToken::new())
+                .await
                 .expect("backend creation should succeed"),
         );
 
@@ -406,7 +410,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new()).await.expect("backend creation");
 
         // Send N records (N > batch_size) with the same call_id so they all
         // hash to the same single node.
@@ -479,7 +483,7 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new()).await.expect("backend creation");
 
         const N: u32 = 10;
         for i in 0..N {

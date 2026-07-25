@@ -171,7 +171,7 @@ regex = "1.12.4"
 http = "1.4.2"
 urlencoding = "2.1.3"
 ipnet = "2.11.0"
-prefix-trie = "0.8.4"
+prefix-trie = "0.10.1"
 sqlx = { version = "0.9.0", features = [
     "runtime-tokio",
     "tls-rustls-ring",
@@ -243,8 +243,11 @@ axum-server = { version = "0.8.0", default-features = false, features = [
     "tls-rustls-no-provider",
 ] }
 csv = "1.4.0"
-csv-async = { version = "1.3.1", features = ["tokio", "with_serde"], optional = true }
-quick-xml = { version = "0.40.1", features = ["serialize"] }
+csv-async = { version = "1.3.1", features = [
+    "tokio",
+    "with_serde",
+], optional = true }
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 ruzstd = "0.8"
 minimp3 = "0.6.1"
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
@@ -262,13 +265,12 @@ flowdb = { version = "0.8.2", default-features = false }
 [dev-dependencies]
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
-sipbot = { version = "0.2.44", default-features = false }
+sipbot = { version = "0.2.48", default-features = false }
 serde_urlencoded = "0.7"
 ctor = "1.0.7"
 
 [build-dependencies]
 chrono = "0.4"
-
 
 [[bin]]
 name = "rustpbx"
@@ -281,7 +283,3 @@ path = "src/bin/sipflow.rs"
 [[bin]]
 name = "sipflow-diag"
 path = "src/bin/sipflow-diag.rs"
-
-[[bin]]
-name = "verify-i18n"
-path = "tools/verify_i18n.rs"

@@ -678,6 +678,14 @@ fn main() -> Result<()> {
 
 async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
+    #[cfg(any(
+        feature = "addon-cc",
+        feature = "addon-wholesale",
+        feature = "addon-endpoint-manager",
+        feature = "addon-enterprise-auth",
+        feature = "addon-ivr-editor",
+        feature = "addon-voicemail",
+    ))]
     use sea_orm_migration::MigratorTrait;
 
     let db = rustpbx::models::create_db(database_url).await?;
