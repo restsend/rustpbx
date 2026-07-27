@@ -67,7 +67,8 @@ pub async fn persist_call_record(
     let transcript_status = details.transcript_status.clone();
     let transcript_language = details.transcript_language.clone();
     let tags = details.tags.clone();
-    let duration_secs = std::cmp::Ord::max((record.end_time - record.start_time).num_seconds(), 0) as i32;
+    let duration_secs =
+        std::cmp::Ord::max((record.end_time - record.start_time).num_seconds(), 0) as i32;
 
     let caller_uri = normalize_endpoint_uri(&record.caller);
     let callee_uri = normalize_endpoint_uri(&record.callee);

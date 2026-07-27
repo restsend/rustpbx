@@ -1,33 +1,17 @@
-//! Cluster event synchronization via SIP MESSAGE.
-//!
-//! When `cluster_peers` is configured, LocatorEvent and Presence state changes
-//! are forwarded to peer nodes.  Remote nodes process shared events locally
-//! without duplicating side-effects (DB writes, webhooks).
+//! Cluster event hub — dispatches local + remote cluster events to addon
+//! handlers.  Cluster sync is handled by AMI HTTP POST (ClusterSync),
+//! not by SIP MESSAGE.
 
-use super::ProxyAction;
 use crate::call::Location;
-use crate::call::TransactionCookie;
-use crate::proxy::ProxyModule;
 use crate::proxy::locator::LocatorEvent;
 use crate::proxy::presence::{PresenceManager, PresenceState, PresenceStatus};
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
-use rsipstack::sip::Param;
-use rsipstack::sip::headers::typed::CSeq;
-use rsipstack::sip::headers::{CallId, ContentType};
-use rsipstack::sip::typed::{From as FromHeader, To as ToHeader, Via};
-use rsipstack::sip::{Header, Method, Request, SipMessage, Uri, Version};
-use rsipstack::transaction::endpoint::EndpointInnerRef;
-use rsipstack::transaction::key::{TransactionKey, TransactionRole};
-use rsipstack::transaction::transaction::Transaction;
+use rsipstack::sip::Uri;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::warn;
 
 // ── Event source ────────────────────────────────────────────────────────────
 
@@ -51,6 +35,7 @@ pub trait ClusterEventHandler: Send + Sync {
     async fn on_presence_event(
         &self,
         _identity: &str,
+        _old_state: Option<&PresenceState>,
         _state: &PresenceState,
         _source: &EventSource,
     ) {
@@ -67,10 +52,9 @@ pub trait ClusterEventHandler: Send + Sync {
     async fn on_queue_event(&self, _msg: &ClusterQueueEventMessage, _source: &EventSource) {}
 }
 
-// ── Cluster message body (serialised in SIP MESSAGE) ────────────────────────
+// ── Cluster message types ───────────────────────────────────────────────────
 
-const CLUSTER_CONTENT_TYPE: &str = "application/x-rustpbx-cluster-event";
-
+#[cfg(test)]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 enum ClusterMessageBody {
@@ -85,7 +69,7 @@ enum ClusterMessageBody {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct ClusterLocatorMessage {
+pub struct ClusterLocatorMessage {
     event: String,
     aor: String,
     registered_aor: Option<String>,
@@ -95,7 +79,7 @@ struct ClusterLocatorMessage {
 }
 
 impl ClusterLocatorMessage {
-    fn to_event(&self) -> Option<LocatorEvent> {
+    pub fn to_event(&self) -> Option<LocatorEvent> {
         let aor: Uri = self.aor.parse().ok()?;
         let registered_aor = self
             .registered_aor
@@ -118,7 +102,7 @@ impl ClusterLocatorMessage {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct ClusterPresenceMessage {
+pub struct ClusterPresenceMessage {
     identity: String,
     status: String,
     note: Option<String>,
@@ -127,7 +111,11 @@ struct ClusterPresenceMessage {
 }
 
 impl ClusterPresenceMessage {
-    fn to_state(&self) -> Option<PresenceState> {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn to_state(&self) -> Option<PresenceState> {
         let status = match self.status.as_str() {
             "idle" | "available" => PresenceStatus::Idle,
             "busy" => PresenceStatus::Busy,
@@ -236,10 +224,9 @@ pub struct ClusterQueueEventMessage {
 pub struct ClusterEventHub {
     locator_events: tokio::sync::broadcast::Sender<LocatorEvent>,
     presence_manager: Arc<PresenceManager>,
-    endpoint_inner: EndpointInnerRef,
-    local_sip_addr: SocketAddr,
-    peers: Vec<SocketAddr>,
     handlers: RwLock<Vec<Arc<dyn ClusterEventHandler>>>,
+    /// Cluster AMI sync for non-presence events (locator, agent_status, queue).
+    cluster_sync: parking_lot::RwLock<Option<crate::proxy::cluster_sync::ClusterSync>>,
     /// Child of the SIP server's cancel token; used to stop the dispatcher.
     cancel: tokio_util::sync::CancellationToken,
     /// Handle to the background dispatcher task (aborted on drop).
@@ -250,21 +237,20 @@ impl ClusterEventHub {
     pub fn new(
         locator_events: tokio::sync::broadcast::Sender<LocatorEvent>,
         presence_manager: Arc<PresenceManager>,
-        endpoint_inner: EndpointInnerRef,
-        local_sip_addr: SocketAddr,
-        peers: Vec<SocketAddr>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             locator_events,
             presence_manager,
-            endpoint_inner,
-            local_sip_addr,
-            peers,
             handlers: RwLock::new(Vec::new()),
+            cluster_sync: parking_lot::RwLock::new(None),
             cancel,
             task_handle: Mutex::new(None),
         }
+    }
+
+    pub fn set_cluster_sync(&self, sync: crate::proxy::cluster_sync::ClusterSync) {
+        *self.cluster_sync.write() = Some(sync);
     }
 
     pub fn register_handler(&self, handler: Arc<dyn ClusterEventHandler>) {
@@ -337,26 +323,32 @@ impl ClusterEventHub {
         self.notify_locator_handlers(&event, &source).await;
     }
 
-    /// Remote presence event (from peer MESSAGE).
+    /// Remote presence event (from peer AMI / cluster event).
     pub async fn on_remote_presence_change(
         &self,
         identity: &str,
-        state: PresenceState,
-        source: EventSource,
+        state: &PresenceState,
+        source: &EventSource,
     ) {
-        self.presence_manager
-            .update_state(identity, state.clone(), &source)
+        let old_state = self
+            .presence_manager
+            .update_state(identity, state.clone(), source)
             .await;
-        self.notify_presence_handlers(identity, &state, &source)
+        self.notify_presence_handlers(identity, old_state.as_ref(), state, source)
             .await;
     }
 
-    /// Emit a local presence change (from PUBLISH etc).
-    pub async fn emit_presence_change(&self, identity: &str, state: &PresenceState) {
+    /// Notify local handlers of a presence change (from PUBLISH etc).
+    /// AMI cluster sync is handled internally by PresenceManager::update_state.
+    pub async fn emit_presence_change(
+        &self,
+        identity: &str,
+        old_state: Option<&PresenceState>,
+        new_state: &PresenceState,
+    ) {
         let source = EventSource::Local;
-        self.notify_presence_handlers(identity, state, &source)
+        self.notify_presence_handlers(identity, old_state, new_state, &source)
             .await;
-        self.send_presence_to_peers(identity, state).await;
     }
 
     // ── handlers ─────────────────────────────────────────────────────────
@@ -369,16 +361,17 @@ impl ClusterEventHub {
         }
     }
 
-    async fn notify_presence_handlers(
+    pub async fn notify_presence_handlers(
         &self,
         identity: &str,
+        old_state: Option<&PresenceState>,
         state: &PresenceState,
         source: &EventSource,
     ) {
         let handlers: Vec<Arc<dyn ClusterEventHandler>> =
             self.handlers.read().iter().cloned().collect();
         for h in &handlers {
-            h.on_presence_event(identity, state, source).await;
+            h.on_presence_event(identity, old_state, state, source).await;
         }
     }
 
@@ -386,57 +379,22 @@ impl ClusterEventHub {
 
     async fn send_locator_to_peers(&self, event: &LocatorEvent) {
         let msg = ClusterLocatorMessage::from(event);
-        let body = match serde_json::to_vec(&ClusterMessageBody::Locator(msg)) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("failed to serialize locator cluster msg: {}", e);
-                return;
-            }
-        };
-        for peer in &self.peers {
-            let _ = self.send_sip_message(peer, &body).await;
-        }
-    }
-
-    async fn send_presence_to_peers(&self, identity: &str, state: &PresenceState) {
-        let msg = ClusterPresenceMessage::from((identity, state));
-        let body = match serde_json::to_vec(&ClusterMessageBody::Presence(msg)) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("failed to serialize presence cluster msg: {}", e);
-                return;
-            }
-        };
-        for peer in &self.peers {
-            let _ = self.send_sip_message(peer, &body).await;
+        if let Some(ref sync) = *self.cluster_sync.read() {
+            sync.broadcast("locator", &msg);
         }
     }
 
     /// Broadcast an agent status change to all cluster peers.
     pub async fn send_agent_status_to_peers(&self, msg: &ClusterAgentStatusMessage) {
-        let body = match serde_json::to_vec(&ClusterMessageBody::AgentStatus(msg.clone())) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("failed to serialize agent_status cluster msg: {}", e);
-                return;
-            }
-        };
-        for peer in &self.peers {
-            let _ = self.send_sip_message(peer, &body).await;
+        if let Some(ref sync) = *self.cluster_sync.read() {
+            sync.broadcast("agent_status", msg);
         }
     }
 
     /// Broadcast a queue event (enqueue / dequeue / assign) to all peers.
     pub async fn send_queue_event_to_peers(&self, msg: &ClusterQueueEventMessage) {
-        let body = match serde_json::to_vec(&ClusterMessageBody::QueueEvent(msg.clone())) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("failed to serialize queue_event cluster msg: {}", e);
-                return;
-            }
-        };
-        for peer in &self.peers {
-            let _ = self.send_sip_message(peer, &body).await;
+        if let Some(ref sync) = *self.cluster_sync.read() {
+            sync.broadcast("queue_event", msg);
         }
     }
 
@@ -461,76 +419,6 @@ impl ClusterEventHub {
             h.on_queue_event(&msg, &source).await;
         }
     }
-
-    async fn send_sip_message(&self, peer: &SocketAddr, body: &[u8]) -> Result<()> {
-        let uri: Uri = format!("sip:cluster@{}:{}", peer.ip(), peer.port())
-            .parse()
-            .map_err(|e| anyhow!("invalid peer URI: {}", e))?;
-
-        let branch = format!(
-            "z9hG4bK-{}",
-            uuid::Uuid::new_v4().to_string().replace('-', "")
-        );
-        let tag = uuid::Uuid::new_v4()
-            .to_string()
-            .split('-')
-            .next()
-            .unwrap_or("tag")
-            .to_string();
-
-        let via = Via::parse(&format!(
-            "SIP/2.0/UDP {};branch={}",
-            self.local_sip_addr, branch
-        ))
-        .map_err(|e| anyhow!("invalid via: {}", e))?;
-        let from = FromHeader {
-            display_name: None,
-            uri: format!("sip:cluster@{}", self.local_sip_addr).parse()?,
-            params: vec![Param::Tag(rsipstack::sip::uri::Tag::new(&tag))],
-        };
-        let to = ToHeader {
-            display_name: None,
-            uri: format!("sip:cluster@{}:{}", peer.ip(), peer.port()).parse()?,
-            params: vec![],
-        };
-        let call_id = CallId::new(uuid::Uuid::new_v4().to_string());
-        let cseq = CSeq {
-            seq: 1u32,
-            method: Method::Message,
-        };
-
-        let request = Request {
-            method: Method::Message,
-            uri,
-            version: Version::V2,
-            headers: vec![
-                via.into(),
-                from.into(),
-                to.into(),
-                call_id.into(),
-                cseq.into(),
-                ContentType::new(CLUSTER_CONTENT_TYPE).into(),
-            ]
-            .into(),
-            body: body.to_vec(),
-        };
-
-        let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
-        let mut tx = Transaction::new_client(key, request, self.endpoint_inner.clone(), None);
-        tx.send().await?;
-        debug!("cluster MESSAGE sent to {}", peer);
-        match tokio::time::timeout(Duration::from_millis(200), tx.receive()).await {
-            Ok(Some(SipMessage::Response(resp))) => {
-                debug!(status = %resp.status_code, peer = %peer, "cluster MESSAGE response received");
-            }
-            Ok(_) => {}
-            Err(_) => debug!(
-                "timed out waiting for cluster MESSAGE response from {}",
-                peer
-            ),
-        }
-        Ok(())
-    }
 }
 
 impl Drop for ClusterEventHub {
@@ -542,151 +430,14 @@ impl Drop for ClusterEventHub {
     }
 }
 
-// ── ClusterEventModule (ProxyModule) ────────────────────────────────────────
 
-pub struct ClusterEventModule {
-    hub: Arc<ClusterEventHub>,
-    peer_ips: HashSet<IpAddr>,
-    local_addrs: HashSet<SocketAddr>,
-}
-
-impl ClusterEventModule {
-    pub fn create(
-        hub: Arc<ClusterEventHub>,
-        peers: &[SocketAddr],
-        local_addrs: HashSet<SocketAddr>,
-    ) -> Box<dyn ProxyModule> {
-        let peer_ips: HashSet<IpAddr> = peers.iter().map(|a| a.ip()).collect();
-        Box::new(Self {
-            hub,
-            peer_ips,
-            local_addrs,
-        })
-    }
-
-    fn extract_source_ip(tx: &Transaction) -> Option<IpAddr> {
-        let addr = tx.connection.as_ref()?.get_remote_addr()?;
-        let ip: IpAddr = addr.addr.host.clone().try_into().ok()?;
-        Some(ip)
-    }
-
-    /// Check if source address matches any local transport listener.
-    fn is_local(&self, source_ip: &IpAddr) -> bool {
-        self.local_addrs.iter().any(|a| a.ip() == *source_ip)
-    }
-}
-
-#[async_trait]
-impl ProxyModule for ClusterEventModule {
-    fn name(&self) -> &str {
-        "cluster_event"
-    }
-
-    fn allow_methods(&self) -> Vec<Method> {
-        vec![Method::Message]
-    }
-
-    async fn on_start(&mut self) -> Result<()> {
-        // The dispatcher must stop when the server shuts down. The hub holds
-        // a child of the server's cancel_token for this purpose.
-        self.hub.clone().start().await;
-        Ok(())
-    }
-
-    async fn on_stop(&self) -> Result<()> {
-        // Cancellation is driven by the server's cancel_token (the hub holds
-        // a child token), so spawned tasks exit when the server shuts down.
-        Ok(())
-    }
-
-    async fn on_transaction_begin(
-        &self,
-        _token: CancellationToken,
-        tx: &mut Transaction,
-        _cookie: TransactionCookie,
-    ) -> Result<ProxyAction> {
-        if tx.original.method != Method::Message {
-            return Ok(ProxyAction::Continue);
-        }
-
-        let Some(from_ip) = Self::extract_source_ip(tx) else {
-            return Ok(ProxyAction::Continue);
-        };
-
-        // Accept only from cluster peers
-        if !self.peer_ips.contains(&from_ip) {
-            return Ok(ProxyAction::Continue);
-        }
-
-        // Ignore messages from self (loopback through hub → peers)
-        if self.is_local(&from_ip) {
-            debug!("cluster event: ignoring loopback MESSAGE from {}", from_ip);
-            tx.reply(rsipstack::sip::StatusCode::OK).await?;
-            return Ok(ProxyAction::Abort);
-        }
-
-        // Check Content-Type by searching headers
-        let ct = tx.original.headers.iter().find_map(|h| match h {
-            Header::ContentType(ct) => Some(ct.value().to_string()),
-            Header::Other(name, value) if name.eq_ignore_ascii_case("Content-Type") => {
-                Some(value.to_string())
-            }
-            _ => None,
-        });
-        if ct.as_deref() != Some(CLUSTER_CONTENT_TYPE) {
-            return Ok(ProxyAction::Continue);
-        }
-
-        // Parse body
-        let body: ClusterMessageBody = match serde_json::from_slice(&tx.original.body) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(
-                    "cluster event: failed to parse body from {}: {}",
-                    from_ip, e
-                );
-                tx.reply(rsipstack::sip::StatusCode::BadRequest).await?;
-                return Ok(ProxyAction::Abort);
-            }
-        };
-
-        let remote_source = EventSource::Remote(SocketAddr::new(from_ip, 0));
-
-        match body {
-            ClusterMessageBody::Locator(msg) => {
-                if let Some(event) = msg.to_event() {
-                    self.hub.on_remote_locator_event(event, remote_source).await;
-                }
-            }
-            ClusterMessageBody::Presence(msg) => {
-                if let Some(state) = msg.to_state() {
-                    self.hub
-                        .on_remote_presence_change(&msg.identity, state, remote_source)
-                        .await;
-                }
-            }
-            ClusterMessageBody::AgentStatus(msg) => {
-                self.hub.on_remote_agent_status(msg, remote_source).await;
-            }
-            ClusterMessageBody::QueueEvent(msg) => {
-                self.hub.on_remote_queue_event(msg, remote_source).await;
-            }
-        }
-
-        tx.reply(rsipstack::sip::StatusCode::OK).await?;
-        Ok(ProxyAction::Abort)
-    }
-}
 
 // ── Unit tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call::Location;
-    use crate::proxy::locator::LocatorEvent;
-    use crate::proxy::presence::{PresenceManager, PresenceState, PresenceStatus};
-    use rsipstack::sip::Uri;
+    use crate::proxy::presence::{PresenceManager, PresenceStatus};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
@@ -1143,7 +894,7 @@ mod tests {
         handler
             .on_locator_event(&LocatorEvent::Registered(loc), &source)
             .await;
-        handler.on_presence_event("1001", &state, &source).await;
+        handler.on_presence_event("1001", None, &state, &source).await;
     }
 
     // ── Hub handler notification ────────────────────────────────────────────
@@ -1170,6 +921,7 @@ mod tests {
         async fn on_presence_event(
             &self,
             _identity: &str,
+            _old_state: Option<&PresenceState>,
             _state: &PresenceState,
             _source: &EventSource,
         ) {
@@ -1180,17 +932,9 @@ mod tests {
     fn make_test_hub() -> Arc<ClusterEventHub> {
         let (locator_tx, _) = tokio::sync::broadcast::channel(4);
         let presence_manager = Arc::new(PresenceManager::new(None));
-        let transport_layer =
-            rsipstack::transport::TransportLayer::new(tokio_util::sync::CancellationToken::new());
-        let endpoint = rsipstack::EndpointBuilder::new()
-            .with_transport_layer(transport_layer)
-            .build();
         Arc::new(ClusterEventHub::new(
             locator_tx,
             presence_manager,
-            endpoint.inner.clone(),
-            "127.0.0.1:5060".parse().unwrap(),
-            vec![],
             tokio_util::sync::CancellationToken::new(),
         ))
     }
@@ -1229,7 +973,7 @@ mod tests {
             status: PresenceStatus::Idle,
             ..Default::default()
         };
-        hub.emit_presence_change("1001", &state).await;
+        hub.emit_presence_change("1001", None, &state).await;
 
         assert_eq!(*handler.presence_count.lock().unwrap(), 1);
         assert_eq!(*handler.locator_count.lock().unwrap(), 0);
@@ -1265,7 +1009,7 @@ mod tests {
             5060,
         ));
 
-        hub.on_remote_presence_change(identity, state.clone(), remote_source)
+        hub.on_remote_presence_change(identity, &state, &remote_source)
             .await;
 
         // Memory state should be updated
@@ -1332,17 +1076,9 @@ mod tests {
         // each location was sent individually, causing double-processing.
         let (locator_tx, _) = tokio::sync::broadcast::channel(4);
         let presence_manager = Arc::new(PresenceManager::new(None));
-        let transport_layer =
-            rsipstack::transport::TransportLayer::new(tokio_util::sync::CancellationToken::new());
-        let endpoint = rsipstack::EndpointBuilder::new()
-            .with_transport_layer(transport_layer)
-            .build();
         let hub = Arc::new(ClusterEventHub::new(
             locator_tx.clone(),
             presence_manager,
-            endpoint.inner.clone(),
-            "127.0.0.1:5060".parse().unwrap(),
-            vec![],
             tokio_util::sync::CancellationToken::new(),
         ));
 

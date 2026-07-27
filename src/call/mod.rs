@@ -1011,8 +1011,7 @@ impl Dialplan {
             audio_profile: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
-            concurrent_call_lease:
-                concurrent_call_limiter::ConcurrentCallLease::default(),
+            concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease::default(),
         }
     }
 

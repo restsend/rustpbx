@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, SqlErr,
+    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use std::path::{Path, PathBuf};
 
@@ -214,7 +214,6 @@ impl GeneratedConfigStore {
     ) -> Result<()> {
         let now = chrono::Utc::now();
 
-        // Try INSERT first — this is atomic and catches the duplicate-key race.
         let model = config_entry::ActiveModel {
             category: Set(category.to_string()),
             entry_name: Set(name.to_string()),
@@ -225,29 +224,22 @@ impl GeneratedConfigStore {
             ..Default::default()
         };
 
-        match model.insert(db).await {
-            Ok(_) => return Ok(()),
-            Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {}
-            Err(e) => return Err(anyhow!("db config insert error: {e}")),
-        }
-
-        // Duplicate key on (category, entry_name) — UPDATE instead.
-        let existing = config_entry::Entity::find()
-            .filter(config_entry::Column::Category.eq(category))
-            .filter(config_entry::Column::EntryName.eq(name))
-            .one(db)
+        config_entry::Entity::insert(model)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::columns([
+                    config_entry::Column::Category,
+                    config_entry::Column::EntryName,
+                ])
+                .update_columns([
+                    config_entry::Column::Content,
+                    config_entry::Column::IsGenerated,
+                    config_entry::Column::UpdatedAt,
+                ])
+                .to_owned(),
+            )
+            .exec(db)
             .await
-            .map_err(|e| anyhow!("db config check error: {e}"))?;
-
-        if let Some(record) = existing {
-            let mut active: config_entry::ActiveModel = record.into();
-            active.set(config_entry::Column::Content, content.into());
-            active.set(config_entry::Column::UpdatedAt, now.into());
-            active
-                .update(db)
-                .await
-                .map_err(|e| anyhow!("db config update error: {e}"))?;
-        }
+            .map_err(|e| anyhow!("db config upsert error: {e}"))?;
 
         Ok(())
     }
@@ -468,17 +460,17 @@ mod tests {
 
         let store = GeneratedConfigStore::from_config(&config, &db);
 
-        assert!(store.is_db(), "should use Database variant when generated_db=true");
+        assert!(
+            store.is_db(),
+            "should use Database variant when generated_db=true"
+        );
 
         // Verify read/write works through the from_config path
         store
             .write("ivr", "from_config_test.toml", "hello from_config")
             .await
             .unwrap();
-        let content = store
-            .read("ivr", "from_config_test.toml")
-            .await
-            .unwrap();
+        let content = store.read("ivr", "from_config_test.toml").await.unwrap();
         assert_eq!(content, Some("hello from_config".to_string()));
     }
 
@@ -489,6 +481,9 @@ mod tests {
 
         let store = GeneratedConfigStore::from_config(&config, &db);
 
-        assert!(!store.is_db(), "should use FileSystem variant when generated_db=false");
+        assert!(
+            !store.is_db(),
+            "should use FileSystem variant when generated_db=false"
+        );
     }
 }

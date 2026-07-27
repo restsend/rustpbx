@@ -113,7 +113,9 @@ impl AppRuntime for DefaultAppRuntime {
 
         // Get the app from factory
         let app = if let Some(factory) = &self.app_factory {
-            factory.create_app(app_name, params.clone(), &self.context).await
+            factory
+                .create_app(app_name, params.clone(), &self.context)
+                .await
         } else {
             None
         };

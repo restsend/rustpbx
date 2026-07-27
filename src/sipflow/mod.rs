@@ -1,8 +1,8 @@
 pub mod backend;
 pub mod diag;
-pub mod flusher;
 pub mod flowdb_backend;
 pub mod flowdb_codec;
+pub mod flusher;
 pub mod perf;
 pub mod protocol;
 pub mod rtp_stats;

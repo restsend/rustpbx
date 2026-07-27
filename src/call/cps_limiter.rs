@@ -68,8 +68,7 @@ impl CpsLimiter {
                 Ok(_) => return Ok(()),
                 Err(actual) => {
                     tat = actual;
-                    now =
-                        u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    now = u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 }
             }
         }
@@ -108,10 +107,7 @@ mod tests {
         assert_eq!(limiter.try_acquire(), Ok(()));
         assert_eq!(limiter.try_acquire(), Ok(()));
         assert_eq!(limiter.try_acquire(), Ok(()));
-        assert_eq!(
-            limiter.try_acquire(),
-            Err(CpsLimitExceeded { limit: 3 })
-        );
+        assert_eq!(limiter.try_acquire(), Err(CpsLimitExceeded { limit: 3 }));
     }
 
     #[test]
@@ -120,10 +116,7 @@ mod tests {
         for _ in 0..20 {
             limiter.try_acquire().unwrap();
         }
-        assert_eq!(
-            limiter.try_acquire(),
-            Err(CpsLimitExceeded { limit: 20 })
-        );
+        assert_eq!(limiter.try_acquire(), Err(CpsLimitExceeded { limit: 20 }));
 
         std::thread::sleep(Duration::from_millis(60));
 

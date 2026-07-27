@@ -532,10 +532,7 @@ impl IvrApp {
                     }
                     query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
-                if let Some(ivr) = return_to_ivr
-                    .as_ref()
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
                     if !query.is_empty() {
                         query.push('&');
                     }
@@ -566,25 +563,22 @@ impl IvrApp {
                     return_to_ivr = ?return_to_ivr,
                     "IVR sending to queue"
                 );
-                self.ivr_flow_completed(ctx, "transferred", "queue", Some(target)).await;
+                self.ivr_flow_completed(ctx, "transferred", "queue", Some(target))
+                    .await;
                 self.state = IvrState::Done;
-                if let Some(ivr) = return_to_ivr
-                    .as_ref()
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
                     // Encode return IVR name so the queue can come back on failure
                     // and the transfer engine stores it for agent-hangup return
                     let mut queue_target = format!(
                         "queue:{}?return_to_ivr={}",
-                        target, urlencoding::encode(ivr)
+                        target,
+                        urlencoding::encode(ivr)
                     );
                     // Encode the current menu for resume
                     let menu = self.current_menu_key().to_string();
                     if !menu.is_empty() && menu != "root" {
-                        queue_target.push_str(&format!(
-                            "&return_menu={}",
-                            urlencoding::encode(&menu)
-                        ));
+                        queue_target
+                            .push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
                     }
                     Ok(AppAction::Transfer(queue_target))
                 } else {
@@ -657,7 +651,8 @@ impl IvrApp {
                     Ok(AppAction::Continue)
                 } else {
                     info!(ivr = %self.definition.name, "IVR hanging up");
-                    self.ivr_flow_completed(ctx, "hangup", "caller_hangup", None).await;
+                    self.ivr_flow_completed(ctx, "hangup", "caller_hangup", None)
+                        .await;
                     self.state = IvrState::Done;
                     Ok(AppAction::Hangup {
                         reason: None,
@@ -1236,7 +1231,10 @@ impl CallApp for IvrApp {
             });
         }
 
-        let start = self.start_menu.clone().unwrap_or_else(|| "root".to_string());
+        let start = self
+            .start_menu
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
         if self.definition.get_menu(&start).is_some() {
             self.enter_menu(&start, ctrl, ctx).await
         } else {

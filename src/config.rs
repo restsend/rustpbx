@@ -1121,8 +1121,7 @@ pub struct DialplanHints {
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
     /// All concurrent-call permits acquired during routing.
     /// Tenant, carrier, and trunk permits share this call-lifetime lease.
-    pub concurrent_call_lease:
-        crate::call::concurrent_call_limiter::ConcurrentCallLease,
+    pub concurrent_call_lease: crate::call::concurrent_call_limiter::ConcurrentCallLease,
 }
 
 impl std::fmt::Debug for DialplanHints {

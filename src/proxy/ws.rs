@@ -178,7 +178,6 @@ pub async fn sip_ws_handler(
                         warn!(addr = %local_addr_clone, "error sending WebSocket ping: {}", e);
                         break;
                     }
-                    debug!(addr = %local_addr_clone, "WebSocket ping sent");
                 }
             }
         }

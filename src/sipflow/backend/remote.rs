@@ -8,6 +8,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+use tracing::{info, warn};
+
 use crate::config::SipFlowClusterNode;
 use crate::http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::sipflow::backend::SipFlowBackend;
@@ -118,12 +120,13 @@ impl RemoteBackend {
 
         let mut nodes = Vec::with_capacity(config_nodes.len());
         for node in config_nodes {
-            let udp_addr: SocketAddr = lookup_host(node.udp.as_str())
-                .await?
-                .next()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", node.udp)
-                })?;
+            let udp_addr: SocketAddr =
+                lookup_host(node.udp.as_str())
+                    .await?
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", node.udp)
+                    })?;
             nodes.push(RemoteNode {
                 udp_host: node.udp,
                 http_addr: node.http,
@@ -616,22 +619,38 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let bytes = fetch_bytes(
+        info!(url, call_id, "remote generate_wav_file: fetching");
+
+        let fetch_result = fetch_bytes(
             &self.client,
             reqwest::Method::GET,
             &url,
             &HttpFetchOptions::new(),
         )
-        .await?;
+        .await;
 
-        let mut tmp = tempfile::Builder::new()
-            .prefix("sipflow_wav_")
-            .suffix(".wav")
-            .tempfile()?;
-        use std::io::Write;
-        tmp.write_all(&bytes)?;
-        tmp.flush()?;
-        Ok(tmp)
+        match fetch_result {
+            Ok(bytes) => {
+                let mut tmp = tempfile::Builder::new()
+                    .prefix("sipflow_wav_")
+                    .suffix(".wav")
+                    .tempfile()?;
+                use std::io::Write;
+                tmp.write_all(&bytes)?;
+                tmp.flush()?;
+                info!(
+                    url,
+                    call_id,
+                    bytes = bytes.len(),
+                    "remote generate_wav_file: success"
+                );
+                Ok(tmp)
+            }
+            Err(e) => {
+                warn!(url, call_id, error = %e, "remote generate_wav_file: failed");
+                Err(e)
+            }
+        }
     }
 }
 

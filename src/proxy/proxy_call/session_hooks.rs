@@ -169,10 +169,7 @@ pub trait CallSessionHook: Send + Sync {
     /// post-exit actions (unhold, send INFO result, etc.).
     ///
     /// The default implementation returns `None` (no action).
-    async fn on_app_exited(
-        &self,
-        _ctx: &CallSessionContext,
-    ) -> Option<IvrExecCompletion> {
+    async fn on_app_exited(&self, _ctx: &CallSessionContext) -> Option<IvrExecCompletion> {
         None
     }
 }

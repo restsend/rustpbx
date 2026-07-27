@@ -4,6 +4,7 @@ use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::models::presence;
 use crate::proxy::cluster_event::EventSource;
+use crate::proxy::cluster_sync::ClusterSync;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -157,6 +158,7 @@ pub struct PresenceManager {
     notify_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<String>>>>,
     /// Channel used by the voicemail layer to request MWI NOTIFY delivery.
     mwi_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<MwiTrigger>>>>,
+    cluster_sync: std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<ClusterSync>>>>,
 }
 
 impl PresenceManager {
@@ -168,7 +170,18 @@ impl PresenceManager {
             database,
             notify_tx: Arc::new(RwLock::new(None)),
             mwi_tx: Arc::new(RwLock::new(None)),
+            cluster_sync: std::sync::Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    pub fn set_cluster_sync(&self, sync: ClusterSync) {
+        *self.cluster_sync.write() = Some(std::sync::Arc::new(sync));
+    }
+
+    /// Get the cluster sync for direct access in tests.
+    #[cfg(test)]
+    pub fn cluster_sync(&self) -> Option<std::sync::Arc<ClusterSync>> {
+        self.cluster_sync.read().clone()
     }
 
     pub fn set_notify_tx(&self, tx: tokio::sync::mpsc::Sender<String>) {
@@ -217,20 +230,36 @@ impl PresenceManager {
         map.get(identity).cloned().unwrap_or_default()
     }
 
-    pub async fn update_state(&self, identity: &str, state: PresenceState, source: &EventSource) {
-        {
+    /// Update the presence state for an identity.
+    ///
+    /// Returns the previous state (if any). When `source.is_local()` the new
+    /// state is persisted to DB and broadcast to cluster peers via AMI.
+    pub async fn update_state(
+        &self,
+        identity: &str,
+        state: PresenceState,
+        source: &EventSource,
+    ) -> Option<PresenceState> {
+        let old_state = {
             let mut map = self.states.write().unwrap();
-            map.insert(identity.to_string(), state.clone());
-        }
+            map.insert(identity.to_string(), state.clone())
+        };
 
-        // Only persist to DB for local events
         if source.is_local() {
+            // Cluster sync first (parallel fire-and-forget) — no partial borrow issues
+            let msg =
+                crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
+            if let Some(ref sync) = *self.cluster_sync.read() {
+                sync.broadcast("presence", &msg);
+            }
+
+            // Persist to DB
             if let Some(db) = &self.database {
                 let active: presence::ActiveModel = presence::ActiveModel {
                     identity: Set(identity.to_string()),
                     status: Set(state.status.to_string()),
-                    note: Set(state.note),
-                    activity: Set(state.activity),
+                    note: Set(state.note.clone()),
+                    activity: Set(state.activity.clone()),
                     last_updated: Set(state.last_updated),
                 };
 
@@ -251,16 +280,18 @@ impl PresenceManager {
                     tracing::error!("failed to persist presence state for {}: {}", identity, e);
                 }
             }
-        } // end source.is_local()
+        }
 
+        // Notify subscribers (triggers NOTIFY messages)
         let tx = {
             let lock = self.notify_tx.read().unwrap();
             lock.clone()
         };
-
         if let Some(tx) = tx {
             let _ = tx.send(identity.to_string()).await;
         }
+
+        old_state
     }
 
     pub fn add_subscriber(&self, identity: &str, sub: Subscriber) {
@@ -747,13 +778,19 @@ impl PresenceModule {
             }
         }
 
+        let old_state = self
+            .manager
+            .get_state(&identity);
+
         self.manager
             .update_state(&identity, current.clone(), &EventSource::Local)
             .await;
 
-        // Forward presence change to cluster peers and addon handlers
+        // Notify local addon handlers (CC addon subscribes to emit webhooks).
+        // AMI cluster sync is handled internally by update_state.
         if let Some(hub) = &self.server.cluster_event_hub {
-            hub.emit_presence_change(&identity, &current).await;
+            hub.emit_presence_change(&identity, Some(&old_state), &current)
+                .await;
         }
 
         tx.reply(rsipstack::sip::StatusCode::OK).await.ok();

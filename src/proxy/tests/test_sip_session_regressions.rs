@@ -699,7 +699,9 @@ fn parse_hold_with_music() {
         "params":{"leg_id":"caller","music":{"source_type":"file","uri":"music.wav"}}
     });
     let cmd = SipSession::parse_info_command("hold", parsed.get("params"), &parsed);
-    assert!(matches!(cmd, Some(CallCommand::Hold { leg_id, music: Some(_), .. }) if leg_id.as_str() == "caller"));
+    assert!(
+        matches!(cmd, Some(CallCommand::Hold { leg_id, music: Some(_), .. }) if leg_id.as_str() == "caller")
+    );
 }
 
 #[test]
@@ -790,11 +792,7 @@ async fn test_session_drop_releases_all_grouped_concurrent_call_permits() {
         .push(second.try_acquire().unwrap());
     let session = build_session(dialplan).await;
     assert!(
-        session
-            .context
-            .dialplan
-            .concurrent_call_lease
-            .is_empty(),
+        session.context.dialplan.concurrent_call_lease.is_empty(),
         "session construction must take the permits out of the dialplan"
     );
     assert_eq!(session.concurrent_call_lease.len(), 2);

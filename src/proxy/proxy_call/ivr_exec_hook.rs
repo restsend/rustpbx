@@ -73,10 +73,7 @@ pub struct IvrExecHook;
 
 #[async_trait]
 impl CallSessionHook for IvrExecHook {
-    async fn on_app_exited(
-        &self,
-        ctx: &CallSessionContext,
-    ) -> Option<IvrExecCompletion> {
+    async fn on_app_exited(&self, ctx: &CallSessionContext) -> Option<IvrExecCompletion> {
         let session_id = ctx.session_id.clone();
 
         // Read IvrExecState — if absent this is not an ivr.exec flow.
@@ -94,20 +91,23 @@ impl CallSessionHook for IvrExecHook {
         // Read result produced by the app.
         let result = {
             let guard = ctx.extensions.read();
-            guard.get::<IvrExecResult>().cloned().map(|r| IvrExecResultPayload {
-                event: "ivr_exec_completed".to_string(),
-                request_id: request_id.clone(),
-                call_id: session_id.clone(),
-                app: app_name.clone(),
-                status: r.status,
-                reason: r.reason,
-                routing_target: r.routing_target,
-                duration_ms: r.duration_ms,
-                collected: r.collected,
-                trace: r.trace,
-                metadata: metadata.clone(),
-                completion_time: r.completion_time,
-            })
+            guard
+                .get::<IvrExecResult>()
+                .cloned()
+                .map(|r| IvrExecResultPayload {
+                    event: "ivr_exec_completed".to_string(),
+                    request_id: request_id.clone(),
+                    call_id: session_id.clone(),
+                    app: app_name.clone(),
+                    status: r.status,
+                    reason: r.reason,
+                    routing_target: r.routing_target,
+                    duration_ms: r.duration_ms,
+                    collected: r.collected,
+                    trace: r.trace,
+                    metadata: metadata.clone(),
+                    completion_time: r.completion_time,
+                })
         }
         .unwrap_or_else(|| IvrExecResultPayload {
             event: "ivr_exec_completed".to_string(),
@@ -260,8 +260,7 @@ mod tests {
         assert!(!info.body.is_empty(), "result body should not be empty");
 
         // Verify JSON body content.
-        let payload: serde_json::Value =
-            serde_json::from_slice(&info.body).expect("valid JSON");
+        let payload: serde_json::Value = serde_json::from_slice(&info.body).expect("valid JSON");
         assert_eq!(payload["event"], "ivr_exec_completed");
         assert_eq!(payload["request_id"], "test-req");
         assert_eq!(payload["status"], "transferred");
@@ -281,9 +280,13 @@ mod tests {
         let _result = hook.on_app_exited(&ctx).await;
 
         // Verify state is removed after hook.
-        assert!(ext.read().get::<IvrExecState>().is_none(),
-            "IvrExecState should be removed after hook");
-        assert!(ext.read().get::<IvrExecResult>().is_none(),
-            "IvrExecResult should be removed after hook");
+        assert!(
+            ext.read().get::<IvrExecState>().is_none(),
+            "IvrExecState should be removed after hook"
+        );
+        assert!(
+            ext.read().get::<IvrExecResult>().is_none(),
+            "IvrExecResult should be removed after hook"
+        );
     }
 }

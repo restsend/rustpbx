@@ -44,7 +44,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 
@@ -554,6 +554,65 @@ impl AppStateBuilder {
             tracing::error!("Failed to initialize addons: {}", e);
         }
 
+        // ── Wire cluster AMI sync ────────────────────────────────────────
+        // Build the peer list for AMI-based cluster sync, excluding self.
+        //
+        // Self-exclusion: match by (local_IP, ami_port). A single machine may
+        // run multiple instances (different ports), so both IP and port must
+        // match to identify "self".
+        if let Some(ref cluster_cfg) = config.cluster
+            && !cluster_cfg.peers.is_empty()
+        {
+            use crate::proxy::cluster_sync::{AmiPeer, ClusterSync};
+
+            let local_ips = get_local_ips();
+
+            // Determine the local AMI port from the configured HTTP address.
+            let local_ami_port = config
+                .http_addr
+                .split(':')
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok());
+
+            let ami_peers: Vec<AmiPeer> = cluster_cfg
+                .peers
+                .iter()
+                .filter(|p| {
+                    // Exclude self: match IP AND ami_port both equal to local.
+                    let ip_match = local_ips.contains(&p.addr);
+                    let port_match = local_ami_port.map_or(false, |lp| lp == p.ami_port);
+                    if ip_match && port_match {
+                        debug!("cluster sync: excluding self peer {}:{}", p.addr, p.ami_port);
+                        return false;
+                    }
+                    true
+                })
+                .map(|p| AmiPeer {
+                    addr: p.addr.clone(),
+                    ami_port: p.ami_port,
+                    ami_path: config
+                        .proxy
+                        .ami_path
+                        .clone()
+                        .unwrap_or_else(|| "/ami/v1".to_string()),
+                    sip_addr: p.addr.clone(),
+                })
+                .collect();
+            if !ami_peers.is_empty() {
+                let peer_count = ami_peers.len();
+                let sync = ClusterSync::new(app_state.http_client.clone(), ami_peers);
+                app_state
+                    .sip_server()
+                    .inner
+                    .presence_manager
+                    .set_cluster_sync(sync.clone());
+                if let Some(ref hub) = app_state.sip_server().inner.cluster_event_hub {
+                    hub.set_cluster_sync(sync);
+                }
+                info!(peer_count = %peer_count, "Cluster AMI sync initialized");
+            }
+        }
+
         // Commerce: verify licenses for all commercial addons at startup and
         // populate the in-memory cache so the UI can show status without restart.
         #[cfg(feature = "commerce")]
@@ -912,4 +971,16 @@ pub fn create_router(state: AppState) -> Router {
     }
 
     router
+}
+
+/// Collect all IP addresses bound to local network interfaces.
+/// Used to exclude self from the AMI cluster peer list.
+fn get_local_ips() -> std::collections::HashSet<String> {
+    let mut ips = std::collections::HashSet::new();
+    if let Ok(addrs) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in addrs {
+            ips.insert(ip.to_string());
+        }
+    }
+    ips
 }

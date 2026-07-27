@@ -20,10 +20,7 @@ use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
-    call::{
-        concurrent_call_limiter::ConcurrentCallLimiter,
-        cps_limiter::CpsLimiter,
-    },
+    call::{concurrent_call_limiter::ConcurrentCallLimiter, cps_limiter::CpsLimiter},
     config::{ProxyConfig, RecordingPolicy},
     config_store::GeneratedConfigStore,
     models::{routing, sip_trunk},
@@ -745,8 +742,7 @@ impl ProxyDataContext {
         }
 
         if !config.acl_files.is_empty() {
-            let (file_rules, file_paths) =
-                load_acl_rules_from_files(&config.acl_files).await?;
+            let (file_rules, file_paths) = load_acl_rules_from_files(&config.acl_files).await?;
             file_count = file_rules.len();
             if !file_paths.is_empty() {
                 files.extend(file_paths);
@@ -1100,9 +1096,7 @@ async fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
     let backup_path = path.with_file_name(backup_name);
     match tokio::fs::rename(path, &backup_path).await {
         Ok(_) => Ok(Some(backup_path)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(None)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| {
             format!(
                 "failed to backup {} to {}",

@@ -720,8 +720,9 @@ impl TestUa {
                                 }
                             })
                             .unwrap_or_default();
-                        let is_dtmf =
-                            content_type.to_lowercase().contains("application/dtmf-relay");
+                        let is_dtmf = content_type
+                            .to_lowercase()
+                            .contains("application/dtmf-relay");
                         if is_dtmf {
                             let body = String::from_utf8_lossy(request.body());
                             for line in body.lines() {

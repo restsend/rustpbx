@@ -170,7 +170,9 @@ async fn test_rotating_sqlite_saver_creates_daily_file() {
     let today = today_string();
     let daily_url = derive_daily_url(&base, &today);
     let db = crate::models::connect_db(&daily_url).await.unwrap();
-    create_call_record_table(&db, "rustpbx_call_records").await.unwrap();
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
     let saver = crate::callrecord::RotatingSqliteSaver {
         base_url: base.clone(),
         table_name: "rustpbx_call_records".to_string(),
@@ -272,9 +274,7 @@ async fn test_local_config_without_main_db_ok() {
     let manager = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
             max_concurrent: 4,
-            storage: CallRecordStorageConfig::Local {
-                root: root.clone(),
-            },
+            storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()
         .await
@@ -383,9 +383,7 @@ async fn test_local_saver_does_not_write_to_db() {
         .with_main_db(db.clone())
         .with_config(CallRecordConfig {
             max_concurrent: 4,
-            storage: CallRecordStorageConfig::Local {
-                root: root.clone(),
-            },
+            storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()
         .await

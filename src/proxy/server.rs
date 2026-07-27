@@ -18,7 +18,7 @@ use crate::{
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
-        cluster_event::{ClusterEventHub, ClusterEventModule},
+        cluster_event::ClusterEventHub,
         locator::{
             DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator,
         },
@@ -100,7 +100,7 @@ pub struct SipServerInner {
     /// Subscribers for REFER NOTIFY events from SipSession.
     pub transfer_notify_subscribers:
         Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
-    /// Cluster event hub for inter-node event sync via SIP MESSAGE.
+    /// Cluster event hub for local event dispatch to addon handlers.
     pub cluster_event_hub: Option<Arc<ClusterEventHub>>,
     /// SIP peer IPs for cluster auth bypass.
     pub cluster_peer_ips: Vec<IpAddr>,
@@ -798,25 +798,14 @@ impl SipServerBuilder {
         let presence_manager = Arc::new(PresenceManager::new(database.clone()));
         presence_manager.load_from_db().await.ok();
 
-        // Create cluster event hub for inter-node sync.
+        // Create cluster event hub for local event dispatch.
         // Always provision the hub so local locator + presence events are
         // dispatched to addon handlers (e.g. the CC registrar bridge) even on a
-        // single node — peer replication is simply a no-op without peers.
+        // single node — AMI cluster sync is a no-op without peers.
         let cluster_peer_ips: Vec<IpAddr> = self.cluster_peers.iter().map(|p| p.ip()).collect();
-        let local_cluster_ip = rtp_config
-            .external_ip
-            .as_deref()
-            .unwrap_or(&config.addr)
-            .parse::<IpAddr>()
-            .map_err(|e| anyhow!("failed to parse cluster local ip address: {}", e))?;
-        let local_cluster_port = config.udp_port.unwrap_or(5060);
-        let local_cluster_addr = SocketAddr::new(local_cluster_ip, local_cluster_port);
         let cluster_event_hub: Arc<ClusterEventHub> = Arc::new(ClusterEventHub::new(
             locator_events.clone(),
             presence_manager.clone(),
-            endpoint.inner.clone(),
-            local_cluster_addr,
-            self.cluster_peers.clone(),
             cancel_token.child_token(),
         ));
         // Start the local event-dispatch loop.
@@ -964,22 +953,6 @@ impl SipServerBuilder {
 
         let mut allow_methods = Vec::new();
         let mut modules = Vec::new();
-
-        // Auto-load cluster_event module only when cluster peers are configured.
-        // (The hub itself is always present for local event dispatch, but the
-        // cluster networking module is unnecessary on a single node.)
-        if !self.cluster_peers.is_empty() {
-            if let Some(hub) = inner.cluster_event_hub.as_ref() {
-                let mut module = ClusterEventModule::create(
-                    hub.clone(),
-                    &self.cluster_peers,
-                    local_addrs.clone(),
-                );
-                let _ = module.on_start().await; // errors logged inside
-                allow_methods.extend(module.allow_methods());
-                modules.push(module);
-            }
-        }
 
         if let Some(load_modules) = self.config.modules.as_ref() {
             let start_time = Instant::now();

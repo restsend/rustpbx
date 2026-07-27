@@ -170,6 +170,11 @@ async fn test_reinvite_audio_hold_unhold() {
         received_sdp.contains("PCMU/8000"),
         "SDP answer should contain PCMU"
     );
+    assert!(
+        received_sdp.contains("a=recvonly"),
+        "SDP answer should contain a=recvonly (mirror of sendonly offer): {}",
+        received_sdp
+    );
 
     // Cleanup
     alice.hangup(&alice_call_id).await.ok();

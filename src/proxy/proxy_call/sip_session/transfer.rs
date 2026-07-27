@@ -150,7 +150,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     TransferTarget::Sip {
                         uri: format!("sip:{}", target),
                         return_to_ivr: None,
-                            return_params: HashMap::new(),
+                        return_params: HashMap::new(),
                     }
                 } else {
                     let mut return_to_ivr = None;
@@ -567,9 +567,9 @@ impl SipSession {
         } else {
             None
         };
-        let ivr_name = return_to_ivr.as_ref().and_then(|s| {
-            if s.is_empty() { None } else { Some(s.as_str()) }
-        });
+        let ivr_name = return_to_ivr
+            .as_ref()
+            .and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
         if let Some(ivr_name) = ivr_name {
             info!(
                 queue = %queue_name,
@@ -1434,7 +1434,8 @@ mod tests {
 
     #[test]
     fn test_parse_transfer_target_queue_with_target_and_return_to_ivr() {
-        let t = parse_transfer_target("queue:support?target=skillgroup:sales&return_to_ivr=main_menu");
+        let t =
+            parse_transfer_target("queue:support?target=skillgroup:sales&return_to_ivr=main_menu");
         assert_eq!(
             t,
             TransferTarget::Queue {
@@ -1517,19 +1518,40 @@ mod tests {
     #[test]
     fn test_parse_transfer_target_sip_uri_passthrough() {
         let t = parse_transfer_target("sip:1001@pbx.local");
-        assert_eq!(t, TransferTarget::Sip { uri: "sip:1001@pbx.local".to_string(), return_to_ivr: None, return_params: HashMap::new() });
+        assert_eq!(
+            t,
+            TransferTarget::Sip {
+                uri: "sip:1001@pbx.local".to_string(),
+                return_to_ivr: None,
+                return_params: HashMap::new()
+            }
+        );
     }
 
     #[test]
     fn test_parse_transfer_target_tel_uri_passthrough() {
         let t = parse_transfer_target("tel:+15551234567");
-        assert_eq!(t, TransferTarget::Sip { uri: "tel:+15551234567".to_string(), return_to_ivr: None, return_params: HashMap::new() });
+        assert_eq!(
+            t,
+            TransferTarget::Sip {
+                uri: "tel:+15551234567".to_string(),
+                return_to_ivr: None,
+                return_params: HashMap::new()
+            }
+        );
     }
 
     #[test]
     fn test_parse_transfer_target_bare_extension_gets_sip_prefix() {
         let t = parse_transfer_target("1001");
-        assert_eq!(t, TransferTarget::Sip { uri: "sip:1001".to_string(), return_to_ivr: None, return_params: HashMap::new() });
+        assert_eq!(
+            t,
+            TransferTarget::Sip {
+                uri: "sip:1001".to_string(),
+                return_to_ivr: None,
+                return_params: HashMap::new()
+            }
+        );
     }
 
     /// An empty `queue:` suffix must NOT produce a Queue — it falls through to

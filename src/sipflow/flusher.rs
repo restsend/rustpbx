@@ -4,8 +4,8 @@ use lru::LruCache;
 use sqlx::{ConnectOptions, Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -38,11 +38,7 @@ pub(crate) struct SipFlowFlusher {
 }
 
 impl SipFlowFlusher {
-    pub(crate) fn new(
-        flush_count: usize,
-        flush_interval_secs: u64,
-        id_cache_size: usize,
-    ) -> Self {
+    pub(crate) fn new(flush_count: usize, flush_interval_secs: u64, id_cache_size: usize) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<FlushCommand>();
         let dropped = Arc::new(AtomicU64::new(0));
         let dropped_clone = dropped.clone();
@@ -56,7 +52,14 @@ impl SipFlowFlusher {
                     .build()
                     .expect("failed to build flusher tokio runtime");
                 rt.block_on(async move {
-                    run(rx, flush_count, flush_interval_secs, id_cache_size, dropped_clone).await;
+                    run(
+                        rx,
+                        flush_count,
+                        flush_interval_secs,
+                        id_cache_size,
+                        dropped_clone,
+                    )
+                    .await;
                 });
             })
             .expect("failed to spawn sipflow flusher thread");
@@ -209,7 +212,7 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_sip_call ON sip_msgs(call_id)")
         .execute(&mut conn)
         .await
-    .ok();
+        .ok();
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS media_msgs (
@@ -229,7 +232,7 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_call ON media_msgs(call_id)")
         .execute(&mut conn)
         .await
-    .ok();
+        .ok();
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_media_call_timestamp ON media_msgs(call_id, timestamp)",

@@ -90,6 +90,11 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             signaling_file_name: None,
         };
 
+        info!(
+            call_id,
+            upload_url, "SipFlowRemoteUploadHook: delegating upload"
+        );
+
         let resp: SipFlowUploadResponse =
             match self.client.post(&upload_url).json(&req).send().await {
                 Ok(r) if r.status().is_success() => match r.json().await {
@@ -97,7 +102,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                     Err(e) => {
                         warn!(
                             call_id,
-                            "SipFlowRemoteUploadHook: decode response failed: {e}"
+                            upload_url, "SipFlowRemoteUploadHook: decode response failed: {e}"
                         );
                         return Ok(());
                     }
@@ -107,12 +112,15 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                     let body = r.text().await.unwrap_or_default();
                     warn!(
                         call_id,
-                        "SipFlowRemoteUploadHook: upload failed: {status} – {body}"
+                        upload_url, "SipFlowRemoteUploadHook: upload failed: {status} – {body}"
                     );
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(call_id, "SipFlowRemoteUploadHook: request failed: {e}");
+                    warn!(
+                        call_id,
+                        upload_url, "SipFlowRemoteUploadHook: request failed: {e}"
+                    );
                     return Ok(());
                 }
             };

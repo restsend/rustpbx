@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use tracing_appender::non_blocking;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -418,11 +418,19 @@ async fn main() -> Result<()> {
                 }
                 _ = interval.tick() => {
                     let flush_start = std::time::Instant::now();
+                    let pending = rx.len();
                     let _ = storage_backend.flush().await;
                     let flush_secs = flush_start.elapsed().as_secs_f64();
                     perf_worker.flushes.fetch_add(1, Ordering::Relaxed);
                     metrics::histogram!("sipflow_flush_duration_seconds", "component" => "sipflow")
                         .record(flush_secs);
+                    if flush_secs > 0.1 {
+                        tracing::warn!(
+                            elapsed = %format!("{:.2?}", flush_start.elapsed()),
+                            pending,
+                            "storage flush took > 100ms"
+                        );
+                    }
                 }
             }
         }
@@ -479,16 +487,35 @@ async fn flow_handler(
     let start_dt = Local.timestamp_opt(start_ts, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts, 0).unwrap();
 
+    let _start = std::time::Instant::now();
     match state.backend.query_flow(&callid, start_dt, end_dt).await {
-        Ok(flow) => axum::Json(serde_json::json!({
-            "status": "success",
-            "callid": callid,
-            "flow": flow
-        })),
-        Err(e) => axum::Json(serde_json::json!({
-            "status": "error",
-            "message": e.to_string()
-        })),
+        Ok(flow) => {
+            let elapsed = _start.elapsed();
+            info!(
+                callid,
+                flow_count = flow.len(),
+                elapsed = %format!("{:.2?}", elapsed),
+                "flow: query success"
+            );
+            axum::Json(serde_json::json!({
+                "status": "success",
+                "callid": callid,
+                "flow": flow
+            }))
+        }
+        Err(e) => {
+            let elapsed = _start.elapsed();
+            warn!(
+                callid,
+                error = %e,
+                elapsed = %format!("{:.2?}", elapsed),
+                "flow: query failed"
+            );
+            axum::Json(serde_json::json!({
+                "status": "error",
+                "message": e.to_string()
+            }))
+        }
     }
 }
 
@@ -514,12 +541,27 @@ async fn media_handler(
     let start_dt = Local.timestamp_opt(start_ts_param, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts_param, 0).unwrap();
 
+    let media_url = format!(
+        "/media?callid={}&start={}&end={}",
+        callid, start_ts_param, end_ts_param
+    );
+
     if stats_only {
+        let _start = std::time::Instant::now();
         let stats = state
             .backend
             .query_media_stats(&callid, start_dt, end_dt)
             .await
             .unwrap_or_default();
+        let elapsed = _start.elapsed();
+
+        info!(
+            url = %media_url,
+            callid,
+            stats_count = stats.len(),
+            elapsed = %format!("{:.2?}", elapsed),
+            "media: stats queried"
+        );
 
         return axum::Json(serde_json::json!({
             "status": "success",
@@ -529,18 +571,40 @@ async fn media_handler(
         .into_response();
     }
 
+    let _start = std::time::Instant::now();
+
+    if let Err(e) = state.backend.flush().await {
+        warn!("media: flush failed: {e}");
+    }
+
     let wav_bytes = state
         .backend
         .query_media(&callid, start_dt, end_dt)
         .await
         .unwrap_or_default();
 
+    let elapsed = _start.elapsed();
+
     if wav_bytes.is_empty() {
+        warn!(
+            url = %media_url,
+            callid,
+            elapsed = %format!("{:.2?}", elapsed),
+            "media: no media found"
+        );
         return (axum::http::StatusCode::NOT_FOUND, "No media found").into_response();
     }
 
     let file_len = wav_bytes.len();
     let body = axum::body::Body::from(wav_bytes);
+
+    info!(
+        url = %media_url,
+        callid,
+        bytes = file_len,
+        elapsed = %format!("{:.2?}", elapsed),
+        "media: wav generated successfully"
+    );
 
     axum::response::Response::builder()
         .header("Content-Type", "audio/wav")
@@ -579,11 +643,18 @@ async fn diag_handler(
         .and_then(|s| rustpbx::sipflow::diag::parse_datetime(s))
         .unwrap_or_else(|| Local::now() + chrono::Duration::hours(1));
 
+    let _start = std::time::Instant::now();
     match rustpbx::sipflow::diag::run_diag(&call_id, &state.root, state.subdirs, start_dt, end_dt)
         .await
     {
         Ok(report) => {
+            let elapsed = _start.elapsed();
             if report.is_empty() {
+                info!(
+                    call_id,
+                    elapsed = %format!("{:.2?}", elapsed),
+                    "diag: no data found"
+                );
                 axum::Json(serde_json::json!({
                     "status": "success",
                     "callid": call_id,
@@ -592,6 +663,15 @@ async fn diag_handler(
                 }))
                 .into_response()
             } else {
+                info!(
+                    call_id,
+                    sip_count = report.sip_count,
+                    rtp_streams = report.rtp_stats.len(),
+                    buckets_scanned = report.bucket_count,
+                    elapsed = %format!("{:.2?}", elapsed),
+                    "diag: success"
+                );
+
                 // Convert report to a clean JSON response
                 let sip_flow: Vec<serde_json::Value> = report
                     .sip_messages
@@ -644,11 +724,20 @@ async fn diag_handler(
                 .into_response()
             }
         }
-        Err(e) => axum::Json(serde_json::json!({
-            "status": "error",
-            "message": e.to_string()
-        }))
-        .into_response(),
+        Err(e) => {
+            let elapsed = _start.elapsed();
+            warn!(
+                call_id,
+                error = %e,
+                elapsed = %format!("{:.2?}", elapsed),
+                "diag: failed"
+            );
+            axum::Json(serde_json::json!({
+                "status": "error",
+                "message": e.to_string()
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -656,6 +745,9 @@ async fn upload_handler(
     State(state): State<AppState>,
     Json(req): Json<SipFlowUploadRequest>,
 ) -> Result<Json<SipFlowUploadResponse>, (StatusCode, String)> {
+    let call_id = &req.call_id;
+    let _start = std::time::Instant::now();
+
     let s3_storage = match build_s3_storage(&req.upload) {
         Ok(s) => s,
         Err(e) => {
@@ -677,14 +769,20 @@ async fn upload_handler(
         .single()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid end timestamp".to_string()))?;
 
+    info!(
+        call_id,
+        upload_type = ?req.upload,
+        "upload: start"
+    );
+
     if let Err(e) = state.backend.flush().await {
         warn!("upload: flush failed: {e}");
     }
 
     // Compute fallback keys
-    let default_media = sipflow_media_key_for(&req.call_id, start.to_utc());
-    let default_signaling = sipflow_signaling_key_for(&req.call_id, start.to_utc());
-    let default_sig_file = sipflow_signaling_file_name_for(&req.call_id);
+    let default_media = sipflow_media_key_for(call_id, start.to_utc());
+    let default_signaling = sipflow_signaling_key_for(call_id, start.to_utc());
+    let default_sig_file = sipflow_signaling_file_name_for(call_id);
 
     let root = match &req.upload {
         SipFlowUploadConfig::S3 { root, .. } => root.as_str(),
@@ -716,7 +814,7 @@ async fn upload_handler(
         match upload_media(
             state.backend.as_ref(),
             &req.upload,
-            &req.call_id,
+            call_id,
             start,
             end,
             &full_media_key,
@@ -744,7 +842,7 @@ async fn upload_handler(
         upload_signaling_flow(
             &req.upload,
             state.backend.as_ref(),
-            &req.call_id,
+            call_id,
             start,
             end,
             &full_signaling_key,
@@ -756,6 +854,16 @@ async fn upload_handler(
     } else {
         false
     };
+
+    let elapsed = _start.elapsed();
+    info!(
+        call_id,
+        media_url = media_url.as_deref().unwrap_or("(none)"),
+        media_size,
+        signaling_uploaded,
+        elapsed = %format!("{:.2?}", elapsed),
+        "upload: complete"
+    );
 
     Ok(Json(SipFlowUploadResponse {
         media_url,
@@ -771,7 +879,10 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
     match ObservabilityAddon::render_prometheus() {
         Some(body) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
             body,
         )
             .into_response(),

@@ -1409,15 +1409,12 @@ impl CallApp for StepIvrApp {
                     .variables
                     .iter()
                     .filter(|(k, _)| {
-                        ![
-                            "session_id", "caller", "callee", "direction",
-                        ]
-                        .contains(&k.as_str())
+                        !["session_id", "caller", "callee", "direction"].contains(&k.as_str())
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                ext.write().insert(
-                    crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
+                ext.write()
+                    .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
                         status: status.clone(),
                         reason: end_reason_label.clone(),
                         routing_target: self.last_transfer_target.clone(),
@@ -1425,8 +1422,7 @@ impl CallApp for StepIvrApp {
                         trace: vec![],
                         duration_ms: 0,
                         completion_time: chrono::Utc::now().to_rfc3339(),
-                    },
-                );
+                    });
             }
         }
 

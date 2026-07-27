@@ -438,7 +438,13 @@ pub async fn create_queue(
         Ok(model) => {
             export_queue_async(state.as_ref(), model.id).await;
             if let Some(app) = state.app_state() {
-                if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                if let Err(e) = app
+                    .sip_server()
+                    .inner
+                    .data_context
+                    .reload_queues(true, None)
+                    .await
+                {
                     warn!("failed to reload queues after create: {}", e);
                 }
             }
@@ -535,7 +541,13 @@ pub async fn update_queue(
         Ok(updated) => {
             export_queue_async(state.as_ref(), updated.id).await;
             if let Some(app) = state.app_state() {
-                if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                if let Err(e) = app
+                    .sip_server()
+                    .inner
+                    .data_context
+                    .reload_queues(true, None)
+                    .await
+                {
                     warn!("failed to reload queues after update: {}", e);
                 }
             }
@@ -592,7 +604,13 @@ pub async fn delete_queue(
                     remove_queue_export(state.as_ref(), entry).await;
                 }
                 if let Some(app) = state.app_state() {
-                    if let Err(e) = app.sip_server().inner.data_context.reload_queues(true, None).await {
+                    if let Err(e) = app
+                        .sip_server()
+                        .inner
+                        .data_context
+                        .reload_queues(true, None)
+                        .await
+                    {
                         warn!("failed to reload queues after delete: {}", e);
                     }
                 }

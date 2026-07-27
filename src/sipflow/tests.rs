@@ -410,7 +410,9 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).await.expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new())
+            .await
+            .expect("backend creation");
 
         // Send N records (N > batch_size) with the same call_id so they all
         // hash to the same single node.
@@ -483,7 +485,9 @@ nodes = [{ udp = "127.0.0.1:3000", http = "http://127.0.0.1:3001" }]
             delegate_upload: false,
             upload: None,
         };
-        let backend = create_backend(&cfg, CancellationToken::new()).await.expect("backend creation");
+        let backend = create_backend(&cfg, CancellationToken::new())
+            .await
+            .expect("backend creation");
 
         const N: u32 = 10;
         for i in 0..N {

@@ -700,15 +700,11 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
         eprintln!("[dump_ddl] wholesale migration warning: {e}");
     }
     #[cfg(feature = "addon-endpoint-manager")]
-    if let Err(e) =
-        rustpbx::addons::endpoint_manager::migration::Migrator::up(&db, None).await
-    {
+    if let Err(e) = rustpbx::addons::endpoint_manager::migration::Migrator::up(&db, None).await {
         eprintln!("[dump_ddl] endpoint_manager migration warning: {e}");
     }
     #[cfg(feature = "addon-enterprise-auth")]
-    if let Err(e) =
-        rustpbx::addons::enterprise_auth::migration::Migrator::up(&db, None).await
-    {
+    if let Err(e) = rustpbx::addons::enterprise_auth::migration::Migrator::up(&db, None).await {
         eprintln!("[dump_ddl] enterprise_auth migration warning: {e}");
     }
     #[cfg(feature = "addon-ivr-editor")]

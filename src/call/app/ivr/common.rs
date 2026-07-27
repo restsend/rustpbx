@@ -225,10 +225,7 @@ pub async fn execute_action(
                 }
                 query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
             }
-            if let Some(ivr) = return_to_ivr
-                .as_ref()
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
                 if !query.is_empty() {
                     query.push('&');
                 }
@@ -245,14 +242,8 @@ pub async fn execute_action(
             return_to_ivr,
         } => {
             let mut t = substitute_vars(target, &sess.variables);
-            if let Some(ivr) = return_to_ivr
-                .as_ref()
-                .filter(|s| !s.is_empty())
-            {
-                t.push_str(&format!(
-                    "?return_to_ivr={}",
-                    urlencoding::encode(ivr)
-                ));
+            if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
+                t.push_str(&format!("?return_to_ivr={}", urlencoding::encode(ivr)));
             }
             Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                 "queue:{}",

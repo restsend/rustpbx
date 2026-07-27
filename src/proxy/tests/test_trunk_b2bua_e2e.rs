@@ -1435,7 +1435,9 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     let elapsed = silence_started.elapsed();
     info!(
         caller_bye,
-        callee_bye, elapsed_secs = elapsed.as_secs(), "Teardown observation result"
+        callee_bye,
+        elapsed_secs = elapsed.as_secs(),
+        "Teardown observation result"
     );
     assert!(
         caller_bye && callee_bye,
@@ -1449,7 +1451,10 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     let records = server.cdr_capture.get_all_records().await;
     let record = &records[0];
     assert!(
-        matches!(record.hangup_reason, Some(CallRecordHangupReason::RtpTimeout)),
+        matches!(
+            record.hangup_reason,
+            Some(CallRecordHangupReason::RtpTimeout)
+        ),
         "Expected CDR hangup reason RtpTimeout, got {:?}",
         record.hangup_reason
     );

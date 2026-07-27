@@ -60,7 +60,12 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             "/cluster/show_session/{session_id}",
             get(cluster_show_session_handler),
         )
-        .route("/cluster/list_calls", get(cluster_list_calls_handler));
+        .route("/cluster/list_calls", get(cluster_list_calls_handler))
+        // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
+        .route("/cluster/event/presence", post(cluster_event_presence))
+        .route("/cluster/event/locator", post(cluster_event_locator))
+        .route("/cluster/event/agent_status", post(cluster_event_agent_status))
+        .route("/cluster/event/queue", post(cluster_event_queue));
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
@@ -1650,6 +1655,76 @@ async fn cluster_list_calls_handler(
         .collect();
 
     Json(serde_json::json!({ "data": payload })).into_response()
+}
+
+// ── AMI cluster event receivers (replace old SIP MESSAGE handlers) ────────
+
+#[cfg(feature = "commerce")]
+use crate::handler::middleware::clientaddr::ClientAddr as AmiClientAddr;
+
+#[cfg(feature = "commerce")]
+async fn cluster_event_presence(
+    State(state): State<AppState>,
+    client: AmiClientAddr,
+    Json(msg): Json<crate::proxy::cluster_event::ClusterPresenceMessage>,
+) -> Response {
+    if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
+        if let Some(new_state) = msg.to_state() {
+            let source = crate::proxy::cluster_event::EventSource::Remote(
+                std::net::SocketAddr::new(client.addr.ip(), 0),
+            );
+            hub.on_remote_presence_change(&msg.identity(), &new_state, &source)
+                .await;
+        }
+    }
+    StatusCode::OK.into_response()
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_event_locator(
+    State(state): State<AppState>,
+    client: AmiClientAddr,
+    Json(msg): Json<crate::proxy::cluster_event::ClusterLocatorMessage>,
+) -> Response {
+    if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
+        if let Some(event) = msg.to_event() {
+            let source = crate::proxy::cluster_event::EventSource::Remote(
+                std::net::SocketAddr::new(client.addr.ip(), 0),
+            );
+            hub.on_remote_locator_event(event, source).await;
+        }
+    }
+    StatusCode::OK.into_response()
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_event_agent_status(
+    State(state): State<AppState>,
+    client: AmiClientAddr,
+    Json(msg): Json<crate::proxy::cluster_event::ClusterAgentStatusMessage>,
+) -> Response {
+    if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
+        let source = crate::proxy::cluster_event::EventSource::Remote(
+            std::net::SocketAddr::new(client.addr.ip(), 0),
+        );
+        hub.on_remote_agent_status(msg, source).await;
+    }
+    StatusCode::OK.into_response()
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_event_queue(
+    State(state): State<AppState>,
+    client: AmiClientAddr,
+    Json(msg): Json<crate::proxy::cluster_event::ClusterQueueEventMessage>,
+) -> Response {
+    if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
+        let source = crate::proxy::cluster_event::EventSource::Remote(
+            std::net::SocketAddr::new(client.addr.ip(), 0),
+        );
+        hub.on_remote_queue_event(msg, source).await;
+    }
+    StatusCode::OK.into_response()
 }
 
 #[cfg(test)]

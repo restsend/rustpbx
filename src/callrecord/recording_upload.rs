@@ -238,22 +238,33 @@ impl CallRecordHook for RecordingUploadHook {
         }
 
         // Determine the url/path for RecordEnd (upload URL or local file path).
+        // When sipflow captured media without upload, use the call_id as
+        // a sipflow reference so consumers can locate the recording via
+        // the sipflow backend.
         let recording_url = first_uploaded_url
             .clone()
-            .or_else(|| record.recorder.first().map(|m| m.path.clone()));
+            .or_else(|| record.recorder.first().map(|m| m.path.clone()))
+            .or_else(|| {
+                if record.answer_time.is_some() {
+                    Some(format!("sipflow://{}", record.call_id))
+                } else {
+                    None
+                }
+            });
 
-        if let Some(ref url) = first_uploaded_url {
-            record.details.recording_url = Some(url.clone());
+        let emit_url = first_uploaded_url.as_deref().or_else(|| {
+            // Sipflow captured the media without upload — emit with sipflow reference.
+            (record.recorder.is_empty() && record.answer_time.is_some())
+                .then(|| recording_url.as_deref().unwrap_or(""))
+        });
+
+        if let Some(url) = emit_url {
+            record.details.recording_url = Some(url.to_string());
             record.details.recording_duration_secs =
                 Some((record.end_time - record.start_time).num_seconds().max(0) as i32);
 
-            // Emit RecordingMetadataAvailable webhook so external systems
-            // (e.g. MQ consumers) are notified that the recording is ready.
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
-                // The generic `metadata` bag carries all addon-contributed
-                // keys (agent_id, queue_id, etc.) verbatim — forwarded to
-                // the webhook so external consumers read what they need.
                 let metadata = RecordingMetadata {
                     filename: record
                         .recorder
@@ -263,9 +274,9 @@ impl CallRecordHook for RecordingUploadHook {
                                 .file_name()
                                 .map(|f| f.to_string_lossy().to_string())
                         })
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| record.call_id.clone()),
                     file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
-                    download_url: Some(url.clone()),
+                    download_url: Some(url.to_string()),
                     caller_name: extract_sip_username(&record.caller),
                     callee_name: extract_sip_username(&record.callee),
                     call_type: record.details.direction.clone(),
@@ -287,7 +298,7 @@ impl CallRecordHook for RecordingUploadHook {
             }
         }
 
-        // Emit RecordEnd with url (upload URL or local path), duration and file size.
+        // Emit RecordEnd with url (upload URL, local path, or sipflow reference).
         if let Some(ref gw) = self.rwi_gateway {
             let gw_ref = gw.read();
             gw_ref.send_to_owner(&crate::rwi::RecordEnd {

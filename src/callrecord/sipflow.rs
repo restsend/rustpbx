@@ -1,9 +1,9 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 

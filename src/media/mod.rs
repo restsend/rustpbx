@@ -30,6 +30,8 @@ pub mod wav_writer;
 #[cfg(test)]
 mod file_track_tests;
 #[cfg(test)]
+mod info_recording_tests;
+#[cfg(test)]
 mod media_engine_tests;
 #[cfg(test)]
 mod media_track_tests;
@@ -37,8 +39,6 @@ mod media_track_tests;
 mod mixer_e2e_tests;
 #[cfg(test)]
 mod recorder_tests;
-#[cfg(test)]
-mod info_recording_tests;
 #[cfg(test)]
 mod unified_pc_tests;
 

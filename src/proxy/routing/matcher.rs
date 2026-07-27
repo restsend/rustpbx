@@ -14,8 +14,7 @@ use tracing::info;
 
 use crate::{
     call::{
-        DialDirection, RoutingState,
-        concurrent_call_limiter::ConcurrentCallLease,
+        DialDirection, RoutingState, concurrent_call_limiter::ConcurrentCallLease,
         policy::PolicyCheckStatus,
     },
     config::{DialplanHints, MediaProxyMode, RouteResult},
@@ -787,10 +786,7 @@ fn attach_holds(
 }
 
 /// Attach all concurrent-call permits to dialplan hints.
-fn attach_concurrent_call_lease(
-    hints: &mut Option<DialplanHints>,
-    lease: ConcurrentCallLease,
-) {
+fn attach_concurrent_call_lease(hints: &mut Option<DialplanHints>, lease: ConcurrentCallLease) {
     if lease.is_empty() {
         return;
     }

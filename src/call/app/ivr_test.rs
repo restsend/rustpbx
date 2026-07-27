@@ -2914,7 +2914,9 @@ action = { type = "transfer", target = "100" }
 
         // Answer + play greeting
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
@@ -2926,7 +2928,9 @@ action = { type = "transfer", target = "100" }
 
         // IVR should emit Transfer command and write IvrExecResult.
         stack
-            .assert_cmd(200, "Transfer", |c| matches!(c, CallCommand::Transfer { .. }))
+            .assert_cmd(200, "Transfer", |c| {
+                matches!(c, CallCommand::Transfer { .. })
+            })
             .await;
 
         // Verify IvrExecResult was written to extensions.

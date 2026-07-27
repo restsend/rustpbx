@@ -1,6 +1,5 @@
 use crate::call::{
-    DialDirection, DialStrategy, RoutingState,
-    concurrent_call_limiter::ConcurrentCallLimiter,
+    DialDirection, DialStrategy, RoutingState, concurrent_call_limiter::ConcurrentCallLimiter,
     cps_limiter::CpsLimiter,
 };
 use crate::call::{FailureAction, QueueFallbackAction};
@@ -2795,10 +2794,7 @@ fn inbound_source_trunk(name: &str) -> SourceTrunk {
     }
 }
 
-fn trunk_concurrent_count(
-    trunks: &HashMap<String, TrunkConfig>,
-    name: &str,
-) -> u32 {
+fn trunk_concurrent_count(trunks: &HashMap<String, TrunkConfig>, name: &str) -> u32 {
     trunks
         .get(name)
         .and_then(|trunk| trunk.concurrent_call_limiter.as_ref())
@@ -2912,12 +2908,7 @@ async fn test_source_trunk_concurrent_limit_rejects() {
 async fn test_source_trunk_concurrent_releases_on_reject_action() {
     // If a routing rule has a Reject action, the source-trunk slot acquired at
     // the beginning must be released so subsequent calls are not stuck.
-    let trunks = make_trunks_with_limits(
-        "in",
-        (Some(1), None),
-        "out",
-        (None, None),
-    );
+    let trunks = make_trunks_with_limits("in", (Some(1), None), "out", (None, None));
     let routing_state = Arc::new(RoutingState::new());
     let routes = vec![RouteRule {
         name: "reject_all".to_string(),
@@ -3062,10 +3053,17 @@ async fn test_dest_trunk_reject_releases_source_slot() {
     // released (the first call's source slot stays at 1 because it's attached
     // to the first call's hints for session-level release).
     let r2 = match_invite(
-        Some(&trunks), Some(&routes), None,
-        create_test_invite_option(), &create_test_request(),
-        Some(&source), routing_state.clone(), &DialDirection::Inbound,
-    ).await.unwrap();
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         r2,
         RouteResult::Abort(StatusCode::ServiceUnavailable, _)
@@ -3080,12 +3078,7 @@ async fn test_dest_trunk_reject_releases_source_slot() {
 
 #[tokio::test]
 async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
-    let trunks = make_trunks_with_limits(
-        "in",
-        (Some(10), None),
-        "out",
-        (Some(10), None),
-    );
+    let trunks = make_trunks_with_limits("in", (Some(10), None), "out", (Some(10), None));
     let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
@@ -3110,14 +3103,8 @@ async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
                 2,
                 "both source and dest trunk holds should be attached"
             );
-            assert_eq!(
-                trunk_concurrent_count(&trunks, "in"),
-                1
-            );
-            assert_eq!(
-                trunk_concurrent_count(&trunks, "out"),
-                1
-            );
+            assert_eq!(trunk_concurrent_count(&trunks, "in"), 1);
+            assert_eq!(trunk_concurrent_count(&trunks, "out"), 1);
             let ctx = hints
                 .extensions
                 .get::<crate::call::OutboundTrunkContext>()
@@ -3130,12 +3117,7 @@ async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
 
 #[tokio::test]
 async fn test_no_limits_means_no_holds() {
-    let trunks = make_trunks_with_limits(
-        "in",
-        (None, None),
-        "out",
-        (None, None),
-    );
+    let trunks = make_trunks_with_limits("in", (None, None), "out", (None, None));
     let routing_state = Arc::new(RoutingState::new());
     let routes = forward_route("out");
     let source = inbound_source_trunk("in");
@@ -3155,13 +3137,8 @@ async fn test_no_limits_means_no_holds() {
 
     match result {
         RouteResult::Forward(_, hints) => {
-            let holds = hints
-                .map(|h| h.concurrent_call_lease)
-                .unwrap_or_default();
-            assert!(
-                holds.is_empty(),
-                "no trunk holds when no limits configured"
-            );
+            let holds = hints.map(|h| h.concurrent_call_lease).unwrap_or_default();
+            assert!(holds.is_empty(), "no trunk holds when no limits configured");
         }
         _ => panic!("expected Forward"),
     }

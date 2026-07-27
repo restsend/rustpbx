@@ -116,7 +116,8 @@ impl PerfDumper {
         metrics::counter!("sipflow_items_recorded_total", "component" => "sipflow").increment(dw);
         metrics::counter!("sipflow_items_dropped_total", "component" => "sipflow").increment(dd);
         metrics::counter!("sipflow_flushes_total", "component" => "sipflow").increment(df);
-        metrics::counter!("sipflow_signaling_sent_total", "component" => "sipflow").increment(d_sig);
+        metrics::counter!("sipflow_signaling_sent_total", "component" => "sipflow")
+            .increment(d_sig);
         metrics::counter!("sipflow_media_sent_total", "component" => "sipflow").increment(d_media);
         metrics::gauge!("sipflow_pending_items", "component" => "sipflow").set(pending as f64);
 

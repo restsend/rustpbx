@@ -169,8 +169,7 @@ pub struct SipSession {
     pub context: CallContext,
     /// Shared owner for every concurrent-call permit held by this
     /// call. Cleanup releases the complete set; Drop is the safety net.
-    pub concurrent_call_lease:
-        crate::call::concurrent_call_limiter::ConcurrentCallLease,
+    pub concurrent_call_lease: crate::call::concurrent_call_limiter::ConcurrentCallLease,
     pub call_record_sender: Option<CallRecordSender>,
 
     pub cancel_token: CancellationToken,
@@ -389,45 +388,37 @@ impl AppFactory for BuiltinAppFactory {
                     // produced by `resolve_ivr_file` / `apply_route_metadata`
                     // when the proxy runs with `generated_db = true`.
                     let file = params.as_ref()?.get("file")?.as_str()?;
-                    let content =
-                        if let Some((category, name)) =
-                            crate::config_store::GeneratedConfigStore::parse_db_uri(file)
-                        {
-                            let store = crate::config_store::GeneratedConfigStore::from_config(
-                                &context.config,
-                                &context.db,
-                            );
-                            match store.read(category, name).await {
-                                Ok(Some(c)) => c,
-                                Ok(None) => {
-                                    tracing::warn!(
-                                        "IVR config '{}' not found in config store",
-                                        file
-                                    );
-                                    return None;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to read IVR config '{}' from store: {}",
-                                        file,
-                                        e
-                                    );
-                                    return None;
-                                }
+                    let content = if let Some((category, name)) =
+                        crate::config_store::GeneratedConfigStore::parse_db_uri(file)
+                    {
+                        let store = crate::config_store::GeneratedConfigStore::from_config(
+                            &context.config,
+                            &context.db,
+                        );
+                        match store.read(category, name).await {
+                            Ok(Some(c)) => c,
+                            Ok(None) => {
+                                tracing::warn!("IVR config '{}' not found in config store", file);
+                                return None;
                             }
-                        } else {
-                            match tokio::fs::read_to_string(file).await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to read IVR config '{}': {}",
-                                        file,
-                                        e
-                                    );
-                                    return None;
-                                }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read IVR config '{}' from store: {}",
+                                    file,
+                                    e
+                                );
+                                return None;
                             }
-                        };
+                        }
+                    } else {
+                        match tokio::fs::read_to_string(file).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!("Failed to read IVR config '{}': {}", file, e);
+                                return None;
+                            }
+                        }
+                    };
 
                     let file_config: crate::call::app::ivr_config::IvrFileConfig =
                         match toml::from_str(&content) {
@@ -959,14 +950,10 @@ impl SipSession {
         // Create a shared session-extensions bag so CallApps and
         // CallSessionHooks can pass typed data across layers (e.g. CSAT
         // results → CDR).
-        let session_extensions =
-            crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        let session_extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
 
         let mut app_ctx = ApplicationContext::new(
-            server
-                .database
-                .clone()
-                .unwrap_or_default(),
+            server.database.clone().unwrap_or_default(),
             call_info,
             Arc::new(crate::config::Config {
                 proxy: (*server.proxy_config).clone(),
@@ -1506,11 +1493,6 @@ impl SipSession {
             .media_sections
             .iter()
             .any(|section| section.kind == rustrtc::MediaKind::Audio);
-        let offer_audio_direction = source_desc
-            .media_sections
-            .iter()
-            .find(|section| section.kind == rustrtc::MediaKind::Audio)
-            .map(|section| section.direction);
 
         // Use one H264 configuration across the bridge. Keep feedback offered
         // by the WebRTC source in its SAVPF answer, but omit it from the
@@ -1655,30 +1637,10 @@ impl SipSession {
                 self.media.callee_offer = Some(target_offer_sdp);
                 self.media.callee_answer_sdp = Some(target_answer_sdp.clone());
                 self.media.answer = Some(source_answer_sdp.clone());
-                if has_audio {
-                    self.update_leg_state(
-                        &LegId::from("caller"),
-                        if Self::is_hold_direction(offer_audio_direction.unwrap_or_default()) {
-                            LegState::Hold
-                        } else {
-                            LegState::Connected
-                        },
-                    );
-                }
             }
             DialogSide::Callee => {
                 self.media.callee_offer = Some(source_answer_sdp.clone());
                 self.media.callee_answer_sdp = Some(source_answer_sdp.clone());
-                if has_audio {
-                    self.update_leg_state(
-                        &LegId::from("callee"),
-                        if Self::is_hold_direction(offer_audio_direction.unwrap_or_default()) {
-                            LegState::Hold
-                        } else {
-                            LegState::Connected
-                        },
-                    );
-                }
             }
         }
 
@@ -2689,8 +2651,11 @@ impl SipSession {
 
         let body = if update_result.is_ok() && !request.body.is_empty() {
             let offer_sdp = String::from_utf8_lossy(&request.body).to_string();
+            let parsed_offer =
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp).ok();
             let bridged_video_offer = self.media.media_bridge.is_some()
-                && rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp)
+                && parsed_offer
+                    .as_ref()
                     .map(|desc| {
                         desc.media_sections
                             .iter()
@@ -2700,6 +2665,12 @@ impl SipSession {
             let answer_result = if self.bypasses_local_media() {
                 self.relay_signaling_only_offer(side, request.method.clone(), &offer_sdp)
                     .await
+                    .map(|(result_status, answer_sdp)| {
+                        // Align answer direction for bypass mode
+                        let aligned = answer_sdp
+                            .map(|sdp| Self::align_answer_direction_with_offer(&offer_sdp, &sdp));
+                        (result_status, aligned)
+                    })
                     .map_err(|e| {
                         (
                             rsipstack::sip::StatusCode::ServerInternalError,
@@ -2710,6 +2681,12 @@ impl SipSession {
             } else if bridged_video_offer {
                 self.relay_bridged_dialog_offer(side, request.method.clone(), &offer_sdp)
                     .await
+                    .map(|(result_status, answer_sdp)| {
+                        // Align answer direction for bridge mode
+                        let aligned = answer_sdp
+                            .map(|sdp| Self::align_answer_direction_with_offer(&offer_sdp, &sdp));
+                        (result_status, aligned)
+                    })
                     .map_err(|e| {
                         (
                             rsipstack::sip::StatusCode::NotAcceptableHere,
@@ -2718,7 +2695,7 @@ impl SipSession {
                         )
                     })
             } else {
-                self.build_local_dialog_answer(side, &offer_sdp, &request.headers.0)
+                self.build_local_dialog_answer(side, &offer_sdp)
                     .await
                     .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
                     .map_err(|e| {
@@ -2735,6 +2712,13 @@ impl SipSession {
                     status = result_status;
                     if status.kind() != rsipstack::sip::status_code::StatusCodeKind::Successful {
                         headers.clear();
+                    }
+                    // Apply hold transition for all branches on success
+                    if status.kind() == rsipstack::sip::StatusCodeKind::Successful {
+                        if let Some(ref offer) = parsed_offer {
+                            self.apply_reinvite_hold_transition(side, offer, &request.headers.0)
+                                .await;
+                        }
                     }
                     if let Some(answer_sdp) = answer_sdp {
                         headers.push(rsipstack::sip::Header::ContentType(
@@ -2952,7 +2936,9 @@ impl SipSession {
 
     /// Parse the music parameter from INFO command params, returning an
     /// optional [`MediaSource`] that can be passed to Hold or used directly.
-    fn parse_info_music_param(params: &serde_json::Value) -> Option<crate::call::domain::MediaSource> {
+    fn parse_info_music_param(
+        params: &serde_json::Value,
+    ) -> Option<crate::call::domain::MediaSource> {
         params.get("music").and_then(Self::parse_info_media_source)
     }
 
@@ -3139,7 +3125,9 @@ impl SipSession {
         let cmd: Option<CallCommand> = Self::parse_info_command(&action, params, &parsed);
 
         match cmd {
-            Some(cmd) => Self::send_or_log_cmd(&self.cmd_tx, cmd, &action, &self.context.session_id),
+            Some(cmd) => {
+                Self::send_or_log_cmd(&self.cmd_tx, cmd, &action, &self.context.session_id)
+            }
             None => {
                 warn!(
                     session_id = %self.context.session_id,
@@ -3484,17 +3472,10 @@ impl SipSession {
                     // ── Return to IVR takes precedence over CSAT hook ──────────
                     if !self.server_dialog.state().is_terminated() {
                         if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
-                            let mut ivr_params = std::mem::take(
-                                &mut self.meta.transfer_return_params,
-                            );
-                            ivr_params.insert(
-                                "transferred_from".into(),
-                                "agent".into(),
-                            );
-                            ivr_params.insert(
-                                "return_reason".into(),
-                                "b_leg_hangup".into(),
-                            );
+                            let mut ivr_params =
+                                std::mem::take(&mut self.meta.transfer_return_params);
+                            ivr_params.insert("transferred_from".into(), "agent".into());
+                            ivr_params.insert("return_reason".into(), "b_leg_hangup".into());
                             info!(
                                 session = %self.id,
                                 %ivr_name,
@@ -3519,10 +3500,7 @@ impl SipSession {
                         let ctx = self.session_hook_ctx();
                         let mut handled = false;
                         for hook in self.server.session_hooks.iter() {
-                            if hook
-                                .on_agent_disconnected(&ctx, &*self.app_runtime)
-                                .await
-                            {
+                            if hook.on_agent_disconnected(&ctx, &*self.app_runtime).await {
                                 handled = true;
                                 break;
                             }
@@ -6646,12 +6624,12 @@ impl SipSession {
         }
 
         // Effective timeout: per-call dialplan override > proxy-wide default.
-        let Some(timeout) = self
-            .context
-            .dialplan
-            .rtp_timeout
-            .or_else(|| self.server.proxy_config.rtp_timeout.map(Duration::from_secs))
-        else {
+        let Some(timeout) = self.context.dialplan.rtp_timeout.or_else(|| {
+            self.server
+                .proxy_config
+                .rtp_timeout
+                .map(Duration::from_secs)
+        }) else {
             debug!(
                 session_id = %self.context.session_id,
                 "rtp-timeout disabled (no dialplan/proxy config); monitor not started"
@@ -6787,15 +6765,11 @@ impl SipSession {
                     callee_silence = None;
                 }
 
-                let caller_silent_for =
-                    caller_silence.map(|s| s.elapsed());
-                let callee_silent_for =
-                    callee_silence.map(|s| s.elapsed());
+                let caller_silent_for = caller_silence.map(|s| s.elapsed());
+                let callee_silent_for = callee_silence.map(|s| s.elapsed());
 
-                let fire_caller =
-                    caller_silent_for.is_some_and(|d| d >= timeout);
-                let fire_callee =
-                    callee_silent_for.is_some_and(|d| d >= timeout);
+                let fire_caller = caller_silent_for.is_some_and(|d| d >= timeout);
+                let fire_callee = callee_silent_for.is_some_and(|d| d >= timeout);
 
                 if fire_caller || fire_callee {
                     fired = true;
@@ -7825,8 +7799,30 @@ impl SipSession {
         Ok(())
     }
 
-    fn is_hold_direction(direction: rustrtc::Direction) -> bool {
-        !matches!(direction, rustrtc::Direction::SendRecv)
+    fn is_hold_direction(
+        direction: rustrtc::Direction,
+        offer: Option<&rustrtc::SessionDescription>,
+    ) -> bool {
+        if !matches!(direction, rustrtc::Direction::SendRecv) {
+            return true;
+        }
+        // Per RFC 4317, c=IN IP4 0.0.0.0 also signals hold even when
+        // direction is sendrecv (some endpoints use this convention).
+        if let Some(offer) = offer {
+            for section in &offer.media_sections {
+                if section.port == 0 {
+                    return true;
+                }
+                let conn = section
+                    .connection
+                    .as_deref()
+                    .or(offer.session.connection.as_deref());
+                if conn.is_some_and(|c| Self::is_zero_connection(c)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
@@ -8011,11 +8007,93 @@ impl SipSession {
         }
     }
 
+    /// Returns `true` when the connection C-line value represents a "zero" address,
+    /// commonly used to signal media hold per RFC 4317.
+    fn is_zero_connection(c: &str) -> bool {
+        let trimmed = c.trim();
+        trimmed == "IN IP4 0.0.0.0" || trimmed == "IN IP6 ::" || trimmed == "IN IP6 0:0:0:0:0:0:0:0"
+    }
+
+    /// Align the answer SDP direction per media section to the mirror of the
+    /// offer direction per RFC 3264 §5.1:
+    ///
+    /// | Offer        | Answer       |
+    /// |--------------|--------------|
+    /// | `sendonly`   | `recvonly`   |
+    /// | `recvonly`   | `sendonly`   |
+    /// | `inactive`   | `inactive`   |
+    /// | `sendrecv`   | `sendrecv`   |
+    ///
+    /// Also treats `port=0` and `c=IN IP4 0.0.0.0` (or `c=IN IP6 ::`)
+    /// as equivalent to `inactive`.
+    ///
+    /// Sections are matched by index between offer and answer (the answer
+    /// is expected to have the same number of `m=` lines).
+    fn align_answer_direction_with_offer(offer_sdp: &str, answer_sdp: &str) -> String {
+        let Ok(offer) = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
+        else {
+            warn!("Failed to parse offer SDP, returning answer unchanged");
+            return answer_sdp.to_string();
+        };
+
+        // Per offer-section: target answer direction string, or None to keep as-is.
+        let target_dirs: Vec<Option<&'static str>> = offer
+            .media_sections
+            .iter()
+            .map(|s| {
+                if s.port == 0 {
+                    return Some("inactive");
+                }
+                let conn = s
+                    .connection
+                    .as_deref()
+                    .or(offer.session.connection.as_deref());
+                if conn.is_some_and(|c| Self::is_zero_connection(c)) {
+                    return Some("inactive");
+                }
+                match s.direction {
+                    rustrtc::Direction::SendOnly => Some("recvonly"),
+                    rustrtc::Direction::RecvOnly => Some("sendonly"),
+                    rustrtc::Direction::Inactive => Some("inactive"),
+                    rustrtc::Direction::SendRecv => None,
+                }
+            })
+            .collect();
+
+        let mut out = String::with_capacity(answer_sdp.len() + 64);
+        let mut section_idx = 0usize;
+        let mut seen_m = false;
+
+        for line in answer_sdp.lines() {
+            let l = line.strip_suffix('\r').unwrap_or(line);
+            if l.starts_with("m=") {
+                section_idx = if seen_m { section_idx + 1 } else { 0 };
+                seen_m = true;
+                out.push_str(l);
+                out.push_str("\r\n");
+                continue;
+            }
+            if seen_m {
+                if let Some(dir) = target_dirs.get(section_idx).copied().flatten() {
+                    if matches!(l, "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive") {
+                        out.push_str("a=");
+                        out.push_str(dir);
+                        out.push_str("\r\n");
+                        continue;
+                    }
+                }
+            }
+            out.push_str(l);
+            out.push_str("\r\n");
+        }
+
+        out
+    }
+
     async fn build_local_dialog_answer(
         &mut self,
         side: DialogSide,
         offer_sdp: &str,
-        request_headers: &[rsipstack::sip::Header],
     ) -> Result<String> {
         let parsed = Self::parse_sdp(rustrtc::SdpType::Offer, offer_sdp, "re-INVITE offer")?;
 
@@ -8025,11 +8103,6 @@ impl SipSession {
             .media_sections
             .iter()
             .any(|s| s.kind == rustrtc::MediaKind::Audio);
-        let offer_direction = parsed
-            .media_sections
-            .iter()
-            .find(|section| section.kind == rustrtc::MediaKind::Audio)
-            .map(|s| s.direction);
 
         // Detect video addition: if the offer contains video but the current
         // session doesn't have video for this leg, dynamically add video tracks
@@ -8092,61 +8165,20 @@ impl SipSession {
             );
         }
 
+        // Align answer direction with offer per RFC 3264 §5.1
+        answer_sdp = Self::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
+
         match side {
             DialogSide::Caller => {
                 self.media.caller_offer = Some(offer_sdp.to_string());
                 self.media.answer = Some(answer_sdp.clone());
-                if has_audio {
-                    let leg_id = LegId::from("caller");
-                    let new_state = if Self::is_hold_direction(offer_direction.unwrap_or_default())
-                    {
-                        LegState::Hold
-                    } else {
-                        LegState::Connected
-                    };
-                    let prev = self.leg_prev_state(&leg_id);
-                    self.update_leg_state(&leg_id, new_state);
-                    self.fire_hold_transition_hooks(&leg_id, prev, new_state)
-                        .await;
-
-                    // Propagate hold/unhold to callee when caller changes direction
-                    let callee_prev = self.leg_prev_state(&LegId::from("callee"));
-                    let callee_transition = match (callee_prev, new_state) {
-                        (Some(LegState::Hold), LegState::Connected) => Some(false), // unhold
-                        (Some(s), LegState::Hold) if s != LegState::Hold => Some(true), // hold
-                        _ => None,
-                    };
-                    if let Some(is_hold) = callee_transition {
-                        if is_hold {
-                            if let Err(e) = self.propagate_hold_to_callee(request_headers, None).await {
-                                warn!(error = %e, "Failed to propagate hold to callee");
-                            }
-                        } else {
-                            if let Err(e) = self.propagate_unhold_to_callee().await {
-                                warn!(error = %e, "Failed to propagate unhold to callee");
-                            }
-                        }
-                    }
-                }
             }
             DialogSide::Callee => {
                 self.media.callee_offer = Some(answer_sdp.clone());
                 self.media.callee_answer_sdp = Some(answer_sdp.clone());
-                if has_audio {
-                    let leg_id = LegId::from("callee");
-                    let new_state = if Self::is_hold_direction(offer_direction.unwrap_or_default())
-                    {
-                        LegState::Hold
-                    } else {
-                        LegState::Connected
-                    };
-                    let prev = self.leg_prev_state(&leg_id);
-                    self.update_leg_state(&leg_id, new_state);
-                    self.fire_hold_transition_hooks(&leg_id, prev, new_state)
-                        .await;
-                }
             }
         }
+        // Hold transition is applied in handle_updated_dialog for all branches
         if offer_video_direction.is_some() && (had_video || offer_video_active) {
             self.legs.set_video_state(&leg_key, true);
         }
@@ -8244,6 +8276,162 @@ impl SipSession {
             }
         }
         Ok(())
+    }
+
+    /// Called when callee initiates hold (sendonly/inactive).
+    /// Propagates the hold to the caller side: updates leg state, sends hold
+    /// re-INVITE (if no media bridge), and starts hold music (if media bridge).
+    async fn propagate_hold_to_caller(&mut self) -> Result<()> {
+        info!("Propagating hold to caller");
+
+        self.update_leg_state(&LegId::from("caller"), LegState::Hold);
+
+        if self.media.media_bridge.is_some() {
+            let music = self.resolve_hold_music(&[]);
+            if let Some(music) = music {
+                let path = match &music {
+                    crate::call::domain::MediaSource::File { path } => path.clone(),
+                    crate::call::domain::MediaSource::Url { url } => url.clone(),
+                    _ => {
+                        warn!("Unsupported hold music source type");
+                        return Ok(());
+                    }
+                };
+                let leg_codec = self
+                    .caller_answer_codec_info()
+                    .or_else(|| {
+                        self.media.caller_offer.as_ref().map(|o| {
+                            crate::media::negotiate::MediaNegotiator::extract_codec_params(o)
+                                .audio
+                                .first()
+                                .cloned()
+                        })?
+                    })
+                    .unwrap_or_else(|| {
+                        crate::media::negotiate::MediaNegotiator::codec_info_for_type(
+                            audio_codec::CodecType::PCMU,
+                        )
+                    });
+                let track = FileTrack::new("hold-music-caller".to_string())
+                    .with_session_id(self.id.clone())
+                    .with_path(path)
+                    .with_loop(true)
+                    .with_codec_info(leg_codec)
+                    .with_cname(self.server.rtc_cname.clone());
+                if let Some(bridge) = self.media.media_bridge.as_ref() {
+                    let endpoint = self.leg_bridge_endpoint(&LegId::from("caller"));
+                    bridge.replace_output_with_file(endpoint, &track).await?;
+                    self.media
+                        .playback_tracks
+                        .insert("hold-music-caller".to_string(), track);
+                    self.media
+                        .bridge_playback_track_ids
+                        .insert("caller".to_string(), "hold-music-caller".to_string());
+                }
+            }
+        } else {
+            let hold_sdp = self.generate_hold_sdp().await?;
+            self.send_reinvite_to_caller(hold_sdp).await?;
+        }
+        Ok(())
+    }
+
+    /// Called when callee initiates unhold (sendrecv).
+    /// Restores the caller side to normal: leg state, stop hold music, send
+    /// unhold re-INVITE (if no media bridge).
+    async fn propagate_unhold_to_caller(&mut self) -> Result<()> {
+        info!("Propagating unhold to caller");
+
+        self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+
+        if self.media.media_bridge.is_some() {
+            self.stop_playback_track("hold-music-caller", true).await;
+        } else {
+            let unhold_sdp = self.generate_unhold_sdp().await?;
+            self.send_reinvite_to_caller(unhold_sdp).await?;
+        }
+        Ok(())
+    }
+
+    /// Apply hold/unhold state transition for a re-INVITE event.
+    ///
+    /// Detects hold from the audio section's direction / connection address,
+    /// updates the target leg's state, fires transition hooks, and propagates
+    /// the change to the opposite leg.
+    async fn apply_reinvite_hold_transition(
+        &mut self,
+        side: DialogSide,
+        offer: &rustrtc::SessionDescription,
+        request_headers: &[rsipstack::sip::Header],
+    ) {
+        let has_audio = offer
+            .media_sections
+            .iter()
+            .any(|s| s.kind == rustrtc::MediaKind::Audio);
+        if !has_audio {
+            return;
+        }
+
+        let offer_direction = offer
+            .media_sections
+            .iter()
+            .find(|s| s.kind == rustrtc::MediaKind::Audio)
+            .map(|s| s.direction);
+
+        let leg_id = match side {
+            DialogSide::Caller => LegId::from("caller"),
+            DialogSide::Callee => LegId::from("callee"),
+        };
+
+        let new_state = if Self::is_hold_direction(offer_direction.unwrap_or_default(), Some(offer))
+        {
+            LegState::Hold
+        } else {
+            LegState::Connected
+        };
+
+        let prev = self.leg_prev_state(&leg_id);
+        self.update_leg_state(&leg_id, new_state);
+        self.fire_hold_transition_hooks(&leg_id, prev, new_state)
+            .await;
+
+        // Cross-leg propagation
+        match side {
+            DialogSide::Caller => {
+                let callee_prev = self.leg_prev_state(&LegId::from("callee"));
+                let callee_transition = match (callee_prev, new_state) {
+                    (Some(LegState::Hold), LegState::Connected) => Some(false),
+                    (Some(s), LegState::Hold) if s != LegState::Hold => Some(true),
+                    _ => None,
+                };
+                if let Some(is_hold) = callee_transition {
+                    if is_hold {
+                        if let Err(e) = self.propagate_hold_to_callee(request_headers, None).await {
+                            warn!(error = %e, "Failed to propagate hold to callee");
+                        }
+                    } else if let Err(e) = self.propagate_unhold_to_callee().await {
+                        warn!(error = %e, "Failed to propagate unhold to callee");
+                    }
+                }
+            }
+            DialogSide::Callee => {
+                let caller_prev = self.leg_prev_state(&LegId::from("caller"));
+                let caller_transition = match (caller_prev, new_state) {
+                    (Some(LegState::Hold), LegState::Connected) => Some(false),
+                    (Some(s), LegState::Hold) if s != LegState::Hold => Some(true),
+                    _ => None,
+                };
+                if let Some(is_hold) = caller_transition {
+                    if is_hold {
+                        if let Err(e) = self.propagate_hold_to_caller().await {
+                            warn!(error = %e, "Failed to propagate hold to caller");
+                        }
+                    } else if let Err(e) = self.propagate_unhold_to_caller().await {
+                        warn!(error = %e, "Failed to propagate unhold to caller");
+                    }
+                }
+            }
+        }
     }
 
     /// Resolve hold music source by priority:
@@ -11656,10 +11844,10 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::wav_reader::{SampleFormat, WavSpec, WavWriter};
     use rustrtc::media::MediaStreamTrack;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use crate::media::wav_reader::{SampleFormat, WavSpec, WavWriter};
 
     // ---- helpers for codec / audio-content verification ----
     fn generate_sine_wav(path: &Path, freq: f64, duration_secs: f64, sample_rate: u32) {
@@ -14676,20 +14864,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         };
         let (server, _) = create_test_server().await;
         let request = create_test_request(
-            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
         );
         let original_request = request.clone();
         let (tx, _) = create_transaction(request).await;
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
-        let server_dialog = server.dialog_layer
-            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
         let (mut session, _h, _rx) = SipSession::new(
-            server, CancellationToken::new(), None,
+            server,
+            CancellationToken::new(),
+            None,
             CallContext {
                 session_id: "test-pcmu".to_string(),
-                dialplan: Arc::new(Dialplan::new("test-pcmu".to_string(), original_request, DialDirection::Inbound)),
+                dialplan: Arc::new(Dialplan::new(
+                    "test-pcmu".to_string(),
+                    original_request,
+                    DialDirection::Inbound,
+                )),
                 cookie: TransactionCookie::default(),
                 start_time: Instant::now(),
                 original_caller: "sip:alice@rustpbx.com".to_string(),
@@ -14698,13 +14898,21 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
                 created_at: chrono::Utc::now().to_rfc3339(),
                 metadata: None,
             },
-            server_dialog, false, caller_peer, callee_peer,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
         );
         setup_pcmu_offers(&mut session);
         enable_bridge_for_callee(&mut session).await;
         play_test_file(&mut session, "pcmu", LegId::from("callee")).await;
-        let ci = session.media.playback_tracks.get("pcmu-callee")
-            .and_then(|t| t.codec_info()).cloned().unwrap();
+        let ci = session
+            .media
+            .playback_tracks
+            .get("pcmu-callee")
+            .and_then(|t| t.codec_info())
+            .cloned()
+            .unwrap();
         assert_eq!(ci.codec, audio_codec::CodecType::PCMU, "codec");
         assert_eq!(ci.payload_type, 0, "PT");
         assert_eq!(ci.clock_rate, 8000, "clock_rate");
@@ -14720,20 +14928,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         };
         let (server, _) = create_test_server().await;
         let request = create_test_request(
-            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
         );
         let original_request = request.clone();
         let (tx, _) = create_transaction(request).await;
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
-        let server_dialog = server.dialog_layer
-            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
         let (mut session, _h, _rx) = SipSession::new(
-            server, CancellationToken::new(), None,
+            server,
+            CancellationToken::new(),
+            None,
             CallContext {
                 session_id: "test-pcma".to_string(),
-                dialplan: Arc::new(Dialplan::new("test-pcma".to_string(), original_request, DialDirection::Inbound)),
+                dialplan: Arc::new(Dialplan::new(
+                    "test-pcma".to_string(),
+                    original_request,
+                    DialDirection::Inbound,
+                )),
                 cookie: TransactionCookie::default(),
                 start_time: Instant::now(),
                 original_caller: "sip:alice@rustpbx.com".to_string(),
@@ -14742,13 +14962,21 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
                 created_at: chrono::Utc::now().to_rfc3339(),
                 metadata: None,
             },
-            server_dialog, false, caller_peer, callee_peer,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
         );
         setup_pcma_offers(&mut session);
         enable_bridge_for_callee(&mut session).await;
         play_test_file(&mut session, "pcma", LegId::from("callee")).await;
-        let ci = session.media.playback_tracks.get("pcma-callee")
-            .and_then(|t| t.codec_info()).cloned().unwrap();
+        let ci = session
+            .media
+            .playback_tracks
+            .get("pcma-callee")
+            .and_then(|t| t.codec_info())
+            .cloned()
+            .unwrap();
         assert_eq!(ci.codec, audio_codec::CodecType::PCMA, "codec");
         assert_eq!(ci.payload_type, 8, "PT");
         assert_eq!(ci.clock_rate, 8000, "clock_rate");
@@ -14764,20 +14992,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         };
         let (server, _) = create_test_server().await;
         let request = create_test_request(
-            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
         );
         let original_request = request.clone();
         let (tx, _) = create_transaction(request).await;
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
-        let server_dialog = server.dialog_layer
-            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
         let (mut session, _h, _rx) = SipSession::new(
-            server, CancellationToken::new(), None,
+            server,
+            CancellationToken::new(),
+            None,
             CallContext {
                 session_id: "test-opus".to_string(),
-                dialplan: Arc::new(Dialplan::new("test-opus".to_string(), original_request, DialDirection::Inbound)),
+                dialplan: Arc::new(Dialplan::new(
+                    "test-opus".to_string(),
+                    original_request,
+                    DialDirection::Inbound,
+                )),
                 cookie: TransactionCookie::default(),
                 start_time: Instant::now(),
                 original_caller: "sip:alice@rustpbx.com".to_string(),
@@ -14786,13 +15026,21 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
                 created_at: chrono::Utc::now().to_rfc3339(),
                 metadata: None,
             },
-            server_dialog, false, caller_peer, callee_peer,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
         );
         setup_opus_offers(&mut session);
         enable_bridge_for_callee(&mut session).await;
         play_test_file(&mut session, "opus", LegId::from("callee")).await;
-        let ci = session.media.playback_tracks.get("opus-callee")
-            .and_then(|t| t.codec_info()).cloned().unwrap();
+        let ci = session
+            .media
+            .playback_tracks
+            .get("opus-callee")
+            .and_then(|t| t.codec_info())
+            .cloned()
+            .unwrap();
         assert_eq!(ci.codec, audio_codec::CodecType::Opus, "codec");
         assert_eq!(ci.payload_type, 111, "PT");
         assert_eq!(ci.clock_rate, 48000, "clock_rate");
@@ -14810,20 +15058,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         };
         let (server, _) = create_test_server().await;
         let request = create_test_request(
-            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
         );
         let original_request = request.clone();
         let (tx, _) = create_transaction(request).await;
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
-        let server_dialog = server.dialog_layer
-            .get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
         let (mut session, _h, _rx) = SipSession::new(
-            server, CancellationToken::new(), None,
+            server,
+            CancellationToken::new(),
+            None,
             CallContext {
                 session_id: "test-hold-sdp".to_string(),
-                dialplan: Arc::new(Dialplan::new("test-hold-sdp".to_string(), original_request, DialDirection::Inbound)),
+                dialplan: Arc::new(Dialplan::new(
+                    "test-hold-sdp".to_string(),
+                    original_request,
+                    DialDirection::Inbound,
+                )),
                 cookie: TransactionCookie::default(),
                 start_time: Instant::now(),
                 original_caller: "sip:alice@rustpbx.com".to_string(),
@@ -14832,7 +15092,10 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
                 created_at: chrono::Utc::now().to_rfc3339(),
                 metadata: None,
             },
-            server_dialog, false, caller_peer, callee_peer,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
         );
 
         // Hold SDP: sendrecv → sendonly
@@ -14846,17 +15109,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             "a=rtpmap:0 PCMU/8000\r\n",
             "a=rtpmap:101 telephone-event/8000\r\n",
             "a=sendrecv\r\n",
-        ).to_string();
+        )
+        .to_string();
         // The method reads answer first, then caller_offer
         session.media.answer = Some(sendrecv_sdp);
 
         let hold_sdp = session.generate_hold_sdp().await.expect("hold SDP");
-        assert!(hold_sdp.contains("a=sendonly"), "hold SDP must be sendonly, got: {}", hold_sdp);
-        assert!(!hold_sdp.contains("a=sendrecv"), "hold SDP must NOT contain sendrecv");
+        assert!(
+            hold_sdp.contains("a=sendonly"),
+            "hold SDP must be sendonly, got: {}",
+            hold_sdp
+        );
+        assert!(
+            !hold_sdp.contains("a=sendrecv"),
+            "hold SDP must NOT contain sendrecv"
+        );
 
         let unhold_sdp = session.generate_unhold_sdp().await.expect("unhold SDP");
-        assert!(unhold_sdp.contains("a=sendrecv"), "unhold SDP must be sendrecv, got: {}", unhold_sdp);
-        assert!(!unhold_sdp.contains("a=sendonly"), "unhold SDP must NOT contain sendonly");
+        assert!(
+            unhold_sdp.contains("a=sendrecv"),
+            "unhold SDP must be sendrecv, got: {}",
+            unhold_sdp
+        );
+        assert!(
+            !unhold_sdp.contains("a=sendonly"),
+            "unhold SDP must NOT contain sendonly"
+        );
     }
 
     // ── Layer 1: parse_info_command dispatch (pure function, no session needed) ──
@@ -14867,7 +15145,11 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         let cmd = SipSession::parse_info_command("media.play", Some(&params), &params)
             .expect("parse_info_command returned None");
         match cmd {
-            CallCommand::Play { source: crate::call::domain::MediaSource::File { ref path }, ref options, .. } => {
+            CallCommand::Play {
+                source: crate::call::domain::MediaSource::File { ref path },
+                ref options,
+                ..
+            } => {
                 assert_eq!(path, "/tmp/test.wav");
                 assert!(options.as_ref().unwrap().loop_playback);
             }
@@ -14879,14 +15161,18 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
     fn test_parse_info_media_stop() {
         let json = serde_json::json!({"leg_id": "callee"});
         let cmd = SipSession::parse_info_command("media.stop", Some(&json), &json).unwrap();
-        assert!(matches!(&cmd, CallCommand::StopPlayback { leg_id } if leg_id == &Some(LegId::from("callee"))));
+        assert!(
+            matches!(&cmd, CallCommand::StopPlayback { leg_id } if leg_id == &Some(LegId::from("callee")))
+        );
     }
 
     #[test]
     fn test_parse_info_record_start() {
         let json = serde_json::json!({"path": "/tmp/rec.wav", "beep": false});
         let cmd = SipSession::parse_info_command("record.start", Some(&json), &json).unwrap();
-        assert!(matches!(&cmd, CallCommand::StartRecording { config } if config.path == "/tmp/rec.wav" && !config.beep));
+        assert!(
+            matches!(&cmd, CallCommand::StartRecording { config } if config.path == "/tmp/rec.wav" && !config.beep)
+        );
     }
 
     #[test]
@@ -14901,7 +15187,9 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
     fn test_parse_info_hold() {
         let json = serde_json::json!({"leg_id": "callee"});
         let cmd = SipSession::parse_info_command("hold", Some(&json), &json).unwrap();
-        assert!(matches!(&cmd, CallCommand::Hold { leg_id, music } if leg_id == &LegId::from("callee") && music.is_none()));
+        assert!(
+            matches!(&cmd, CallCommand::Hold { leg_id, music } if leg_id == &LegId::from("callee") && music.is_none())
+        );
     }
 
     #[test]
@@ -14923,176 +15211,250 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         let parsed = serde_json::json!({});
         let json = serde_json::json!({"leg_id": "caller"});
         let cmd = SipSession::parse_info_command("consult.initiate", Some(&json), &parsed).unwrap();
-        assert!(matches!(&cmd, CallCommand::Hold { leg_id, music: None } if leg_id == &LegId::from("caller")));
+        assert!(
+            matches!(&cmd, CallCommand::Hold { leg_id, music: None } if leg_id == &LegId::from("caller"))
+        );
     }
 
     #[test]
     fn test_parse_info_consult_cancel() {
         let parsed = serde_json::json!({"call_id": "dynamic-leg"});
         let cmd = SipSession::parse_info_command("consult.cancel", None, &parsed).unwrap();
-        assert!(matches!(&cmd, CallCommand::Unhold { leg_id } if leg_id == &LegId::from("dynamic-leg")));
+        assert!(
+            matches!(&cmd, CallCommand::Unhold { leg_id } if leg_id == &LegId::from("dynamic-leg"))
+        );
     }
 
     #[test]
     fn test_parse_info_unknown_action() {
-        assert!(SipSession::parse_info_command("unknown.action", None, &serde_json::json!({})).is_none());
+        assert!(
+            SipSession::parse_info_command("unknown.action", None, &serde_json::json!({}))
+                .is_none()
+        );
     }
 
     // ── Layer 2 helpers (take &mut SipSession only, no complex types) ──
 
     fn setup_pcmu_offers(session: &mut SipSession) {
-        session.media.caller_offer = Some(concat!(
-            "v=0
-", "o=alice 1 1 IN IP4 192.0.2.10
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.10
-", "t=0 0
+                "o=alice 1 1 IN IP4 192.0.2.10
 ",
-            "m=audio 40000 RTP/AVP 0 101
+                "s=Talk
 ",
-            "a=rtpmap:0 PCMU/8000
+                "c=IN IP4 192.0.2.10
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
-        session.media.callee_offer = Some(concat!(
-            "v=0
-", "o=bob 1 1 IN IP4 192.0.2.20
+                "m=audio 40000 RTP/AVP 0 101
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "a=rtpmap:0 PCMU/8000
 ",
-            "m=audio 40050 RTP/AVP 0 101
+                "a=rtpmap:101 telephone-event/8000
 ",
-            "a=rtpmap:0 PCMU/8000
+                "a=sendrecv
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+            )
+            .to_string(),
+        );
+        session.media.callee_offer = Some(
+            concat!(
+                "v=0
 ",
-        ).to_string());
-        session.media.callee_answer_sdp = Some(concat!(
-            "v=0
-", "o=bob 2 2 IN IP4 192.0.2.20
+                "o=bob 1 1 IN IP4 192.0.2.20
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "s=Talk
 ",
-            "m=audio 40060 RTP/AVP 0
+                "c=IN IP4 192.0.2.20
 ",
-            "a=rtpmap:0 PCMU/8000
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
+                "m=audio 40050 RTP/AVP 0 101
+",
+                "a=rtpmap:0 PCMU/8000
+",
+                "a=rtpmap:101 telephone-event/8000
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
+        session.media.callee_answer_sdp = Some(
+            concat!(
+                "v=0
+",
+                "o=bob 2 2 IN IP4 192.0.2.20
+",
+                "s=Talk
+",
+                "c=IN IP4 192.0.2.20
+",
+                "t=0 0
+",
+                "m=audio 40060 RTP/AVP 0
+",
+                "a=rtpmap:0 PCMU/8000
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
         set_rtp_transports(session);
     }
 
     fn setup_pcma_offers(session: &mut SipSession) {
-        session.media.caller_offer = Some(concat!(
-            "v=0
-", "o=alice 1 1 IN IP4 192.0.2.10
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.10
-", "t=0 0
+                "o=alice 1 1 IN IP4 192.0.2.10
 ",
-            "m=audio 40000 RTP/AVP 0 101
+                "s=Talk
 ",
-            "a=rtpmap:0 PCMU/8000
+                "c=IN IP4 192.0.2.10
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
-        session.media.callee_offer = Some(concat!(
-            "v=0
-", "o=bob 1 1 IN IP4 192.0.2.20
+                "m=audio 40000 RTP/AVP 0 101
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "a=rtpmap:0 PCMU/8000
 ",
-            "m=audio 40050 RTP/AVP 8 101
+                "a=rtpmap:101 telephone-event/8000
 ",
-            "a=rtpmap:8 PCMA/8000
+                "a=sendrecv
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+            )
+            .to_string(),
+        );
+        session.media.callee_offer = Some(
+            concat!(
+                "v=0
 ",
-        ).to_string());
-        session.media.callee_answer_sdp = Some(concat!(
-            "v=0
-", "o=bob 2 2 IN IP4 192.0.2.20
+                "o=bob 1 1 IN IP4 192.0.2.20
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "s=Talk
 ",
-            "m=audio 40060 RTP/AVP 8
+                "c=IN IP4 192.0.2.20
 ",
-            "a=rtpmap:8 PCMA/8000
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
+                "m=audio 40050 RTP/AVP 8 101
+",
+                "a=rtpmap:8 PCMA/8000
+",
+                "a=rtpmap:101 telephone-event/8000
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
+        session.media.callee_answer_sdp = Some(
+            concat!(
+                "v=0
+",
+                "o=bob 2 2 IN IP4 192.0.2.20
+",
+                "s=Talk
+",
+                "c=IN IP4 192.0.2.20
+",
+                "t=0 0
+",
+                "m=audio 40060 RTP/AVP 8
+",
+                "a=rtpmap:8 PCMA/8000
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
         set_rtp_transports(session);
     }
 
     fn setup_opus_offers(session: &mut SipSession) {
-        session.media.caller_offer = Some(concat!(
-            "v=0
-", "o=alice 1 1 IN IP4 192.0.2.10
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.10
-", "t=0 0
+                "o=alice 1 1 IN IP4 192.0.2.10
 ",
-            "m=audio 40000 RTP/AVP 0 101
+                "s=Talk
 ",
-            "a=rtpmap:0 PCMU/8000
+                "c=IN IP4 192.0.2.10
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
-        session.media.callee_offer = Some(concat!(
-            "v=0
-", "o=bob 1 1 IN IP4 192.0.2.20
+                "m=audio 40000 RTP/AVP 0 101
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "a=rtpmap:0 PCMU/8000
 ",
-            "m=audio 40050 RTP/AVP 111 101
+                "a=rtpmap:101 telephone-event/8000
 ",
-            "a=rtpmap:111 opus/48000/2
+                "a=sendrecv
 ",
-            "a=rtpmap:101 telephone-event/8000
-", "a=sendrecv
+            )
+            .to_string(),
+        );
+        session.media.callee_offer = Some(
+            concat!(
+                "v=0
 ",
-        ).to_string());
-        session.media.callee_answer_sdp = Some(concat!(
-            "v=0
-", "o=bob 2 2 IN IP4 192.0.2.20
+                "o=bob 1 1 IN IP4 192.0.2.20
 ",
-            "s=Talk
-", "c=IN IP4 192.0.2.20
-", "t=0 0
+                "s=Talk
 ",
-            "m=audio 40060 RTP/AVP 111
+                "c=IN IP4 192.0.2.20
 ",
-            "a=rtpmap:111 opus/48000/2
-", "a=sendrecv
+                "t=0 0
 ",
-        ).to_string());
+                "m=audio 40050 RTP/AVP 111 101
+",
+                "a=rtpmap:111 opus/48000/2
+",
+                "a=rtpmap:101 telephone-event/8000
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
+        session.media.callee_answer_sdp = Some(
+            concat!(
+                "v=0
+",
+                "o=bob 2 2 IN IP4 192.0.2.20
+",
+                "s=Talk
+",
+                "c=IN IP4 192.0.2.20
+",
+                "t=0 0
+",
+                "m=audio 40060 RTP/AVP 111
+",
+                "a=rtpmap:111 opus/48000/2
+",
+                "a=sendrecv
+",
+            )
+            .to_string(),
+        );
         set_rtp_transports(session);
     }
 
     fn set_rtp_transports(session: &mut SipSession) {
-        session.legs.set_transport(LegId::from("caller"), rustrtc::TransportMode::WebRtc);
-        session.legs.set_transport(LegId::from("callee"), rustrtc::TransportMode::Rtp);
+        session
+            .legs
+            .set_transport(LegId::from("caller"), rustrtc::TransportMode::WebRtc);
+        session
+            .legs
+            .set_transport(LegId::from("callee"), rustrtc::TransportMode::Rtp);
     }
 
     async fn enable_bridge_for_callee(session: &mut SipSession) {
@@ -15109,11 +15471,19 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         let dir = tempfile::tempdir().unwrap();
         let wav_path = dir.path().join(format!("{}_sine_440.wav", tag));
         generate_sine_wav(&wav_path, 440.0, 0.5, 8000);
-        session.handle_play(
-            Some(leg),
-            MediaSource::File { path: wav_path.to_str().unwrap().to_string() },
-            Some(PlayOptions { track_id: Some(tag.to_string()), ..Default::default() }),
-        ).await.expect("play");
+        session
+            .handle_play(
+                Some(leg),
+                MediaSource::File {
+                    path: wav_path.to_str().unwrap().to_string(),
+                },
+                Some(PlayOptions {
+                    track_id: Some(tag.to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("play");
     }
 
     async fn clean_bridge(session: &mut SipSession) {
@@ -15171,11 +15541,8 @@ max_retries = 3
             sip_headers: std::collections::HashMap::new(),
             route_name: None,
         };
-        let app_ctx = crate::call::app::ApplicationContext::new(
-            db,
-            call_info,
-            std::sync::Arc::new(config),
-        );
+        let app_ctx =
+            crate::call::app::ApplicationContext::new(db, call_info, std::sync::Arc::new(config));
 
         let factory = BuiltinAppFactory {
             addon_registry: None,
@@ -15189,6 +15556,154 @@ max_retries = 3
         assert!(
             app.is_some(),
             "BuiltinAppFactory should create IVR app from DB store when generated_db=true"
+        );
+    }
+
+    // ── align_answer_direction_with_offer ──
+
+    #[test]
+    fn test_is_zero_connection() {
+        assert!(SipSession::is_zero_connection("IN IP4 0.0.0.0"));
+        assert!(SipSession::is_zero_connection("IN IP6 ::"));
+        assert!(SipSession::is_zero_connection("IN IP6 0:0:0:0:0:0:0:0"));
+        assert!(!SipSession::is_zero_connection("IN IP4 192.168.1.1"));
+        assert!(!SipSession::is_zero_connection("IN IP4 127.0.0.1"));
+    }
+
+    #[test]
+    fn test_align_answer_direction_audio_hold() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=recvonly"),
+            "hold offer sendonly → answer recvonly:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("a=sendrecv"),
+            "answer should not have sendrecv:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_unhold() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=sendrecv"),
+            "unhold offer sendrecv → answer keep sendrecv:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_audio_recvonly() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=sendonly"),
+            "offer recvonly → answer sendonly:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_inactive() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=inactive\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=inactive"),
+            "offer inactive → answer inactive:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_port_zero() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=inactive"),
+            "port=0 → answer inactive:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_zero_connection() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=inactive"),
+            "c=0.0.0.0 → answer inactive:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_mixed_audio_video() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=sendrecv\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=recvonly"),
+            "audio hold → audio recvonly:\n{}",
+            result
+        );
+        assert!(
+            result.contains("a=sendrecv"),
+            "video unchanged → video sendrecv:\n{}",
+            result
+        );
+        // Audio section rewritten → recvonly, video unchanged → sendrecv
+        let recvonly_count = result.matches("a=recvonly").count();
+        let sendrecv_count = result.matches("a=sendrecv").count();
+        assert_eq!(
+            recvonly_count, 1,
+            "one recvonly for audio hold:\n{}",
+            result
+        );
+        assert_eq!(sendrecv_count, 1, "one sendrecv for video:\n{}", result);
+    }
+
+    #[test]
+    fn test_align_answer_direction_no_offer_direction() {
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        // No direction in offer → default is sendrecv → answer unchanged
+        assert!(
+            result.contains("a=sendrecv"),
+            "no offer direction → answer unchanged:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_align_answer_direction_invalid_offer() {
+        let offer = "not an sdp at all";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert_eq!(result, answer, "invalid offer → answer unchanged");
+    }
+
+    #[test]
+    fn test_align_answer_direction_section_connection_zero() {
+        // Section-level c=0.0.0.0, session-level c=10.0.0.1
+        let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let result = SipSession::align_answer_direction_with_offer(offer, answer);
+        assert!(
+            result.contains("a=inactive"),
+            "section c=0.0.0.0 → answer inactive:\n{}",
+            result
         );
     }
 }

@@ -673,7 +673,9 @@ impl CallRecordManagerBuilder {
                 .map_err(|e| {
                     warn!(
                         bucket,
-                        ?endpoint, "CallRecordManager failed to initialize S3 storage: {}", e
+                        ?endpoint,
+                        "CallRecordManager failed to initialize S3 storage: {}",
+                        e
                     );
                     e
                 })?;
@@ -815,11 +817,7 @@ impl CallRecordSaver for S3CallRecordSaver {
             filename.trim_start_matches('/')
         );
         Ok(match self.endpoint.as_ref() {
-            Some(ep) if !ep.is_empty() => format!(
-                "{}/{}",
-                ep.trim_end_matches('/'),
-                path
-            ),
+            Some(ep) if !ep.is_empty() => format!("{}/{}", ep.trim_end_matches('/'), path),
             _ => path,
         })
     }
@@ -1024,7 +1022,8 @@ impl CallRecordSaver for RotatingSqliteSaver {
             .into_table(Alias::new(&self.table_name))
             .columns(call_record_columns())
             .values_panic(build_call_record_values(&row));
-        db.execute_raw(db.get_database_backend().build(&insert)).await?;
+        db.execute_raw(db.get_database_backend().build(&insert))
+            .await?;
         Ok(format!(
             "{}/{}/{}",
             self.base_url, self.table_name, record.call_id
@@ -1169,7 +1168,8 @@ pub(crate) async fn create_call_record_table(
         .col(timestamp_null(Alias::new("archived_at")))
         .to_owned();
 
-    db.execute_raw(db.get_database_backend().build(&create)).await?;
+    db.execute_raw(db.get_database_backend().build(&create))
+        .await?;
 
     // Add unique index on call_id + basic query indexes (must run after CREATE TABLE)
     let indexes = [

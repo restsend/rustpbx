@@ -162,7 +162,9 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         upload: None,
     };
 
-    let backend = rustpbx::sipflow::create_backend(&config, CancellationToken::new()).await.unwrap();
+    let backend = rustpbx::sipflow::create_backend(&config, CancellationToken::new())
+        .await
+        .unwrap();
 
     let base_ts = chrono::Utc::now().timestamp_micros() as u64;
     let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);

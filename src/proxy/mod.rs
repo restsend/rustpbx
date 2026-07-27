@@ -13,6 +13,7 @@ pub mod auth;
 pub mod call;
 pub mod capability_headers;
 pub mod cluster_event;
+pub mod cluster_sync;
 pub mod data;
 pub mod dialog_auth_cache;
 pub mod emergency;

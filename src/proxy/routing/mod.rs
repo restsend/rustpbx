@@ -1,7 +1,6 @@
 use crate::{
     call::{
-        DialDirection, DialStrategy, Location,
-        concurrent_call_limiter::ConcurrentCallLimiter,
+        DialDirection, DialStrategy, Location, concurrent_call_limiter::ConcurrentCallLimiter,
         cps_limiter::CpsLimiter,
     },
     config::RecordingPolicy,

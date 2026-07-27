@@ -10,11 +10,7 @@ pub struct ConcurrentCallLimitExceeded {
 
 impl fmt::Display for ConcurrentCallLimitExceeded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Concurrent call limit exceeded (limit: {})",
-            self.limit
-        )
+        write!(f, "Concurrent call limit exceeded (limit: {})", self.limit)
     }
 }
 
@@ -79,9 +75,7 @@ impl ConcurrentCallLimiter {
         }
     }
 
-    pub fn try_acquire(
-        &self,
-    ) -> Result<ConcurrentCallPermit, ConcurrentCallLimitExceeded> {
+    pub fn try_acquire(&self) -> Result<ConcurrentCallPermit, ConcurrentCallLimitExceeded> {
         Arc::clone(&self.semaphore)
             .try_acquire_owned()
             .map(|permit| ConcurrentCallPermit { _permit: permit })

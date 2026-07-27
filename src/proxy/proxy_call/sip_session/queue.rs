@@ -376,14 +376,8 @@ impl SipSession {
                     TransferEndpoint::Ivr(ivr_name) => {
                         info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
                         let mut ivr_params = std::collections::HashMap::new();
-                        ivr_params.insert(
-                            "transferred_from".into(),
-                            "queue".into(),
-                        );
-                        ivr_params.insert(
-                            "return_reason".into(),
-                            "queue_fallback".into(),
-                        );
+                        ivr_params.insert("transferred_from".into(), "queue".into());
+                        ivr_params.insert("return_reason".into(), "queue_fallback".into());
                         self.start_ivr_app(ivr_name, ivr_params)
                             .await
                             .map_err(|e| {
