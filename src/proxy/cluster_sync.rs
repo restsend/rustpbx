@@ -74,10 +74,22 @@ impl ClusterSync {
                 let etag = et.clone();
                 set.spawn(async move {
                     let start = std::time::Instant::now();
-                    match c.post(&url).json(&b).timeout(Duration::from_millis(1000)).send().await {
+                    match c
+                        .post(&url)
+                        .json(&b)
+                        .timeout(Duration::from_millis(1000))
+                        .send()
+                        .await
+                    {
                         Ok(resp) => {
                             let status = resp.status();
-                            debug!("cluster_sync: {} {} -> {} ({:?})", etag, p, status, start.elapsed());
+                            debug!(
+                                "cluster_sync: {} {} -> {} ({:?})",
+                                etag,
+                                p,
+                                status,
+                                start.elapsed()
+                            );
                         }
                         Err(dur_err) => {
                             debug!("cluster_sync: {} {} failed: {}", etag, p, dur_err);
@@ -86,7 +98,10 @@ impl ClusterSync {
                 });
             }
             while set.join_next().await.is_some() {}
-            debug!("cluster_sync: {} broadcast to {} peers done", et, peer_count);
+            debug!(
+                "cluster_sync: {} broadcast to {} peers done",
+                et, peer_count
+            );
         });
     }
 }

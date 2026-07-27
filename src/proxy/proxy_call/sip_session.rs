@@ -4328,8 +4328,21 @@ impl SipSession {
     }
 
     async fn prepare_app_caller_media_bridge(&mut self) -> Option<String> {
-        if let Some(ref answer) = self.media.answer {
-            return Some(answer.clone());
+        if self.media.answer.is_some() {
+            // On return_to_ivr after a WS bridge disconnect, the bridge's
+            // forwarding was stopped by `stop_forwarding()` in connect_bridge().
+            // Restart it so IVR playback (greeting/menu) and RFC 2833 DTMF
+            // detection work again.
+            if self.media.caller_answer_uses_media_bridge {
+                if let Some(bridge) = self.media.media_bridge.as_ref() {
+                    if bridge.forwarding_stopped() {
+                        bridge.reset_forwarding_state();
+                        bridge.start_bridge().await;
+                        self.start_caller_ingress_monitor_if_needed().await;
+                    }
+                }
+            }
+            return self.media.answer.clone();
         }
 
         let caller_offer = self.media.caller_offer.clone()?;

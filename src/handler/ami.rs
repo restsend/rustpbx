@@ -64,7 +64,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
         .route("/cluster/event/presence", post(cluster_event_presence))
         .route("/cluster/event/locator", post(cluster_event_locator))
-        .route("/cluster/event/agent_status", post(cluster_event_agent_status))
+        .route(
+            "/cluster/event/agent_status",
+            post(cluster_event_agent_status),
+        )
         .route("/cluster/event/queue", post(cluster_event_queue));
 
     let r = r.layer(middleware::from_fn_with_state(
@@ -128,6 +131,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "total": state.total_calls.load(Ordering::Relaxed),
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
         "tasks": app_tasks,
+        "tokio": crate::utils::tokio_runtime_metrics(),
         "sipserver": sipserver_stats,
         "callrecord": callrecord_stats,
     });
@@ -1704,9 +1708,10 @@ async fn cluster_event_agent_status(
     Json(msg): Json<crate::proxy::cluster_event::ClusterAgentStatusMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
-        let source = crate::proxy::cluster_event::EventSource::Remote(
-            std::net::SocketAddr::new(client.addr.ip(), 0),
-        );
+        let source = crate::proxy::cluster_event::EventSource::Remote(std::net::SocketAddr::new(
+            client.addr.ip(),
+            0,
+        ));
         hub.on_remote_agent_status(msg, source).await;
     }
     StatusCode::OK.into_response()
@@ -1719,9 +1724,10 @@ async fn cluster_event_queue(
     Json(msg): Json<crate::proxy::cluster_event::ClusterQueueEventMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
-        let source = crate::proxy::cluster_event::EventSource::Remote(
-            std::net::SocketAddr::new(client.addr.ip(), 0),
-        );
+        let source = crate::proxy::cluster_event::EventSource::Remote(std::net::SocketAddr::new(
+            client.addr.ip(),
+            0,
+        ));
         hub.on_remote_queue_event(msg, source).await;
     }
     StatusCode::OK.into_response()

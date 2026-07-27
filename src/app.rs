@@ -582,7 +582,10 @@ impl AppStateBuilder {
                     let ip_match = local_ips.contains(&p.addr);
                     let port_match = local_ami_port.map_or(false, |lp| lp == p.ami_port);
                     if ip_match && port_match {
-                        debug!("cluster sync: excluding self peer {}:{}", p.addr, p.ami_port);
+                        debug!(
+                            "cluster sync: excluding self peer {}:{}",
+                            p.addr, p.ami_port
+                        );
                         return false;
                     }
                     true

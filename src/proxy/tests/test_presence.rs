@@ -104,3 +104,101 @@ async fn test_presence_locator_sync() {
     // Alice should now be Idle
     assert_eq!(manager.get_state("alice").status, PresenceStatus::Idle);
 }
+
+#[tokio::test]
+async fn test_presence_notify_body_generation() {
+    use crate::proxy::presence::build_pidf_body;
+    let (server, _config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+
+    // Set up a known state via update_state
+    manager
+        .update_state(
+            "bob",
+            crate::proxy::presence::PresenceState {
+                status: crate::proxy::presence::PresenceStatus::Busy,
+                note: None,
+                activity: None,
+                last_updated: chrono::Utc::now().timestamp(),
+            },
+            &crate::proxy::cluster_event::EventSource::Local,
+        )
+        .await;
+
+    // Verify the state is stored correctly
+    let state = manager.get_state("bob");
+    assert_eq!(state.status, crate::proxy::presence::PresenceStatus::Busy);
+
+    // Verify build_pidf_body produces valid output for this state
+    let body = build_pidf_body("bob", "rustpbx.com", &state);
+    assert!(body.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+    assert!(body.contains("entity=\"sip:bob@rustpbx.com\""));
+    assert!(body.contains("<basic>open</basic>"));
+    assert!(body.contains("<note>busy</note>"));
+
+    // Change to idle and verify
+    manager
+        .update_state(
+            "bob",
+            crate::proxy::presence::PresenceState {
+                status: crate::proxy::presence::PresenceStatus::Idle,
+                note: None,
+                activity: None,
+                last_updated: chrono::Utc::now().timestamp(),
+            },
+            &crate::proxy::cluster_event::EventSource::Local,
+        )
+        .await;
+
+    let state = manager.get_state("bob");
+    assert_eq!(state.status, crate::proxy::presence::PresenceStatus::Idle);
+
+    let body = build_pidf_body("bob", "rustpbx.com", &state);
+    assert!(body.contains("<basic>open</basic>"));
+    assert!(body.contains("<note>idle</note>"));
+
+    // Change to wrapup and verify
+    manager
+        .update_state(
+            "bob",
+            crate::proxy::presence::PresenceState {
+                status: crate::proxy::presence::PresenceStatus::Wrapup,
+                note: None,
+                activity: None,
+                last_updated: chrono::Utc::now().timestamp(),
+            },
+            &crate::proxy::cluster_event::EventSource::Local,
+        )
+        .await;
+
+    let state = manager.get_state("bob");
+    assert_eq!(state.status, crate::proxy::presence::PresenceStatus::Wrapup);
+
+    let body = build_pidf_body("bob", "rustpbx.com", &state);
+    assert!(body.contains("<note>wrapup</note>"));
+    assert!(body.contains("<basic>open</basic>"));
+
+    // Change to offline and verify
+    manager
+        .update_state(
+            "bob",
+            crate::proxy::presence::PresenceState {
+                status: crate::proxy::presence::PresenceStatus::Offline,
+                note: None,
+                activity: None,
+                last_updated: chrono::Utc::now().timestamp(),
+            },
+            &crate::proxy::cluster_event::EventSource::Local,
+        )
+        .await;
+
+    let state = manager.get_state("bob");
+    assert_eq!(
+        state.status,
+        crate::proxy::presence::PresenceStatus::Offline
+    );
+
+    let body = build_pidf_body("bob", "rustpbx.com", &state);
+    assert!(body.contains("<basic>closed</basic>"));
+    assert!(body.contains("<note>offline</note>"));
+}

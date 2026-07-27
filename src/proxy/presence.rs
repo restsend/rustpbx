@@ -247,8 +247,7 @@ impl PresenceManager {
 
         if source.is_local() {
             // Cluster sync first (parallel fire-and-forget) — no partial borrow issues
-            let msg =
-                crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
+            let msg = crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
             if let Some(ref sync) = *self.cluster_sync.read() {
                 sync.broadcast("presence", &msg);
             }
@@ -778,9 +777,7 @@ impl PresenceModule {
             }
         }
 
-        let old_state = self
-            .manager
-            .get_state(&identity);
+        let old_state = self.manager.get_state(&identity);
 
         self.manager
             .update_state(&identity, current.clone(), &EventSource::Local)
@@ -809,66 +806,8 @@ impl PresenceModule {
             sub.aor, identity, state.status
         );
 
-        // Build PIDF-XML (RFC 3863)
-        // Ringing/Wrapup/Busy are active (on-a-call) states — represented as
-        // <basic>open</basic> per RFC 3863, with RPID activities for detail.
-        let basic_status = if matches!(
-            state.status,
-            PresenceStatus::Idle
-                | PresenceStatus::Busy
-                | PresenceStatus::Ringing
-                | PresenceStatus::Wrapup
-                | PresenceStatus::Away(_)
-                | PresenceStatus::Dnd
-        ) {
-            "open"
-        } else {
-            "closed"
-        };
-
         let domain = sub.aor.host().to_string();
-        let entity = format!("sip:{}@{}", identity, domain);
-
-        let pidf = PidfPresence {
-            xmlns: "urn:ietf:params:xml:ns:pidf".to_string(),
-            xmlns_rpid: Some("urn:ietf:params:xml:ns:pidf:rpid".to_string()),
-            entity,
-            tuples: vec![PidfTuple {
-                id: "t1".to_string(),
-                status: PidfStatus {
-                    basic: basic_status.to_string(),
-                },
-                note: state.note.clone().or_else(|| match &state.status {
-                    PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
-                    _ => Some(state.status.to_string()),
-                }),
-                contact: Some(format!("sip:{}@{}", identity, domain)),
-                activities: match state.status {
-                    PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
-                        busy: Some(RpidEmpty {}),
-                        ..Default::default()
-                    }),
-                    PresenceStatus::Ringing | PresenceStatus::Wrapup => Some(RpidActivities {
-                        on_the_phone: Some(RpidEmpty {}),
-                        ..Default::default()
-                    }),
-                    PresenceStatus::Away(_) => Some(RpidActivities {
-                        away: Some(RpidEmpty {}),
-                        ..Default::default()
-                    }),
-                    _ => None,
-                },
-            }],
-            notes: vec![],
-        };
-
-        let body = match quick_xml::se::to_string(&pidf) {
-            Ok(xml) => format!(r#"<?xml version="1.0" encoding="UTF-8"?>{}"#, xml),
-            Err(e) => {
-                tracing::error!("failed to serialize PIDF-XML: {}", e);
-                return Err(anyhow!("XML serialization failed"));
-            }
-        };
+        let body = build_pidf_body(identity, &domain, state);
 
         let dialog = self
             .server
@@ -1023,6 +962,67 @@ impl PresenceModule {
     }
 }
 
+/// Build a PIDF-XML body (RFC 3863 + RFC 4480 RPID) from a presence state.
+/// Returns a complete XML document with declaration.
+pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceState) -> String {
+    let basic_status = if matches!(
+        state.status,
+        PresenceStatus::Idle
+            | PresenceStatus::Busy
+            | PresenceStatus::Ringing
+            | PresenceStatus::Wrapup
+            | PresenceStatus::Away(_)
+            | PresenceStatus::Dnd
+    ) {
+        "open"
+    } else {
+        "closed"
+    };
+
+    let entity = format!("sip:{}@{}", identity, domain);
+
+    let pidf = PidfPresence {
+        xmlns: "urn:ietf:params:xml:ns:pidf".to_string(),
+        xmlns_rpid: Some("urn:ietf:params:xml:ns:pidf:rpid".to_string()),
+        entity,
+        tuples: vec![PidfTuple {
+            id: "t1".to_string(),
+            status: PidfStatus {
+                basic: basic_status.to_string(),
+            },
+            note: state.note.clone().or_else(|| match &state.status {
+                PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
+                _ => Some(state.status.to_string()),
+            }),
+            contact: Some(format!("sip:{}@{}", identity, domain)),
+            activities: match state.status {
+                PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
+                    busy: Some(RpidEmpty {}),
+                    ..Default::default()
+                }),
+                PresenceStatus::Ringing | PresenceStatus::Wrapup => Some(RpidActivities {
+                    on_the_phone: Some(RpidEmpty {}),
+                    ..Default::default()
+                }),
+                PresenceStatus::Away(_) => Some(RpidActivities {
+                    away: Some(RpidEmpty {}),
+                    ..Default::default()
+                }),
+                _ => None,
+            },
+        }],
+        notes: vec![],
+    };
+
+    match quick_xml::se::to_string(&pidf) {
+        Ok(xml) => format!(r#"<?xml version="1.0" encoding="UTF-8"?>{}"#, xml),
+        Err(e) => {
+            tracing::error!("failed to serialize PIDF-XML: {}", e);
+            String::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1092,101 @@ mod tests {
         let subs = manager.get_subscribers(ext);
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].aor, sub_uri);
+    }
+
+    // ── build_pidf_body tests ──────────────────────────────────────────────
+
+    fn make_state(status: PresenceStatus) -> PresenceState {
+        PresenceState {
+            status,
+            note: None,
+            activity: None,
+            last_updated: 0,
+        }
+    }
+
+    #[test]
+    fn test_build_pidf_body_idle() {
+        let body = build_pidf_body("1001", "pbx.example.com", &make_state(PresenceStatus::Idle));
+        assert!(body.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+        assert!(body.contains(r#"entity="sip:1001@pbx.example.com""#));
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>idle</note>"));
+        assert!(!body.contains("rpid:away"));
+        assert!(!body.contains("rpid:busy"));
+        assert!(!body.contains("rpid:on-the-phone"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_busy() {
+        let body = build_pidf_body("1001", "pbx.example.com", &make_state(PresenceStatus::Busy));
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>busy</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_ringing() {
+        let body = build_pidf_body(
+            "1001",
+            "pbx.example.com",
+            &make_state(PresenceStatus::Ringing),
+        );
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>ringing</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_wrapup() {
+        let body = build_pidf_body(
+            "1001",
+            "pbx.example.com",
+            &make_state(PresenceStatus::Wrapup),
+        );
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>wrapup</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_away_with_detail() {
+        let state = make_state(PresenceStatus::Away("lunch".to_string()));
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>lunch</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_away_empty() {
+        let state = make_state(PresenceStatus::Away(String::new()));
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>away</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_dnd() {
+        let body = build_pidf_body("1001", "pbx.example.com", &make_state(PresenceStatus::Dnd));
+        assert!(body.contains("<basic>open</basic>"));
+        assert!(body.contains("<note>dnd</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_offline() {
+        let body = build_pidf_body(
+            "1001",
+            "pbx.example.com",
+            &make_state(PresenceStatus::Offline),
+        );
+        assert!(body.contains("<basic>closed</basic>"));
+        assert!(body.contains("<note>offline</note>"));
+    }
+
+    #[test]
+    fn test_build_pidf_body_entity_uri() {
+        let body = build_pidf_body(
+            "agent42",
+            "sip.example.net",
+            &make_state(PresenceStatus::Idle),
+        );
+        assert!(body.contains(r#"entity="sip:agent42@sip.example.net""#));
     }
 }

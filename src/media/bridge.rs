@@ -586,6 +586,7 @@ struct BridgeSideState {
     sender_codec: Option<RtpCodecParameters>,
     video_codec: Option<RtpCodecParameters>,
     video_sender: parking_lot::Mutex<Option<Arc<RtpSender>>>,
+    audio_sender: parking_lot::Mutex<Option<Arc<RtpSender>>>,
     video_payload_type: Arc<AtomicU8>,
     video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
 }
@@ -610,6 +611,7 @@ impl BridgeSideState {
             sender_codec: None,
             video_codec: None,
             video_sender: parking_lot::Mutex::new(None),
+            audio_sender: parking_lot::Mutex::new(None),
             video_payload_type: Arc::new(AtomicU8::new(96)),
             video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
@@ -648,10 +650,144 @@ impl DirectionCodecState {
     }
 }
 
+/// RTCP-derived statistics from Receiver Reports for one direction.
+struct DirectionRtcpStats {
+    /// Latest jitter in microseconds (0 = unknown)
+    jitter_us: AtomicU64,
+    /// Latest round-trip time in microseconds (0 = unknown)
+    rtt_us: AtomicU64,
+    /// Latest fraction lost (0..=255, where 255 = 100%)
+    fraction_lost: AtomicU8,
+}
+
+impl DirectionRtcpStats {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            jitter_us: AtomicU64::new(0),
+            rtt_us: AtomicU64::new(0),
+            fraction_lost: AtomicU8::new(0),
+        })
+    }
+
+    fn format_jitter(&self) -> String {
+        let us = self.jitter_us.load(Ordering::Relaxed);
+        if us == 0 {
+            "-".into()
+        } else {
+            format!("{:.1}ms", us as f64 / 1000.0)
+        }
+    }
+
+    fn format_rtt(&self) -> String {
+        let us = self.rtt_us.load(Ordering::Relaxed);
+        if us == 0 {
+            "-".into()
+        } else {
+            format!("{:.1}ms", us as f64 / 1000.0)
+        }
+    }
+
+    fn format_flost(&self) -> String {
+        let fl = self.fraction_lost.load(Ordering::Relaxed);
+        format!("{:.1}%", fl as f64 / 255.0 * 100.0)
+    }
+}
+
+/// Tracks RTCP Sender Report send timestamps so that RTT can be computed
+/// from incoming Receiver Reports (LSR/DLSR fields per RFC 3550 §6.4.1).
+/// Injected as a sender interceptor on each PeerConnection; shared state
+/// is referenced by the per-direction RTCP listener tasks.
+struct SrTimeTracker {
+    times: Arc<parking_lot::Mutex<std::collections::HashMap<u32, std::time::Instant>>>,
+}
+
+impl rustrtc::RtpSenderInterceptor for SrTimeTracker {
+    fn on_sr_sent(&self, _ssrc: u32, ntp_least: u32) {
+        self.times
+            .lock()
+            .insert(ntp_least, std::time::Instant::now());
+    }
+}
+
+/// Extract jitter, fraction-lost and RTT from a slice of ReportBlocks
+/// and update the shared `DirectionRtcpStats` atomics.
+fn update_rtcp_from_report_blocks(
+    blocks: &[rustrtc::rtp::ReportBlock],
+    ssrc: u32,
+    rtcp_stats: &DirectionRtcpStats,
+    sr_times: &parking_lot::Mutex<std::collections::HashMap<u32, std::time::Instant>>,
+    clock_rate: u32,
+) {
+    for block in blocks {
+        if block.ssrc != ssrc {
+            continue;
+        }
+        if block.jitter != 0 {
+            let jitter_us = block.jitter as u64 * 1_000_000 / clock_rate as u64;
+            rtcp_stats.jitter_us.store(jitter_us, Ordering::Relaxed);
+        }
+        rtcp_stats
+            .fraction_lost
+            .store(block.fraction_lost, Ordering::Relaxed);
+        // RTT = now − SR_sent_time − DLSR  (RFC 3550 §6.4.1)
+        if block.last_sender_report != 0 {
+            let times = sr_times.lock();
+            if let Some(&sent_instant) = times.get(&block.last_sender_report) {
+                let dlsr = block.delay_since_last_sender_report as f64 / 65536.0;
+                let rtt = sent_instant.elapsed().as_secs_f64() - dlsr;
+                if rtt > 0.0 {
+                    rtcp_stats
+                        .rtt_us
+                        .store((rtt * 1_000_000.0) as u64, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Spawns a task that subscribes to an RtpSender's RTCP channel and
+/// extracts Receiver-Report statistics (jitter, fraction lost, RTT)
+/// into the shared `DirectionRtcpStats`.
+fn spawn_sender_rtcp_listener(
+    sender: Arc<RtpSender>,
+    rtcp_stats: Arc<DirectionRtcpStats>,
+    sr_times: Arc<parking_lot::Mutex<std::collections::HashMap<u32, std::time::Instant>>>,
+    clock_rate: u32,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let ssrc = sender.ssrc();
+    let mut rx = sender.subscribe_rtcp();
+    crate::utils::media_spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = rx.recv() => {
+                    match result {
+                        Ok(RtcpPacket::ReceiverReport(rr)) => {
+                            update_rtcp_from_report_blocks(
+                                &rr.report_blocks, ssrc, &rtcp_stats, &sr_times, clock_rate,
+                            );
+                        }
+                        Ok(RtcpPacket::SenderReport(sr)) => {
+                            update_rtcp_from_report_blocks(
+                                &sr.report_blocks, ssrc, &rtcp_stats, &sr_times, clock_rate,
+                            );
+                        }
+                        Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Per-direction media forwarding stats.
 struct BridgeStats {
     caller_to_callee: Arc<LegStats>,
     callee_to_caller: Arc<LegStats>,
+    caller_to_callee_rtcp: Arc<DirectionRtcpStats>,
+    callee_to_caller_rtcp: Arc<DirectionRtcpStats>,
 }
 
 /// N-peer routing state.
@@ -694,7 +830,14 @@ pub struct BridgePeer {
     bridge_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     sub_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     cancel_token: CancellationToken,
+    /// Separate token for file-output clock tasks, NOT affected by
+    /// `stop_forwarding()`. Ensures IVR playback survives WS bridge takeover.
+    file_output_token: CancellationToken,
     forwarding_started: AtomicBool,
+    /// Set to true by `stop_forwarding()`, cleared by `reset_forwarding_state()`.
+    /// Used by callers (e.g. SipSession) to detect when bridge forwarding needs
+    /// to be re-started after a WS bridge disconnected.
+    forwarding_stopped: AtomicBool,
     /// Handle to the bidirectional forwarder task, used to restart it
     /// when PeerConnection(s) are replaced (e.g. RTP → WebRTC callee).
     forwarder_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -709,6 +852,9 @@ pub struct BridgePeer {
     caller_to_callee_codec: DirectionCodecState,
     peer_routes: PeerRouteState,
     rtp_timeout: RtpTimeoutConfig,
+    /// Maps SR NTP least-field → Instant, shared with SrTimeTracker interceptors
+    /// for RTT computation from Receiver Report LSR/DLSR.
+    sr_times: Arc<parking_lot::Mutex<std::collections::HashMap<u32, std::time::Instant>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +906,9 @@ impl BridgePeer {
             bridge_tasks: parking_lot::Mutex::new(Vec::new()),
             sub_tasks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
+            file_output_token: CancellationToken::new(),
             forwarding_started: AtomicBool::new(false),
+            forwarding_stopped: AtomicBool::new(false),
             forwarder_handle: Arc::new(parking_lot::Mutex::new(None)),
             caller_gate: Arc::new(AtomicBool::new(false)),
             recorder: None,
@@ -771,11 +919,14 @@ impl BridgePeer {
             stats: BridgeStats {
                 caller_to_callee: LegStats::new(),
                 callee_to_caller: LegStats::new(),
+                caller_to_callee_rtcp: DirectionRtcpStats::new(),
+                callee_to_caller_rtcp: DirectionRtcpStats::new(),
             },
             callee_to_caller_codec: DirectionCodecState::new(),
             caller_to_callee_codec: DirectionCodecState::new(),
             peer_routes: PeerRouteState::new(),
             rtp_timeout: RtpTimeoutConfig::none(),
+            sr_times: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -809,10 +960,11 @@ impl BridgePeer {
         let st = self.side_state(side);
         *st.track.lock() = Some(track.clone());
         let pc = st.pc();
-        {
+        let sender = {
             let _g = crate::utils::media_enter();
-            let _ = pc.add_track(track, params);
-        }
+            pc.add_track(track, params).ok()
+        };
+        *st.audio_sender.lock() = sender;
         // A-leg (Caller) egress is recorded as leg B; callee egress is a
         // zero-cost passthrough (only the A-leg is recorded).
         let tap = match side {
@@ -865,7 +1017,7 @@ impl BridgePeer {
                 self.caller.send.lock().clone(),
                 Arc::clone(&self.caller.output_state),
                 Arc::clone(&self.caller.output_mode),
-                self.cancel_token.clone(),
+                self.file_output_token.clone(),
             )
             .build(),
         ));
@@ -876,7 +1028,7 @@ impl BridgePeer {
                 self.callee.send.lock().clone(),
                 Arc::clone(&self.callee.output_state),
                 Arc::clone(&self.callee.output_mode),
-                self.cancel_token.clone(),
+                self.file_output_token.clone(),
             )
             .build(),
         ));
@@ -1047,10 +1199,63 @@ impl BridgePeer {
         // Spawn a single bidirectional forwarding task instead of 2 separate tasks
         let bidirectional_task = self.spawn_bidirectional_forwarder();
 
+        // Subscribe to RTCP Receiver Reports for audio senders (both directions).
+        let w_rtcp = Arc::clone(&self.stats.caller_to_callee_rtcp);
+        let r_rtcp = Arc::clone(&self.stats.callee_to_caller_rtcp);
+        let sr_times = Arc::clone(&self.sr_times);
+        let cancel = self.cancel_token.clone();
+        if let Some(sender) = self.callee.audio_sender.lock().clone() {
+            let clock_rate = sender.params().clock_rate;
+            let h = spawn_sender_rtcp_listener(
+                sender,
+                Arc::clone(&w_rtcp),
+                Arc::clone(&sr_times),
+                clock_rate,
+                cancel.clone(),
+            );
+            self.bridge_tasks.lock().push(h);
+        }
+        if let Some(sender) = self.caller.audio_sender.lock().clone() {
+            let clock_rate = sender.params().clock_rate;
+            let h = spawn_sender_rtcp_listener(
+                sender,
+                Arc::clone(&r_rtcp),
+                Arc::clone(&sr_times),
+                clock_rate,
+                cancel.clone(),
+            );
+            self.bridge_tasks.lock().push(h);
+        }
+        // Subscribe video audio-sender RTCP if available (replaced/created dynamically).
+        if let Some(sender) = self.callee.video_sender.lock().clone() {
+            let clock_rate = sender.params().clock_rate;
+            let h = spawn_sender_rtcp_listener(
+                sender,
+                Arc::clone(&w_rtcp),
+                Arc::clone(&sr_times),
+                clock_rate,
+                cancel.clone(),
+            );
+            self.bridge_tasks.lock().push(h);
+        }
+        if let Some(sender) = self.caller.video_sender.lock().clone() {
+            let clock_rate = sender.params().clock_rate;
+            let h = spawn_sender_rtcp_listener(
+                sender,
+                Arc::clone(&r_rtcp),
+                Arc::clone(&sr_times),
+                clock_rate,
+                cancel.clone(),
+            );
+            self.bridge_tasks.lock().push(h);
+        }
+
         // Spawn a 5-second periodic stats logger for all bridge legs
         let stats_task = {
             let w2r = Arc::clone(&self.stats.caller_to_callee);
             let r2w = Arc::clone(&self.stats.callee_to_caller);
+            let w_rtcp = Arc::clone(&self.stats.caller_to_callee_rtcp);
+            let r_rtcp = Arc::clone(&self.stats.callee_to_caller_rtcp);
             let bridge_id = self.id.clone();
             let cancel = self.cancel_token.clone();
             let rtp_timeout = self.rtp_timeout.duration;
@@ -1094,14 +1299,22 @@ impl BridgePeer {
 
                             debug!(
                                 bridge_id = %bridge_id,
-                                caller_to_callee_pkts_5s = dw_pkts,
-                                caller_to_callee_kbps    = dw_bytes * 8 / 5 / 1000,
-                                caller_to_callee_loss    = format!("{:.2}%", w_loss_pct),
-                                caller_to_callee_drop    = w_drop,
-                                callee_to_caller_pkts_5s = dr_pkts,
-                                callee_to_caller_kbps    = dr_bytes * 8 / 5 / 1000,
-                                callee_to_caller_loss    = format!("{:.2}%", r_loss_pct),
-                                callee_to_caller_drop    = r_drop,
+                                // forward stats (5s delta)
+                                c2c_pkts   = dw_pkts,
+                                c2c_kbps   = dw_bytes * 8 / 5 / 1000,
+                                c2c_loss   = format!("{:.2}%", w_loss_pct),
+                                c2c_drop   = w_drop,
+                                c2r_pkts   = dr_pkts,
+                                c2r_kbps   = dr_bytes * 8 / 5 / 1000,
+                                c2r_loss   = format!("{:.2}%", r_loss_pct),
+                                c2r_drop   = r_drop,
+                                // RTCP stats (latest values)
+                                c2c_jitter = w_rtcp.format_jitter(),
+                                c2c_rtt    = w_rtcp.format_rtt(),
+                                c2c_flost  = w_rtcp.format_flost(),
+                                c2r_jitter = r_rtcp.format_jitter(),
+                                c2r_rtt    = r_rtcp.format_rtt(),
+                                c2r_flost  = r_rtcp.format_flost(),
                                 "Bridge leg stats [5s]"
                             );
 
@@ -2507,16 +2720,49 @@ impl BridgePeer {
     /// `track.recv()` is single-consumer, so the bridge's forward loops must be
     /// stopped to avoid stealing packets from the new consumer. The
     /// PeerConnections (and their RTP receivers/tracks) stay alive — only the
-    /// forwarding tasks are cancelled.
+    /// forwarding tasks are aborted.
+    ///
+    /// Unlike the old implementation this does NOT cancel `cancel_token`, so the
+    /// file-output clock (which uses the separate `file_output_token`) survives,
+    /// and the forwarder can be re-started later via `reset_forwarding_state()`
+    /// + `start_bridge()` (e.g. after a WS bridge disconnects and the IVR
+    /// returns to its prompt flow).
     pub fn stop_forwarding(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge forwarding (PeerConnections kept alive)");
-        self.cancel_token.cancel();
+        if let Some(handle) = self.forwarder_handle.lock().take() {
+            handle.abort();
+        }
+        // Abort all sub-tasks (forward_track_to_sender, pli_forwarder, etc.)
+        // that were spawned by the bidirectional forwarder.
+        for task in self.sub_tasks.lock().drain(..) {
+            task.abort();
+        }
+        self.forwarding_stopped.store(true, Ordering::Release);
+    }
+
+    /// Returns `true` after `stop_forwarding()` has been called and forwarding
+    /// has not yet been re-started. Used by callers to decide whether to call
+    /// `reset_forwarding_state()` + `start_bridge()` (e.g. on `return_to_ivr`).
+    pub fn forwarding_stopped(&self) -> bool {
+        self.forwarding_stopped.load(Ordering::Acquire)
+    }
+
+    /// Reset the internal forwarding state so that `start_bridge()` can spawn
+    /// new forwarding tasks. The `cancel_token` was never cancelled by
+    /// `stop_forwarding()`, so new tasks will operate normally.
+    ///
+    /// Safe to call only after `stop_forwarding()`. Calling it while the bridge
+    /// is still actively forwarding would result in duplicate forwarders.
+    pub fn reset_forwarding_state(&self) {
+        self.forwarding_stopped.store(false, Ordering::Release);
+        self.forwarding_started.store(false, Ordering::Release);
     }
 
     /// Stop the bridge (async — waits for forwarding tasks to finish)
     pub async fn stop(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge");
         self.cancel_token.cancel();
+        self.file_output_token.cancel();
         self.caller.pc().close();
         self.callee.pc().close();
 
@@ -2542,6 +2788,7 @@ impl BridgePeer {
     /// Close both PeerConnections and abort all tasks (sync, no awaiting).
     pub fn close_sync(&self) {
         self.cancel_token.cancel();
+        self.file_output_token.cancel();
         if let Some(handle) = self.forwarder_handle.lock().take() {
             handle.abort();
         }
@@ -2562,6 +2809,7 @@ impl Drop for BridgePeer {
     fn drop(&mut self) {
         trace!(bridge_id = %self.id, "BridgePeer dropping, cleaning up resources");
         self.cancel_token.cancel();
+        self.file_output_token.cancel();
         if let Some(handle) = self.forwarder_handle.lock().take() {
             handle.abort();
         }
@@ -2931,6 +3179,21 @@ impl BridgePeerBuilder {
             callee_config.recorder_interceptors.senders.push(i.clone());
         }
 
+        // Shared SR-time tracker for RTT computation.
+        let sr_times = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        caller_config
+            .recorder_interceptors
+            .senders
+            .push(Arc::new(SrTimeTracker {
+                times: sr_times.clone(),
+            }) as Arc<_>);
+        callee_config
+            .recorder_interceptors
+            .senders
+            .push(Arc::new(SrTimeTracker {
+                times: sr_times.clone(),
+            }) as Arc<_>);
+
         caller_config.label = Some(format!("{}-caller", self.bridge_id));
         callee_config.label = Some(format!("{}-callee", self.bridge_id));
 
@@ -2943,6 +3206,7 @@ impl BridgePeerBuilder {
         };
 
         let mut bridge = BridgePeer::new(self.bridge_id, caller_pc, callee_pc);
+        bridge.sr_times = sr_times;
         bridge.session_id = self.session_id;
         bridge.caller.sender_codec = self.caller_sender_codec;
         bridge.callee.sender_codec = self.callee_sender_codec;
@@ -5007,6 +5271,104 @@ mod tests {
             bridge.session_id.as_deref(),
             Some("test-session-abc"),
             "bridge should have session_id from builder"
+        );
+    }
+
+    /// Regression test for the IVR bridge / return_to_ivr bug.
+    ///
+    /// When a WS bridge (VoipBridge) takes over media, `stop_forwarding()` is
+    /// called which previously cancelled the shared `cancel_token`, permanently
+    /// killing the file-output clock tasks. After the fix, the file-output clock
+    /// uses its own `file_output_token` and survives `stop_forwarding()`.
+    ///
+    /// Without the fix this test times out because no audio frames arrive after
+    /// `stop_forwarding()` + `replace_output_with_file()`.
+    #[tokio::test]
+    async fn test_stop_forwarding_does_not_kill_file_output() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_stop_forwarding_file_output.wav");
+        create_test_wav_file(test_file.to_str().unwrap(), 800).unwrap();
+
+        let bridge = BridgePeerBuilder::new("test-stop-forwarding-file-output".to_string())
+            .with_rtp_port_range(26500, 26600)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+        bridge.start_bridge().await;
+
+        // This previously cancelled cancel_token, killing file_output_clock.
+        bridge.stop_forwarding();
+
+        let track = FileTrack::new("sf-file-output".to_string())
+            .with_path(test_file.to_string_lossy().to_string())
+            .with_loop(false)
+            .with_codec_info(crate::media::negotiate::CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            });
+
+        bridge
+            .replace_output_with_file(BridgeEndpoint::Callee, &track)
+            .await
+            .unwrap();
+        drop(track);
+
+        let rtp_track = bridge
+            .get_callee_track()
+            .await
+            .expect("bridge RTP output track should exist");
+        let mut frame_count = 0usize;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(400);
+        while tokio::time::Instant::now() < deadline && frame_count < 3 {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), rtp_track.recv())
+                .await
+            {
+                Ok(Ok(MediaSample::Audio(_))) => frame_count += 1,
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+
+        bridge.stop().await;
+        let _ = std::fs::remove_file(&test_file);
+
+        assert!(
+            frame_count >= 3,
+            "file-output clock should survive stop_forwarding(), got {frame_count} frames"
+        );
+    }
+
+    /// Verify that after `stop_forwarding()` the bridge can be re-started via
+    /// `reset_forwarding_state()` + `start_bridge()`. This simulates the
+    /// return_to_ivr flow where the IVR needs RFC 2833 DTMF detection
+    /// (bidirectional forwarder) to work again after a WS bridge disconnect.
+    #[tokio::test]
+    async fn test_stop_forwarding_can_restart_bridge() {
+        let bridge = BridgePeerBuilder::new("test-stop-forwarding-restart".to_string())
+            .with_rtp_port_range(26600, 26700)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+        bridge.start_bridge().await;
+
+        // Simulate WS bridge taking over
+        bridge.stop_forwarding();
+
+        // Simulate return_to_ivr: restart forwarding
+        bridge.reset_forwarding_state();
+        bridge.start_bridge().await;
+
+        // Verify the forwarder is alive: the cancel_token was NOT cancelled,
+        // so the new forwarder should operate normally.
+        assert!(
+            !bridge.forwarding_stopped(),
+            "bridge should not report forwarding_stopped after restart"
+        );
+        assert!(
+            bridge.forwarder_handle.lock().is_some(),
+            "forwarder_handle should be re-populated after restart"
         );
     }
 }

@@ -371,7 +371,8 @@ impl ClusterEventHub {
         let handlers: Vec<Arc<dyn ClusterEventHandler>> =
             self.handlers.read().iter().cloned().collect();
         for h in &handlers {
-            h.on_presence_event(identity, old_state, state, source).await;
+            h.on_presence_event(identity, old_state, state, source)
+                .await;
         }
     }
 
@@ -429,8 +430,6 @@ impl Drop for ClusterEventHub {
         }
     }
 }
-
-
 
 // ── Unit tests ──────────────────────────────────────────────────────────────
 
@@ -894,7 +893,9 @@ mod tests {
         handler
             .on_locator_event(&LocatorEvent::Registered(loc), &source)
             .await;
-        handler.on_presence_event("1001", None, &state, &source).await;
+        handler
+            .on_presence_event("1001", None, &state, &source)
+            .await;
     }
 
     // ── Hub handler notification ────────────────────────────────────────────
