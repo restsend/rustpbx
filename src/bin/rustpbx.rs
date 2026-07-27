@@ -462,22 +462,26 @@ fn main() -> Result<()> {
     // Every branch receives the same OTel reload layer so that the commercial
     // TelemetryAddon can inject a live OTel tracing layer later, regardless of
     // which logging backend was chosen.
+    let untracked_layer = rustpbx::untracked_tasks::UntrackedTaskLayer::default();
     if let Some(console_layer) = console_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
             .with(filter_layer)
+            .with(untracked_layer)
             .with(console_layer)
             .try_init()?;
     } else if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
             .with(filter_layer)
+            .with(untracked_layer)
             .with(file_layer)
             .try_init()?;
     } else if let Some(fmt_layer) = fmt_layer {
         tracing_subscriber::registry()
             .with(otel_reload_layer)
             .with(filter_layer)
+            .with(untracked_layer)
             .with(fmt_layer)
             .try_init()?;
     }

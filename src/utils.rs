@@ -259,6 +259,16 @@ pub fn tokio_runtime_metrics() -> serde_json::Value {
         collect_metrics("media", &handle.metrics());
     }
 
+    // Untracked task counts (third-party spawns not going through utils::spawn)
+    let untracked = crate::untracked_tasks::snapshot();
+    if !untracked.is_empty() {
+        let mut entries = Vec::new();
+        for (loc, cnt) in &untracked {
+            entries.push(serde_json::json!({"loc": loc, "count": cnt}));
+        }
+        map.insert("untracked".into(), serde_json::json!(entries));
+    }
+
     serde_json::Value::Object(map)
 }
 
