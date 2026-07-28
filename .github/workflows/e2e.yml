@@ -48,5 +48,5 @@ jobs:
         with:
           rustflags: ""
       - name: Run wholesale E2E tests
-        run: cargo test --no-default-features --features wholesale --test e2e_wholesale_test -- --nocapture
+        run: cargo test --no-default-features --features wholesale,console,addon-observability --test e2e_wholesale_test -- --nocapture
         timeout-minutes: 20
