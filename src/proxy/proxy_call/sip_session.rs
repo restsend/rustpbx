@@ -5126,7 +5126,7 @@ impl SipSession {
                                     .prepare_caller_answer_from_callee_sdp(
                                         Some(callee_sdp),
                                         false,
-                                        true,
+                                        rustrtc::SdpType::Pranswer,
                                     )
                                     .await;
 
@@ -5231,7 +5231,11 @@ impl SipSession {
         }
 
         let caller_answer = self
-            .prepare_caller_answer_from_callee_sdp(callee_sdp, false, false)
+            .prepare_caller_answer_from_callee_sdp(
+                callee_sdp,
+                false,
+                rustrtc::SdpType::Answer,
+            )
             .await;
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
@@ -5342,9 +5346,83 @@ impl SipSession {
         &mut self,
         callee_sdp: Option<String>,
         force_regenerate: bool,
-        is_early_media: bool,
+        callee_sdp_type: rustrtc::SdpType,
     ) -> Option<String> {
+        let is_early_media = callee_sdp_type == rustrtc::SdpType::Pranswer;
         let Some(callee_sdp_value) = callee_sdp else {
+            if callee_sdp_type == rustrtc::SdpType::Answer && self.media.early_media_sent {
+                debug!(
+                    session_id = %self.context.session_id,
+                    "Final 200 OK has no SDP; promoting the existing early-media descriptions to Answer"
+                );
+
+                let (caller_pc, callee_pc) = if self.media.caller_answer_uses_media_bridge {
+                    if let Some(bridge) = self.media.media_bridge.clone() {
+                        let caller_pc = if self.is_caller_webrtc() {
+                            bridge.caller_pc().clone()
+                        } else {
+                            bridge.callee_pc().clone()
+                        };
+                        let callee_pc = if self.is_callee_webrtc() {
+                            if self.media.callee_pc_is_webrtc {
+                                bridge.callee_pc().clone()
+                            } else {
+                                bridge.caller_pc().clone()
+                            }
+                        } else {
+                            bridge.callee_pc().clone()
+                        };
+                        (Some(caller_pc), Some(callee_pc))
+                    } else {
+                        (None, None)
+                    }
+                } else if self.media_profile.path == MediaPathMode::Anchored {
+                    let caller_pc = match self.caller_peer() {
+                        Some(peer) => Self::get_peer_pc(peer, Self::CALLER_TRACK_ID).await,
+                        None => None,
+                    };
+                    let callee_pc = match self.callee_peer() {
+                        Some(peer) => Self::get_peer_pc(peer, Self::CALLEE_TRACK_ID).await,
+                        None => None,
+                    };
+                    (caller_pc, callee_pc)
+                } else {
+                    (None, None)
+                };
+
+                if let Some(callee_pc) = callee_pc
+                    && let Some(mut answer) = callee_pc.remote_description()
+                    && answer.sdp_type == rustrtc::SdpType::Pranswer
+                {
+                    answer.sdp_type = rustrtc::SdpType::Answer;
+                    if let Err(error) = callee_pc.set_remote_description(answer).await {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %error,
+                            "Failed to promote callee remote pranswer"
+                        );
+                    }
+                }
+
+                if let Some(caller_pc) = caller_pc
+                    && let Some(mut answer) = caller_pc.local_description()
+                    && answer.sdp_type == rustrtc::SdpType::Pranswer
+                {
+                    answer.sdp_type = rustrtc::SdpType::Answer;
+                    if let Err(error) = caller_pc.set_local_description(answer) {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %error,
+                            "Failed to promote caller local pranswer"
+                        );
+                    }
+                }
+
+                if let Some(ref bridge) = self.media.media_bridge {
+                    bridge.open_caller_gate();
+                }
+            }
+
             return if self.media.early_media_sent {
                 self.media.answer.clone()
             } else {
@@ -5354,8 +5432,35 @@ impl SipSession {
 
         let sdp_changed =
             self.media.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
+        let media_parameters_changed = match self
+            .media
+            .callee_answer_sdp
+            .as_deref()
+            .and_then(|sdp| {
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, sdp).ok()
+            })
+            .zip(
+                rustrtc::SessionDescription::parse(
+                    rustrtc::SdpType::Answer,
+                    &callee_sdp_value,
+                )
+                .ok(),
+            ) {
+            Some((previous, current)) => {
+                previous.session.connection != current.session.connection
+                    || previous.session.attributes != current.session.attributes
+                    || previous.media_sections != current.media_sections
+            }
+            None => sdp_changed,
+        };
+        let should_refresh_anchored_forwarding =
+            self.media.callee_answer_sdp.is_none() || media_parameters_changed;
 
-        if self.media.answer.is_some() && !sdp_changed && !force_regenerate {
+        if self.server_dialog.state().is_confirmed()
+            && self.media.answer.is_some()
+            && !sdp_changed
+            && !force_regenerate
+        {
             if !is_early_media {
                 if let Some(ref bridge) = self.media.media_bridge {
                     bridge.open_caller_gate();
@@ -5367,7 +5472,7 @@ impl SipSession {
         if self.media.callee_answer_sdp.is_some() && sdp_changed {
             debug!(
                 session_id = %self.context.session_id,
-                "Callee answer SDP changed after early media; regenerating caller-facing SDP"
+                "Callee SDP changed after early media; updating the existing media transport"
             );
         }
 
@@ -5420,7 +5525,11 @@ impl SipSession {
 
             if let Some(peer) = self.callee_peer() {
                 if let Err(e) = peer
-                    .update_remote_description(Self::CALLEE_TRACK_ID, &callee_sdp_value)
+                    .update_remote_description(
+                        Self::CALLEE_TRACK_ID,
+                        &callee_sdp_value,
+                        callee_sdp_type,
+                    )
                     .await
                 {
                     warn!(
@@ -5447,15 +5556,15 @@ impl SipSession {
         let callee_is_webrtc = self.is_callee_webrtc();
 
         let caller_answer = if caller_is_webrtc && !callee_is_webrtc {
-            self.negotiate_bridge_caller_answer(&callee_sdp_value, is_early_media, true)
+            self.negotiate_bridge_caller_answer(&callee_sdp_value, callee_sdp_type, true)
                 .await
         } else if !caller_is_webrtc && callee_is_webrtc {
-            self.negotiate_bridge_caller_answer(&callee_sdp_value, is_early_media, false)
+            self.negotiate_bridge_caller_answer(&callee_sdp_value, callee_sdp_type, false)
                 .await
         } else if self.media_profile.path == MediaPathMode::Anchored {
             if let (Some(sdp), Some(peer)) = (callee_sdp.as_ref(), self.callee_peer()) {
                 if let Err(e) = peer
-                    .update_remote_description(Self::CALLEE_TRACK_ID, sdp)
+                    .update_remote_description(Self::CALLEE_TRACK_ID, sdp, callee_sdp_type)
                     .await
                 {
                     warn!(
@@ -5466,75 +5575,113 @@ impl SipSession {
                 }
             }
 
-            if let Some(ref caller_offer) = self.media.caller_offer {
-                let allow_codecs = self.resolve_effective_codecs();
-                let preferred_codecs: Vec<CodecType> =
-                    MediaNegotiator::extract_codec_params(&callee_sdp_value)
-                        .audio
-                        .into_iter()
-                        .map(|codec| codec.codec)
-                        .collect();
-                let codec_info = MediaNegotiator::build_codec_list_from_offer(
-                    caller_offer,
-                    if preferred_codecs.is_empty() {
-                        &allow_codecs
-                    } else {
-                        &preferred_codecs
-                    },
-                );
-                if codec_info.is_empty() {
-                    warn!(
-                        session_id = %self.context.session_id,
-                        "No compatible codec found for anchored caller answer"
-                    );
-                }
-
-                let cancel_token = self
-                    .caller_peer()
-                    .map(|p| p.cancel_token())
-                    .unwrap_or_default();
-                let mut track_builder = self.build_rtp_track_builder(
-                    Self::CALLER_TRACK_ID.to_string(),
-                    cancel_token,
-                    self.caller_transport_mode(),
-                );
-
-                if !codec_info.is_empty() {
-                    track_builder = track_builder.with_codec_info(codec_info);
-                }
-
-                if caller_is_webrtc {
-                    track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
-                    if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
-                        track_builder = track_builder.with_ice_servers(ice_servers.clone());
-                    }
-                }
-
-                let track = track_builder.build();
-                match track.handshake(caller_offer.clone()).await {
-                    Ok(answer_sdp) => {
-                        let answer_sdp = self.rewrite_answer_to_selected_codecs(
-                            &answer_sdp,
-                            caller_offer,
-                            Some(&callee_sdp_value),
-                            "anchored caller answer",
-                        );
-                        debug!(
-                            session_id = %self.context.session_id,
-                            "Generated PBX answer SDP for caller (anchored media)"
-                        );
-                        if let Some(peer) = self.caller_peer() {
-                            peer.update_track(Box::new(track), None).await;
+            if let Some(caller_offer) = self.media.caller_offer.clone() {
+                let existing_caller_track = if let Some(peer) = self.caller_peer() {
+                    let mut found = None;
+                    for track in peer.get_tracks().await {
+                        let is_caller_track = {
+                            let guard = track.lock().await;
+                            guard.id() == Self::CALLER_TRACK_ID
+                        };
+                        if is_caller_track {
+                            found = Some(track);
+                            break;
                         }
-                        Some(answer_sdp)
                     }
-                    Err(e) => {
+                    found
+                } else {
+                    None
+                };
+
+                if let Some(track) = existing_caller_track {
+                    let guard = track.lock().await;
+                    match guard
+                        .handshake(caller_offer.clone(), callee_sdp_type)
+                        .await
+                    {
+                        Ok(answer_sdp) => {
+                            let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                                &answer_sdp,
+                                &caller_offer,
+                                Some(&callee_sdp_value),
+                                "anchored caller answer",
+                            );
+                            debug!(
+                                session_id = %self.context.session_id,
+                                "Updated existing PBX caller answer SDP without replacing its RTP transport"
+                            );
+                            Some(answer_sdp)
+                        }
+                        Err(e) => {
+                            warn!(
+                                session_id = %self.context.session_id,
+                                error = %e,
+                                "Failed to update existing caller track answer; keeping previous caller SDP"
+                            );
+                            self.media.answer.clone().or_else(|| callee_sdp.clone())
+                        }
+                    }
+                } else {
+                    let allow_codecs = self.resolve_effective_codecs();
+                    let codec_info =
+                        MediaNegotiator::build_codec_list_from_offer(&caller_offer, &allow_codecs);
+                    if codec_info.is_empty() {
                         warn!(
                             session_id = %self.context.session_id,
-                            error = %e,
-                            "Failed to handshake caller track"
+                            "No compatible codec found for anchored caller answer"
                         );
-                        None
+                    }
+
+                    let cancel_token = self
+                        .caller_peer()
+                        .map(|p| p.cancel_token())
+                        .unwrap_or_default();
+                    let mut track_builder = self.build_rtp_track_builder(
+                        Self::CALLER_TRACK_ID.to_string(),
+                        cancel_token,
+                        self.caller_transport_mode(),
+                    );
+
+                    if !codec_info.is_empty() {
+                        track_builder = track_builder.with_codec_info(codec_info);
+                    }
+
+                    if caller_is_webrtc {
+                        track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
+                        if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
+                            track_builder = track_builder.with_ice_servers(ice_servers.clone());
+                        }
+                    }
+
+                    let track = track_builder.build();
+                    match track
+                        .handshake(caller_offer.clone(), callee_sdp_type)
+                        .await
+                    {
+                        Ok(answer_sdp) => {
+                            let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                                &answer_sdp,
+                                &caller_offer,
+                                Some(&callee_sdp_value),
+                                "anchored caller answer",
+                            );
+                            debug!(
+                                session_id = %self.context.session_id,
+                                "Generated PBX answer SDP for caller (anchored media)"
+                            );
+                            if let Some(peer) = self.caller_peer() {
+                                peer.update_track(Box::new(track), None).await;
+                            }
+                            Some(answer_sdp)
+                        }
+                        Err(e) => {
+                            warn!(
+                                session_id = %self.context.session_id,
+                                error = %e,
+                                "Failed to handshake caller track"
+                            );
+                            None
+                        }
                     }
                 }
             } else {
@@ -5552,7 +5699,10 @@ impl SipSession {
 
         self.configure_media_bridge_transcoders(caller_answer.as_deref(), callee_sdp.as_deref());
 
-        if self.media_profile.path == MediaPathMode::Anchored && self.media.media_bridge.is_none() {
+        if self.media_profile.path == MediaPathMode::Anchored
+            && self.media.media_bridge.is_none()
+            && should_refresh_anchored_forwarding
+        {
             let caller_answer_for_forwarding = self.media.answer.clone();
             let callee_answer_for_forwarding = callee_sdp.clone();
             self.start_anchored_media_forwarding(
@@ -5584,18 +5734,12 @@ impl SipSession {
     async fn negotiate_bridge_caller_answer(
         &mut self,
         callee_sdp: &str,
-        is_early_media: bool,
+        callee_sdp_type: rustrtc::SdpType,
         caller_is_webrtc: bool,
     ) -> Option<String> {
         let sdp = callee_sdp;
         if let Some(ref bridge) = self.media.media_bridge {
             use rustrtc::sdp::{SdpType, SessionDescription};
-
-            let callee_sdp_type = if is_early_media {
-                SdpType::Pranswer
-            } else {
-                SdpType::Answer
-            };
 
             let callee_pc = if caller_is_webrtc {
                 bridge.callee_pc()
@@ -5674,91 +5818,109 @@ impl SipSession {
             }
 
             if let Some(ref caller_offer) = self.media.caller_offer {
-                match SessionDescription::parse(SdpType::Offer, caller_offer) {
-                    Ok(caller_desc) => match caller_pc.set_remote_description(caller_desc).await {
-                        Ok(_) => match caller_pc.create_answer().await {
-                            Ok(mut answer) => {
-                                if callee_video_rejected
-                                    && let Some(video_section) = answer
-                                        .media_sections
-                                        .iter_mut()
-                                        .find(|section| section.kind == rustrtc::MediaKind::Video)
-                                {
-                                    video_section.port = 0;
-                                    video_section.direction = rustrtc::Direction::Inactive;
-                                }
-
-                                if let Err(e) = caller_pc.set_local_description(answer) {
-                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge local description");
-                                    Some(callee_sdp.to_string())
-                                } else {
-                                    if caller_is_webrtc {
-                                        caller_pc.wait_for_gathering_complete().await;
-                                    }
-
-                                    if let Some(answer_sdp) =
-                                        caller_pc.local_description().map(|d| d.to_sdp_string())
-                                    {
-                                        let answer_sdp = crate::media::negotiate::MediaNegotiator::restrict_sdp_to_reference_codecs(
-                                                    SdpType::Answer,
-                                                    &answer_sdp,
-                                                    SdpType::Answer,
-                                                    sdp,
-                                                ).unwrap_or(answer_sdp);
-
-                                        let answer_sdp = self.rewrite_answer_to_selected_codecs(
-                                            &answer_sdp,
-                                            caller_offer,
-                                            Some(sdp),
-                                            "bridge caller answer",
-                                        );
-
-                                        let caller_video_caps =
-                                            SessionDescription::parse(SdpType::Answer, &answer_sdp)
-                                                .map(|desc| {
-                                                    desc.media_sections
-                                                        .iter()
-                                                        .filter(|section| {
-                                                            section.kind
-                                                                == rustrtc::MediaKind::Video
-                                                                && section.port != 0
-                                                                && section.direction
-                                                                    != rustrtc::Direction::Inactive
-                                                        })
-                                                        .flat_map(|section| {
-                                                            section.to_video_capabilities()
-                                                        })
-                                                        .collect()
-                                                })
-                                                .unwrap_or_default();
-
-                                        let (webrtc_caps, rtp_caps) = if caller_is_webrtc {
-                                            (caller_video_caps, callee_video_caps)
-                                        } else {
-                                            (callee_video_caps, caller_video_caps)
-                                        };
-
-                                        bridge.set_video_payload_maps(&webrtc_caps, &rtp_caps);
-                                        Some(answer_sdp)
-                                    } else {
-                                        Some(callee_sdp.to_string())
+                let remote_offer_ready = match caller_pc.signaling_state() {
+                    rustrtc::SignalingState::Stable => {
+                        match SessionDescription::parse(SdpType::Offer, caller_offer) {
+                            Ok(caller_desc) => {
+                                match caller_pc.set_remote_description(caller_desc).await {
+                                    Ok(_) => true,
+                                    Err(e) => {
+                                        warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge remote description");
+                                        false
                                     }
                                 }
                             }
                             Err(e) => {
-                                warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge answer");
-                                Some(callee_sdp.to_string())
+                                warn!(session_id = %self.context.session_id, error = %e, "Failed to parse caller offer SDP");
+                                false
                             }
-                        },
+                        }
+                    }
+                    rustrtc::SignalingState::HaveRemoteOffer => true,
+                    state => {
+                        warn!(session_id = %self.context.session_id, state = ?state, "Bridge caller side is not ready to create an answer");
+                        false
+                    }
+                };
+
+                if remote_offer_ready {
+                    match caller_pc.create_answer().await {
+                        Ok(mut answer) => {
+                            answer.sdp_type = callee_sdp_type;
+                            if callee_video_rejected
+                                && let Some(video_section) = answer
+                                    .media_sections
+                                    .iter_mut()
+                                    .find(|section| section.kind == rustrtc::MediaKind::Video)
+                            {
+                                video_section.port = 0;
+                                video_section.direction = rustrtc::Direction::Inactive;
+                            }
+
+                            if let Err(e) = caller_pc.set_local_description(answer) {
+                                warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge local description");
+                                Some(callee_sdp.to_string())
+                            } else {
+                                if caller_is_webrtc {
+                                    caller_pc.wait_for_gathering_complete().await;
+                                }
+
+                                if let Some(answer_sdp) =
+                                    caller_pc.local_description().map(|d| d.to_sdp_string())
+                                {
+                                    let answer_sdp = crate::media::negotiate::MediaNegotiator::restrict_sdp_to_reference_codecs(
+                                                callee_sdp_type,
+                                                &answer_sdp,
+                                                callee_sdp_type,
+                                                sdp,
+                                            ).unwrap_or(answer_sdp);
+
+                                    let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                                        &answer_sdp,
+                                        caller_offer,
+                                        Some(sdp),
+                                        "bridge caller answer",
+                                    );
+
+                                    let caller_video_caps =
+                                        SessionDescription::parse(callee_sdp_type, &answer_sdp)
+                                            .map(|desc| {
+                                                desc.media_sections
+                                                    .iter()
+                                                    .filter(|section| {
+                                                        section.kind
+                                                            == rustrtc::MediaKind::Video
+                                                            && section.port != 0
+                                                            && section.direction
+                                                                != rustrtc::Direction::Inactive
+                                                    })
+                                                    .flat_map(|section| {
+                                                        section.to_video_capabilities()
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+
+                                    let (webrtc_caps, rtp_caps) = if caller_is_webrtc {
+                                        (caller_video_caps, callee_video_caps)
+                                    } else {
+                                        (callee_video_caps, caller_video_caps)
+                                    };
+
+                                    bridge.set_video_payload_maps(&webrtc_caps, &rtp_caps);
+                                    Some(answer_sdp)
+                                } else {
+                                    Some(callee_sdp.to_string())
+                                }
+                            }
+                        }
                         Err(e) => {
-                            warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge remote description");
+                            warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge answer");
                             Some(callee_sdp.to_string())
                         }
-                    },
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "Failed to parse caller offer SDP");
-                        Some(callee_sdp.to_string())
                     }
+                } else {
+                    Some(callee_sdp.to_string())
                 }
             } else {
                 Some(callee_sdp.to_string())
@@ -6110,6 +6272,14 @@ impl SipSession {
                 );
             }
         }
+
+        // A provisional answer may have enabled the transport fast-path while
+        // the final answer selects a different codec and requires the
+        // ForwardingTrack/transcoder path. Remove any provisional rewrite
+        // bridge before wiring that path, otherwise RtpTransport consumes the
+        // packets before the updated transceivers can receive them.
+        caller_pc.clear_rtp_rewrite_bridge();
+        callee_pc.clear_rtp_rewrite_bridge();
 
         self.wire_both_forwarding_tracks(
             &caller_pc,
@@ -7659,7 +7829,10 @@ impl SipSession {
         }
 
         let track = track_builder.build();
-        match track.handshake(caller_offer.clone()).await {
+        match track
+            .handshake(caller_offer.clone(), rustrtc::SdpType::Answer)
+            .await
+        {
             Ok(answer_sdp) => {
                 let answer_sdp = self.rewrite_answer_to_selected_codecs(
                     &answer_sdp,
@@ -8618,7 +8791,11 @@ impl SipSession {
                         || self.media.media_bridge.is_some()
                     {
                         final_answer = self
-                            .prepare_caller_answer_from_callee_sdp(Some(answer_sdp), true, false)
+                            .prepare_caller_answer_from_callee_sdp(
+                                Some(answer_sdp),
+                                true,
+                                rustrtc::SdpType::Answer,
+                            )
                             .await;
                     } else {
                         final_answer = Some(answer_sdp.clone());
@@ -10601,7 +10778,11 @@ impl SipSession {
                                         let answer_sdp = if !resp.body().is_empty() {
                                             let sdp = String::from_utf8_lossy(resp.body()).to_string();
                                             if let Err(e) =
-                                                peer.update_remote_description(&track_id, &sdp).await
+                                                peer.update_remote_description(
+                                                    &track_id,
+                                                    &sdp,
+                                                    rustrtc::SdpType::Answer,
+                                                ).await
                                             {
                                                 warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
                                             } else {
@@ -10657,7 +10838,11 @@ impl SipSession {
                                 if !body.is_empty() {
                                     let sdp = String::from_utf8_lossy(body).to_string();
                                     if let Err(e) =
-                                        peer.update_remote_description(&track_id, &sdp).await
+                                        peer.update_remote_description(
+                                            &track_id,
+                                            &sdp,
+                                            rustrtc::SdpType::Pranswer,
+                                        ).await
                                     {
                                         warn!(%leg_id, error = %e, "Failed to set early media remote description");
                                     } else {

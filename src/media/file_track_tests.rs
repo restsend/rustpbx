@@ -341,7 +341,9 @@ m=audio 9 RTP/AVP 0
 a=rtpmap:0 PCMU/8000
 "#;
 
-    let result = track.set_remote_description(answer_sdp).await;
+    let result = track
+        .set_remote_description(answer_sdp, rustrtc::SdpType::Answer)
+        .await;
     assert!(result.is_ok(), "Should set remote description successfully");
 }
 
@@ -508,9 +510,12 @@ async fn test_start_playback_on_external_pc_delivers_rtp() {
     // caller creates offer, receiver answers — this establishes both PCs'
     // remote descriptions and RTP transport addresses.
     let caller_offer = caller_track.local_description().await.unwrap();
-    let receiver_answer = receiver_track.handshake(caller_offer).await.unwrap();
+    let receiver_answer = receiver_track
+        .handshake(caller_offer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
     caller_track
-        .set_remote_description(&receiver_answer)
+        .set_remote_description(&receiver_answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
 

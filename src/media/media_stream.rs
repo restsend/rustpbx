@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
+use rustrtc::SdpType;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -73,13 +74,18 @@ impl MediaStream {
         self.tracks.iter().map(|e| e.value().clone()).collect()
     }
 
-    pub async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()> {
+    pub async fn update_remote_description(
+        &self,
+        track_id: &str,
+        remote: &str,
+        sdp_type: SdpType,
+    ) -> Result<()> {
         let track = self.tracks.get(track_id).map(|e| e.value().clone());
         let Some(track) = track else {
             return Err(anyhow!("track not found: {track_id}"));
         };
         let guard = track.lock().await;
-        guard.set_remote_description(remote).await
+        guard.set_remote_description(remote, sdp_type).await
     }
 
     pub async fn remove_track(&self, track_id: &str, _stop_audio_immediately: bool) {

@@ -271,13 +271,21 @@ mod media_engine_tests {
             fn id(&self) -> &str {
                 &self.0
             }
-            async fn handshake(&self, _: String) -> anyhow::Result<String> {
+            async fn handshake(
+                &self,
+                _: String,
+                _: rustrtc::SdpType,
+            ) -> anyhow::Result<String> {
                 Ok("".into())
             }
             async fn local_description(&self) -> anyhow::Result<String> {
                 Ok("".into())
             }
-            async fn set_remote_description(&self, _: &str) -> anyhow::Result<()> {
+            async fn set_remote_description(
+                &self,
+                _: &str,
+                _: rustrtc::SdpType,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
             async fn stop(&self) {}

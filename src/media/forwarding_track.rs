@@ -467,7 +467,11 @@ impl Track for ForwardingTrackHandle {
         &self.track_id
     }
 
-    async fn handshake(&self, _remote_offer: String) -> Result<String> {
+    async fn handshake(
+        &self,
+        _remote_offer: String,
+        _answer_type: rustrtc::SdpType,
+    ) -> Result<String> {
         Err(anyhow!("ForwardingTrackHandle does not support handshake"))
     }
 
@@ -477,7 +481,11 @@ impl Track for ForwardingTrackHandle {
         ))
     }
 
-    async fn set_remote_description(&self, _remote: &str) -> Result<()> {
+    async fn set_remote_description(
+        &self,
+        _remote: &str,
+        _sdp_type: rustrtc::SdpType,
+    ) -> Result<()> {
         Err(anyhow!(
             "ForwardingTrackHandle does not support remote description updates"
         ))

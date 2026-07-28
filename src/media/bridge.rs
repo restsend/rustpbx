@@ -3243,7 +3243,10 @@ mod tests {
             .local_description()
             .unwrap()
             .to_sdp_string();
-        let callee_answer = rtp_callee.handshake(bridge_rtp_sdp).await.unwrap();
+        let callee_answer = rtp_callee
+            .handshake(bridge_rtp_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         // Bridge RTP side sets remote description from callee
         let rtp_leg_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
@@ -3736,7 +3739,10 @@ mod tests {
         );
 
         // Step 7: RTP callee receives bridge RTP offer and creates answer
-        let rtp_callee_answer = rtp_callee.handshake(rtp_sdp).await.unwrap();
+        let rtp_callee_answer = rtp_callee
+            .handshake(rtp_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         // Step 8: Bridge RTP side sets remote description from callee
         let callee_desc = SessionDescription::parse(SdpType::Answer, &rtp_callee_answer).unwrap();
@@ -3889,7 +3895,10 @@ mod tests {
             "Bridge RTP offer should be plain RTP"
         );
 
-        let callee_answer = rtp_callee.handshake(bridge_rtp_sdp).await.unwrap();
+        let callee_answer = rtp_callee
+            .handshake(bridge_rtp_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         // Step 5: Set callee's answer on bridge's RTP side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
@@ -3941,7 +3950,7 @@ mod tests {
 
         // Step 8: Set bridge's WebRTC answer on the caller (simulates 200 OK processing)
         webrtc_caller
-            .set_remote_description(&answer_sdp)
+            .set_remote_description(&answer_sdp, rustrtc::SdpType::Answer)
             .await
             .unwrap();
 
@@ -4006,7 +4015,10 @@ mod tests {
             "Bridge WebRTC offer should use SAVPF"
         );
 
-        let callee_answer = webrtc_callee.handshake(bridge_webrtc_sdp).await.unwrap();
+        let callee_answer = webrtc_callee
+            .handshake(bridge_webrtc_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         // Step 5: Set callee's answer on bridge's WebRTC side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
@@ -4046,7 +4058,7 @@ mod tests {
 
         // Step 8: Set bridge's RTP answer on the caller
         rtp_caller
-            .set_remote_description(&answer_sdp)
+            .set_remote_description(&answer_sdp, rustrtc::SdpType::Answer)
             .await
             .unwrap();
 
@@ -4281,7 +4293,10 @@ mod tests {
             .with_rtp_range(35200, 35300)
             .with_codec_preference(vec![CodecType::PCMU])
             .build();
-        let callee_answer = callee.handshake(bridge_rtp_sdp).await.unwrap();
+        let callee_answer = callee
+            .handshake(bridge_rtp_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         // Set callee answer on bridge RTP side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
@@ -4318,7 +4333,10 @@ mod tests {
         );
 
         // Caller processes answer
-        caller.set_remote_description(&answer_sdp).await.unwrap();
+        caller
+            .set_remote_description(&answer_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         bridge.stop().await;
     }
@@ -4426,7 +4444,10 @@ mod tests {
             .with_rtp_range(36200, 36300)
             .with_codec_preference(vec![CodecType::PCMU])
             .build();
-        let callee_answer = callee.handshake(bridge_webrtc_sdp).await.unwrap();
+        let callee_answer = callee
+            .handshake(bridge_webrtc_sdp, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
 
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
@@ -4460,7 +4481,7 @@ mod tests {
         );
 
         caller
-            .set_remote_description(&rtp_answer_sdp)
+            .set_remote_description(&rtp_answer_sdp, rustrtc::SdpType::Answer)
             .await
             .unwrap();
 

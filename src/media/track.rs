@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use audio_codec::CodecType;
-use rustrtc::PeerConnection;
+use rustrtc::{PeerConnection, SdpType};
 use rustrtc::media::SampleStreamSource;
 
 use crate::media::negotiate;
@@ -9,9 +9,13 @@ use crate::media::negotiate;
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &str;
-    async fn handshake(&self, remote_offer: String) -> Result<String>;
+    async fn handshake(
+        &self,
+        remote_offer: String,
+        answer_type: SdpType,
+    ) -> Result<String>;
     async fn local_description(&self) -> Result<String>;
-    async fn set_remote_description(&self, remote: &str) -> Result<()>;
+    async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()>;
     async fn stop(&self);
     async fn get_peer_connection(&self) -> Option<PeerConnection>;
     fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {}

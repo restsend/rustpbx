@@ -110,11 +110,36 @@ impl Track for RtcTrack {
         &self.track_id
     }
 
-    async fn handshake(&self, remote_offer: String) -> Result<String> {
+    async fn handshake(
+        &self,
+        remote_offer: String,
+        answer_type: SdpType,
+    ) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
-        self.set_remote(&self.pc, &remote_offer, SdpType::Offer)
-            .await?;
-        let answer = self.pc.create_answer().await?;
+        match self.pc.signaling_state() {
+            rustrtc::SignalingState::Stable => {
+                self.set_remote(&self.pc, &remote_offer, SdpType::Offer)
+                    .await?;
+            }
+            rustrtc::SignalingState::HaveRemoteOffer => {}
+            state => {
+                return Err(anyhow!(
+                    "cannot create local answer while in signaling state {:?}",
+                    state
+                ));
+            }
+        }
+
+        let mut answer = self.pc.create_answer().await?;
+        match answer_type {
+            SdpType::Pranswer | SdpType::Answer => answer.sdp_type = answer_type,
+            _ => {
+                return Err(anyhow!(
+                    "unsupported answer SDP type: {:?}",
+                    answer_type
+                ));
+            }
+        }
         let sdp = self.set_local(&self.pc, answer).await?;
         Ok(sdp)
     }
@@ -138,9 +163,9 @@ impl Track for RtcTrack {
         }
     }
 
-    async fn set_remote_description(&self, remote: &str) -> Result<()> {
+    async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
         self.pc.wait_for_gathering_complete().await;
-        self.set_remote(&self.pc, remote, SdpType::Answer).await
+        self.set_remote(&self.pc, remote, sdp_type).await
     }
 
     async fn stop(&self) {

@@ -586,13 +586,37 @@ impl Track for FileTrack {
         &self.track_id
     }
 
-    async fn handshake(&self, remote_offer: String) -> Result<String> {
+    async fn handshake(
+        &self,
+        remote_offer: String,
+        answer_type: SdpType,
+    ) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
 
-        let offer = SessionDescription::parse(SdpType::Offer, &remote_offer)?;
+        match self.pc.signaling_state() {
+            rustrtc::SignalingState::Stable => {
+                let offer = SessionDescription::parse(SdpType::Offer, &remote_offer)?;
+                self.pc.set_remote_description(offer).await?;
+            }
+            rustrtc::SignalingState::HaveRemoteOffer => {}
+            state => {
+                return Err(anyhow!(
+                    "cannot create local answer while in signaling state {:?}",
+                    state
+                ));
+            }
+        }
 
-        self.pc.set_remote_description(offer).await?;
-        let answer = self.pc.create_answer().await?;
+        let mut answer = self.pc.create_answer().await?;
+        match answer_type {
+            SdpType::Pranswer | SdpType::Answer => answer.sdp_type = answer_type,
+            _ => {
+                return Err(anyhow!(
+                    "unsupported answer SDP type: {:?}",
+                    answer_type
+                ));
+            }
+        }
         self.pc.set_local_description(answer.clone())?;
 
         Ok(answer.to_sdp_string())
@@ -640,9 +664,9 @@ impl Track for FileTrack {
         Ok(offer.to_sdp_string())
     }
 
-    async fn set_remote_description(&self, remote: &str) -> Result<()> {
+    async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
         self.pc.wait_for_gathering_complete().await;
-        let desc = SessionDescription::parse(SdpType::Answer, remote)?;
+        let desc = SessionDescription::parse(sdp_type, remote)?;
         self.pc.set_remote_description(desc).await?;
         Ok(())
     }

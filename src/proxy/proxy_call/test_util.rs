@@ -73,7 +73,12 @@ pub mod tests {
             self.tracks.lock().unwrap().clone()
         }
 
-        async fn update_remote_description(&self, _track_id: &str, _sdp: &str) -> Result<()> {
+        async fn update_remote_description(
+            &self,
+            _track_id: &str,
+            _sdp: &str,
+            _sdp_type: rustrtc::SdpType,
+        ) -> Result<()> {
             Ok(())
         }
 

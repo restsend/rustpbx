@@ -1678,7 +1678,7 @@ impl RwiCommandProcessor {
                                                                 tracing::info!(%call_id_for_spawn, %leg_id_clone, status = %status_code, "SIP leg answered successfully in originate task");
                                                                 if !resp.body().is_empty() {
                                                                     let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
-                                                                    if let Err(e) = peer_clone.update_remote_description(&format!("orig-{}-{}", call_id_for_spawn, leg_id_clone), &answer_sdp).await {
+                                                                    if let Err(e) = peer_clone.update_remote_description(&format!("orig-{}-{}", call_id_for_spawn, leg_id_clone), &answer_sdp, rustrtc::SdpType::Answer).await {
                                                                         tracing::warn!(%call_id_for_spawn, %leg_id_clone, error = %e, "Failed to set remote description on leg peer");
                                                                     } else {
                                                                         // Notify main loop: agent answered, trigger auto-bridge
@@ -2042,7 +2042,7 @@ impl RwiCommandProcessor {
 
                                 let tracks = caller_peer.get_tracks().await;
                                 if let Some(first_track) = tracks.first() {
-                                    if let Err(e) = first_track.lock().await.set_remote_description(&answer).await {
+                                    if let Err(e) = first_track.lock().await.set_remote_description(&answer, rustrtc::SdpType::Answer).await {
                                         tracing::error!(%call_id, "Failed to set remote description: {}", e);
                                     } else {
                                         tracing::info!(%call_id, "Media session established successfully");
@@ -2585,7 +2585,7 @@ impl RwiCommandProcessor {
                         let _ = first_track
                             .lock()
                             .await
-                            .set_remote_description(&answer)
+                            .set_remote_description(&answer, rustrtc::SdpType::Answer)
                             .await;
                     }
                 }

@@ -1,6 +1,7 @@
 use crate::media::{MediaStream, Track};
 use anyhow::Result;
 use async_trait::async_trait;
+use rustrtc::SdpType;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -10,7 +11,12 @@ pub trait MediaPeer: Send + Sync {
     fn cancel_token(&self) -> CancellationToken;
     async fn update_track(&self, track: Box<dyn Track>, play_id: Option<String>);
     async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>>;
-    async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()>;
+    async fn update_remote_description(
+        &self,
+        track_id: &str,
+        remote: &str,
+        sdp_type: SdpType,
+    ) -> Result<()>;
     async fn remove_track(&self, track_id: &str, stop: bool);
     #[allow(dead_code)]
     async fn serve(&self) -> Result<()>;
@@ -50,9 +56,14 @@ impl MediaPeer for VoiceEnginePeer {
         self.stream.get_tracks().await
     }
 
-    async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()> {
+    async fn update_remote_description(
+        &self,
+        track_id: &str,
+        remote: &str,
+        sdp_type: SdpType,
+    ) -> Result<()> {
         self.stream
-            .update_remote_description(track_id, remote)
+            .update_remote_description(track_id, remote, sdp_type)
             .await
     }
 

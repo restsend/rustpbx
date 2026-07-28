@@ -186,12 +186,84 @@ async fn test_media_track_handshake() {
     let offer = track1.local_description().await.unwrap();
 
     // Track2 responds with answer
-    let answer = track2.handshake(offer).await;
+    let answer = track2
+        .handshake(offer, rustrtc::SdpType::Answer)
+        .await;
     assert!(answer.is_ok(), "Handshake failed: {:?}", answer.err());
 
     let answer_sdp = answer.unwrap();
     assert!(answer_sdp.contains("v=0"));
     assert!(answer_sdp.contains("m=audio"));
+}
+
+#[tokio::test]
+async fn test_media_track_pranswer_then_answer_reuses_rtp_transport() {
+    let offerer = RtpTrackBuilder::new("offerer".to_string())
+        .with_mode(TransportMode::Rtp)
+        .build();
+    let answerer = RtpTrackBuilder::new("answerer".to_string())
+        .with_mode(TransportMode::Rtp)
+        .build();
+
+    let offer = offerer.local_description().await.unwrap();
+    let offer_desc =
+        rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
+    let offerer_port = offer_desc.first_audio_section().unwrap().port;
+
+    let pranswer = answerer
+        .handshake(offer.clone(), rustrtc::SdpType::Pranswer)
+        .await
+        .unwrap();
+    let pranswer_desc =
+        rustrtc::SessionDescription::parse(rustrtc::SdpType::Pranswer, &pranswer).unwrap();
+    let answerer_port = pranswer_desc.first_audio_section().unwrap().port;
+    offerer
+        .set_remote_description(&pranswer, rustrtc::SdpType::Pranswer)
+        .await
+        .unwrap();
+
+    let offerer_pc = offerer.get_peer_connection().await.unwrap();
+    let answerer_pc = answerer.get_peer_connection().await.unwrap();
+    assert_eq!(
+        offerer_pc.signaling_state(),
+        rustrtc::SignalingState::HaveLocalOffer
+    );
+    assert_eq!(
+        answerer_pc.signaling_state(),
+        rustrtc::SignalingState::HaveRemoteOffer
+    );
+
+    let answer = answerer
+        .handshake(offer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    let answer_desc =
+        rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &answer).unwrap();
+    assert_eq!(
+        answer_desc.first_audio_section().unwrap().port,
+        answerer_port,
+        "the final answer must keep the RTP port allocated for the 183"
+    );
+
+    offerer
+        .set_remote_description(&answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    assert_eq!(
+        offerer_pc.signaling_state(),
+        rustrtc::SignalingState::Stable
+    );
+    assert_eq!(
+        answerer_pc.signaling_state(),
+        rustrtc::SignalingState::Stable
+    );
+
+    let final_offer = offerer_pc.local_description().unwrap();
+    assert_eq!(
+        final_offer.first_audio_section().unwrap().port,
+        offerer_port,
+        "processing 183 then 200 must not replace the offerer's RTP socket"
+    );
 }
 
 #[tokio::test]
@@ -270,7 +342,9 @@ async fn test_file_track_handshake() {
     let offer = offerer.local_description().await.unwrap();
 
     // FileTrack should be able to respond
-    let answer = track.handshake(offer).await;
+    let answer = track
+        .handshake(offer, rustrtc::SdpType::Answer)
+        .await;
     assert!(
         answer.is_ok(),
         "FileTrack handshake failed: {:?}",
