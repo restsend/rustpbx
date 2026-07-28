@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -664,6 +665,110 @@ pub async fn run_diag(
         end_time,
         rtp_detail,
     })
+}
+
+// ── Payload Debug / Analysis ──────────────────────────────
+
+/// Analyse a raw payload and return structured diagnostic info.
+pub fn payload_analysis(payload: &[u8]) -> serde_json::Value {
+    let is_utf8 = std::str::from_utf8(payload).is_ok();
+    let sip_status = sip_message_status(payload);
+
+    let starts_with_gzip = payload.starts_with(&[0x1F, 0x8B]);
+    let starts_with_zstd = payload.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]);
+    let embedded_gzip_offset = payload.windows(2).position(|w| w == [0x1F, 0x8B]);
+    let sf_offset = payload.windows(2).position(|w| w == [0x53, 0x46]);
+
+    let show_len = payload.len().min(128);
+    let hex_prefix: String = payload[..show_len]
+        .iter()
+        .enumerate()
+        .fold(String::with_capacity(show_len * 3), |mut acc, (i, b)| {
+            if i > 0 { acc.push(' '); }
+            acc.push_str(&format!("{:02x}", b));
+            acc
+        });
+
+    serde_json::json!({
+        "length": payload.len(),
+        "is_utf8": is_utf8,
+        "hex_prefix": hex_prefix,
+        "sip_status": sip_status,
+        "starts_with_gzip": starts_with_gzip,
+        "starts_with_zstd": starts_with_zstd,
+        "has_embedded_gzip": embedded_gzip_offset.is_some(),
+        "embedded_gzip_offset": embedded_gzip_offset,
+        "has_sf_marker": sf_offset.is_some(),
+        "sf_marker_offset": sf_offset,
+    })
+}
+
+/// Read raw bytes from a file at a given offset + size (diagnostic only).
+pub fn raw_read_range_sync(
+    path: &str,
+    offset: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; size];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Read raw bytes from a file at a given offset + size (async version for use inside tokio context).
+pub async fn raw_read_range(
+    path: &str,
+    offset: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncSeekExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    file.seek(SeekFrom::Start(offset)).await?;
+    let mut buf = vec![0u8; size];
+    file.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Format bytes as a hex dump with ASCII side (diagnostic only).
+pub fn hex_dump(data: &[u8], bytes_per_line: usize) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(bytes_per_line) {
+        // Offset
+        let off = chunk.as_ptr() as usize - data.as_ptr() as usize;
+        out.push_str(&format!("{:08x}  ", off));
+
+        // Hex
+        for (i, b) in chunk.iter().enumerate() {
+            out.push_str(&format!("{:02x} ", b));
+            if i == bytes_per_line / 2 - 1 {
+                out.push(' ');
+            }
+        }
+
+        // Pad short lines
+        if chunk.len() < bytes_per_line {
+            for _ in 0..(bytes_per_line - chunk.len()) {
+                out.push_str("   ");
+            }
+            if chunk.len() <= bytes_per_line / 2 {
+                out.push(' ');
+            }
+        }
+
+        // ASCII
+        out.push(' ');
+        for b in chunk {
+            if b.is_ascii_graphic() || *b == b' ' {
+                out.push(*b as char);
+            } else {
+                out.push('.');
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 // ── Date/Time helpers ─────────────────────────────────────

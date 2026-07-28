@@ -25,6 +25,7 @@ pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
     raw_file: Option<File>,
+    current_offset: u64,
     subdirs: SipFlowSubdirs,
     flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
@@ -217,6 +218,7 @@ impl StorageManager {
             base_path: base_path.to_path_buf(),
             current_hour: (0, 0, 0, 0),
             raw_file: None,
+            current_offset: 0,
             subdirs,
             flusher_tx,
             dropped: dropped.unwrap_or_default(),
@@ -236,7 +238,11 @@ impl StorageManager {
             .raw_file
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
-        let offset = file.metadata().await?.len();
+        let offset = self.current_offset;
+
+        // Seek to the tracked offset so the write goes exactly where the
+        // database will say it is, regardless of O_APPEND being absent.
+        file.seek(SeekFrom::Start(offset)).await?;
 
         let mut header = [0u8; RAW_RECORD_HEADER_LEN as usize];
         let mut header_buf = &mut header[..];
@@ -245,6 +251,8 @@ impl StorageManager {
         header_buf.put_u32(processed.comp_size as u32);
         let mut record = Buf::chain(&header[..], processed.payload.as_ref());
         file.write_all_buf(&mut record).await?;
+
+        self.current_offset += RAW_RECORD_HEADER_LEN as u64 + processed.comp_size as u64;
 
         if let Some(ref tx) = self.flusher_tx {
             let meta = FlushMeta {
@@ -306,11 +314,33 @@ impl StorageManager {
         let db_path = dir.join("sipflow.db");
         let raw_path = dir.join("data.raw");
 
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
-            .append(true)
-            .open(raw_path)
+            .write(true)
+            .open(&raw_path)
             .await?;
+
+        // Advisory exclusive lock to prevent multi-process write corruption.
+        // Acquire BEFORE reading the file size so the initial offset is accurate.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if ret != 0 {
+                tracing::error!(
+                    path = %raw_path.display(),
+                    errno = %std::io::Error::last_os_error(),
+                    "data.raw is locked by another process — offset tracking may be unreliable"
+                );
+            }
+        }
+
+        // Read the current file length only ONCE here; after this,
+        // write_processed tracks the offset in-memory.
+        self.current_offset = file.metadata().await?.len();
+        // Seek to end so subsequent seek+write goes to the correct position.
+        file.seek(SeekFrom::Start(self.current_offset)).await?;
 
         self.raw_file = Some(file);
 
@@ -557,7 +587,7 @@ impl StorageManager {
             {
                 let db_ex = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
                 let raw_ex = tokio::fs::try_exists(&raw_path).await.unwrap_or(false);
-                tracing::warn!(
+                tracing::debug!(
                     "query_media_packets[SKIP]: callid={} dir={} db={} raw={} db_ex={} raw_ex={}",
                     callid, dir.display(), db_path.display(), raw_path.display(), db_ex, raw_ex,
                 );
@@ -605,17 +635,43 @@ impl StorageManager {
             }
 
             for row in rows {
-                let offset = u64::try_from(row.offset)?;
-                let size = usize::try_from(row.size)?;
-                let payload =
-                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
-
-                results.push(StoredMediaPacket {
-                    leg: row.leg,
-                    src: row.src,
-                    timestamp: row.timestamp as u64,
-                    payload,
-                });
+                let offset = match u64::try_from(row.offset) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::warn!("skip bad media packet: offset overflow: {e}");
+                        current_pos = None;
+                        continue;
+                    }
+                };
+                let size = match usize::try_from(row.size) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            "skip bad media packet: size overflow: {e} offset={offset}"
+                        );
+                        current_pos = None;
+                        continue;
+                    }
+                };
+                match read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await {
+                    Ok(payload) => {
+                        results.push(StoredMediaPacket {
+                            leg: row.leg,
+                            src: row.src,
+                            timestamp: row.timestamp as u64,
+                            payload,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            callid,
+                            offset,
+                            size,
+                            "skip bad media packet: {e}"
+                        );
+                        current_pos = None;
+                    }
+                }
             }
         }
 

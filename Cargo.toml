@@ -212,6 +212,7 @@ async-compression = { version = "0.4", default-features = false, features = [
     "gzip",
 ], optional = true }
 flate2 = "1"
+libc = "0.2"
 console-subscriber = "0.5.0"
 lru = "0.18"
 metrics = "0.24"

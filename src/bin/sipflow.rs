@@ -18,7 +18,7 @@ use rustpbx::callrecord::{
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
     SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
-    perf::{PerfCounters, PerfDumper},
+    perf::PerfCounters,
     protocol::{MsgType, Packet, parse_datagram},
     storage::{extract_callid, maybe_compress_payload},
 };
@@ -250,6 +250,7 @@ async fn main() -> Result<()> {
     fmt()
         .with_env_filter(EnvFilter::new(&args.log_level))
         .with_writer(writer)
+        .with_ansi(false)
         .init();
 
     // Ensure data directory exists
@@ -436,24 +437,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Periodic perf dump (every 10 s, skipped when idle)
-    let perf_dump = perf_counters.clone();
-    rustpbx::utils::spawn(async move {
-        let mut dumper = PerfDumper::new(perf_dump);
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            if let Some(msg) = dumper.try_dump() {
-                tracing::info!("{msg}");
-            }
-        }
-    });
-
     // HTTP Server
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/flow", get(flow_handler))
         .route("/media", get(media_handler))
         .route("/diag", get(diag_handler))
+        .route("/debug/flow", get(debug_flow_handler))
+        .route("/debug/raw", get(debug_raw_handler))
         .route("/upload", post(upload_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(app_state);
@@ -497,10 +488,31 @@ async fn flow_handler(
                 elapsed = %format!("{:.2?}", elapsed),
                 "flow: query success"
             );
+            let flow_items: Vec<serde_json::Value> = flow
+                .iter()
+                .map(|item| {
+                    let payload: serde_json::Value = if let Ok(s) = String::from_utf8(item.payload.to_vec()) {
+                        serde_json::Value::String(s)
+                    } else {
+                        serde_json::Value::Array(
+                            item.payload.iter().map(|&b| serde_json::Value::Number(b.into())).collect(),
+                        )
+                    };
+                    serde_json::json!({
+                        "timestamp": item.timestamp,
+                        "seq": item.seq,
+                        "leg": item.leg,
+                        "msg_type": item.msg_type,
+                        "src_addr": item.src_addr,
+                        "dst_addr": item.dst_addr,
+                        "payload": payload,
+                    })
+                })
+                .collect();
             axum::Json(serde_json::json!({
                 "status": "success",
                 "callid": callid,
-                "flow": flow
+                "flow": flow_items
             }))
         }
         Err(e) => {
@@ -577,11 +589,13 @@ async fn media_handler(
         warn!("media: flush failed: {e}");
     }
 
-    let wav_bytes = state
-        .backend
-        .query_media(&callid, start_dt, end_dt)
-        .await
-        .unwrap_or_default();
+    let wav_bytes = match state.backend.query_media(&callid, start_dt, end_dt).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(callid, error = %e, "media: query_media failed");
+            Vec::new()
+        }
+    };
 
     let elapsed = _start.elapsed();
 
@@ -739,6 +753,95 @@ async fn diag_handler(
             .into_response()
         }
     }
+}
+
+async fn debug_flow_handler(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> axum::Json<serde_json::Value> {
+    let callid = params.get("callid").cloned().unwrap_or_default();
+    let start_ts = params
+        .get("start")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| Local::now().timestamp() - 3600);
+    let end_ts = params
+        .get("end")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| Local::now().timestamp() + 3600);
+
+    let start_dt = Local.timestamp_opt(start_ts, 0).unwrap();
+    let end_dt = Local.timestamp_opt(end_ts, 0).unwrap();
+
+    match state.backend.query_flow(&callid, start_dt, end_dt).await {
+        Ok(flow) => {
+            let items: Vec<serde_json::Value> = flow.iter().map(|item| {
+                serde_json::json!({
+                    "timestamp": item.timestamp,
+                    "seq": item.seq,
+                    "leg": item.leg,
+                    "msg_type": item.msg_type,
+                    "src_addr": item.src_addr,
+                    "dst_addr": item.dst_addr,
+                    "payload_debug": rustpbx::sipflow::diag::payload_analysis(&item.payload),
+                })
+            }).collect();
+
+            axum::Json(serde_json::json!({
+                "status": "success",
+                "callid": callid,
+                "count": items.len(),
+                "flow": items,
+            }))
+        }
+        Err(e) => {
+            axum::Json(serde_json::json!({
+                "status": "error",
+                "message": e.to_string(),
+            }))
+        }
+    }
+}
+
+async fn debug_raw_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let path = match params.get("path") {
+        Some(p) => p,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing 'path' parameter".to_string()).into_response();
+        }
+    };
+    let offset = match params.get("offset").and_then(|s| s.parse::<u64>().ok()) {
+        Some(o) => o,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing or invalid 'offset' parameter".to_string()).into_response();
+        }
+    };
+    let size = match params.get("size").and_then(|s| s.parse::<usize>().ok()) {
+        Some(s) => s,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing or invalid 'size' parameter".to_string()).into_response();
+        }
+    };
+
+    let data = match rustpbx::sipflow::diag::raw_read_range(path, offset, size).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {e}")).into_response();
+        }
+    };
+
+    let analysis = rustpbx::sipflow::diag::payload_analysis(&data);
+    let hex_dump = rustpbx::sipflow::diag::hex_dump(&data, 16);
+
+    (StatusCode::OK, format!(
+        "path: {}\noffset: {}\nsize: {}\n\nanalysis: {}\n\nhex dump:\n{}",
+        path,
+        offset,
+        data.len(),
+        serde_json::to_string_pretty(&analysis).unwrap_or_default(),
+        hex_dump,
+    )).into_response()
 }
 
 async fn upload_handler(
