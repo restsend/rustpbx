@@ -179,6 +179,8 @@ impl RtpTrackBuilder {
             sdp_compatibility,
             cname: self.cname,
             buffer_drop_strategy: BufferDropStrategy::DropOldest,
+            rtp_buffer_capacity: 500,
+            runtime_handle: crate::utils::media_runtime_handle(),
             ..Default::default()
         };
 

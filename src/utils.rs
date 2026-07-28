@@ -192,6 +192,15 @@ pub fn set_media_runtime(handle: Handle) {
         .expect("set_media_runtime called more than once");
 }
 
+/// Return the configured media runtime handle, used by rustrtc
+/// `RtcConfiguration` so that all internal spawns land on the media runtime.
+pub fn media_runtime_handle() -> Option<Handle> {
+    MEDIA_RUNTIME
+        .get()
+        .cloned()
+        .or_else(|| Handle::try_current().ok())
+}
+
 /// Spawn a future onto the dedicated media runtime.  Falls back to the
 /// ambient tokio runtime if the media runtime has not been initialised
 /// (e.g. during tests).

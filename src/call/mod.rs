@@ -800,6 +800,10 @@ pub struct MediaConfig {
     pub probation_max_packets: Option<u8>,
     /// Video policy: pass-through or strip video from SDP
     pub video_policy: Option<VideoPolicy>,
+    /// Per-side audio ring-buffer capacity (in RTP frames) for the bridge's
+    /// egress sample_track. 500 ≈ 10 s @ 20 ms ptime. None ⇒ use the
+    /// bridge's built-in default (`BRIDGE_AUDIO_RING_CAPACITY_DEFAULT`).
+    pub bridge_audio_buffer_frames: Option<usize>,
 }
 
 impl Default for MediaConfig {
@@ -822,6 +826,7 @@ impl MediaConfig {
             enable_latching: true,
             probation_max_packets: None,
             video_policy: None,
+            bridge_audio_buffer_frames: None,
         }
     }
 

@@ -82,7 +82,7 @@ impl From<CallMeta> for EventCallContext {
     }
 }
 
-/// Thread-safe, in-memory store mapping call_id → CallMeta.
+/// Thread-safe, concurrent in-memory store mapping call_id → CallMeta.
 pub struct CallMetaStore {
     store: DashMap<String, CallMeta>,
 }
@@ -94,21 +94,26 @@ impl CallMetaStore {
         })
     }
 
-    pub async fn insert(&self, call_id: String, meta: CallMeta) {
+    pub fn insert(&self, call_id: String, meta: CallMeta) {
         self.store.insert(call_id, meta);
     }
 
-    pub async fn get(&self, call_id: &str) -> Option<CallMeta> {
-        self.store.get(call_id).map(|v| v.clone())
+    pub fn get(&self, call_id: &str) -> Option<CallMeta> {
+        self.store.get(call_id).map(|r| r.clone())
     }
 
-    /// Synchronous non-blocking lookup.
+    /// Synchronous lookup (identical to `get` — both are sync with DashMap).
     pub fn get_sync(&self, call_id: &str) -> Option<CallMeta> {
-        self.store.get(call_id).map(|v| v.clone())
+        self.store.get(call_id).map(|r| r.clone())
     }
 
-    pub async fn remove(&self, call_id: &str) {
+    pub fn remove(&self, call_id: &str) {
         self.store.remove(call_id);
+    }
+
+    /// Current number of entries in the store.
+    pub fn len(&self) -> usize {
+        self.store.len()
     }
 }
 
@@ -145,19 +150,17 @@ mod tests {
     #[tokio::test]
     async fn call_meta_store_insert_and_get() {
         let store = CallMetaStore::new();
-        store
-            .insert(
-                "call-1".to_string(),
-                CallMeta {
-                    caller: Some("1001".to_string()),
-                    callee: Some("1002".to_string()),
-                    caller_name: Some("alice".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await;
+        store.insert(
+            "call-1".to_string(),
+            CallMeta {
+                caller: Some("1001".to_string()),
+                callee: Some("1002".to_string()),
+                caller_name: Some("alice".to_string()),
+                ..Default::default()
+            },
+        );
 
-        let meta = store.get("call-1").await.expect("meta must exist");
+        let meta = store.get("call-1").expect("meta must exist");
         assert_eq!(meta.caller.as_deref(), Some("1001"));
         assert_eq!(meta.callee.as_deref(), Some("1002"));
         assert_eq!(meta.caller_name.as_deref(), Some("alice"));

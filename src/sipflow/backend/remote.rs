@@ -167,7 +167,7 @@ impl RemoteBackend {
         let perf = PerfCounters::new_arc();
         let perf_clone = perf.clone();
 
-        crate::utils::spawn(async move {
+        crate::utils::media_spawn(async move {
             worker_loop(
                 rx,
                 udp_socket,

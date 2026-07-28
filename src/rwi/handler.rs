@@ -85,6 +85,38 @@ fn extract_token(
 ///                      |
 ///                  [write_task] -> ws_sender
 /// ```
+///
+/// RAII guard that removes the session+its CallMeta from the gateway on drop.
+/// Created at the top of [`handle_websocket`] so cleanup runs on ANY exit path
+/// including panic, early return, or normal completion.
+struct GatewaySessionGuard {
+    gateway: RwiGatewayRef,
+    session_id: String,
+}
+
+impl GatewaySessionGuard {
+    fn new(gateway: &RwiGatewayRef, session_id: &str) -> Self {
+        Self {
+            gateway: gateway.clone(),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
+impl Drop for GatewaySessionGuard {
+    fn drop(&mut self) {
+        let (call_ids, meta_store) = {
+            let mut gw = self.gateway.write();
+            let call_ids = gw.remove_session(&self.session_id);
+            let meta_store = gw.meta_store.clone();
+            (call_ids, meta_store)
+        };
+        for call_id in &call_ids {
+            meta_store.remove(call_id);
+        }
+    }
+}
+
 async fn handle_websocket(
     socket: WebSocket,
     identity: RwiIdentity,
@@ -128,6 +160,10 @@ async fn handle_websocket(
         gw.set_session_event_sender(&id, event_tx);
         id
     };
+
+    // RAII: on any exit path (panic/return/select-complete), remove the
+    // session from the gateway and clean up its CallMeta entries.
+    let _session_guard = GatewaySessionGuard::new(&gateway, &session_id);
 
     let write_task = crate::utils::spawn(async move {
         while let Some(msg) = ws_rx.recv().await {
@@ -178,15 +214,7 @@ async fn handle_websocket(
         _ = recv_task => {}
     }
 
-    let (cleanup_call_ids, meta_store) = {
-        let mut gw = gateway.write();
-        let call_ids = gw.remove_session(&session_id);
-        let meta = gw.meta_store.clone();
-        (call_ids, meta)
-    };
-    for call_id in &cleanup_call_ids {
-        meta_store.remove(call_id).await;
-    }
+    // _session_guard is dropped here → remove_session + CallMeta cleanup.
 }
 
 /// Process one text frame from the WebSocket.

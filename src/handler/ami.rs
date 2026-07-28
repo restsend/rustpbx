@@ -134,6 +134,14 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         }
     };
 
+    let rwi_meta_store_size = state
+        .core
+        .rwi_gateway
+        .as_ref()
+        .map(|gw| gw.read().meta_store.len())
+        .unwrap_or(0);
+    let rwi_gateway_configured = state.core.rwi_gateway.is_some();
+
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
@@ -144,6 +152,10 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "tokio": crate::utils::tokio_runtime_metrics(),
         "sipserver": sipserver_stats,
         "callrecord": callrecord_stats,
+        "rwi": {
+            "gateway_configured": rwi_gateway_configured,
+            "meta_store_size": rwi_meta_store_size,
+        },
     });
     Json(health).into_response()
 }

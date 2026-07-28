@@ -60,3 +60,4 @@ dist/
 package-lock.json
 tests/bench/
 todo_lists/
+.cargo/config.toml

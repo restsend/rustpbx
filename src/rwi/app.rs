@@ -125,8 +125,7 @@ impl CallApp for RwiApp {
                     app_id: None,
                     routing_target: None,
                 },
-            )
-            .await;
+            );
 
         self.send_typed_event(&crate::rwi::CallIncoming {
             call_id: call_id.clone(),

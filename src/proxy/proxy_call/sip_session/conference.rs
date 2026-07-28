@@ -206,7 +206,10 @@ impl SipSession {
             )
         };
 
-        let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
+        let (audio_sender, track, _feedback_rx) = sample_track(
+            MediaKind::Audio,
+            crate::media::bridge::BRIDGE_AUDIO_RING_CAPACITY_DEFAULT,
+        );
 
         let mut pc = None;
         for attempt in 0..150 {

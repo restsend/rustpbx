@@ -67,6 +67,12 @@ ami_path = "/ami/v1"
 ice_servers_path = "/iceservers"
 media_proxy = "auto"
 
+# Per-side audio ring-buffer capacity (in RTP frames) for the media bridge's
+# egress sample_track. 500 ≈ 10 s @ 20 ms ptime — large enough to absorb
+# encoder jitter, GC pauses, and downstream RTP-reader stalls without dropping
+# packets. Range [50, 2000]; unset ⇒ default (500).
+# bridge_audio_buffer_frames = 500
+
 # Worker thread isolation: SIP signalling and RTP media run on separate tokio
 # runtimes, preventing heavy media-plane load from starving SIP timer tasks.
 # Defaults: sip_worker_threads = min(4, num_cpus), media_worker_threads = rest.

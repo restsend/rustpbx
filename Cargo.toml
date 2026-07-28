@@ -148,7 +148,7 @@ rsipstack = "0.5.22"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
-rustrtc = "0.3.107"
+rustrtc = "0.3.110"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -284,3 +284,9 @@ path = "src/bin/sipflow.rs"
 [[bin]]
 name = "sipflow-diag"
 path = "src/bin/sipflow-diag.rs"
+
+[profile.dev]
+opt-level = 1
+codegen-units = 256
+incremental = true
+debug = 1

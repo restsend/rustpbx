@@ -110,6 +110,8 @@ impl FileTrack {
         let config = RtcConfiguration {
             transport_mode: TransportMode::Rtp,
             buffer_drop_strategy: BufferDropStrategy::DropOldest,
+            rtp_buffer_capacity: 500,
+            runtime_handle: crate::utils::media_runtime_handle(),
             ..Default::default()
         };
 
@@ -226,6 +228,8 @@ impl FileTrack {
             ssrc_start: rand::random::<u32>(),
             cname: self.cname.clone(),
             buffer_drop_strategy: BufferDropStrategy::DropOldest,
+            rtp_buffer_capacity: 500,
+            runtime_handle: crate::utils::media_runtime_handle(),
             ..Default::default()
         };
 

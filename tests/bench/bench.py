@@ -679,6 +679,7 @@ class P2PBenchmark:
         self.uac_process: SipProcess | None = None
         self.monitor: ResourceMonitor | None = None
         self.results: list[BenchmarkResult] = []
+        self.cancel_prob = 0  # set from CLI; used by run_uac_batch
         # SipFlow remote server management
         self.sipflow_process: subprocess.Popen[str] | None = None
         self.sipflow_udp_port = 3000
@@ -1032,8 +1033,12 @@ class P2PBenchmark:
     # -----------------------------------------------------------------------
 
     def start_uas_instances(
-        self, count: int, base_port: int = DEFAULT_UAS_BASE_PORT, hangup: int = 120,
+        self,
+        count: int,
+        base_port: int = DEFAULT_UAS_BASE_PORT,
+        hangup: int = 120,
         verbose: bool = True,
+        ring_duration: float = 0.0,
     ) -> bool:
         """Start UAS instances registered as extension users.
 
@@ -1043,10 +1048,16 @@ class P2PBenchmark:
         Pass verbose=False for long soak runs: sipbot's -v logs every RTP
         packet, which produces GB-sized logs in minutes and starves the
         load generator (observed 2.6 GB / 10 min from a single UAS).
+
+        When ``ring_duration`` > 0 the UAS rings (180) for that many seconds
+        before answering — this keeps calls in the early/ringing phase so a
+        UAC CANCEL lands before 200 OK (reliably producing 487).
         """
+        ring_info = f", ring={ring_duration}s" if ring_duration else ""
+        quiet_info = " [quiet]" if not verbose else ""
         print(f"\n{'='*60}")
-        print(f"Starting {count} UAS instances (sipbot wait + register)"
-              f"{' [quiet]' if not verbose else ''}")
+        print(f"Starting {count} UAS instances (sipbot wait + register"
+              + ring_info + quiet_info + ")")
         print(f"{'='*60}")
 
         self.uas_list = []
@@ -1071,6 +1082,10 @@ class P2PBenchmark:
                 "-a", f"127.0.0.1:{port}",
                 "--codecs", "pcmu",
                 "--hangup", str(hangup),
+            ]
+            if ring_duration and ring_duration > 0:
+                cmd += ["--ring-duration", str(int(round(ring_duration)))]
+            cmd += [
                 "--echo",  # echo mode for realistic bidirectional RTP
             ]
             if verbose:
@@ -1079,7 +1094,8 @@ class P2PBenchmark:
             uas = SipProcess(f"uas-{i+1}", log_file=log_file)
             uas.start(cmd)
             self.uas_list.append(uas)
-            print(f"[UAS] #{i+1} started: user={username}, port={port}, log={log_file}")
+            print(f"[UAS] #{i+1} started: user={username}, port={port}, "
+                  f"ring={ring_duration}s, log={log_file}")
 
         # Wait for registrations to complete
         time.sleep(3)
@@ -1098,10 +1114,13 @@ class P2PBenchmark:
         soak: bool = False,
         wall_time: int = 0,
         batch_window: int = 120,
+        cancel_prob: int = 0,
     ) -> tuple[str, float]:
         """Run batch UAC calls via sipbot call --total --cps.
 
         Calls are placed to extension users (bob/alice) through the PBX.
+        When ``cancel_prob`` > 0, sipbot will CANCEL that percentage of calls
+        right after INVITE (before answer) — exercises the CANCEL cleanup path.
         Returns (output_text, wall_time_seconds).
 
         When soak=True (long-duration run), sipbot is invoked in a loop of
@@ -1144,6 +1163,8 @@ class P2PBenchmark:
             "--total", str(total),
             "--cps", str(cps),
         ]
+        if cancel_prob > 0:
+            cmd += ["--cancel-prob", str(cancel_prob)]
         if not soak:
             cmd.append("-v")  # -v logs every RTP packet — unusable over long runs
 
@@ -1344,10 +1365,11 @@ class P2PBenchmark:
             )
 
             # 4. Run UAC batch (loops sipbot batches in soak mode)
-            uac_output, wall_time_s = self.run_uac_batch(
+            uac_output, wall_time = self.run_uac_batch(
                 total, cps, duration, soak=soak, wall_time=wall_time,
+                cancel_prob=self.cancel_prob,
             )
-            result.test_duration_s = wall_time_s
+            result.test_duration_s = wall_time
 
             # 5. Allow stats to settle
             time.sleep(2)
@@ -1438,6 +1460,393 @@ class P2PBenchmark:
             except subprocess.TimeoutExpired:
                 self._mysql_proxy_process.kill()
             self._mysql_proxy_process = None
+
+    # -----------------------------------------------------------------------
+    # Memory-leak batch test
+    # -----------------------------------------------------------------------
+
+    def _rustpbx_rss_mb(self) -> float:
+        """Return total RSS (MB) of all running rustpbx processes (excludes self)."""
+        import platform
+        try:
+            my_pid = os.getpid()
+            if platform.system() == "Darwin":
+                pgrep = subprocess.run(
+                    ["pgrep", "-f", "rustpbx"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                pids = [
+                    p.strip() for p in pgrep.stdout.strip().split("\n")
+                    if p.strip() and p.strip().isdigit() and int(p.strip()) != my_pid
+                ]
+                if not pids:
+                    return 0.0
+                result = subprocess.run(
+                    ["ps", "-o", "pid,rss", "-p", ",".join(pids)],
+                    capture_output=True, text=True, timeout=5,
+                )
+            else:
+                result = subprocess.run(
+                    ["ps", "-C", "rustpbx", "-o", "pid,rss", "--no-headers"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            total_kb = 0.0
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) != my_pid:
+                    total_kb += float(parts[-1])
+                elif len(parts) == 1:
+                    try:
+                        total_kb += float(parts[0])
+                    except ValueError:
+                        pass
+            return total_kb / 1024.0
+        except Exception:
+            return 0.0
+
+    def _memleak_snapshot(self) -> dict[str, Any]:
+        """One-shot snapshot of rustpbx RSS + /ami/v1/health sipserver + task stats.
+
+        Task reclamation (``tasks.total`` returning to baseline after calls
+        drain) is the reliable leak signal; RSS is unreliable under jemalloc.
+        """
+        health_url = f"{self.http_base}/ami/v1/health"
+        snap: dict[str, Any] = {
+            "rss_mb": self._rustpbx_rss_mb(),
+            "calls": 0,
+            "dialogs": 0,
+            "running_tx": 0,
+            "tx_finished": 0,
+            "tasks_total": 0,
+            "tasks_by_location": {},
+        }
+        try:
+            req = urllib.request.Request(health_url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read())
+            ss = data.get("sipserver", {}) if isinstance(data, dict) else {}
+            snap["calls"] = ss.get("calls", 0)
+            snap["dialogs"] = ss.get("dialogs", 0)
+            snap["running_tx"] = ss.get("running_tx", 0)
+            snap["tx_finished"] = ss.get("transactions", {}).get("finished", 0)
+            tasks = data.get("tasks", {}) if isinstance(data, dict) else {}
+            snap["tasks_total"] = int(tasks.get("total", 0) or 0)
+            locs = tasks.get("by_location", []) or []
+            snap["tasks_by_location"] = {
+                (e.get("loc", "?")): int(e.get("count", 0) or 0) for e in locs
+            }
+        except Exception:
+            pass
+        return snap
+
+    def _wait_drain(self, timeout: float = 30.0) -> bool:
+        """Wait until sipserver.calls==0 and running_tx==0 (all calls released)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = self._memleak_snapshot()
+            if s["calls"] == 0 and s["running_tx"] == 0:
+                return True
+            time.sleep(0.5)
+        return False
+
+    def run_memleak(
+        self,
+        total: int,
+        batch_size: int,
+        cps: int,
+        duration: int,
+        cancel_prob: int,
+        uas_count: int,
+        uas_base_port: int,
+        external_server: bool,
+        uas_ring_duration: float = 0.0,
+    ) -> int:
+        """Batched memory-leak test.
+
+        Runs ``total`` calls in batches of ``batch_size`` with ``--cancel-prob``,
+        sampling RSS + /ami/v1/health after each batch to detect leaked memory.
+        Memory that is reclaimed after calls drain indicates no leak; a
+        monotonically rising baseline signals a leak.
+
+        ``uas_ring_duration`` > 0 makes UAS ring before answering, so CANCEL
+        lands during early media (reliably 487) instead of racing a fast answer.
+        """
+        print(f"\n{'='*70}")
+        print(f"MEMORY-LEAK TEST  (external_server={external_server})")
+        print(f"{'='*70}")
+        print(f"  Total Calls     : {total}")
+        print(f"  Batch Size      : {batch_size} calls (sample /health after each)")
+        print(f"  CPS             : {cps}")
+        print(f"  Call Duration   : {duration}s (non-cancelled legs)")
+        print(f"  Cancel Prob     : {cancel_prob}%  (INVITE then CANCEL)")
+        print(f"  UAS Ring Dur    : {uas_ring_duration}s before answer"
+              + ("  (CANCEL lands in ringing -> 487)" if uas_ring_duration else ""))
+        print(f"  UAS Count       : {uas_count}")
+        print(f"  Proxy           : {self.proxy_host}:{self.proxy_port}")
+        print(f"  HTTP            : {self.http_base}")
+        print(f"{'='*70}\n")
+
+        # 1. Server readiness
+        if external_server:
+            print("[memleak] Verifying external rustpbx health...")
+            if not self._wait_for_rustpbx(timeout=10):
+                print("[memleak] External server not reachable — abort.")
+                return 1
+            print("[memleak] External server healthy")
+        else:
+            if not self.start_rustpbx(mediaproxy="all", sipflow=False):
+                print("[memleak] Failed to start rustpbx")
+                return 1
+            time.sleep(2)
+
+        # 2. UAS registration (bob/alice)
+        if not self.start_uas_instances(
+            uas_count, base_port=uas_base_port, hangup=duration + 30,
+            ring_duration=uas_ring_duration,
+        ):
+            print("[memleak] Failed to start UAS instances")
+            return 1
+
+        # 3. Baseline (after UAS registered, fully idle)
+        self._wait_drain(timeout=30)
+        time.sleep(1)
+        baseline = self._memleak_snapshot()
+        base_rss = baseline["rss_mb"]
+        base_tasks = baseline["tasks_total"]
+        base_task_loc = dict(baseline["tasks_by_location"])
+        if base_rss <= 0:
+            print("[memleak] Could not measure rustpbx RSS (is rustpbx running?).")
+            return 1
+        print(f"[memleak] Baseline RSS = {base_rss:.1f} MB, tasks.total = {base_tasks} "
+              f"(calls={baseline['calls']}, dialogs={baseline['dialogs']}, "
+              f"running_tx={baseline['running_tx']}, tx_finished={baseline['tx_finished']})\n")
+
+        n_batches = (total + batch_size - 1) // batch_size
+        rows: list[dict[str, Any]] = []
+        rss_series: list[float] = [base_rss]
+        tasks_series: list[int] = [base_tasks]
+        comp_total = 0
+        canc_total = 0
+
+        print(f"{'batch':>5} {'calls':>5} {'comp':>5} {'cancel':>7} "
+              f"{'RSS_MB':>8} {'dVsBase':>9} {'tasks':>6} {'dTsk':>5} "
+              f"{'calls':>5} {'runtx':>5} {'drain':>7}")
+        print("-" * 86)
+
+        for i in range(1, n_batches + 1):
+            this_batch = min(batch_size, total - (i - 1) * batch_size)
+            out, _ = self.run_uac_batch(
+                this_batch, cps, duration, cancel_prob=cancel_prob
+            )
+            m = parse_stress_metrics(out)
+            comp = m["completed"]
+            canc = m["status_counts"].get("487", 0)
+            comp_total += comp
+            canc_total += canc
+
+            drained = self._wait_drain(timeout=max(30.0, float(duration) * 3))
+            time.sleep(0.5)
+            s = self._memleak_snapshot()
+            delta = s["rss_mb"] - base_rss
+            dtasks = s["tasks_total"] - base_tasks
+            rss_series.append(s["rss_mb"])
+            tasks_series.append(s["tasks_total"])
+            rows.append({
+                "batch": i,
+                "calls": this_batch,
+                "completed": comp,
+                "cancelled_487": canc,
+                "rss_mb": round(s["rss_mb"], 2),
+                "delta_mb": round(delta, 2),
+                "tasks_total": s["tasks_total"],
+                "tasks_delta": dtasks,
+                "calls_active": s["calls"],
+                "dialogs": s["dialogs"],
+                "running_tx": s["running_tx"],
+                "tx_finished": s["tx_finished"],
+                "drained_ok": bool(drained),
+            })
+            print(f"{i:>5} {this_batch:>5} {comp:>5} {canc:>7} "
+                  f"{s['rss_mb']:>8.1f} {delta:>+9.1f} {s['tasks_total']:>6} "
+                  f"{dtasks:>+5} {s['calls']:>5} {s['running_tx']:>5} "
+                  f"{'ok' if drained else 'TIMEOUT':>7}")
+
+        # 4. Final drain + tail sample (let caches/GC settle)
+        self._wait_drain(timeout=30)
+        time.sleep(3)
+        tail = self._memleak_snapshot()
+        rss_series.append(tail["rss_mb"])
+        tasks_series.append(tail["tasks_total"])
+
+        # 5. Analysis + save
+        self._memleak_analyze(
+            rss_series, base_rss, comp_total, canc_total, rows, cancel_prob, tail,
+            tasks_series=tasks_series,
+            base_tasks=base_tasks,
+            base_task_loc=base_task_loc,
+        )
+        self._save_memleak(
+            rows, base_rss, rss_series, cancel_prob, cps, duration, batch_size, total,
+            tasks_series=tasks_series,
+            base_tasks=base_tasks,
+        )
+        return 0
+
+    def _memleak_analyze(
+        self,
+        rss_series: list[float],
+        base_rss: float,
+        comp_total: int,
+        canc_total: int,
+        rows: list[dict[str, Any]],
+        cancel_prob: int,
+        tail: dict[str, Any],
+        tasks_series: list[int] | None = None,
+        base_tasks: int = 0,
+        base_task_loc: dict[str, int] | None = None,
+    ) -> None:
+        tasks_series = tasks_series or [base_tasks]
+        base_task_loc = base_task_loc or {}
+
+        n = len(rss_series)
+        xs = list(range(n))
+        mean_x = sum(xs) / n
+        mean_y = sum(rss_series) / n
+        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, rss_series))
+        den = sum((x - mean_x) ** 2 for x in xs) or 1.0
+        slope = num / den  # MB per batch
+        growth = rss_series[-1] - base_rss
+        peak = max(rss_series)
+        peak_delta = peak - base_rss
+
+        # ---- Task reclamation analysis (the reliable leak signal) ----
+        final_tasks = int(tail.get("tasks_total", tasks_series[-1] if tasks_series else 0))
+        task_growth = final_tasks - base_tasks
+        # max tasks observed at a drained sample (skip the very first = baseline)
+        drained_tasks = tasks_series[1:] if len(tasks_series) > 1 else [base_tasks]
+        max_tasks_drained = max(drained_tasks)
+        min_tasks_drained = min(drained_tasks)
+        # slope of tasks (tasks/batch) — positive monotonic slope = leak
+        tn = len(tasks_series)
+        txs = list(range(tn))
+        tmx = sum(txs) / tn
+        tmy = sum(tasks_series) / tn
+        tnum = sum((x - tmx) * (y - tmy) for x, y in zip(txs, tasks_series))
+        tden = sum((x - tmx) ** 2 for x in txs) or 1.0
+        task_slope = tnum / tden
+
+        # Locations whose live task count grew above baseline at the tail
+        tail_loc = dict(tail.get("tasks_by_location", {}) or {})
+        loc_growth: list[tuple[str, int, int]] = []
+        for loc, cnt in tail_loc.items():
+            diff = cnt - base_task_loc.get(loc, 0)
+            if diff > 0:
+                loc_growth.append((loc, cnt, diff))
+        # also locations present in baseline but missing at tail are fine
+        loc_growth.sort(key=lambda t: -t[2])
+
+        # ---- Verdict: task reclamation is authoritative; RSS is advisory ----
+        if task_growth <= 1 and abs(task_slope) < 0.5:
+            verdict = "[OK] NO LEAK — tasks fully reclaimed after each batch"
+        elif task_growth <= 1:
+            verdict = "[OK] NO LEAK — tasks return to baseline (transient growth during calls)"
+        elif task_growth < 5 and abs(task_slope) < 1.0:
+            verdict = "[STABLE] small residual task growth — likely fine, monitor"
+        elif task_growth < 10:
+            verdict = "[WATCH] POSSIBLE TASK LEAK — tasks not fully reclaimed"
+        else:
+            verdict = "[LEAK] TASK LEAK — tasks accumulate monotonically"
+
+        print(f"\n{'='*74}")
+        print("MEMORY-LEAK ANALYSIS")
+        print(f"{'='*74}")
+        print(f"  Baseline tasks.total: {base_tasks}")
+        print(f"  Final tasks.total   : {final_tasks}  (growth {task_growth:+d})")
+        print(f"  Drained task range  : {min_tasks_drained} .. {max_tasks_drained} "
+              f"(slope {task_slope:+.2f} tasks/batch)")
+        print(f"  Baseline RSS        : {base_rss:.1f} MB")
+        print(f"  Final RSS           : {rss_series[-1]:.1f} MB")
+        print(f"  Peak RSS            : {peak:.1f} MB  (d {peak_delta:+.1f} MB)")
+        print(f"  RSS slope           : {slope:+.2f} MB/batch  (advisory under jemalloc)")
+        print(f"  Calls completed     : {comp_total}")
+        print(f"  Calls cancelled(487): {canc_total}  (cancel_prob={cancel_prob}%)")
+        print(f"  Final active calls  : {tail.get('calls', 0)}")
+        print(f"  Final dialogs       : {tail.get('dialogs', 0)}")
+        print(f"  Final running_tx    : {tail.get('running_tx', 0)}")
+        print(f"  VERDICT             : {verdict}")
+        if loc_growth:
+            print(f"  Task locations still above baseline (possible leak sites):")
+            for loc, cnt, diff in loc_growth[:12]:
+                print(f"      +{diff:>3}  (now {cnt:>3})  {loc}")
+        else:
+            print(f"  No task location above baseline — all per-call tasks reclaimed.")
+        print(f"{'='*74}")
+
+        # Mini trend bars
+        print("\n  tasks.total trend:")
+        tlo = min(tasks_series)
+        thi = max(tasks_series)
+        tspan = max(thi - tlo, 1)
+        for idx, v in enumerate(tasks_series):
+            label = "base" if idx == 0 else ("tail" if idx == tn - 1 else f"b{idx}")
+            bar_len = int(round((v - tlo) / tspan * 30))
+            print(f"    {label:>4} {v:>5} {'#' * bar_len}")
+
+        print("\n  RSS trend (advisory under jemalloc):")
+        lo = min(rss_series)
+        hi = max(rss_series)
+        span = max(hi - lo, 1.0)
+        for idx, v in enumerate(rss_series):
+            if idx == 0:
+                label = "base"
+            elif idx == len(rss_series) - 1:
+                label = "tail"
+            else:
+                label = f"b{idx}"
+            bar_len = int(round((v - lo) / span * 30))
+            print(f"    {label:>4} {v:>7.1f} MB {'#' * bar_len}")
+
+    def _save_memleak(
+        self,
+        rows: list[dict[str, Any]],
+        base_rss: float,
+        rss_series: list[float],
+        cancel_prob: int,
+        cps: int,
+        duration: int,
+        batch_size: int,
+        total: int,
+        tasks_series: list[int] | None = None,
+        base_tasks: int = 0,
+    ) -> None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        detail = {
+            "type": "memleak",
+            "timestamp": ts,
+            "total": total,
+            "batch_size": batch_size,
+            "cps": cps,
+            "duration": duration,
+            "cancel_prob": cancel_prob,
+            "baseline_rss_mb": round(base_rss, 2),
+            "final_rss_mb": round(rss_series[-1], 2),
+            "growth_mb": round(rss_series[-1] - base_rss, 2),
+            "rss_series": [round(v, 2) for v in rss_series],
+            "baseline_tasks": base_tasks,
+            "tasks_series": list(tasks_series or [base_tasks]),
+            "batches": rows,
+        }
+        jf = os.path.join(self.log_dir, f"memleak_{ts}.json")
+        with open(jf, "w") as f:
+            json.dump(detail, f, indent=2)
+        cf = os.path.join(self.log_dir, f"memleak_{ts}.csv")
+        with open(cf, "w", newline="") as f:
+            if rows:
+                w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                w.writeheader()
+                w.writerows(rows)
+        print(f"\n[memleak] Saved: {jf}")
+        print(f"[memleak] Saved: {cf}")
 
     # -----------------------------------------------------------------------
     # Result output
@@ -1614,6 +2023,7 @@ Examples:
         help="Cooldown between scenarios in seconds (default: 10)",
     )
     parser.add_argument(
+    parser.add_argument(
         "--wholesale",
         action="store_true",
         help="Enable the wholesale addon (injects addons=[\"wholesale\"] under [proxy]). "
@@ -1636,6 +2046,40 @@ Examples:
              "Active when --wall-time > 0. Reports slope (MB/min), R², and an "
              "assessment (STABLE/WATCH/LEAK SUSPECTED) and appends to leak_check.csv.",
     )
+    parser.add_argument(
+        "--cancel-prob",
+        type=int,
+        default=0,
+        help="sipbot --cancel-prob (0-99): probability of INVITE then CANCEL "
+             "(default 0). Applied in both batch and --memleak modes.",
+    )
+    parser.add_argument(
+        "--memleak",
+        action="store_true",
+        help="Batched memory-leak test: run --total calls in batches of "
+             "--batch-size, sampling /health + RSS after each batch to detect "
+             "leaked memory. Use with --external-server to target a running PBX.",
+    )
+    parser.add_argument(
+        "--external-server",
+        action="store_true",
+        help="Use an already-running rustpbx (skip starting/killing our own). "
+             "Set --proxy-host/--proxy-port/--http-base to match it.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Calls per batch in --memleak mode (default 10).",
+    )
+    parser.add_argument(
+        "--uas-ring-duration",
+        type=float,
+        default=0.0,
+        help="UAS ring duration (seconds) before answering. >0 keeps calls in "
+             "ringing so CANCEL lands before 200 (reliably 487). Default 0.",
+    )
+
 
     args = parser.parse_args()
 
@@ -1647,8 +2091,9 @@ Examples:
         print("❌ Error: sipbot not found. Install with: cargo install sipbot")
         return 1
 
-    # Check rustpbx binary exists
-    if not os.path.exists(args.rustpbx_bin):
+    # Check rustpbx binary exists (not needed when targeting an external server)
+    need_binary = not (args.memleak and args.external_server)
+    if need_binary and not os.path.exists(args.rustpbx_bin):
         print(f"❌ Error: {args.rustpbx_bin} not found. Build with: cargo build --release")
         return 1
 
@@ -1660,6 +2105,30 @@ Examples:
         rustpbx_config=args.rustpbx_config,
         log_dir=args.log_dir,
     )
+    benchmark.cancel_prob = args.cancel_prob
+
+    # ------------------------------------------------------------------
+    # Memory-leak mode: batched calls with per-batch /health sampling.
+    # Bypasses the normal scenario loop.
+    # ------------------------------------------------------------------
+    if args.memleak:
+        try:
+            return benchmark.run_memleak(
+                total=args.total,
+                batch_size=args.batch_size,
+                cps=args.cps,
+                duration=args.duration,
+                cancel_prob=args.cancel_prob,
+                uas_count=args.uas_count,
+                uas_base_port=args.uas_base_port,
+                external_server=args.external_server,
+                uas_ring_duration=args.uas_ring_duration,
+            )
+        except KeyboardInterrupt:
+            print("\n\n⚠ Memory-leak test interrupted by user")
+            return 130
+        finally:
+            benchmark.cleanup()
 
     # Define scenarios: (name, mediaproxy, sipflow_enabled)
     scenarios = []

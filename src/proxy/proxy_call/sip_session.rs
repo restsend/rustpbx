@@ -979,11 +979,8 @@ impl SipSession {
                     .and_then(|m| m.get("trunk").cloned()),
                 ..Default::default()
             };
-            let store = gw.read().meta_store.clone();
             let sid = session_id_str.clone();
-            crate::utils::spawn(async move {
-                store.insert(sid, meta).await;
-            });
+            gw.read().meta_store.insert(sid, meta);
         }
 
         // Create a shared handle for app event delivery (send_app_event).
@@ -4437,6 +4434,8 @@ impl SipSession {
                 bind_ip: self.context.dialplan.media.bind_ip.clone(),
                 cname: Some(self.server.rtc_cname.clone()),
                 buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
+                rtp_buffer_capacity: 500,
+                runtime_handle: crate::utils::media_runtime_handle(),
                 ..Default::default()
             };
             bridge_builder = bridge_builder.with_callee_config(callee_config);
@@ -4586,6 +4585,8 @@ impl SipSession {
             sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
             cname: Some(self.server.rtc_cname.clone()),
             buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
+            rtp_buffer_capacity: 500,
+            runtime_handle: crate::utils::media_runtime_handle(),
             ..Default::default()
         };
         callee_config.label = Some(format!("{}-app-bridge-callee-webrtc", self.id));
@@ -7237,6 +7238,8 @@ impl SipSession {
                     bind_ip: self.context.dialplan.media.bind_ip.clone(),
                     cname: Some(self.server.rtc_cname.clone()),
                     buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
+                    rtp_buffer_capacity: 500,
+                    runtime_handle: crate::utils::media_runtime_handle(),
                     ..Default::default()
                 };
                 bridge_builder = bridge_builder.with_callee_config(callee_config);

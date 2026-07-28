@@ -15,8 +15,9 @@ pub struct RtpTiming {
     first_output_sequence: u16,
 }
 
-impl Default for RtpTiming {
-    fn default() -> Self {
+impl RtpTiming {
+    /// Construct with random output timestamp / sequence origins (production path).
+    pub fn new() -> Self {
         let mut rng = rand::rng();
         Self {
             domain: None,
@@ -25,9 +26,39 @@ impl Default for RtpTiming {
             first_output_sequence: rng.random(),
         }
     }
-}
 
-impl RtpTiming {
+    /// Construct with deterministic origins (for tests).
+    #[cfg(test)]
+    pub fn with_origins(first_output_timestamp: u32, first_output_sequence: u16) -> Self {
+        Self {
+            domain: None,
+            first_input_sequence: None,
+            first_output_timestamp,
+            first_output_sequence,
+        }
+    }
+
+    /// Reset the timestamp / sequence domain anchors. Used when a transcoder
+    /// is rebuilt for a new codec direction but should preserve continuity
+    /// of the *output* domain (callers pass the previous output_origin).
+    pub fn reset_with_output_origin(&mut self, output_timestamp: u32, output_sequence: u16) {
+        self.domain = None;
+        self.first_input_sequence = None;
+        self.first_output_timestamp = output_timestamp;
+        self.first_output_sequence = output_sequence;
+    }
+
+    /// Return the current output timestamp origin (last value of
+    /// `first_output_timestamp`). Useful for preserving continuity across
+    /// transcoder rebuilds.
+    pub fn current_output_timestamp_origin(&self) -> u32 {
+        self.first_output_timestamp
+    }
+
+    pub fn current_output_sequence_origin(&self) -> u16 {
+        self.first_output_sequence
+    }
+
     pub fn rewrite(
         &mut self,
         frame: &mut AudioFrame,
@@ -74,6 +105,12 @@ impl RtpTiming {
     }
 }
 
+impl Default for RtpTiming {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Rewrite the duration field inside a telephone-event (RFC 4733) payload.
 /// Duration is bytes [2..4] in network byte order, expressed in RTP clock ticks.
 pub fn rewrite_dtmf_duration(data: &[u8], source_rate: u32, target_rate: u32) -> bytes::Bytes {
@@ -95,6 +132,12 @@ pub struct Transcoder {
     /// The actual negotiated PT for the target codec (from SDP answer, not codec default)
     target_pt: u8,
     resampler: Option<Resampler>,
+    /// Embedded RTP timestamp/sequence rewriter. Ensures every transcode call
+    /// returns an AudioFrame whose rtp_timestamp, sequence_number, payload_type,
+    /// and clock_rate are all in the *target* domain. Eliminates the historical
+    /// race where the transcoder returned source-domain timestamps that
+    /// disagreed with the target-domain clock_rate.
+    timing: RtpTiming,
 }
 
 impl Transcoder {
@@ -120,6 +163,7 @@ impl Transcoder {
             target,
             target_pt,
             resampler,
+            timing: RtpTiming::new(),
         }
     }
 
@@ -135,6 +179,19 @@ impl Transcoder {
         self.target_pt
     }
 
+    pub fn source_codec(&self) -> CodecType {
+        self.source
+    }
+
+    pub fn target_codec(&self) -> CodecType {
+        self.target
+    }
+
+    /// Access the embedded timing (e.g. for diagnostic inspection or test seeding).
+    pub fn timing(&mut self) -> &mut RtpTiming {
+        &mut self.timing
+    }
+
     pub fn transcode(&mut self, frame: &AudioFrame) -> AudioFrame {
         let mut pcmbuf = self.decoder.decode(&frame.data);
         if let Some(resampler) = &mut self.resampler {
@@ -143,7 +200,7 @@ impl Transcoder {
 
         let encoded_data = self.encoder.encode(&pcmbuf);
 
-        AudioFrame {
+        let mut output = AudioFrame {
             rtp_timestamp: frame.rtp_timestamp,
             clock_rate: self.target.clock_rate(),
             data: encoded_data.into(),
@@ -153,7 +210,19 @@ impl Transcoder {
             header_extension: None,
             raw_packet: None,
             source_addr: frame.source_addr,
-        }
+        };
+
+        // Atomically rewrite ts/seq/pt/clock_rate into the target domain.
+        // This is the single source of truth: callers do NOT need to invoke
+        // RtpTiming separately.
+        self.timing.rewrite(
+            &mut output,
+            self.source.clock_rate(),
+            self.target.clock_rate(),
+            self.target_pt,
+        );
+
+        output
     }
 }
 
@@ -329,17 +398,63 @@ mod tests {
     }
 
     #[test]
-    fn test_transcoder_preserves_timestamp() {
+    fn test_transcoder_rewrites_timestamp_to_target_domain() {
+        // After embedding RtpTiming inside Transcoder, the transcode output
+        // must carry a timestamp in the *target* clock-rate domain, advancing
+        // at the target's tick rate. Sequence numbers must be monotonic.
+        // The absolute origin is randomized (RtpTiming::new), so we verify
+        // deltas across two frames rather than absolute values.
         let pcm = silence_pcm_8k();
         let mut enc = create_encoder(CodecType::PCMU);
         let data = enc.encode(&pcm);
 
         let mut t = Transcoder::new(CodecType::PCMU, CodecType::PCMA, 8);
-        let input = make_frame(0, 8000, data, 42, 12345);
-        let output = t.transcode(&input);
+        let input1 = make_frame(0, 8000, data.clone(), 42, 12345);
+        let input2 = make_frame(0, 8000, data, 43, 12505); // +160 ticks (20ms @ 8kHz)
+        let output1 = t.transcode(&input1);
+        let output2 = t.transcode(&input2);
 
-        assert_eq!(output.rtp_timestamp, 12345);
-        assert_eq!(output.sequence_number, Some(42));
+        // Same codec clock-rate → delta preserved.
+        let ts_delta = output2.rtp_timestamp.wrapping_sub(output1.rtp_timestamp);
+        assert_eq!(ts_delta, 160, "PCMU→PCMA (both 8kHz): Δts should be 160");
+        let seq_delta = output2
+            .sequence_number
+            .unwrap()
+            .wrapping_sub(output1.sequence_number.unwrap());
+        assert_eq!(seq_delta, 1, "Sequence must increment by 1");
+        assert_eq!(output1.payload_type, Some(8));
+        assert_eq!(output1.clock_rate, 8000);
+    }
+
+    #[test]
+    fn test_transcoder_rewrites_timestamp_cross_clock_rate() {
+        // Opus (48kHz) → PCMU (8kHz): 960-tick input delta must become 160.
+        let pcmu = silence_pcm_8k();
+        let mut pcmu_enc = create_encoder(CodecType::PCMU);
+        let pcmu_data = pcmu_enc.encode(&pcmu);
+
+        // Synthesize opus-shaped input by re-using pcmu bytes; decoder is what matters here.
+        // We test the timing math via the embedded RtpTiming using Transcoder directly.
+        let mut t = Transcoder::new(CodecType::PCMU, CodecType::PCMU, 0);
+        let input1 = make_frame(111, 48000, pcmu_data.clone(), 100, 0);
+        let input2 = make_frame(111, 48000, pcmu_data, 101, 960);
+        let output1 = t.transcode(&input1);
+        let _output2 = t.transcode(&input2);
+
+        // The Transcoder's clock-rate scaling uses codec-intrinsic rates (both 8kHz here),
+        // so to verify cross-rate math we use RtpTiming directly below. Here we just
+        // confirm output is internally consistent (clock_rate matches payload_type).
+        assert_eq!(output1.clock_rate, 8000);
+        assert_eq!(output1.payload_type, Some(0));
+
+        // Direct cross-rate timing test via RtpTiming API.
+        let mut timing = RtpTiming::with_origins(0, 0);
+        let mut f1 = make_frame(111, 48000, vec![0u8; 40], 100, 0);
+        let mut f2 = make_frame(111, 48000, vec![0u8; 40], 101, 960);
+        timing.rewrite(&mut f1, 48000, 8000, 0);
+        timing.rewrite(&mut f2, 48000, 8000, 0);
+        let ts_delta = f2.rtp_timestamp.wrapping_sub(f1.rtp_timestamp);
+        assert_eq!(ts_delta, 160, "48kHz→8kHz: 960 tick delta should become 160");
     }
 
     #[test]

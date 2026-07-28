@@ -84,6 +84,19 @@ pub struct NegotiatedCodec {
     pub channels: u16,
 }
 
+impl NegotiatedCodec {
+    /// Convert to a `CodecInfo` (no fmtp — answer codecs don't carry it).
+    pub fn to_codec_info(&self) -> CodecInfo {
+        CodecInfo {
+            payload_type: self.payload_type,
+            codec: self.codec,
+            clock_rate: self.clock_rate,
+            channels: self.channels,
+            fmtp: None,
+        }
+    }
+}
+
 /// Per-leg negotiated media profile extracted from an SDP answer.
 /// Contains the selected audio codec, video codec, and the selected DTMF entry for that answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +116,27 @@ impl Default for NegotiatedLegProfile {
             dtmf: None,
             transport: rustrtc::TransportMode::Rtp,
         }
+    }
+}
+
+impl NegotiatedLegProfile {
+    /// Build a `{payload_type → CodecInfo}` map for this leg's audio + DTMF
+    /// codecs. Used by the bridge's `LegEgressEncoder` to resolve incoming
+    /// PTs without re-parsing SDP on every packet.
+    pub fn build_pt_map(&self) -> std::collections::HashMap<u8, CodecInfo> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(audio) = &self.audio {
+            map.insert(audio.payload_type, audio.to_codec_info());
+        }
+        if let Some(dtmf) = &self.dtmf {
+            map.insert(dtmf.payload_type, dtmf.to_codec_info());
+        }
+        map
+    }
+
+    /// All telephone-event PTs configured for this leg.
+    pub fn dtmf_pts(&self) -> std::collections::HashSet<u8> {
+        self.dtmf.iter().map(|c| c.payload_type).collect()
     }
 }
 
