@@ -2496,7 +2496,19 @@ impl SipSession {
             self.callee_transport_mode(callee_is_webrtc),
         );
 
-        let offer = self.prepare_callee_media_offer(target).await;
+        let offer = self.prepare_callee_media_offer(target).await.map_err(|e| {
+            warn!(
+                session_id = %self.context.session_id,
+                error = %e,
+                "Failed to prepare callee media offer"
+            );
+            into_callee_err(
+                &StatusCode::ServerInternalError,
+                Some(
+                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
+                ),
+            )
+        })?;
         let content_type = offer.as_ref().map(|_| "application/sdp".to_string());
 
         let contact_uri = self
@@ -5122,13 +5134,24 @@ impl SipSession {
                             self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
                             if self.media_profile.path == MediaPathMode::Anchored {
-                                let caller_sdp = self
+                                let caller_sdp = match self
                                     .prepare_caller_answer_from_callee_sdp(
                                         Some(callee_sdp),
                                         false,
                                         rustrtc::SdpType::Pranswer,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(caller_sdp) => caller_sdp,
+                                    Err(error) => {
+                                        warn!(
+                                            session_id = %self.context.session_id,
+                                            error = %error,
+                                            "Failed to prepare caller early-media answer"
+                                        );
+                                        None
+                                    }
+                                };
 
                                 if let Err(e) = self.server_dialog.ringing(
                                     Some(Self::sdp_headers()),
@@ -5230,20 +5253,32 @@ impl SipSession {
             }
         }
 
+        let callee_guard =
+            ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog_id.clone());
         let caller_answer = self
             .prepare_caller_answer_from_callee_sdp(
                 callee_sdp,
                 false,
                 rustrtc::SdpType::Answer,
             )
-            .await;
+            .await
+            .map_err(|e| {
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to prepare caller answer"
+                );
+                into_callee_err(
+                    &StatusCode::ServerInternalError,
+                    Some(
+                        r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
+                    ),
+                )
+            })?;
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
-        self.callee_guards.push(ClientDialogGuard::new(
-            self.server.dialog_layer.clone(),
-            dialog_id.clone(),
-        ));
+        self.callee_guards.push(callee_guard);
 
         self.accept_call(
             Some(callee_uri.to_string()),
@@ -5286,7 +5321,7 @@ impl SipSession {
     async fn prepare_callee_media_offer(
         &mut self,
         target: &crate::call::Location,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
 
         // Bug 3 fix: transport-aware parallel-fork caching. When multiple fork
@@ -5295,7 +5330,7 @@ impl SipSession {
         // (e.g. one WebRTC fork and one RTP fork).
         if let Some(cached) = &self.media.callee_offer {
             if self.media.callee_offer_cached_webrtc == Some(callee_is_webrtc) {
-                return Some(cached.clone().into_bytes());
+                return Ok(Some(cached.clone().into_bytes()));
             }
         }
         self.media.callee_offer_cached_webrtc = Some(callee_is_webrtc);
@@ -5336,10 +5371,10 @@ impl SipSession {
                 self.media.caller_offer.clone()
             }
         } else {
-            self.create_callee_track(callee_is_webrtc).await.ok()
+            Some(self.create_callee_track(callee_is_webrtc).await?)
         };
         self.media.callee_offer = callee_sdp.clone();
-        callee_sdp.map(|s| s.into_bytes())
+        Ok(callee_sdp.map(|s| s.into_bytes()))
     }
 
     async fn prepare_caller_answer_from_callee_sdp(
@@ -5347,7 +5382,7 @@ impl SipSession {
         callee_sdp: Option<String>,
         force_regenerate: bool,
         callee_sdp_type: rustrtc::SdpType,
-    ) -> Option<String> {
+    ) -> Result<Option<String>> {
         let is_early_media = callee_sdp_type == rustrtc::SdpType::Pranswer;
         let Some(callee_sdp_value) = callee_sdp else {
             if callee_sdp_type == rustrtc::SdpType::Answer && self.media.early_media_sent {
@@ -5423,11 +5458,11 @@ impl SipSession {
                 }
             }
 
-            return if self.media.early_media_sent {
+            return Ok(if self.media.early_media_sent {
                 self.media.answer.clone()
             } else {
                 None
-            };
+            });
         };
 
         let sdp_changed =
@@ -5466,7 +5501,7 @@ impl SipSession {
                     bridge.open_caller_gate();
                 }
             }
-            return self.media.answer.clone();
+            return Ok(self.media.answer.clone());
         }
 
         if self.media.callee_answer_sdp.is_some() && sdp_changed {
@@ -5504,7 +5539,7 @@ impl SipSession {
             }
 
             self.media.callee_answer_sdp = Some(callee_sdp_value);
-            return self.media.answer.clone();
+            return Ok(self.media.answer.clone());
         }
 
         let can_update_confirmed_anchored_media = self.media.media_bridge.is_none()
@@ -5548,7 +5583,7 @@ impl SipSession {
             )
             .await;
 
-            return caller_answer;
+            return Ok(caller_answer);
         }
 
         let callee_sdp = Some(callee_sdp_value.clone());
@@ -5675,12 +5710,7 @@ impl SipSession {
                             Some(answer_sdp)
                         }
                         Err(e) => {
-                            warn!(
-                                session_id = %self.context.session_id,
-                                error = %e,
-                                "Failed to handshake caller track"
-                            );
-                            None
+                            return Err(anyhow!("Failed to handshake caller track: {e}"));
                         }
                     }
                 }
@@ -5724,7 +5754,7 @@ impl SipSession {
             }
         }
 
-        caller_answer
+        Ok(caller_answer)
     }
 
     /// WebRTC caller ↔ RTP callee: negotiate bridge media answer for the WebRTC side.
@@ -8796,7 +8826,7 @@ impl SipSession {
                                 true,
                                 rustrtc::SdpType::Answer,
                             )
-                            .await;
+                            .await?;
                     } else {
                         final_answer = Some(answer_sdp.clone());
                     }
@@ -14734,6 +14764,279 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
     }
 
     #[tokio::test]
+    async fn test_proxied_rtp_offer_reports_port_allocation_failure() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (occupied_port, _occupied_socket) = (30000..60000)
+            .step_by(2)
+            .find_map(|port| {
+                std::net::UdpSocket::bind(("127.0.0.1", port))
+                    .ok()
+                    .map(|socket| (port, socket))
+            })
+            .expect("failed to reserve an RTP port for the test");
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let caller_uri = "sip:alice@rustpbx.com".try_into().unwrap();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let mut dialplan = Dialplan::new(
+            "test-rtp-port-allocation-failure".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )
+        .with_caller(caller_uri);
+        dialplan.media.bind_ip = Some("127.0.0.1".to_string());
+        dialplan.media.rtp_start_port = Some(occupied_port);
+        dialplan.media.rtp_end_port = Some(occupied_port);
+        let context = CallContext {
+            session_id: "test-rtp-port-allocation-failure".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            true,
+            caller_peer,
+            callee_peer,
+        );
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+        let target = Location {
+            aor: "sip:agent@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+
+        let error = match session.build_target_invite_option(&target, None).await {
+            Ok(_) => panic!("occupied RTP range must abort outbound INVITE preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            (
+                500,
+                "Server Internal Error".to_string(),
+                Some(
+                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
+                ),
+            ),
+            "unexpected callee offer error"
+        );
+        assert!(
+            session.media.callee_offer.is_none(),
+            "failed RTP allocation must not cache a callee offer"
+        );
+
+        assert!(
+            session.meta.connected_callee.is_none(),
+            "failed callee offer allocation must not move the call into connected state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_proxied_rtp_answer_reports_port_allocation_failure() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (rtp_start_port, _occupied_socket, released_socket) = (30000..59998)
+            .step_by(2)
+            .find_map(|port| {
+                let occupied_socket = std::net::UdpSocket::bind(("127.0.0.1", port)).ok()?;
+                let released_socket =
+                    std::net::UdpSocket::bind(("127.0.0.1", port + 2)).ok()?;
+                Some((port, occupied_socket, released_socket))
+            })
+            .expect("failed to reserve an RTP port pair for the test");
+        let rtp_end_port = rtp_start_port + 2;
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let caller_uri = "sip:alice@rustpbx.com".try_into().unwrap();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let mut dialplan = Dialplan::new(
+            "test-rtp-answer-port-allocation-failure".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )
+        .with_caller(caller_uri);
+        dialplan.media.bind_ip = Some("127.0.0.1".to_string());
+        dialplan.media.rtp_start_port = Some(rtp_start_port);
+        dialplan.media.rtp_end_port = Some(rtp_end_port);
+        let context = CallContext {
+            session_id: "test-rtp-answer-port-allocation-failure".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            true,
+            caller_peer,
+            callee_peer,
+        );
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtcp-mux\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+        let target = Location {
+            aor: "sip:agent@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+
+        drop(released_socket);
+        let (invite_option, callee_uri, _) = session
+            .build_target_invite_option(&target, None)
+            .await
+            .expect("callee offer should consume the only unoccupied RTP port");
+        let callee_offer = String::from_utf8(
+            invite_option
+                .offer
+                .clone()
+                .expect("proxied callee INVITE must contain SDP"),
+        )
+        .expect("callee offer must be UTF-8");
+        assert_eq!(
+            extract_audio_port(&callee_offer),
+            Some(rtp_end_port),
+            "callee offer must hold the only initially available RTP port"
+        );
+
+        let response = rsipstack::sip::Response {
+            status_code: StatusCode::OK,
+            version: rsipstack::sip::Version::V2,
+            headers: rsipstack::sip::Headers::default(),
+            body: concat!(
+                "v=0\r\n",
+                "o=agent 1 1 IN IP4 192.0.2.20\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.20\r\n",
+                "t=0 0\r\n",
+                "m=audio 41000 RTP/AVP 0\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtcp-mux\r\n",
+                "a=sendrecv\r\n",
+            )
+            .as_bytes()
+            .to_vec(),
+        };
+        let dialog_id = DialogId {
+            call_id: "callee-answer-port-allocation-failure".to_string(),
+            local_tag: "local".to_string(),
+            remote_tag: "remote".to_string(),
+        };
+
+        let error = session
+            .finalize_callee_connection(
+                dialog_id,
+                Some(response),
+                callee_uri,
+                None,
+                &invite_option,
+                DEFAULT_SESSION_EXPIRES,
+            )
+            .await
+            .expect_err("caller answer must fail when no second RTP port is available");
+        assert_eq!(
+            error,
+            (
+                500,
+                "Server Internal Error".to_string(),
+                Some(
+                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
+                ),
+            ),
+            "unexpected caller answer error"
+        );
+        assert!(
+            session.meta.connected_callee.is_none(),
+            "failed caller answer allocation must not move the call into connected state"
+        );
+        assert!(
+            session.meta.connected_callee_dialog_id.is_none(),
+            "failed caller answer allocation must not register a connected callee dialog"
+        );
+    }
+
+    #[tokio::test]
     async fn test_parallel_fork_callee_offer_caches_same_transport_port() {
         // Two fork targets with the same transport must share the same RTP port
         // (cached callee offer). Without the Bug 3 fix, each fork created a
@@ -14821,6 +15124,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             session
                 .prepare_callee_media_offer(&target1)
                 .await
+                .expect("1st offer creation")
                 .expect("1st offer"),
         )
         .unwrap();
@@ -14830,6 +15134,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             session
                 .prepare_callee_media_offer(&target2)
                 .await
+                .expect("2nd offer creation")
                 .expect("2nd offer"),
         )
         .unwrap();
@@ -14931,6 +15236,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             session
                 .prepare_callee_media_offer(&webrtc_target)
                 .await
+                .expect("WebRTC offer creation")
                 .expect("WebRTC offer"),
         )
         .unwrap();
@@ -14949,6 +15255,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             session
                 .prepare_callee_media_offer(&rtp_target)
                 .await
+                .expect("RTP offer creation")
                 .expect("RTP offer"),
         )
         .unwrap();
