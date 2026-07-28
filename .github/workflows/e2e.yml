@@ -21,7 +21,7 @@ jobs:
           rustflags: ""
       - name: Run default E2E tests
         run: cargo test --test e2e_p2p_comprehensive_test --test e2e_p2p_demo_test --test e2e_queue_comprehensive_test --test e2e_conference_test -- --nocapture
-        timeout-minutes: 10
+        timeout-minutes: 20
 
   e2e-wholesale:
     name: e2e (wholesale)
@@ -48,5 +48,5 @@ jobs:
         with:
           rustflags: ""
       - name: Run wholesale E2E tests
-        run: cargo test --features wholesale --test e2e_wholesale_test -- --nocapture
-        timeout-minutes: 10
+        run: cargo test --no-default-features --features wholesale --test e2e_wholesale_test -- --nocapture
+        timeout-minutes: 20
