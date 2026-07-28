@@ -588,6 +588,10 @@ pub enum SipFlowUploadConfig {
         signaling: Option<bool>,
         #[serde(default = "default_true")]
         media: Option<bool>,
+        #[serde(default)]
+        force_pcm: Option<bool>,
+        #[serde(default = "default_pcm_rate")]
+        pcm_sample_rate: Option<u32>,
     },
     Http {
         url: String,
@@ -596,11 +600,19 @@ pub enum SipFlowUploadConfig {
         signaling: Option<bool>,
         #[serde(default = "default_true")]
         media: Option<bool>,
+        #[serde(default)]
+        force_pcm: Option<bool>,
+        #[serde(default = "default_pcm_rate")]
+        pcm_sample_rate: Option<u32>,
     },
 }
 
 fn default_true() -> Option<bool> {
     Some(true)
+}
+
+fn default_pcm_rate() -> Option<u32> {
+    Some(16000)
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]

@@ -9,8 +9,8 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
-use tokio::sync::Mutex;
+use dashmap::DashMap;
+use std::{future::Future, pin::Pin, sync::Arc};
 use tracing::info;
 
 #[async_trait]
@@ -35,7 +35,7 @@ pub trait UserBackend: Send + Sync {
 }
 
 pub struct MemoryUserBackend {
-    users: Mutex<HashMap<String, SipUser>>,
+    users: DashMap<String, SipUser>,
 }
 
 // Type alias to simplify complex return type
@@ -67,7 +67,7 @@ impl MemoryUserBackend {
             "Creating MemoryUserBackend, users: {}",
             builtin_users.as_ref().map(|us| us.len()).unwrap_or(0)
         );
-        let mut users = HashMap::new();
+        let users = DashMap::new();
         if let Some(builtin_users) = builtin_users {
             for user in builtin_users {
                 let identifier =
@@ -75,13 +75,11 @@ impl MemoryUserBackend {
                 users.insert(identifier, user);
             }
         }
-        Self {
-            users: Mutex::new(users),
-        }
+        Self { users }
     }
     pub async fn create_user(&self, user: SipUser) -> Result<()> {
         let identifier = self.get_identifier(user.username.as_str(), user.realm.as_deref());
-        self.users.lock().await.insert(identifier, user);
+        self.users.insert(identifier, user);
         Ok(())
     }
 
@@ -92,13 +90,13 @@ impl MemoryUserBackend {
         user: SipUser,
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
-        self.users.lock().await.insert(identifier, user);
+        self.users.insert(identifier, user);
         Ok(())
     }
 
     pub async fn delete_user(&self, user: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(user, realm);
-        self.users.lock().await.remove(&identifier);
+        self.users.remove(&identifier);
         Ok(())
     }
 
@@ -109,25 +107,25 @@ impl MemoryUserBackend {
         password: &str,
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
-        let mut users = self.users.lock().await;
-        let user = users.get_mut(&identifier).unwrap();
-        user.password = Some(password.to_string());
+        if let Some(mut user) = self.users.get_mut(&identifier) {
+            user.password = Some(password.to_string());
+        }
         Ok(())
     }
 
     pub async fn enable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
-        let mut users = self.users.lock().await;
-        let user = users.get_mut(&identifier).unwrap();
-        user.enabled = true;
+        if let Some(mut user) = self.users.get_mut(&identifier) {
+            user.enabled = true;
+        }
         Ok(())
     }
 
     pub async fn disable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
-        let mut users = self.users.lock().await;
-        let user = users.get_mut(&identifier).unwrap();
-        user.enabled = false;
+        if let Some(mut user) = self.users.get_mut(&identifier) {
+            user.enabled = false;
+        }
         Ok(())
     }
 }
@@ -148,16 +146,15 @@ impl UserBackend for MemoryUserBackend {
         realm: Option<&str>,
         _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
-        let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
-        let mut user = match users.get(&identifier) {
+        let mut user = match self.users.get(&identifier) {
             Some(user) => user.clone(),
             None => {
-                if let Some(user) = users.get(username) {
+                if let Some(user) = self.users.get(username) {
                     if user.realm.as_ref().is_some_and(|r| !r.is_empty()) {
                         return Err(AuthError::NotFound);
                     }
-                    return Ok(Some(user.clone()));
+                    return Ok(Some(user.value().clone()));
                 }
                 return Ok(None);
             }
@@ -168,7 +165,7 @@ impl UserBackend for MemoryUserBackend {
 
     async fn create_user(&self, user: SipUser) -> Result<()> {
         let identifier = self.get_identifier(user.username.as_str(), user.realm.as_deref());
-        self.users.lock().await.insert(identifier, user);
+        self.users.insert(identifier, user);
         Ok(())
     }
 }

@@ -139,8 +139,7 @@ pub async fn challenge(
     Extension(acme_state): Extension<AcmeState>,
 ) -> impl IntoResponse {
     info!("Handling ACME challenge request for token: {}", token);
-    let challenges = acme_state.challenges.read().unwrap();
-    if let Some(response) = challenges.get(&token) {
+    if let Some(response) = acme_state.challenges.get(&token) {
         info!("Found challenge response for token: {}", token);
         (StatusCode::OK, response.clone())
     } else {
@@ -388,8 +387,7 @@ async fn process_acme(
             }
 
             {
-                let mut challenges = acme_state.challenges.write().unwrap();
-                challenges.remove(&token);
+                acme_state.challenges.remove(&token);
             }
         } else {
             break;
@@ -558,8 +556,7 @@ async fn solve_http01_challenge<'a>(
     let token = challenge.token.to_string();
     let key_auth = challenge.key_authorization();
     {
-        let mut challenges = acme_state.challenges.write().unwrap();
-        challenges.insert(token.clone(), key_auth.as_str().to_string());
+        acme_state.challenges.insert(token.clone(), key_auth.as_str().to_string());
     }
     challenge.set_ready().await?;
     Ok(token)

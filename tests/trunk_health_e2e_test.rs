@@ -6,13 +6,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use portpicker::pick_unused_port;
 use rsipstack::{
     EndpointBuilder,
     sip::{Method, StatusCode},
     transport::{TransportLayer, udp::UdpConnection},
 };
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -146,7 +146,7 @@ async fn test_e2e_health_check_healthy() {
     let responder = OptionsResponder::start(resp_port).await;
     let (server, _pbx_cancel) = create_pbx(pbx_port).await;
 
-    let states: HealthStateMap = Arc::new(RwLock::new(HashMap::new()));
+    let states: HealthStateMap = Arc::new(DashMap::new());
     let trunk = make_trunk(&responder.addr());
     let cancel = CancellationToken::new();
 
@@ -189,7 +189,7 @@ async fn test_e2e_health_check_unhealthy() {
 
     let (server, _pbx_cancel) = create_pbx(pbx_port).await;
 
-    let states: HealthStateMap = Arc::new(RwLock::new(HashMap::new()));
+    let states: HealthStateMap = Arc::new(DashMap::new());
     let trunk = make_trunk(&dest);
     let cancel = CancellationToken::new();
 
@@ -235,7 +235,7 @@ async fn test_e2e_health_check_recovery() {
 
     let (server, _pbx_cancel) = create_pbx(pbx_port).await;
 
-    let states: HealthStateMap = Arc::new(RwLock::new(HashMap::new()));
+    let states: HealthStateMap = Arc::new(DashMap::new());
     let trunk = make_trunk(&format!("127.0.0.1:{resp_port}"));
     let cancel = CancellationToken::new();
 
@@ -292,7 +292,7 @@ async fn test_e2e_health_check_multiple_trunks() {
     let _r2 = OptionsResponder::start(resp2).await;
     let (server, _pbx_cancel) = create_pbx(pbx_port).await;
 
-    let states: HealthStateMap = Arc::new(RwLock::new(HashMap::new()));
+    let states: HealthStateMap = Arc::new(DashMap::new());
     let t1 = make_trunk(&format!("127.0.0.1:{resp1}"));
     let t2 = make_trunk(&format!("127.0.0.1:{resp2}"));
     let cancel = CancellationToken::new();

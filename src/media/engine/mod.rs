@@ -32,12 +32,11 @@ pub use command::{
 pub use event::{MediaEvent, RecordResult};
 pub use transport::resolve_audio_path;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use parking_lot::RwLock;
+use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -85,15 +84,14 @@ pub struct MediaEngine {
     event_tx: broadcast::Sender<MediaEvent>,
     reaper_interval: Duration,
     session_idle_ttl: Duration,
-    #[cfg(test)]
-    sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
+    sessions: Arc<DashMap<String, session::MediaSession>>,
 }
 
 /// Internal handle returned alongside MediaEngine for spawning the engine task.
 pub struct MediaEngineHandle {
     pub cmd_rx: mpsc::Receiver<MediaCommand>,
     pub event_tx: broadcast::Sender<MediaEvent>,
-    pub sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
+    pub sessions: Arc<DashMap<String, session::MediaSession>>,
 }
 
 impl MediaEngine {
@@ -104,15 +102,14 @@ impl MediaEngine {
     pub fn new(config: MediaEngineConfig) -> (Self, MediaEngineHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(config.command_channel_capacity);
         let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
-        let sessions: Arc<RwLock<HashMap<String, session::MediaSession>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let sessions: Arc<DashMap<String, session::MediaSession>> =
+            Arc::new(DashMap::new());
 
         let engine = Self {
             cmd_tx,
             event_tx: event_tx.clone(),
             reaper_interval: config.session_reaper_interval,
             session_idle_ttl: config.session_idle_ttl,
-            #[cfg(test)]
             sessions: sessions.clone(),
         };
 
@@ -157,6 +154,11 @@ impl MediaEngine {
         })
     }
 
+    /// Number of active media sessions (for health reporting).
+    pub fn sessions_len(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Send a command asynchronously (backpressure-aware).
     pub async fn send_async(&self, cmd: MediaCommand) -> Result<()> {
         self.cmd_tx
@@ -173,7 +175,7 @@ impl MediaEngine {
 struct EngineCore {
     cmd_rx: mpsc::Receiver<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
-    sessions: Arc<RwLock<HashMap<String, session::MediaSession>>>,
+    sessions: Arc<DashMap<String, session::MediaSession>>,
     reaper_interval: Duration,
     session_idle_ttl: Duration,
 }
@@ -242,14 +244,14 @@ impl EngineCore {
         // (e.g. GetSessionInfo) still count as activity.
         if let Some(sid) = cmd.session_id() {
             let now = std::time::Instant::now();
-            if let Some(sess) = self.sessions.write().get_mut(sid) {
+            if let Some(mut sess) = self.sessions.get_mut(sid) {
                 sess.last_activity = now;
             }
         }
 
         match cmd {
             MediaCommand::CreateSession { session_id } => {
-                self.sessions.write().insert(
+                self.sessions.insert(
                     session_id.clone(),
                     session::MediaSession::new(session_id.clone()),
                 );
@@ -260,10 +262,7 @@ impl EngineCore {
             }
 
             MediaCommand::DestroySession { session_id } => {
-                let sess = {
-                    let mut sessions = self.sessions.write();
-                    sessions.remove(&session_id)
-                };
+                let sess = self.sessions.remove(&session_id).map(|(_, v)| v);
                 if let Some(sess) = sess {
                     Self::finalize_session_resources(sess).await;
                 }
@@ -299,8 +298,7 @@ impl EngineCore {
                 callee_codec_info,
             } => {
                 let old_bridge = {
-                    let mut sessions = self.sessions.write();
-                    let sess = sessions.get_mut(&session_id).ok_or_else(|| {
+                    let mut sess = self.sessions.get_mut(&session_id).ok_or_else(|| {
                         anyhow!("Session {} not found for AttachBridge", session_id)
                     })?;
                     let old = sess.bridge.take();
@@ -317,10 +315,7 @@ impl EngineCore {
             }
 
             MediaCommand::DetachBridge { session_id } => {
-                let bridge = {
-                    let mut sessions = self.sessions.write();
-                    sessions.get_mut(&session_id).and_then(|s| s.bridge.take())
-                };
+                let bridge = self.sessions.get_mut(&session_id).and_then(|mut s| s.bridge.take());
                 if let Some(bridge) = bridge {
                     bridge.stop().await;
                 }
@@ -332,8 +327,7 @@ impl EngineCore {
                 recorder,
                 paused,
             } => {
-                let mut sessions = self.sessions.write();
-                let sess = sessions.get_mut(&session_id).ok_or_else(|| {
+                let mut sess = self.sessions.get_mut(&session_id).ok_or_else(|| {
                     anyhow!("Session {} not found for AttachRecorder", session_id)
                 })?;
                 sess.recorder = recorder;
@@ -383,8 +377,7 @@ impl EngineCore {
                 };
 
                 let (bridge, endpoint, codec_info) = {
-                    let sessions = self.sessions.read();
-                    let sess = sessions
+                    let sess = self.sessions
                         .get(&session_id)
                         .ok_or_else(|| anyhow!("Session {} not found for Play", session_id))?;
                     let bridge = sess
@@ -423,8 +416,7 @@ impl EngineCore {
                     Ok(()) => {
                         let leg = leg_id.clone().unwrap_or_else(|| "caller".into());
                         {
-                            let mut sessions = self.sessions.write();
-                            if let Some(sess) = sessions.get_mut(&session_id) {
+                            if let Some(mut sess) = self.sessions.get_mut(&session_id) {
                                 sess.bridge_playback_track_ids = vec![play_id.clone()];
                                 sess.playback_tracks.insert(play_id.clone(), track);
                             }
@@ -443,8 +435,7 @@ impl EngineCore {
 
             MediaCommand::StopPlayback { session_id, leg_id } => {
                 let (tracks_to_stop, bridge_opt, endpoint_opt) = {
-                    let mut sessions = self.sessions.write();
-                    if let Some(sess) = sessions.get_mut(&session_id) {
+                    if let Some(mut sess) = self.sessions.get_mut(&session_id) {
                         // Drain all registered playback track IDs (InjectAudio::Both
                         // creates two tracks under the same play_id but needs both stopped).
                         let ids: Vec<String> = std::mem::take(&mut sess.bridge_playback_track_ids);
@@ -477,8 +468,7 @@ impl EngineCore {
                 callee_profile,
                 reply,
             } => {
-                let mut sessions = self.sessions.write();
-                let sess = sessions.get_mut(&session_id).ok_or_else(|| {
+                let mut sess = self.sessions.get_mut(&session_id).ok_or_else(|| {
                     anyhow!("Session {} not found for StartRecording", session_id)
                 })?;
 
@@ -513,12 +503,12 @@ impl EngineCore {
                     recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
                 }
                 *guard = Some(recorder);
+                drop(guard);
                 use std::sync::atomic::Ordering;
                 sess.recording_paused.store(false, Ordering::Relaxed);
                 sess.recording_started_at = Some(std::time::Instant::now());
                 info!(session_id = %session_id, path = %config.path, "Recording started");
-                drop(guard);
-                drop(sessions);
+                drop(sess);
 
                 // Signal the caller that the recorder is now visible to the
                 // bridge's forwarding loop, so no audio gap exists.
@@ -533,16 +523,15 @@ impl EngineCore {
 
             MediaCommand::StopRecording { session_id, reply } => {
                 let result = {
-                    let mut sessions = self.sessions.write();
-                    if let Some(sess) = sessions.get_mut(&session_id) {
+                    if let Some(mut sess) = self.sessions.get_mut(&session_id) {
+                        let started_at = sess.recording_started_at.take();
                         let mut guard = sess.recorder.write();
                         if let Some(ref mut rec) = *guard {
                             let path = rec.path.clone();
                             let _ = rec.finalize();
-                            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                            let duration_secs = sess
-                                .recording_started_at
-                                .take()
+                            let file_size =
+                                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            let duration_secs = started_at
                                 .map(|t| t.elapsed().as_secs_f64())
                                 .unwrap_or(0.0);
                             *guard = None;
@@ -552,7 +541,6 @@ impl EngineCore {
                                 file_size,
                             })
                         } else {
-                            sess.recording_started_at = None;
                             None
                         }
                     } else {
@@ -571,8 +559,7 @@ impl EngineCore {
             }
 
             MediaCommand::PauseRecording { session_id } => {
-                let sessions = self.sessions.read();
-                if let Some(sess) = sessions.get(&session_id) {
+                if let Some(sess) = self.sessions.get(&session_id) {
                     use std::sync::atomic::Ordering;
                     // Release ensures the bridge forwarding thread sees the flag
                     // before the RecordingPaused event reaches subscribers.
@@ -584,8 +571,7 @@ impl EngineCore {
             }
 
             MediaCommand::ResumeRecording { session_id } => {
-                let sessions = self.sessions.read();
-                if let Some(sess) = sessions.get(&session_id) {
+                if let Some(sess) = self.sessions.get(&session_id) {
                     use std::sync::atomic::Ordering;
                     sess.recording_paused.store(false, Ordering::Release);
                 }
@@ -601,7 +587,6 @@ impl EngineCore {
             } => {
                 let Some((bridge, endpoint)) = self
                     .sessions
-                    .read()
                     .get(&session_id)
                     .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
                 else {
@@ -668,8 +653,7 @@ impl EngineCore {
                 mute_peer,
             } => {
                 let (endpoints, mute_endpoint) = {
-                    let sessions = self.sessions.read();
-                    let Some(sess) = sessions.get(&session_id) else {
+                    let Some(sess) = self.sessions.get(&session_id) else {
                         return Err(anyhow!("Session {} not found for InjectAudio", session_id));
                     };
                     let (eps, mute) = match target {
@@ -705,8 +689,7 @@ impl EngineCore {
                 };
 
                 let (bridge, caller_codec, callee_codec) = {
-                    let sessions = self.sessions.read();
-                    let sess = sessions
+                    let sess = self.sessions
                         .get(&session_id)
                         .ok_or_else(|| anyhow!("Session {} not found", session_id))?;
                     let bridge = sess.bridge.clone().ok_or_else(|| {
@@ -738,8 +721,7 @@ impl EngineCore {
                 // Use the codec that matches the target endpoint so the
                 // receiver can actually decode the audio.
                 let caller_ep = {
-                    let sessions = self.sessions.read();
-                    sessions.get(&session_id).map(|s| s.caller_endpoint())
+                    self.sessions.get(&session_id).map(|s| s.caller_endpoint())
                 };
                 let mut tracks: Vec<(
                     crate::media::bridge::BridgeEndpoint,
@@ -765,8 +747,7 @@ impl EngineCore {
                 }
 
                 {
-                    let mut sessions = self.sessions.write();
-                    if let Some(sess) = sessions.get_mut(&session_id) {
+                    if let Some(mut sess) = self.sessions.get_mut(&session_id) {
                         // Store all tracks so StopPlayback can stop every one.
                         // InjectAudio::Both creates two FileTrack instances under the
                         // same play_id (distinguished by endpoint suffix).
@@ -806,7 +787,6 @@ impl EngineCore {
             MediaCommand::MuteLeg { session_id, leg_id } => {
                 let Some((bridge, endpoint)) = self
                     .sessions
-                    .read()
                     .get(&session_id)
                     .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
                 else {
@@ -819,7 +799,6 @@ impl EngineCore {
             MediaCommand::UnmuteLeg { session_id, leg_id } => {
                 let Some((bridge, endpoint)) = self
                     .sessions
-                    .read()
                     .get(&session_id)
                     .and_then(|s| s.bridge.clone().map(|b| (b, s.endpoint_for_leg(&leg_id))))
                 else {
@@ -877,19 +856,18 @@ impl EngineCore {
 
         // Step 1: identify stale session IDs (read lock).
         let stale_ids: Vec<String> = {
-            let sessions = self.sessions.read();
-            sessions
+            self.sessions
                 .iter()
-                .filter_map(|(sid, sess)| {
-                    let idle = now.duration_since(sess.last_activity);
+                .filter_map(|r| {
+                    let idle = now.duration_since(r.last_activity);
                     if idle > ttl {
                         warn!(
-                            session_id = %sid,
+                            session_id = r.key(),
                             idle_secs = idle.as_secs(),
                             ttl_secs = ttl.as_secs(),
                             "Reaping stale MediaEngine session (DestroySession was likely lost)"
                         );
-                        Some(sid.clone())
+                        Some(r.key().clone())
                     } else {
                         None
                     }
@@ -898,17 +876,16 @@ impl EngineCore {
         };
 
         if stale_ids.is_empty() {
-            let remaining = self.sessions.read().len();
+            let remaining = self.sessions.len();
             debug!(active_sessions = remaining, "MediaEngine session map size");
             return;
         }
 
         // Step 2: remove & collect the MediaSession values (write lock).
         let stale: Vec<session::MediaSession> = {
-            let mut sessions = self.sessions.write();
             stale_ids
                 .iter()
-                .filter_map(|sid| sessions.remove(sid))
+                .filter_map(|sid| self.sessions.remove(sid).map(|(_, v)| v))
                 .collect()
         };
 
@@ -921,7 +898,7 @@ impl EngineCore {
                 .send(MediaEvent::SessionDestroyed { session_id: sid });
         }
 
-        let remaining = self.sessions.read().len();
+        let remaining = self.sessions.len();
         warn!(
             reaped = count,
             remaining, "MediaEngine reaper swept stale sessions"
@@ -1030,7 +1007,7 @@ mod tests {
         );
 
         // Confirm the session is gone from the map.
-        assert_eq!(engine.sessions.read().len(), 0);
+        assert_eq!(engine.sessions.len(), 0);
     }
 
     #[tokio::test]
@@ -1060,7 +1037,7 @@ mod tests {
 
         // After ~750ms (well past the 300ms TTL) the session should still
         // be alive because last_activity was refreshed.
-        assert_eq!(engine.sessions.read().len(), 1);
+        assert_eq!(engine.sessions.len(), 1);
     }
 
     #[tokio::test]
@@ -1327,8 +1304,7 @@ mod tests {
 
         // Verify the bridge is stored
         {
-            let sessions = engine.sessions.read();
-            let sess = sessions.get("bridge1").unwrap();
+            let sess = engine.sessions.get("bridge1").unwrap();
             assert!(sess.bridge.is_some());
             assert!(sess.caller_is_webrtc);
         }
@@ -1351,8 +1327,7 @@ mod tests {
         let _ = event_rx.recv().await;
 
         {
-            let sessions = engine.sessions.read();
-            let sess = sessions.get("bridge1").unwrap();
+            let sess = engine.sessions.get("bridge1").unwrap();
             assert!(sess.bridge.is_none());
         }
     }
@@ -2162,8 +2137,7 @@ mod tests {
 
         // Now inspect the session — BOTH track IDs must be stored.
         {
-            let sessions = engine.sessions.read();
-            let sess = sessions.get("inj_both").unwrap();
+            let sess = engine.sessions.get("inj_both").unwrap();
             assert_eq!(
                 sess.bridge_playback_track_ids.len(),
                 2,
@@ -2265,8 +2239,7 @@ mod tests {
         let _ = event_rx.recv().await;
 
         {
-            let sessions = engine.sessions.read();
-            let sess = sessions.get("sp_both").unwrap();
+            let sess = engine.sessions.get("sp_both").unwrap();
             assert!(
                 sess.bridge_playback_track_ids.is_empty(),
                 "bridge_playback_track_ids must be empty after StopPlayback"

@@ -191,8 +191,8 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing
         if let Some(callee_user) = origin.uri.user() {
-            let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
+            if let Some(entry) = self.data_context.debug_routes.get(callee_user) {
+                let (app_name, app_params) = entry.value();
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),
@@ -236,8 +236,8 @@ impl RouteInvite for DefaultRouteInvite {
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         // Check debug routes before standard routing (preview mode)
         if let Some(callee_user) = origin.uri.user() {
-            let debug_routes = self.data_context.debug_routes.read().unwrap();
-            if let Some((app_name, app_params)) = debug_routes.get(callee_user) {
+            if let Some(entry) = self.data_context.debug_routes.get(callee_user) {
+                let (app_name, app_params) = entry.value();
                 return Ok(RouteResult::Application {
                     option,
                     app_name: app_name.clone(),

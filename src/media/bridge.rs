@@ -57,6 +57,7 @@ use rustrtc::{
     },
     rtp::RtcpPacket,
 };
+use dashmap::DashMap;
 use std::{
     collections::HashMap,
     sync::{
@@ -148,7 +149,7 @@ struct VideoForwardingTrack {
     id: String,
     inner: Arc<dyn MediaStreamTrack>,
     payload_type: Arc<AtomicU8>,
-    payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+    payload_map: Arc<DashMap<u8, u8>>,
 }
 
 #[async_trait::async_trait]
@@ -176,7 +177,7 @@ impl MediaStreamTrack for VideoForwardingTrack {
             }
             let target_payload_type = frame
                 .payload_type
-                .and_then(|pt| self.payload_map.read().get(&pt).copied())
+                .and_then(|pt| self.payload_map.get(&pt).map(|v| *v))
                 .unwrap_or_else(|| self.payload_type.load(Ordering::Relaxed));
             frame.payload_type = Some(target_payload_type);
             frame.header_extension = None;
@@ -588,7 +589,7 @@ struct BridgeSideState {
     video_sender: parking_lot::Mutex<Option<Arc<RtpSender>>>,
     audio_sender: parking_lot::Mutex<Option<Arc<RtpSender>>>,
     video_payload_type: Arc<AtomicU8>,
-    video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+    video_payload_map: Arc<DashMap<u8, u8>>,
 }
 
 impl BridgeSideState {
@@ -613,7 +614,7 @@ impl BridgeSideState {
             video_sender: parking_lot::Mutex::new(None),
             audio_sender: parking_lot::Mutex::new(None),
             video_payload_type: Arc::new(AtomicU8::new(96)),
-            video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            video_payload_map: Arc::new(DashMap::new()),
         }
     }
 
@@ -792,17 +793,15 @@ struct BridgeStats {
 
 /// N-peer routing state.
 struct PeerRouteState {
-    peers: Arc<parking_lot::Mutex<std::collections::HashMap<PeerId, PeerEntry>>>,
-    routes: Arc<
-        parking_lot::Mutex<std::collections::HashMap<PeerId, std::collections::HashSet<PeerId>>>,
-    >,
+    peers: Arc<DashMap<PeerId, PeerEntry>>,
+    routes: Arc<DashMap<PeerId, std::collections::HashSet<PeerId>>>,
 }
 
 impl PeerRouteState {
     fn new() -> Self {
         Self {
-            peers: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
-            routes: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            peers: Arc::new(DashMap::new()),
+            routes: Arc::new(DashMap::new()),
         }
     }
 }
@@ -881,7 +880,7 @@ struct DirectionParams {
     leg_stats: Arc<LegStats>,
     recorder_leg: Option<RecLeg>,
     video_payload_type: Arc<AtomicU8>,
-    video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+    video_payload_map: Arc<DashMap<u8, u8>>,
     video_track_label: &'static str,
     pli_label: &'static str,
     transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
@@ -1140,10 +1139,16 @@ impl BridgePeer {
             self.callee.video_payload_type.store(pt, Ordering::Relaxed);
         }
 
-        *self.caller.video_payload_map.write() = rtp_to_webrtc;
-        *self.callee.video_payload_map.write() = webrtc_to_rtp;
-        let caller_map = self.caller.video_payload_map.read().clone();
-        let callee_map = self.callee.video_payload_map.read().clone();
+        self.caller.video_payload_map.clear();
+        for (k, v) in rtp_to_webrtc {
+            self.caller.video_payload_map.insert(k, v);
+        }
+        self.callee.video_payload_map.clear();
+        for (k, v) in webrtc_to_rtp {
+            self.callee.video_payload_map.insert(k, v);
+        }
+        let caller_map: HashMap<u8, u8> = self.caller.video_payload_map.iter().map(|r| (*r.key(), *r.value())).collect();
+        let callee_map: HashMap<u8, u8> = self.callee.video_payload_map.iter().map(|r| (*r.key(), *r.value())).collect();
 
         debug!(
             bridge_id = %self.id,
@@ -1616,28 +1621,28 @@ impl BridgePeer {
 
     /// Add a peer to the N-peer bridge.
     pub async fn add_peer(&self, peer_id: PeerId, entry: PeerEntry) -> Result<()> {
-        let mut peers = self.peer_routes.peers.lock();
-        if peers.contains_key(&peer_id) {
-            return Err(anyhow::anyhow!(
+        let peer_id2 = peer_id.clone();
+        match self.peer_routes.peers.entry(peer_id) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(anyhow::anyhow!(
                 "Peer {} already exists in bridge {}",
-                peer_id,
+                peer_id2,
                 self.id
-            ));
+            )),
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(entry);
+                Ok(())
+            }
         }
-        peers.insert(peer_id, entry);
-        Ok(())
     }
 
     /// Remove a peer from the N-peer bridge.
     pub async fn remove_peer(&self, peer_id: &PeerId) -> Option<PeerEntry> {
-        let mut peers = self.peer_routes.peers.lock();
-        let mut routes = self.peer_routes.routes.lock();
-        routes.remove(peer_id);
+        self.peer_routes.routes.remove(peer_id);
         // Remove this peer from all other routes
-        for dests in routes.values_mut() {
-            dests.remove(peer_id);
+        for mut dests in self.peer_routes.routes.iter_mut() {
+            dests.value_mut().remove(peer_id);
         }
-        peers.remove(peer_id)
+        self.peer_routes.peers.remove(peer_id).map(|r| r.1)
     }
 
     /// Set forwarding route: audio from `from_peer` is sent to all peers in `to_peers`.
@@ -1646,15 +1651,12 @@ impl BridgePeer {
         from_peer: PeerId,
         to_peers: std::collections::HashSet<PeerId>,
     ) -> Result<()> {
-        let peers = self.peer_routes.peers.lock();
         for dest in &to_peers {
-            if !peers.contains_key(dest) {
+            if !self.peer_routes.peers.contains_key(dest) {
                 return Err(anyhow::anyhow!("Route destination peer {} not found", dest));
             }
         }
-        drop(peers);
-        let mut routes = self.peer_routes.routes.lock();
-        routes.insert(from_peer, to_peers);
+        self.peer_routes.routes.insert(from_peer, to_peers);
         Ok(())
     }
 
@@ -1906,10 +1908,9 @@ impl BridgePeer {
 
         crate::utils::media_spawn(async move {
             let extra_peers: Vec<(PeerId, PeerConnection)> = peers_map
-                .lock()
                 .iter()
-                .filter(|(id, _)| *id != "webrtc" && *id != "rtp")
-                .map(|(id, entry)| (id.clone(), entry.pc.clone()))
+                .filter(|r| *r.key() != "webrtc" && *r.key() != "rtp")
+                .map(|r| (r.key().clone(), r.value().pc.clone()))
                 .collect();
 
             for (peer_id, pc) in extra_peers {
@@ -1953,19 +1954,14 @@ impl BridgePeer {
     fn spawn_peer_track_forwarder(
         bridge_id: &str,
         peer_id: &str,
-        routes: &Arc<
-            parking_lot::Mutex<
-                std::collections::HashMap<PeerId, std::collections::HashSet<PeerId>>,
-            >,
-        >,
-        peers_ref: &Arc<parking_lot::Mutex<std::collections::HashMap<PeerId, PeerEntry>>>,
+        routes: &Arc<DashMap<PeerId, std::collections::HashSet<PeerId>>>,
+        peers_ref: &Arc<DashMap<PeerId, PeerEntry>>,
         cancel: &CancellationToken,
         track: Arc<dyn MediaStreamTrack>,
     ) {
         let route_dests: Vec<PeerId> = routes
-            .lock()
             .get(peer_id)
-            .cloned()
+            .map(|r| r.clone())
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -1991,15 +1987,13 @@ impl BridgePeer {
                         Err(_) => break,
                     },
                 };
-                let guard = peers.lock();
                 for dest in &dests {
-                    if let Some(entry) = guard.get(dest) {
+                    if let Some(entry) = peers.get(dest) {
                         if let Some(ref sender) = entry.audio_sender {
                             let _ = sender.try_send(sample.clone());
                         }
                     }
                 }
-                drop(guard);
             }
             debug!(bridge_id = %bid, peer_id = %pid, track = %track_id, "N-peer forward task ended");
         });
@@ -2375,6 +2369,23 @@ impl BridgePeer {
                                     &mut dtmf_detector,
                                 );
                             }
+                            // Count ALL received packets before output_mode/gate checks,
+                            // so the RTP timeout detector reliably reflects actual reception.
+                            let (sample_bytes, sample_seq) = match &sample {
+                                MediaSample::Audio(a) => (a.data.len() as u64, a.sequence_number),
+                                MediaSample::Video(v) => (v.data.len() as u64, v.sequence_number),
+                            };
+                            ctx.leg_stats.packets.fetch_add(1, Ordering::Relaxed);
+                            ctx.leg_stats.bytes.fetch_add(sample_bytes, Ordering::Relaxed);
+                            if let Some(seq) = sample_seq {
+                                if let Some(prev) = last_seq {
+                                    let gap = seq.wrapping_sub(prev.wrapping_add(1));
+                                    if gap > 0 && gap < 512 {
+                                        ctx.leg_stats.lost.fetch_add(gap as u64, Ordering::Relaxed);
+                                    }
+                                }
+                                last_seq = Some(seq);
+                            }
                             let mode = ctx.output_mode.load(Ordering::Acquire);
                             if !is_video && mode != BRIDGE_OUTPUT_PEER {
                                 if packet_count == 1 {
@@ -2394,21 +2405,6 @@ impl BridgePeer {
                             }
                             if packet_count == 1 {
                                 debug!(bridge_id = %ctx.bridge_id, direction = %ctx.path, kind = ?sample.kind(), "First media sample forwarded");
-                            }
-                            let (sample_bytes, sample_seq) = match &sample {
-                                MediaSample::Audio(a) => (a.data.len() as u64, a.sequence_number),
-                                MediaSample::Video(v) => (v.data.len() as u64, v.sequence_number),
-                            };
-                            ctx.leg_stats.packets.fetch_add(1, Ordering::Relaxed);
-                            ctx.leg_stats.bytes.fetch_add(sample_bytes, Ordering::Relaxed);
-                            if let Some(seq) = sample_seq {
-                                if let Some(prev) = last_seq {
-                                    let gap = seq.wrapping_sub(prev.wrapping_add(1));
-                                    if gap > 0 && gap < 512 {
-                                        ctx.leg_stats.lost.fetch_add(gap as u64, Ordering::Relaxed);
-                                    }
-                                }
-                                last_seq = Some(seq);
                             }
                             match sample {
                                 MediaSample::Audio(mut a) => {
@@ -5188,6 +5184,69 @@ mod tests {
                 rms
             );
         }
+    }
+
+    /// Verify that the forward loop counts ALL received packets in leg_stats
+    /// before the output_mode and gate checks, so the RTP timeout detector
+    /// reliably reflects actual reception even when forwarding is suppressed
+    /// by a non-PEER output mode or a closed gate (Bug 1 fix).
+    #[tokio::test]
+    async fn test_forward_loop_counts_packets_before_suppression_checks() {
+        use rustrtc::media::track::sample_track;
+
+        let input_frame = AudioFrame {
+            rtp_timestamp: 100,
+            clock_rate: 8000,
+            data: vec![0u8; 160].into(),
+            sequence_number: Some(10),
+            payload_type: Some(0),
+            ..Default::default()
+        };
+
+        let mock_track: Arc<dyn MediaStreamTrack> = Arc::new(OneShotAudioTrack {
+            sample: parking_lot::Mutex::new(Some(MediaSample::Audio(input_frame))),
+        });
+
+        let (output_tx, _output_track, _) = sample_track(MediaKind::Audio, 10);
+        let sender_arc = Arc::new(parking_lot::Mutex::new(Some(EgressTap::passthrough(
+            output_tx,
+        ))));
+        let sender_weak = Arc::downgrade(&sender_arc);
+
+        let cancel = CancellationToken::new();
+        let stats: Arc<LegStats> = LegStats::new();
+        let dtmf: Arc<parking_lot::RwLock<Option<DtmfSink>>> =
+            Arc::new(parking_lot::RwLock::new(None));
+        let gate = Arc::new(AtomicBool::new(false));
+
+        let task_handle = {
+            let ctx = ForwardLoopContextBuilder::new(
+                "test-stats-before-suppression".to_string(),
+                mock_track.clone(),
+                sender_weak.clone(),
+                Arc::new(AtomicU8::new(BRIDGE_OUTPUT_FILE)),
+                cancel.clone(),
+                ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
+                stats.clone(),
+            )
+            .with_gate(Some(gate))
+            .with_dtmf_sink(dtmf)
+            .build();
+            crate::utils::media_spawn(async move {
+                BridgePeer::run_forward_loop(ctx).await;
+            })
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel.cancel();
+        let _ = task_handle.await;
+
+        let counted = stats.packets.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            counted > 0,
+            "leg_stats.packets must be > 0 even when output_mode=FILE and gate=closed; got {}",
+            counted
+        );
     }
 
     /// Verify that the forwarding loop passes audio through unchanged when

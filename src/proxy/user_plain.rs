@@ -3,21 +3,21 @@ use crate::call::user::SipUser;
 use crate::proxy::auth::AuthError;
 use anyhow::Result;
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use dashmap::DashMap;
 use std::io::BufRead;
 use std::sync::Arc;
-use std::{collections::HashMap, fs::File, io, path::Path};
+use std::{fs::File, io, path::Path};
 use tracing::{info, warn};
 
 pub struct PlainTextBackend {
-    users: Arc<Mutex<HashMap<String, SipUser>>>,
+    users: Arc<DashMap<String, SipUser>>,
     path: String,
 }
 
 impl PlainTextBackend {
     pub fn new(path: &str) -> Self {
         Self {
-            users: Arc::new(Mutex::new(HashMap::new())),
+            users: Arc::new(DashMap::new()),
             path: path.to_owned(),
         }
     }
@@ -36,8 +36,7 @@ impl PlainTextBackend {
             }
         };
         let reader = io::BufReader::new(file);
-        let mut users = self.users.lock();
-        users.clear();
+        self.users.clear();
 
         for line in reader.lines() {
             let line = line?;
@@ -75,9 +74,9 @@ impl PlainTextBackend {
                 allow_guest_calls: false,
                 voicemail_disabled: false,
             };
-            users.insert(username.to_string(), user);
+            self.users.insert(username.to_string(), user);
         }
-        info!("Loaded {} users from {}", users.len(), self.path);
+        info!("Loaded {} users from {}", self.users.len(), self.path);
         Ok(())
     }
 }
@@ -93,8 +92,8 @@ impl UserBackend for PlainTextBackend {
         realm: Option<&str>,
         _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
-        let mut user = match self.users.lock().get(username) {
-            Some(user) => user.clone(),
+        let mut user = match self.users.get(username) {
+            Some(user) => user.value().clone(),
             None => return Ok(None),
         };
         if !user.enabled {

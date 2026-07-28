@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use audio_codec::CodecType;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use rsipstack::sip::{StatusCode, Transport};
 use rsipstack::{
@@ -1278,7 +1279,7 @@ pub trait RouteInvite: Sync + Send {
 #[derive(Debug)]
 pub struct RoutingState {
     /// Round-robin counters for each destination group
-    round_robin_counters: Arc<Mutex<HashMap<String, usize>>>,
+    round_robin_counters: Arc<DashMap<String, usize>>,
     pub policy_guard: Option<Arc<crate::call::policy::PolicyGuard>>,
 }
 
@@ -1291,7 +1292,7 @@ impl Default for RoutingState {
 impl RoutingState {
     pub fn new() -> Self {
         Self {
-            round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
+            round_robin_counters: Arc::new(DashMap::new()),
             policy_guard: None,
         }
     }
@@ -1302,12 +1303,12 @@ impl RoutingState {
             return 0;
         }
 
-        let mut counters = self.round_robin_counters.lock();
-        let counter = counters
+        let mut entry = self
+            .round_robin_counters
             .entry(destination_key.to_string())
-            .or_insert_with(|| 0);
-        let r = *counter % trunk_count;
-        *counter += 1;
+            .or_insert(0);
+        let r = *entry % trunk_count;
+        *entry += 1;
         r
     }
 }

@@ -225,6 +225,18 @@ impl PresenceManager {
         Ok(())
     }
 
+    pub fn states_len(&self) -> usize {
+        self.states.read().unwrap().len()
+    }
+
+    pub fn subscribers_len(&self) -> usize {
+        self.subscribers.read().unwrap().len()
+    }
+
+    pub fn mwi_subscribers_len(&self) -> usize {
+        self.mwi_subscribers.read().unwrap().len()
+    }
+
     pub fn get_state(&self, identity: &str) -> PresenceState {
         let map = self.states.read().unwrap();
         map.get(identity).cloned().unwrap_or_default()

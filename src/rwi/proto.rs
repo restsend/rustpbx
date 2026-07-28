@@ -1,7 +1,6 @@
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub const RWI_VERSION: &str = "1.0";
 
@@ -85,31 +84,31 @@ impl From<CallMeta> for EventCallContext {
 
 /// Thread-safe, in-memory store mapping call_id → CallMeta.
 pub struct CallMetaStore {
-    store: RwLock<HashMap<String, CallMeta>>,
+    store: DashMap<String, CallMeta>,
 }
 
 impl CallMetaStore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            store: RwLock::new(HashMap::new()),
+            store: DashMap::new(),
         })
     }
 
     pub async fn insert(&self, call_id: String, meta: CallMeta) {
-        self.store.write().await.insert(call_id, meta);
+        self.store.insert(call_id, meta);
     }
 
     pub async fn get(&self, call_id: &str) -> Option<CallMeta> {
-        self.store.read().await.get(call_id).cloned()
+        self.store.get(call_id).map(|v| v.clone())
     }
 
     /// Synchronous non-blocking lookup.
     pub fn get_sync(&self, call_id: &str) -> Option<CallMeta> {
-        self.store.try_read().ok()?.get(call_id).cloned()
+        self.store.get(call_id).map(|v| v.clone())
     }
 
     pub async fn remove(&self, call_id: &str) {
-        self.store.write().await.remove(call_id);
+        self.store.remove(call_id);
     }
 }
 

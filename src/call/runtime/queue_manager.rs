@@ -6,9 +6,9 @@
 use crate::call::domain::LegId;
 use crate::call::runtime::SessionId;
 use anyhow::{Result, anyhow};
-use std::collections::{HashMap, VecDeque};
+use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::info;
 
 /// Unique identifier for a queue
@@ -109,20 +109,19 @@ impl CallQueue {
 /// Global queue manager
 #[derive(Debug)]
 pub struct QueueManager {
-    queues: Arc<RwLock<HashMap<QueueId, CallQueue>>>,
+    queues: Arc<DashMap<QueueId, CallQueue>>,
 }
 
 impl QueueManager {
     pub fn new() -> Self {
         Self {
-            queues: Arc::new(RwLock::new(HashMap::new())),
+            queues: Arc::new(DashMap::new()),
         }
     }
 
     /// Create or get a queue
     pub async fn get_or_create_queue(&self, queue_id: QueueId) -> CallQueue {
-        let mut queues = self.queues.write().await;
-        queues
+        self.queues
             .entry(queue_id.clone())
             .or_insert_with(|| CallQueue::new(queue_id))
             .clone()
@@ -130,8 +129,7 @@ impl QueueManager {
 
     /// Get a queue if it exists
     pub async fn get_queue(&self, queue_id: &QueueId) -> Option<CallQueue> {
-        let queues = self.queues.read().await;
-        queues.get(queue_id).cloned()
+        self.queues.get(queue_id).map(|v| v.clone())
     }
 
     /// Enqueue a leg to a queue
@@ -142,8 +140,7 @@ impl QueueManager {
         session_id: SessionId,
         priority: Option<u32>,
     ) -> Result<usize> {
-        let mut queues = self.queues.write().await;
-        let queue = queues
+        let mut queue = self.queues
             .entry(queue_id.clone())
             .or_insert_with(|| CallQueue::new(queue_id));
 
@@ -162,8 +159,7 @@ impl QueueManager {
 
     /// Dequeue a leg from a queue
     pub async fn dequeue(&self, queue_id: &QueueId, leg_id: &LegId) -> Result<QueueEntry> {
-        let mut queues = self.queues.write().await;
-        let queue = queues
+        let mut queue = self.queues
             .get_mut(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -182,8 +178,7 @@ impl QueueManager {
 
     /// Get position of a leg in a queue
     pub async fn get_position(&self, queue_id: &QueueId, leg_id: &LegId) -> Result<usize> {
-        let queues = self.queues.read().await;
-        let queue = queues
+        let queue = self.queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -194,8 +189,7 @@ impl QueueManager {
 
     /// Get queue statistics
     pub async fn get_queue_stats(&self, queue_id: &QueueId) -> Result<QueueStats> {
-        let queues = self.queues.read().await;
-        let queue = queues
+        let queue = self.queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -212,17 +206,15 @@ impl QueueManager {
 
     /// List all queues
     pub async fn list_queues(&self) -> Vec<QueueId> {
-        let queues = self.queues.read().await;
-        queues.keys().cloned().collect()
+        self.queues.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Remove a queue if empty
     pub async fn remove_queue_if_empty(&self, queue_id: &QueueId) -> Result<bool> {
-        let mut queues = self.queues.write().await;
-        if let Some(queue) = queues.get(queue_id)
+        if let Some(queue) = self.queues.get(queue_id)
             && queue.is_empty()
         {
-            queues.remove(queue_id);
+            self.queues.remove(queue_id);
             info!(queue_id = %queue_id.0, "Empty queue removed");
             return Ok(true);
         }
@@ -231,8 +223,7 @@ impl QueueManager {
 
     /// Get all entries in a queue
     pub async fn get_queue_entries(&self, queue_id: &QueueId) -> Result<Vec<QueueEntry>> {
-        let queues = self.queues.read().await;
-        let queue = queues
+        let queue = self.queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 

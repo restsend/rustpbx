@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use dashmap::DashMap;
+
 use crate::config::SipFlowSubdirs;
 use crate::sipflow::flowdb_codec::{
     SIP_PREFIX, decode_rtp_value, decode_sip_value, encode_rtp_value, encode_sip_value,
@@ -17,7 +19,7 @@ use crate::sipflow::flowdb_codec::{
 use crate::sipflow::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
 use crate::sipflow::wav_utils::{
     LegPayloadTypeMap, PayloadTypeMap, build_payload_type_map, build_payload_type_map_by_leg,
-    generate_wav_to_writer,
+    generate_wav_to_writer_with_rate,
 };
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
@@ -48,15 +50,17 @@ pub struct FlowDbBackend {
     block_cache_capacity_mb: usize,
 
     /// LRU cache of open engines, keyed by absolute data directory.
-    engines: Mutex<HashMap<PathBuf, CachedEngine>>,
+    engines: DashMap<PathBuf, CachedEngine>,
 
     counter: AtomicU64,
     /// Per-bucket pending batches. The key matches the key used in `engines`,
     /// i.e. the absolute data directory of the bucket.
-    batches: Mutex<HashMap<PathBuf, Vec<Record>>>,
+    batches: DashMap<PathBuf, Vec<Record>>,
     flush_count: usize,
     flush_interval: std::time::Duration,
     last_flush: Mutex<Instant>,
+    force_pcm: bool,
+    pcm_sample_rate: u32,
 }
 
 impl FlowDbBackend {
@@ -68,6 +72,8 @@ impl FlowDbBackend {
         block_cache_capacity_mb: usize,
         flush_count: usize,
         flush_interval_secs: u64,
+        force_pcm: bool,
+        pcm_sample_rate: u32,
     ) -> Result<Self> {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)?;
@@ -81,12 +87,14 @@ impl FlowDbBackend {
             ttl_micros,
             memtable_size_mb,
             block_cache_capacity_mb,
-            engines: Mutex::new(HashMap::new()),
+            engines: DashMap::new(),
             counter: AtomicU64::new(0),
-            batches: Mutex::new(HashMap::new()),
+            batches: DashMap::new(),
             flush_count,
             flush_interval: std::time::Duration::from_secs(flush_interval_secs),
             last_flush: Mutex::new(Instant::now()),
+            force_pcm,
+            pcm_sample_rate,
         })
     }
 
@@ -152,12 +160,9 @@ impl FlowDbBackend {
     /// alive — we never evict an engine that has unflushed data.
     fn engine_for_bucket(&self, path: &PathBuf) -> Result<Arc<Engine>> {
         // Fast path: cache hit.
-        {
-            let mut engines = self.engines.lock().unwrap();
-            if let Some(entry) = engines.get_mut(path) {
-                entry.last_used = Instant::now();
-                return Ok(entry.engine.clone());
-            }
+        if let Some(mut entry) = self.engines.get_mut(path) {
+            entry.last_used = Instant::now();
+            return Ok(entry.engine.clone());
         }
 
         // Slow path: open a new engine outside the lock to avoid blocking
@@ -169,50 +174,38 @@ impl FlowDbBackend {
         };
         let new_engine = Self::open_engine_at(path, &tuning)?;
 
-        let evicted = {
-            let mut engines = self.engines.lock().unwrap();
-            // Re-check: another thread may have raced us.
-            if let Some(entry) = engines.get_mut(path) {
-                entry.last_used = Instant::now();
-                return Ok(entry.engine.clone());
-            }
-            engines.insert(
-                path.clone(),
-                CachedEngine {
-                    engine: new_engine.clone(),
-                    last_used: Instant::now(),
-                },
-            );
+        // Re-check: another thread may have raced us.
+        if let Some(mut entry) = self.engines.get_mut(path) {
+            entry.last_used = Instant::now();
+            return Ok(entry.engine.clone());
+        }
+        self.engines.insert(
+            path.clone(),
+            CachedEngine {
+                engine: new_engine.clone(),
+                last_used: Instant::now(),
+            },
+        );
 
-            // Evict if over capacity.
-            if engines.len() > MAX_OPEN_ENGINES {
-                let batches = self.batches.lock().unwrap();
-                // Pick the LRU engine whose bucket has no pending batch.
-                let victim = engines
-                    .iter()
-                    .filter(|(p, _)| p.as_path() != path.as_path() && !batches.contains_key(*p))
-                    .min_by_key(|(_, e)| e.last_used)
-                    .map(|(p, _)| p.clone());
-                drop(batches);
-                if let Some(victim_path) = victim {
-                    if let Some(entry) = engines.remove(&victim_path) {
-                        drop(engines);
-                        // Close outside the lock; ignore errors — data is
-                        // still recoverable from the WAL on next open.
-                        let _ = entry.engine.close();
-                        Some(entry)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+        // Evict if over capacity.
+        if self.engines.len() > MAX_OPEN_ENGINES {
+            // Pick the LRU engine whose bucket has no pending batch.
+            let victim = self
+                .engines
+                .iter()
+                .filter(|entry| entry.key().as_path() != path.as_path() && !self.batches.contains_key(entry.key()))
+                .min_by_key(|entry| entry.value().last_used)
+                .map(|entry| entry.key().clone());
+
+            if let Some(victim_path) = victim {
+                if let Some((_, entry)) = self.engines.remove(&victim_path) {
+                    // Close outside the lock; ignore errors — data is
+                    // still recoverable from the WAL on next open.
+                    let _ = entry.engine.close();
                 }
-            } else {
-                None
             }
-        };
+        }
 
-        let _ = evicted; // already closed above
         Ok(new_engine)
     }
 
@@ -229,7 +222,7 @@ impl FlowDbBackend {
 
     /// Total number of records waiting across all buckets.
     fn total_pending(&self) -> usize {
-        self.batches.lock().unwrap().values().map(|v| v.len()).sum()
+        self.batches.iter().map(|entry| entry.value().len()).sum()
     }
 
     fn should_flush(&self) -> bool {
@@ -249,13 +242,16 @@ impl FlowDbBackend {
     /// `engines` cache, so there is no risk of deadlock with
     /// [`engine_for_bucket`].
     fn flush_all_batches(&self) -> Result<()> {
-        let drained: HashMap<PathBuf, Vec<Record>> = {
-            let mut batches = self.batches.lock().unwrap();
-            if batches.is_empty() {
-                return Ok(());
+        if self.batches.is_empty() {
+            return Ok(());
+        }
+        let keys: Vec<PathBuf> = self.batches.iter().map(|e| e.key().clone()).collect();
+        let mut drained: HashMap<PathBuf, Vec<Record>> = HashMap::new();
+        for key in keys {
+            if let Some((_, records)) = self.batches.remove(&key) {
+                drained.insert(key, records);
             }
-            std::mem::take(&mut *batches)
-        };
+        }
 
         for (path, mut records) in drained {
             if records.is_empty() {
@@ -271,7 +267,7 @@ impl FlowDbBackend {
                             "flowdb write_batch_sync failed for {}: {e}",
                             path.display()
                         );
-                        self.batches.lock().unwrap().insert(path, vec![]);
+                        self.batches.insert(path, vec![]);
                     }
                 }
                 Err(e) => {
@@ -280,7 +276,7 @@ impl FlowDbBackend {
                         path.display()
                     );
                     records.clear();
-                    self.batches.lock().unwrap().insert(path, records);
+                    self.batches.insert(path, records);
                 }
             }
         }
@@ -450,11 +446,13 @@ impl FlowDbBackend {
         let (payload_map, leg_payload_map) =
             self.build_payload_maps(call_id, start_ts, end_ts, leg_filter);
         let mut cursor = std::io::Cursor::new(Vec::new());
-        generate_wav_to_writer(
+        generate_wav_to_writer_with_rate(
+            call_id,
             &packets,
             &payload_map,
             &leg_payload_map,
-            true,
+            self.force_pcm,
+            self.pcm_sample_rate,
             false,
             &mut cursor,
         )?;
@@ -463,9 +461,11 @@ impl FlowDbBackend {
 
     /// Flush every cached engine and clear the cache on drop.
     fn shutdown_cached_engines(&self) {
-        let engines = std::mem::take(&mut *self.engines.lock().unwrap());
-        for (_, entry) in engines {
-            let _ = entry.engine.close();
+        let keys: Vec<PathBuf> = self.engines.iter().map(|e| e.key().clone()).collect();
+        for key in keys {
+            if let Some((_, entry)) = self.engines.remove(&key) {
+                let _ = entry.engine.close();
+            }
         }
     }
 }
@@ -544,8 +544,6 @@ impl SipFlowBackend for FlowDbBackend {
 
         let bucket_path = self.bucket_path_for_dt(Local::now());
         self.batches
-            .lock()
-            .unwrap()
             .entry(bucket_path)
             .or_default()
             .push(record);
@@ -561,10 +559,8 @@ impl SipFlowBackend for FlowDbBackend {
         // Also flush each open engine's memtable so SSTs are durable.
         let engines: Vec<Arc<Engine>> = self
             .engines
-            .lock()
-            .unwrap()
-            .values()
-            .map(|e| e.engine.clone())
+            .iter()
+            .map(|entry| entry.value().engine.clone())
             .collect();
         for engine in engines {
             let _ = engine.flush();
@@ -711,11 +707,12 @@ impl SipFlowBackend for FlowDbBackend {
             self.build_payload_maps(call_id, start_ts, end_ts, stream_leg);
 
         let mut file = tempfile::NamedTempFile::new()?;
-        generate_wav_to_writer(
+        generate_wav_to_writer_with_rate(call_id, 
             &packets,
             &payload_map,
             &leg_payload_map,
-            true,
+            self.force_pcm,
+            self.pcm_sample_rate,
             false,
             &mut file,
         )?;
@@ -792,7 +789,7 @@ mod tests {
     async fn test_flowdb_record_and_query_flow() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-flow-1";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
@@ -824,7 +821,7 @@ mod tests {
     async fn test_flowdb_query_flow_time_range() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-flow-range";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
@@ -853,7 +850,7 @@ mod tests {
     async fn test_flowdb_record_rtp_and_query_media() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-rtp-1";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -882,7 +879,7 @@ mod tests {
     async fn test_flowdb_query_media_stats() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-stats-1";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -914,7 +911,7 @@ mod tests {
     async fn test_flowdb_query_media_stats_with_loss() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-stats-loss";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -945,7 +942,7 @@ mod tests {
     async fn test_flowdb_media_stream_leg_filter() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let call_id = "test-leg-filter";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -980,7 +977,7 @@ mod tests {
     async fn test_flowdb_empty_query() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         let items = backend
@@ -1010,7 +1007,7 @@ mod tests {
     async fn test_flowdb_isolation_between_calls() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         backend
@@ -1048,7 +1045,7 @@ mod tests {
     async fn test_flowdb_flush_no_error() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
         backend.flush().await.unwrap();
     }
 
@@ -1061,7 +1058,7 @@ mod tests {
 
         {
             let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
             backend
                 .record(call_id, make_sip_item(base as u64, call_id))
                 .unwrap();
@@ -1070,7 +1067,7 @@ mod tests {
 
         {
             let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
             let items = backend
                 .query_flow(
                     call_id,
@@ -1087,7 +1084,7 @@ mod tests {
     async fn test_flowdb_skip_empty_call_id() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         // Empty call_id should be silently skipped
         backend.record("", make_sip_item(1000, "")).unwrap();
@@ -1100,7 +1097,7 @@ mod tests {
     async fn test_flowdb_subdirs_hourly_writes_to_current_hour_bucket() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         let now = Local::now();
         let call_id = "subdirs-hourly";
@@ -1133,7 +1130,7 @@ mod tests {
     async fn test_flowdb_subdirs_hourly_query_aggregates_buckets() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         let call_id = "subdirs-hourly-multi";
         let base = chrono::Utc::now().timestamp_micros();
@@ -1165,7 +1162,7 @@ mod tests {
     async fn test_flowdb_subdirs_daily_query_same_day() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         let call_id = "subdirs-daily";
         let base = chrono::Utc::now().timestamp_micros();
@@ -1193,7 +1190,7 @@ mod tests {
     async fn test_flowdb_subdirs_daily_no_leakage_into_other_day_bucket() {
         let dir = tempfile::tempdir().unwrap();
         let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5).unwrap();
+            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         let call_id = "subdirs-daily-no-leak";
         let now = Local::now();
@@ -1230,7 +1227,7 @@ mod tests {
 
         {
             let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5).unwrap();
+                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000).unwrap();
             backend
                 .record(call_id, make_sip_item(base as u64, call_id))
                 .unwrap();
@@ -1239,7 +1236,7 @@ mod tests {
 
         {
             let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5).unwrap();
+                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000).unwrap();
             let items = backend
                 .query_flow(
                     call_id,

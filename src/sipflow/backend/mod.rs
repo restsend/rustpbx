@@ -8,7 +8,7 @@ use chrono::{DateTime, Local};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{SipFlowClusterNode, SipFlowConfig};
+use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowUploadConfig};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats};
 
 #[async_trait]
@@ -99,8 +99,26 @@ pub async fn create_backend(
             ttl_secs,
             memtable_size_mb,
             block_cache_capacity_mb,
+            upload,
             ..
         } => {
+            // Extract force_pcm and sample_rate from upload config (if present)
+            let (force_pcm, pcm_sample_rate) = upload
+                .as_ref()
+                .map(|u| match u {
+                    SipFlowUploadConfig::S3 {
+                        force_pcm,
+                        pcm_sample_rate,
+                        ..
+                    } => (force_pcm.unwrap_or(false), pcm_sample_rate.unwrap_or(16000)),
+                    SipFlowUploadConfig::Http {
+                        force_pcm,
+                        pcm_sample_rate,
+                        ..
+                    } => (force_pcm.unwrap_or(false), pcm_sample_rate.unwrap_or(16000)),
+                })
+                .unwrap_or((false, 16000));
+
             // Hybrid backend: writes go to the configured engine, while
             // queries can open both SQLite and FlowDB buckets, using each
             // subdirectory's contents as an engine hint.
@@ -116,6 +134,8 @@ pub async fn create_backend(
                 *ttl_secs,
                 *memtable_size_mb,
                 *block_cache_capacity_mb,
+                force_pcm,
+                pcm_sample_rate,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }

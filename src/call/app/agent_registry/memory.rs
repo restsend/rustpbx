@@ -7,6 +7,7 @@
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy, select_best_agent};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -17,7 +18,7 @@ use tracing::info;
 /// All data is stored in memory and lost on restart.
 /// Suitable for single-node deployments and testing.
 pub struct MemoryRegistry {
-    agents: RwLock<HashMap<String, AgentRecord>>,
+    agents: DashMap<String, AgentRecord>,
     /// Round-robin counter
     rr_counter: RwLock<u64>,
     /// Event callbacks for state changes
@@ -27,7 +28,7 @@ pub struct MemoryRegistry {
 impl MemoryRegistry {
     pub fn new() -> Self {
         Self {
-            agents: RwLock::new(HashMap::new()),
+            agents: DashMap::new(),
             rr_counter: RwLock::new(0),
             event_handlers: RwLock::new(Vec::new()),
         }
@@ -57,8 +58,7 @@ impl AgentRegistry for MemoryRegistry {
         skills: Vec<String>,
         max_concurrency: u32,
     ) -> anyhow::Result<()> {
-        let mut agents = self.agents.write().await;
-        if agents.contains_key(&agent_id) {
+        if self.agents.contains_key(&agent_id) {
             anyhow::bail!("Agent {} already registered", agent_id);
         }
 
@@ -77,19 +77,16 @@ impl AgentRegistry for MemoryRegistry {
             custom_data: HashMap::new(),
         };
 
-        agents.insert(agent_id.clone(), record.clone());
+        self.agents.insert(agent_id.clone(), record.clone());
         info!(agent_id = %agent_id, "Agent registered in memory");
 
-        // Notify handlers
-        drop(agents);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut agents = self.agents.write().await;
-        if agents.remove(agent_id).is_some() {
+        if self.agents.remove(agent_id).is_some() {
             info!(agent_id = %agent_id, "Agent unregistered from memory");
             Ok(())
         } else {
@@ -98,13 +95,11 @@ impl AgentRegistry for MemoryRegistry {
     }
 
     async fn get_agent(&self, agent_id: &str) -> Option<AgentRecord> {
-        let agents = self.agents.read().await;
-        agents.get(agent_id).cloned()
+        self.agents.get(agent_id).map(|v| v.clone())
     }
 
     async fn list_agents(&self) -> Vec<AgentRecord> {
-        let agents = self.agents.read().await;
-        agents.values().cloned().collect()
+        self.agents.iter().map(|e| e.value().clone()).collect()
     }
 
     async fn update_presence(
@@ -112,8 +107,7 @@ impl AgentRegistry for MemoryRegistry {
         agent_id: &str,
         new_state: PresenceState,
     ) -> anyhow::Result<()> {
-        let mut agents = self.agents.write().await;
-        let agent = agents
+        let mut agent = self.agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -129,15 +123,14 @@ impl AgentRegistry for MemoryRegistry {
         );
 
         let record = agent.clone();
-        drop(agents);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut agents = self.agents.write().await;
-        let agent = agents
+        let mut agent = self.agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -146,15 +139,14 @@ impl AgentRegistry for MemoryRegistry {
         agent.last_state_change = Instant::now();
 
         let record = agent.clone();
-        drop(agents);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-        let mut agents = self.agents.write().await;
-        let agent = agents
+        let mut agent = self.agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -171,18 +163,17 @@ impl AgentRegistry for MemoryRegistry {
         }
 
         let record = agent.clone();
-        drop(agents);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord> {
-        let agents = self.agents.read().await;
-        agents
-            .values()
-            .filter(|a| a.has_capacity() && a.has_skills(required_skills))
-            .cloned()
+        self.agents
+            .iter()
+            .filter(|e| e.value().has_capacity() && e.value().has_skills(required_skills))
+            .map(|e| e.value().clone())
             .collect()
     }
 

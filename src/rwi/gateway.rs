@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
+use dashmap::DashMap;
 use std::sync::{Arc, Arc as StdArc};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -47,7 +48,7 @@ pub struct RwiGateway {
     max_cache_size: usize,
     max_cache_age_secs: u64,
     /// Per-call DTMF taps for active DtmfCollect operations.
-    dtmf_taps: Mutex<HashMap<CallId, tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>>>,
+    dtmf_taps: DashMap<CallId, tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>>,
     /// Per-call channel variables (key/value store).
     call_vars: HashMap<CallId, HashMap<String, String>>,
     /// Per-session event type filter; if set, only events whose type name is in the set are delivered.
@@ -94,7 +95,7 @@ impl RwiGateway {
             }),
             max_cache_size,
             max_cache_age_secs,
-            dtmf_taps: Mutex::new(HashMap::new()),
+            dtmf_taps: DashMap::new(),
             call_vars: HashMap::new(),
             session_event_filters: HashMap::new(),
             webhook_tx: None,
@@ -460,8 +461,7 @@ impl RwiGateway {
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
             if let Some(c) = digit_char {
-                let taps = self.dtmf_taps.lock();
-                if let Some(tx) = taps.get(call_id) {
+                if let Some(tx) = self.dtmf_taps.get(call_id) {
                     let _ = tx.send((leg_id, c));
                 }
             }
@@ -485,12 +485,12 @@ impl RwiGateway {
         call_id: CallId,
         tx: tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>,
     ) {
-        self.dtmf_taps.lock().insert(call_id, tx);
+        self.dtmf_taps.insert(call_id, tx);
     }
 
     /// Remove the DTMF tap for `call_id` (called when collection completes).
     pub fn remove_dtmf_tap(&self, call_id: &CallId) {
-        self.dtmf_taps.lock().remove(call_id);
+        self.dtmf_taps.remove(call_id);
     }
 
     /// Fan-out an event to all sessions subscribed to a context.

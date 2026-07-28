@@ -555,13 +555,19 @@ impl StorageManager {
             if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
                 || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
             {
+                let db_ex = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
+                let raw_ex = tokio::fs::try_exists(&raw_path).await.unwrap_or(false);
+                tracing::warn!(
+                    "query_media_packets[SKIP]: callid={} dir={} db={} raw={} db_ex={} raw_ex={}",
+                    callid, dir.display(), db_path.display(), raw_path.display(), db_ex, raw_ex,
+                );
                 continue;
             }
 
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path).await?;
+            let mut raw_file = File::open(&raw_path).await?;
             let mut current_pos = None;
 
             let rows = sqlx::query_as::<_, MediaPacketRow>(
@@ -571,17 +577,32 @@ impl StorageManager {
                         s.offset AS offset,
                         s.size AS size
                  FROM media_msgs s
-                 JOIN call_meta c ON s.call_id = c.id
-                 WHERE c.callid = ?
-                 AND s.timestamp >= ?
-                 AND s.timestamp <= ?
-                 ORDER BY s.offset ASC",
+                  JOIN call_meta c ON s.call_id = c.id
+                  WHERE c.callid = ?
+                  AND s.timestamp >= ?
+                  AND s.timestamp <= ?
+                  ORDER BY s.offset ASC",
             )
             .bind(callid)
             .bind(start_ts)
             .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
+
+            if !rows.is_empty() {
+                tracing::info!(
+                    "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
+                    callid, dir.display(), db_path.display(), rows.len(), start_ts, end_ts,
+                );
+            } else {
+                let db_sz = tokio::fs::metadata(&db_path).await.map(|m| m.len()).unwrap_or(0);
+                let raw_sz = tokio::fs::metadata(&raw_path).await.map(|m| m.len()).unwrap_or(0);
+                tracing::info!(
+                    "query_media_packets[EMPTY]: callid={} dir={} db_path={} raw_path={} start_ts={} end_ts={} db_size={} raw_size={}",
+                    callid, dir.display(), db_path.display(), raw_path.display(),
+                    start_ts, end_ts, db_sz, raw_sz,
+                );
+            }
 
             for row in rows {
                 let offset = u64::try_from(row.offset)?;

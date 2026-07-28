@@ -1,6 +1,7 @@
 use crate::call::app::ivr::trace::IvrTraceCollector;
 use crate::config::Config;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use sea_orm::{DatabaseConnection, DatabaseConnectionType};
 use serde::{Deserialize, Serialize};
@@ -34,13 +35,13 @@ pub struct AppSharedState {
     /// Arbitrary typed data, keyed by string.
     ///
     /// Use this to share state between addons (e.g., conference rooms, queue stats).
-    pub custom_data: Arc<RwLock<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>>,
+    pub custom_data: Arc<DashMap<String, Box<dyn std::any::Any + Send + Sync>>>,
 }
 
 impl AppSharedState {
     pub fn new() -> Self {
         Self {
-            custom_data: Arc::new(RwLock::new(HashMap::new())),
+            custom_data: Arc::new(DashMap::new()),
         }
     }
 }
@@ -89,7 +90,7 @@ impl std::fmt::Debug for AppSharedState {
 #[derive(Clone)]
 pub struct ApplicationContext {
     /// Session-level variables shared across chained applications.
-    pub session_vars: Arc<RwLock<HashMap<String, String>>>,
+    pub session_vars: Arc<DashMap<String, String>>,
 
     /// Queue name set by QueueApp — used by post-call hooks (e.g., CSAT survey).
     pub queue_name: Arc<RwLock<Option<String>>>,
@@ -135,7 +136,7 @@ impl ApplicationContext {
     /// Create a new application context.
     pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
         Self {
-            session_vars: Arc::new(RwLock::new(HashMap::new())),
+            session_vars: Arc::new(DashMap::new()),
             queue_name: Arc::new(RwLock::new(None)),
             db,
             http_client: crate::http_util::build_keepalive_client(None, None)
@@ -150,15 +151,13 @@ impl ApplicationContext {
     }
 
     /// Set a session variable.
-    pub async fn set_var(&self, key: impl Into<String>, value: impl Into<String>) {
-        let mut vars = self.session_vars.write().await;
-        vars.insert(key.into(), value.into());
+    pub fn set_var(&self, key: impl Into<String>, value: impl Into<String>) {
+        self.session_vars.insert(key.into(), value.into());
     }
 
     /// Get a session variable.
-    pub async fn get_var(&self, key: &str) -> Option<String> {
-        let vars = self.session_vars.read().await;
-        vars.get(key).cloned()
+    pub fn get_var(&self, key: &str) -> Option<String> {
+        self.session_vars.get(key).map(|r| r.value().clone())
     }
 
     /// Set the queue name for this session (called by QueueApp on enter).
@@ -246,15 +245,15 @@ mod tests {
         let ctx = ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()));
 
         // Initially empty
-        assert!(ctx.get_var("lang").await.is_none());
+        assert!(ctx.get_var("lang").is_none());
 
         // Set and get
-        ctx.set_var("lang", "zh").await;
-        assert_eq!(ctx.get_var("lang").await, Some("zh".to_string()));
+        ctx.set_var("lang", "zh");
+        assert_eq!(ctx.get_var("lang"), Some("zh".to_string()));
 
         // Overwrite
-        ctx.set_var("lang", "en").await;
-        assert_eq!(ctx.get_var("lang").await, Some("en".to_string()));
+        ctx.set_var("lang", "en");
+        assert_eq!(ctx.get_var("lang"), Some("en".to_string()));
     }
 
     #[test]

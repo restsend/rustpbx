@@ -35,6 +35,8 @@ impl HybridLocalBackend {
         ttl_secs: Option<u64>,
         memtable_size_mb: usize,
         block_cache_capacity_mb: usize,
+        force_pcm: bool,
+        pcm_sample_rate: u32,
     ) -> Result<Self> {
         let sqlite = LocalBackend::new(
             root.clone(),
@@ -43,6 +45,8 @@ impl HybridLocalBackend {
             flush_interval_secs,
             id_cache_size,
             compress,
+            force_pcm,
+            pcm_sample_rate,
         )?;
         let flowdb = FlowDbBackend::new(
             root,
@@ -52,6 +56,8 @@ impl HybridLocalBackend {
             block_cache_capacity_mb,
             flush_count,
             flush_interval_secs,
+            force_pcm,
+            pcm_sample_rate,
         )?;
         Ok(Self {
             write_engine,
@@ -260,6 +266,8 @@ mod tests {
             None,
             1,
             16,
+            false,
+            16000,
         )
         .expect("hybrid backend")
     }

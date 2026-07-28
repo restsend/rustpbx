@@ -131,6 +131,11 @@ class BenchmarkResult:
     end_time: str = ""
     errors: list[str] = field(default_factory=list)
 
+    # Memory-leak analysis (soak mode)
+    leak_final_assessment: str | None = None
+    leak_final_slope_mb_per_min: float = 0.0
+    leak_base_delta_mb: float = 0.0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario,
@@ -160,6 +165,9 @@ class BenchmarkResult:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "errors": self.errors,
+            "leak_final_assessment": self.leak_final_assessment,
+            "leak_final_slope_mb_per_min": self.leak_final_slope_mb_per_min,
+            "leak_base_delta_mb": self.leak_base_delta_mb,
         }
 
 
@@ -175,6 +183,11 @@ class ResourceMonitor:
         process_name: str = "rustpbx",
         interval: float = 1.0,
         health_url: str | None = None,
+        leak_check_interval: float = 0.0,
+        target_concurrency: int = 0,
+        leak_csv: str | None = None,
+        leak_slope_warn_mb_per_min: float = 0.5,
+        leak_slope_watch_mb_per_min: float = 0.1,
     ):
         self.process_name = process_name
         self.interval = interval
@@ -182,16 +195,31 @@ class ResourceMonitor:
         self.samples: list[dict[str, float]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        # Memory-leak detection
+        self.leak_check_interval = leak_check_interval
+        self.target_concurrency = target_concurrency
+        self.leak_csv = leak_csv
+        self.leak_slope_warn = leak_slope_warn_mb_per_min
+        self.leak_slope_watch = leak_slope_watch_mb_per_min
+        self._leak_thread: threading.Thread | None = None
+        self._baseline_mem: float | None = None
+        self._last_check_mem: float | None = None
+        self.leak_reports: list[dict[str, Any]] = []
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        if self.leak_check_interval > 0:
+            self._leak_thread = threading.Thread(target=self._leak_run, daemon=True)
+            self._leak_thread.start()
 
     def _run(self) -> None:
         while not self._stop.is_set():
             sample = self._sample()
             if sample is not None:
-                self.samples.append(sample)
+                with self._lock:
+                    self.samples.append(sample)
             self._stop.wait(self.interval)
 
     def _sample(self) -> dict[str, float] | None:
@@ -252,30 +280,230 @@ class ResourceMonitor:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        # Final leak check so the last interval is captured
+        if self._leak_thread is not None:
+            self._leak_thread.join(timeout=5)
+            self._do_leak_check()
+
+    # ------------------------------------------------------------------
+    # Memory-leak detection
+    # ------------------------------------------------------------------
+
+    def _leak_run(self) -> None:
+        """Periodically analyse the memory trend and report leaks."""
+        while not self._stop.is_set():
+            if self._stop.wait(self.leak_check_interval):
+                break
+            self._do_leak_check()
+
+    @staticmethod
+    def _regress(win: list[dict[str, float]]) -> tuple[float, float]:
+        """Least-squares regression of mem(t) over the window.
+
+        Returns (slope_mb_per_min, r_squared)."""
+        n = len(win)
+        t0 = win[0]["timestamp"]
+        xs = [s["timestamp"] - t0 for s in win]
+        ys = [s["mem_mb"] for s in win]
+        sx, sy = sum(xs), sum(ys)
+        sxx = sum(x * x for x in xs)
+        sxy = sum(x * y for x, y in zip(xs, ys))
+        denom = n * sxx - sx * sx
+        if denom == 0:
+            return 0.0, 0.0
+        slope_per_s = (n * sxy - sx * sy) / denom
+        intercept = (sy - slope_per_s * sx) / n
+        slope_per_min = slope_per_s * 60.0
+        mean_y = sy / n
+        ss_tot = sum((y - mean_y) ** 2 for y in ys)
+        ss_res = sum((y - (slope_per_s * x + intercept)) ** 2 for x, y in zip(xs, ys))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        return slope_per_min, r2
+
+    def _do_leak_check(self) -> None:
+        with self._lock:
+            samples = list(self.samples)
+        if len(samples) < 10:
+            return
+
+        now_sample = samples[-1]
+        cur_mem = now_sample["mem_mb"]
+        cur_calls = now_sample.get("calls")
+        elapsed = int(now_sample["timestamp"] - samples[0]["timestamp"])
+
+        cutoff = now_sample["timestamp"] - self.leak_check_interval
+        win = [s for s in samples if s["timestamp"] >= cutoff]
+        if len(win) < 5:
+            win = samples  # fall back to everything if window too small
+
+        slope_mb_min, r2 = self._regress(win)
+
+        if self._baseline_mem is None:
+            self._baseline_mem = win[0]["mem_mb"]
+        if self._last_check_mem is None:
+            self._last_check_mem = self._baseline_mem
+
+        win_delta = cur_mem - self._last_check_mem
+        base_delta = cur_mem - self._baseline_mem
+        self._last_check_mem = cur_mem
+
+        # Concurrency stability (only meaningful once ramp-up is done)
+        calls_list = [s["calls"] for s in win if "calls" in s]
+        concurrency_stable = True
+        calls_avg_str = "n/a"
+        if calls_list and self.target_concurrency > 0 and elapsed > self.leak_check_interval:
+            calls_avg = sum(calls_list) / len(calls_list)
+            calls_avg_str = f"{calls_avg:.0f}"
+            concurrency_stable = abs(calls_avg - self.target_concurrency) / self.target_concurrency < 0.25
+
+        if slope_mb_min > self.leak_slope_warn and r2 > 0.5 and concurrency_stable:
+            assessment = "LEAK SUSPECTED"
+        elif slope_mb_min > self.leak_slope_watch:
+            assessment = "WATCH"
+        else:
+            assessment = "STABLE"
+
+        report = {
+            "elapsed_s": elapsed,
+            "mem_mb": round(cur_mem, 2),
+            "calls": cur_calls,
+            "window_delta_mb": round(win_delta, 2),
+            "base_delta_mb": round(base_delta, 2),
+            "slope_mb_per_min": round(slope_mb_min, 3),
+            "r2": round(r2, 3),
+            "assessment": assessment,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        self.leak_reports.append(report)
+
+        # Health counters validation
+        health_ok, health_issues = self._check_health()
+        if not health_ok:
+            report["health_issues"] = health_issues
+            print(f"  ⚠ health: {', '.join(health_issues)}", flush=True)
+
+        print(
+            f"[LEAK-CHECK {elapsed//60:02d}m{elapsed%60:02d}s] "
+            f"mem={cur_mem:.1f}MB (win {win_delta:+.1f}MB, base {base_delta:+.1f}MB) | "
+            f"slope={slope_mb_min:.3f} MB/min R²={r2:.2f} | "
+            f"calls={calls_avg_str}/{self.target_concurrency or '-'} | "
+            f"→ {assessment}",
+            flush=True,
+        )
+
+        if self.leak_csv:
+            write_header = not os.path.exists(self.leak_csv)
+            try:
+                with open(self.leak_csv, "a", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=list(report.keys()))
+                    if write_header:
+                        writer.writeheader()
+                    writer.writerow(report)
+            except Exception:
+                pass
+
+    def _check_health(self) -> tuple[bool, list[str]]:
+        """Fetch /ami/v1/health and validate all numeric counters are sensible.
+
+        Returns (ok, [issues]).
+        """
+        if not self.health_url:
+            return True, []
+        try:
+            req = urllib.request.Request(self.health_url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            return False, [f"health fetch failed: {e}"]
+
+        issues: list[str] = []
+
+        def check(name: str, val: int, minv: int = 0, maxv: int | None = None) -> None:
+            if not isinstance(val, int) or val < minv:
+                issues.append(f"{name}={val!r} (expected int ≥{minv})")
+                return
+            if maxv is not None and val > maxv:
+                issues.append(f"{name}={val} > {maxv}")
+
+        # Top-level counters
+        total = data.get("total")
+        failed = data.get("failed")
+        if total is not None:
+            check("total", total)
+        if failed is not None:
+            check("failed", failed)
+        if isinstance(total, int) and isinstance(failed, int) and failed > total:
+            issues.append(f"failed={failed} > total={total}")
+
+        # sipserver counters
+        ss = data.get("sipserver", {})
+        if ss:
+            calls = ss.get("calls")
+            if calls is not None:
+                check("sipserver.calls", calls)
+            dialogs = ss.get("dialogs")
+            if dialogs is not None:
+                check("sipserver.dialogs", dialogs)
+            running_tx = ss.get("running_tx")
+            if running_tx is not None:
+                check("sipserver.running_tx", running_tx)
+
+            tx = ss.get("transactions", {})
+            if tx:
+                for k in ("running", "finished", "waiting_ack"):
+                    v = tx.get(k)
+                    if v is not None:
+                        check(f"transactions.{k}", v)
+
+            # DashMap sizes
+            dm = ss.get("dashmaps", {})
+            if dm:
+                for k in ("trunks", "queues", "debug_routes",
+                          "presence_states", "presence_subscribers", "mwi_subscribers"):
+                    v = dm.get(k)
+                    if v is not None:
+                        check(f"dashmaps.{k}", v)
+
+        # tasks.total
+        tasks = data.get("tasks", {})
+        if tasks:
+            t = tasks.get("total")
+            if t is not None:
+                check("tasks.total", t)
+
+        return len(issues) == 0, issues
 
     def summary(self) -> dict[str, Any]:
-        if not self.samples:
+        with self._lock:
+            snap = list(self.samples)
+        if not snap:
             return {
                 "cpu_avg": 0.0, "cpu_peak": 0.0,
                 "mem_avg_mb": 0.0, "mem_peak_mb": 0.0,
                 "samples": 0, "calls_peak": 0, "calls_avg": 0.0,
             }
-        cpus = [s["cpu_pct"] for s in self.samples]
-        mems = [s["mem_mb"] for s in self.samples]
+        cpus = [s["cpu_pct"] for s in snap]
+        mems = [s["mem_mb"] for s in snap]
         result: dict[str, Any] = {
             "cpu_avg": sum(cpus) / len(cpus),
             "cpu_peak": max(cpus),
             "mem_avg_mb": sum(mems) / len(mems),
             "mem_peak_mb": max(mems),
-            "samples": len(self.samples),
+            "samples": len(snap),
         }
-        calls_list = [s["calls"] for s in self.samples if "calls" in s]
+        calls_list = [s["calls"] for s in snap if "calls" in s]
         if calls_list:
             result["calls_peak"] = int(max(calls_list))
             result["calls_avg"] = sum(calls_list) / len(calls_list)
         else:
             result["calls_peak"] = 0
             result["calls_avg"] = 0.0
+        if self.leak_reports:
+            final = self.leak_reports[-1]
+            result["leak_final_assessment"] = final["assessment"]
+            result["leak_final_slope_mb_per_min"] = final["slope_mb_per_min"]
+            result["leak_base_delta_mb"] = final["base_delta_mb"]
+            result["leak_reports"] = self.leak_reports
         return result
 
 
@@ -286,13 +514,14 @@ class ResourceMonitor:
 class SipProcess:
     """Manages a sipbot process (UAS or UAC)."""
 
-    def __init__(self, name: str, log_file: str | None = None):
+    def __init__(self, name: str, log_file: str | None = None, retain_lines: int = 0):
         self.name = name
         self.process: subprocess.Popen[str] | None = None
         self.lines: list[str] = []
         self._lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._log_file = log_file
+        self._retain_lines = retain_lines  # 0 = keep all
 
     def start(self, cmd: list[str]) -> None:
         self.process = subprocess.Popen(
@@ -313,6 +542,9 @@ class SipProcess:
             if line:
                 with self._lock:
                     self.lines.append(line)
+                    if self._retain_lines > 0 and len(self.lines) > self._retain_lines:
+                        # drop oldest 20% to amortise the trim cost
+                        del self.lines[: int(self._retain_lines * 0.2)]
                 if self._log_file:
                     with open(self._log_file, "a") as f:
                         f.write(line + "\n")
@@ -320,6 +552,21 @@ class SipProcess:
     def output(self) -> str:
         with self._lock:
             return "\n".join(self.lines)
+
+    def log_tail(self, n_bytes: int = 2_000_000) -> str:
+        """Return the last ~n_bytes of the log file (for parsing final metrics
+        on very long runs where in-memory retention is capped)."""
+        if not self._log_file or not os.path.exists(self._log_file):
+            return self.output()
+        try:
+            size = os.path.getsize(self._log_file)
+            with open(self._log_file, "rb") as f:
+                if size > n_bytes:
+                    f.seek(-n_bytes, os.SEEK_END)
+                    f.readline()  # skip partial line
+                return f.read().decode("utf-8", errors="replace")
+        except Exception:
+            return self.output()
 
     def terminate(self) -> None:
         if self.process and self.process.poll() is None:
@@ -495,10 +742,10 @@ class P2PBenchmark:
                 self.sipflow_process.wait()
             self.sipflow_process = None
 
-    def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False) -> bool:
+    def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False, wholesale: bool = False) -> bool:
         """Start rustpbx with specified configuration."""
         print(f"\n{'='*60}")
-        print(f"Starting rustpbx (mediaproxy={mediaproxy}, sipflow={sipflow})")
+        print(f"Starting rustpbx (mediaproxy={mediaproxy}, sipflow={sipflow}, wholesale={wholesale})")
         print(f"{'='*60}")
 
         self._kill_rustpbx()
@@ -510,7 +757,7 @@ class P2PBenchmark:
             self.start_sipflow_server()
 
         db_suffix = self._create_database()
-        config_path = self._create_config(mediaproxy, sipflow, db_suffix)
+        config_path = self._create_config(mediaproxy, sipflow, db_suffix, wholesale=wholesale)
         if not config_path:
             return False
 
@@ -654,7 +901,7 @@ class P2PBenchmark:
             print(f"[mysql] Failed to create database ({e}), using base config")
             return ""
 
-    def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "") -> str | None:
+    def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "", wholesale: bool = False) -> str | None:
         """Create a temporary config file with specified settings."""
         try:
             with open(self.rustpbx_config, "r") as f:
@@ -684,6 +931,36 @@ class P2PBenchmark:
                 config_content,
                 flags=re.DOTALL,
             )
+
+            # Enable wholesale addon under [proxy] (addons is a ProxyConfig field).
+            # wholesale is a commercial addon; initialize() runs migrations +
+            # background tasks and per-call hooks regardless of license (license
+            # only gates the admin UI), so it loads cleanly for soak testing.
+            if wholesale:
+                if re.search(r'(?m)^\s*addons\s*=', config_content):
+                    # Replace existing top-level/[proxy] addons line
+                    def _ensure_wholesale(m: re.Match) -> str:
+                        line = m.group(0)
+                        # parse current list
+                        cur = m.group(1)
+                        items = [a.strip().strip('"').strip("'") for a in cur.split(",") if a.strip().strip('"').strip("'")]
+                        if "wholesale" not in items:
+                            items.append("wholesale")
+                        rendered = ", ".join(f'"{a}"' for a in items)
+                        return f'addons = [{rendered}]'
+                    config_content = re.sub(
+                        r'(?m)^\s*addons\s*=\s*\[([^\]]*)\]',
+                        _ensure_wholesale,
+                        config_content,
+                    )
+                else:
+                    # Insert right after the [proxy] header
+                    config_content = re.sub(
+                        r'(\[proxy\]\s*\n)',
+                        r'\1addons = ["wholesale"]\n',
+                        config_content,
+                        count=1,
+                    )
 
             # Modify sipflow — use remote mode (separate sipflow process with flowdb)
             if sipflow:
@@ -716,7 +993,7 @@ class P2PBenchmark:
                 )
 
             temp_config = os.path.join(
-                self.log_dir, f"config_{mediaproxy}_{int(sipflow)}.toml"
+                self.log_dir, f"config_{mediaproxy}_{int(sipflow)}_ws{int(wholesale)}.toml"
             )
             with open(temp_config, "w") as f:
                 f.write(config_content)
@@ -755,15 +1032,21 @@ class P2PBenchmark:
     # -----------------------------------------------------------------------
 
     def start_uas_instances(
-        self, count: int, base_port: int = DEFAULT_UAS_BASE_PORT, hangup: int = 120
+        self, count: int, base_port: int = DEFAULT_UAS_BASE_PORT, hangup: int = 120,
+        verbose: bool = True,
     ) -> bool:
         """Start UAS instances registered as extension users.
 
         Each UAS registers as bob/alice (cycling through users).
         sipbot handles multiple concurrent calls per instance.
+
+        Pass verbose=False for long soak runs: sipbot's -v logs every RTP
+        packet, which produces GB-sized logs in minutes and starves the
+        load generator (observed 2.6 GB / 10 min from a single UAS).
         """
         print(f"\n{'='*60}")
-        print(f"Starting {count} UAS instances (sipbot wait + register)")
+        print(f"Starting {count} UAS instances (sipbot wait + register)"
+              f"{' [quiet]' if not verbose else ''}")
         print(f"{'='*60}")
 
         self.uas_list = []
@@ -789,8 +1072,9 @@ class P2PBenchmark:
                 "--codecs", "pcmu",
                 "--hangup", str(hangup),
                 "--echo",  # echo mode for realistic bidirectional RTP
-                "-v",
             ]
+            if verbose:
+                cmd.append("-v")
 
             uas = SipProcess(f"uas-{i+1}", log_file=log_file)
             uas.start(cmd)
@@ -811,14 +1095,34 @@ class P2PBenchmark:
         total: int,
         cps: int,
         duration: int,
+        soak: bool = False,
+        wall_time: int = 0,
+        batch_window: int = 120,
     ) -> tuple[str, float]:
         """Run batch UAC calls via sipbot call --total --cps.
 
         Calls are placed to extension users (bob/alice) through the PBX.
         Returns (output_text, wall_time_seconds).
+
+        When soak=True (long-duration run), sipbot is invoked in a loop of
+        smaller batches (each batch_window seconds). This is required because
+        sipbot's batch mode accumulates per-call state ("Active" counter) and
+        dies after ~100k calls in a single invocation, so a single --total of
+        cps*wall_time (e.g. 360000) is unsustainable. The resource monitor
+        (leak checker) runs across all batches since it is started/stopped by
+        run_benchmark around this call.
         """
+        if soak and wall_time > 0:
+            return self._run_uac_soak(cps, duration, wall_time, batch_window)
+        return self._run_uac_single(total, cps, duration, soak=False)
+
+    def _run_uac_single(
+        self, total: int, cps: int, duration: int, soak: bool,
+    ) -> tuple[str, float]:
+        """Run one sipbot call batch."""
         print(f"\n{'='*60}")
-        print(f"Starting UAC batch: {total} calls @ {cps} CPS, duration={duration}s")
+        print(f"Starting UAC batch: {total} calls @ {cps} CPS, duration={duration}s"
+              f"{' [SOAK batch]' if soak else ''}")
         print(f"{'='*60}")
 
         # Target: call bob through the PBX (PBX routes to registered bob UAS)
@@ -839,10 +1143,15 @@ class P2PBenchmark:
             "--hangup", str(duration),
             "--total", str(total),
             "--cps", str(cps),
-            "-v",
         ]
+        if not soak:
+            cmd.append("-v")  # -v logs every RTP packet — unusable over long runs
 
-        self.uac_process = SipProcess("uac-batch", log_file=log_file)
+        # In soak mode, cap retained lines (full output still goes to log file)
+        self.uac_process = SipProcess(
+            "uac-batch", log_file=log_file,
+            retain_lines=8000 if soak else 0,
+        )
         self.uac_process.start(cmd)
         print(f"[UAC] Batch started (log: {log_file})")
 
@@ -852,22 +1161,104 @@ class P2PBenchmark:
         self.uac_process.wait(timeout=timeout)
         wall_time = time.time() - t_start
 
-        output = self.uac_process.output()
+        if soak:
+            output = self.uac_process.log_tail(n_bytes=2_000_000)
+        else:
+            output = self.uac_process.output()
         return output, wall_time
+
+    def _run_uac_soak(
+        self, cps: int, duration: int, wall_time: int, batch_window: int,
+    ) -> tuple[str, float]:
+        """Sustain load for wall_time by looping sipbot batches.
+
+        Each batch places cps*batch_window calls. Sequential batches keep
+        concurrency approximately stable (brief ~1-2s dip between batches as
+        calls churn at duration-second hangup)."""
+        import math
+        batches = max(1, math.ceil(wall_time / batch_window))
+        batch_total = cps * batch_window
+        print(f"\n{'='*60}")
+        print(f"[SOAK] loop batching: {batches} batches × {batch_total} calls"
+              f" (≈{batch_window}s each) ≈ {batches * batch_total} calls over ~{wall_time}s")
+        print(f"{'='*60}")
+
+        agg_completed = 0
+        agg_total = 0
+        agg_status: dict[str, int] = {}
+        t0 = time.time()
+
+        try:
+            for i in range(batches):
+                output, _bw = self._run_uac_single(batch_total, cps, duration, soak=True)
+                completed, ctotal, status = self._parse_batch_progress(output)
+                agg_completed += completed
+                agg_total += ctotal
+                for k, v in status.items():
+                    agg_status[k] = agg_status.get(k, 0) + v
+                elapsed = time.time() - t0
+                status_str = ", ".join(f"{k}:{v}" for k, v in sorted(agg_status.items())) or "-"
+                print(f"[SOAK] batch {i+1}/{batches} done: +{completed} completed "
+                      f"(cum {agg_completed}/{agg_total}), elapsed {elapsed:.0f}s "
+                      f"[{status_str}]", flush=True)
+        except KeyboardInterrupt:
+            print("\n[SOAK] interrupted — stopping batch loop")
+
+        wall = time.time() - t0
+        # Synthesize a final Progress line with cumulative counts for the
+        # result collector (parse_stress_metrics reads the last Progress line).
+        status_str = ", ".join(f"{k}:{v}" for k, v in sorted(agg_status.items())) or "-"
+        synthetic = (
+            f"Progress: {agg_completed}/{agg_total}, Active: 0, {status_str}\n"
+        )
+        return synthetic, wall
+
+    @staticmethod
+    def _parse_batch_progress(output: str) -> tuple[int, int, dict[str, int]]:
+        """Parse the LAST 'Progress: a/b, ... 200: n, 4xx: n' line from sipbot.
+
+        Returns (completed, total, status_counts)."""
+        completed = 0
+        total = 0
+        status: dict[str, int] = {}
+        prog_lines = [l for l in output.split("\n") if l.startswith("Progress:")]
+        if not prog_lines:
+            return completed, total, status
+        line = prog_lines[-1]
+        m = re.search(r"Progress:\s*(\d+)\s*/\s*(\d+)", line)
+        if m:
+            completed = int(m.group(1))
+            total = int(m.group(2))
+        # status tokens like "200: 123", "4xx: 5", "3xx: 0"
+        for tok in re.findall(r"(\d+[xsx]{0,2}):\s*(\d+)", line):
+            key, val = tok[0], int(tok[1])
+            if key in ("200", "180", "183") or key.endswith("xx"):
+                status[key] = status.get(key, 0) + val
+        return completed, total, status
 
     # -----------------------------------------------------------------------
     # Monitoring
     # -----------------------------------------------------------------------
 
-    def start_monitoring(self, interval: float = 1.0) -> None:
+    def start_monitoring(
+        self,
+        interval: float = 1.0,
+        leak_check_interval: float = 0.0,
+        target_concurrency: int = 0,
+        leak_csv: str | None = None,
+    ) -> None:
         health_url = f"{self.http_base}/ami/v1/health"
         self.monitor = ResourceMonitor(
             process_name="rustpbx",
             interval=interval,
             health_url=health_url,
+            leak_check_interval=leak_check_interval,
+            target_concurrency=target_concurrency,
+            leak_csv=leak_csv,
         )
         self.monitor.start()
-        print(f"[monitor] Started (interval={interval}s)")
+        extra = f", leak-check every {leak_check_interval:.0f}s (target≈{target_concurrency or 'auto'} calls)" if leak_check_interval else ""
+        print(f"[monitor] Started (interval={interval}s{extra})")
 
     def stop_monitoring(self) -> dict[str, Any]:
         if self.monitor:
@@ -889,8 +1280,17 @@ class P2PBenchmark:
         sipflow: bool,
         uas_count: int,
         uas_base_port: int = DEFAULT_UAS_BASE_PORT,
+        wholesale: bool = False,
+        wall_time: int = 0,
+        leak_check_interval: int = 0,
     ) -> BenchmarkResult:
         """Run a single benchmark scenario."""
+        # In wall-time (soak) mode, derive total so the batch sustains for the
+        # full duration: total = cps * wall_time. Concurrency ≈ cps * duration.
+        soak = wall_time > 0
+        if soak:
+            total = cps * wall_time
+
         result = BenchmarkResult(
             scenario=scenario_name,
             total_calls=total,
@@ -902,6 +1302,8 @@ class P2PBenchmark:
             start_time=datetime.now(timezone.utc).isoformat(),
         )
 
+        target_concurrency = min(cps * duration, total)
+
         print(f"\n{'='*70}")
         print(f"BENCHMARK: {scenario_name}")
         print(f"{'='*70}")
@@ -911,34 +1313,46 @@ class P2PBenchmark:
         print(f"  Call Duration   : {duration}s")
         print(f"  UAS Count       : {uas_count}")
         print(f"  Media Proxy     : {mediaproxy}")
-        print(f"  SIP Flow        : {sipflow}")
-        print(f"  Est. Concurrent : {min(cps * duration, total)}")
+        print(f"  SIP Flow        : {sipflow} ({'remote' if sipflow else 'off'})")
+        print(f"  Wholesale       : {wholesale}")
+        if soak:
+            print(f"  Wall-Time       : {wall_time}s ({wall_time//3600}h{(wall_time%3600)//60}m)")
+            print(f"  Leak Check      : every {leak_check_interval}s")
+        print(f"  Est. Concurrent : {target_concurrency}")
         print(f"{'='*70}\n")
 
         try:
             # 1. Start rustpbx
-            if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=sipflow):
+            if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=sipflow, wholesale=wholesale):
                 result.errors.append("Failed to start rustpbx")
                 return result
 
             time.sleep(2)
 
             # 2. Start UAS instances (hangup > call_duration so UAS doesn't hang up early)
-            if not self.start_uas_instances(uas_count, base_port=uas_base_port, hangup=duration + 30):
+            if not self.start_uas_instances(uas_count, base_port=uas_base_port, hangup=duration + 30, verbose=not soak):
                 result.errors.append("Failed to start UAS instances")
                 return result
 
-            # 3. Start monitoring
-            self.start_monitoring(interval=1.0)
+            # 3. Start monitoring (with periodic leak analysis in soak mode)
+            leak_csv = os.path.join(self.log_dir, "leak_check.csv") if leak_check_interval else None
+            self.start_monitoring(
+                interval=1.0,
+                leak_check_interval=float(leak_check_interval),
+                target_concurrency=target_concurrency,
+                leak_csv=leak_csv,
+            )
 
-            # 4. Run UAC batch
-            uac_output, wall_time = self.run_uac_batch(total, cps, duration)
-            result.test_duration_s = wall_time
+            # 4. Run UAC batch (loops sipbot batches in soak mode)
+            uac_output, wall_time_s = self.run_uac_batch(
+                total, cps, duration, soak=soak, wall_time=wall_time,
+            )
+            result.test_duration_s = wall_time_s
 
             # 5. Allow stats to settle
             time.sleep(2)
 
-            # 6. Stop monitoring
+            # 6. Stop monitoring (triggers final leak check)
             resource_summary = self.stop_monitoring()
 
             # 7. Collect results
@@ -970,6 +1384,10 @@ class P2PBenchmark:
         result.mem_peak_mb = resource_summary.get("mem_peak_mb", 0.0)
         result.calls_peak = resource_summary.get("calls_peak", 0)
         result.calls_avg = resource_summary.get("calls_avg", 0.0)
+        # Leak analysis (soak mode)
+        result.leak_final_assessment = resource_summary.get("leak_final_assessment")
+        result.leak_final_slope_mb_per_min = resource_summary.get("leak_final_slope_mb_per_min", 0.0)
+        result.leak_base_delta_mb = resource_summary.get("leak_base_delta_mb", 0.0)
 
         # Parse UAC metrics
         metrics = parse_stress_metrics(uac_output)
@@ -1078,6 +1496,12 @@ class P2PBenchmark:
         print(f"Avg Concurrent    : {result.calls_avg:.1f}")
         print(f"Test Duration     : {result.test_duration_s:.1f}s")
 
+        if result.leak_final_assessment:
+            print(f"\n--- Memory Leak Analysis ---")
+            print(f"Final Assessment  : {result.leak_final_assessment}")
+            print(f"Final Slope       : {result.leak_final_slope_mb_per_min:.3f} MB/min")
+            print(f"Total Growth      : {result.leak_base_delta_mb:+.1f} MB (vs first window)")
+
         if result.errors:
             print(f"\n--- Errors ---")
             for error in result.errors:
@@ -1107,6 +1531,11 @@ Examples:
 
   # 5000 concurrent (final goal)
   python bench.py --scenario all --total 5000 --cps 200 --duration 120 --uas-count 10
+
+  # 1-hour soak test: cps=100, ~1000 concurrent, leak check every 5 min,
+  # sipflow remote + wholesale addon enabled
+  python bench.py --scenario forward_sipflow --cps 100 --duration 10 \
+      --wall-time 3600 --leak-check-interval 300 --wholesale --uas-count 5
         """,
     )
 
@@ -1184,6 +1613,29 @@ Examples:
         default=10,
         help="Cooldown between scenarios in seconds (default: 10)",
     )
+    parser.add_argument(
+        "--wholesale",
+        action="store_true",
+        help="Enable the wholesale addon (injects addons=[\"wholesale\"] under [proxy]). "
+             "Requires rustpbx built with the 'wholesale' feature.",
+    )
+    parser.add_argument(
+        "--wall-time",
+        type=int,
+        default=0,
+        help="Total sustained load duration in seconds (soak mode). When set, "
+             "--total is ignored and recomputed as cps * wall_time so load is "
+             "sustained for the full duration. e.g. --cps 100 --wall-time 3600 "
+             "= 1 hour. In soak mode only one scenario runs.",
+    )
+    parser.add_argument(
+        "--leak-check-interval",
+        type=int,
+        default=300,
+        help="Memory-leak analysis interval in seconds (default: 300 = 5 min). "
+             "Active when --wall-time > 0. Reports slope (MB/min), R², and an "
+             "assessment (STABLE/WATCH/LEAK SUSPECTED) and appends to leak_check.csv.",
+    )
 
     args = parser.parse_args()
 
@@ -1227,6 +1679,17 @@ Examples:
     elif args.scenario == "forward_sipflow":
         scenarios = [("forward_sipflow", "all", True)]
 
+    # In soak (wall-time) mode, running all 4 scenarios back-to-back would take
+    # 4× the wall time. Force a single scenario, defaulting to forward_sipflow
+    # (media proxy all + sipflow remote) which exercises the most code paths and
+    # is the typical choice for leak detection.
+    if args.wall_time > 0 and args.scenario == "all":
+        print(f"[soak] --wall-time={args.wall_time}s set with --scenario all; "
+              f"narrowing to forward_sipflow only (media_proxy=all + sipflow remote)")
+        scenarios = [("forward_sipflow", "all", True)]
+
+    leak_interval = args.leak_check_interval if args.wall_time > 0 else 0
+
     # Run scenarios
     all_results: list[BenchmarkResult] = []
     try:
@@ -1244,6 +1707,9 @@ Examples:
                 sipflow=sipflow,
                 uas_count=args.uas_count,
                 uas_base_port=args.uas_base_port,
+                wholesale=args.wholesale,
+                wall_time=args.wall_time,
+                leak_check_interval=leak_interval,
             )
 
             benchmark.print_summary(result)

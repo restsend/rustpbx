@@ -587,6 +587,8 @@ mod tests {
                 headers: None,
                 signaling: None,
                 media: None,
+                force_pcm: None,
+                pcm_sample_rate: None,
             },
             None,
             None,

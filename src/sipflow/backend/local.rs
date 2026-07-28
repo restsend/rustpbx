@@ -14,7 +14,7 @@ use crate::sipflow::flusher::SipFlowFlusher;
 use crate::sipflow::perf::{PerfCounters, PerfDumper};
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet_with};
-use crate::sipflow::wav_utils::generate_wav_to_writer;
+use crate::sipflow::wav_utils::generate_wav_to_writer_with_rate;
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 enum Command {
@@ -35,6 +35,8 @@ pub struct LocalBackend {
     subdirs: SipFlowSubdirs,
     cancel_token: CancellationToken,
     _flusher: SipFlowFlusher,
+    force_pcm: bool,
+    pcm_sample_rate: u32,
 }
 
 impl LocalBackend {
@@ -45,6 +47,8 @@ impl LocalBackend {
         flush_interval_secs: u64,
         id_cache_size: usize,
         compress: Option<u32>,
+        force_pcm: bool,
+        pcm_sample_rate: u32,
     ) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
 
@@ -161,6 +165,8 @@ impl LocalBackend {
             subdirs,
             cancel_token,
             _flusher: flusher,
+            force_pcm,
+            pcm_sample_rate,
         })
     }
 }
@@ -247,6 +253,8 @@ impl SipFlowBackend for LocalBackend {
         let call_id = call_id.to_string();
         let root = self.root.clone();
         let subdirs = self.subdirs.clone();
+        let force_pcm = self.force_pcm;
+        let pcm_sample_rate = self.pcm_sample_rate;
 
         let result = tokio::task::spawn(async move {
             let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
@@ -257,11 +265,13 @@ impl SipFlowBackend for LocalBackend {
             let payload_map =
                 build_payload_maps(&mut storage, &call_id, start_time, end_time).await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(
+            generate_wav_to_writer_with_rate(
+                &call_id,
                 &packets,
                 &payload_map.0,
                 &payload_map.1,
-                true,
+                force_pcm,
+                pcm_sample_rate,
                 false,
                 &mut cursor,
             )?;
@@ -282,6 +292,8 @@ impl SipFlowBackend for LocalBackend {
         let call_id = call_id.to_string();
         let root = self.root.clone();
         let subdirs = self.subdirs.clone();
+        let force_pcm = self.force_pcm;
+        let pcm_sample_rate = self.pcm_sample_rate;
 
         let result = tokio::task::spawn(async move {
             let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
@@ -301,11 +313,13 @@ impl SipFlowBackend for LocalBackend {
             )
             .await;
             let mut cursor = std::io::Cursor::new(Vec::new());
-            generate_wav_to_writer(
+            generate_wav_to_writer_with_rate(
+                &call_id,
                 &packets,
                 &payload_map.0,
                 &payload_map.1,
-                true,
+                force_pcm,
+                pcm_sample_rate,
                 false,
                 &mut cursor,
             )?;
@@ -326,6 +340,8 @@ impl SipFlowBackend for LocalBackend {
         let call_id = call_id.to_string();
         let root = self.root.clone();
         let subdirs = self.subdirs.clone();
+        let force_pcm = self.force_pcm;
+        let pcm_sample_rate = self.pcm_sample_rate;
 
         let file = tokio::task::spawn(async move {
             let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None);
@@ -346,11 +362,13 @@ impl SipFlowBackend for LocalBackend {
             .await;
 
             let mut file = tempfile::NamedTempFile::new()?;
-            generate_wav_to_writer(
+            generate_wav_to_writer_with_rate(
+                &call_id,
                 &packets,
                 &payload_map.0,
                 &payload_map.1,
-                true,
+                force_pcm,
+                pcm_sample_rate,
                 false,
                 &mut file,
             )?;

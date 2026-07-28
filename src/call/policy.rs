@@ -6,9 +6,9 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
     TransactionTrait,
 };
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use dashmap::DashMap;
 use tracing::{error, warn};
 
 #[async_trait]
@@ -491,13 +491,13 @@ impl FrequencyLimiter for MockFrequencyLimiter {
 pub struct InMemoryFrequencyLimiter {
     // Key: "policy_id:scope:scope_value:type" -> (count, window_end_timestamp)
     // For concurrency, window_end is i64::MAX
-    counts: RwLock<HashMap<String, (u32, i64)>>,
+    counts: DashMap<String, (u32, i64)>,
 }
 
 impl InMemoryFrequencyLimiter {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            counts: RwLock::new(HashMap::new()),
+            counts: DashMap::new(),
         })
     }
     pub async fn run_cleanup_loop(self: Arc<Self>, cancel_token: CancellationToken) {
@@ -522,10 +522,9 @@ impl InMemoryFrequencyLimiter {
 
     fn cleanup(&self) {
         let now = Utc::now().timestamp();
-        let mut counts = self.counts.write().unwrap();
         // Only cleanup expired windows. Concurrency (MAX) won't be cleaned up here unless we want to.
         // Concurrency should be released explicitly.
-        counts.retain(|_, (_, window_end)| *window_end > now);
+        self.counts.retain(|_, (_, window_end)| *window_end > now);
     }
 
     fn get_key(&self, policy_id: &str, scope: &str, scope_value: &str, limit_type: &str) -> String {
@@ -545,9 +544,8 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
     ) -> Result<bool> {
         let key = self.get_key(policy_id, scope, scope_value, "frequency");
         let now = Utc::now().timestamp();
-        let mut counts = self.counts.write().unwrap();
-
-        let (count, window_end) = counts.entry(key.clone()).or_insert((0, 0));
+        let mut entry = self.counts.entry(key).or_insert((0, 0));
+        let (count, window_end) = &mut *entry;
 
         if now > *window_end {
             // Window expired, reset
@@ -581,8 +579,8 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             .unwrap()
             .timestamp();
 
-        let mut counts = self.counts.write().unwrap();
-        let (count, window_end) = counts.entry(key.clone()).or_insert((0, 0));
+        let mut entry = self.counts.entry(key).or_insert((0, 0));
+        let (count, window_end) = &mut *entry;
 
         if now.timestamp() > *window_end {
             // New day (or first time)
@@ -607,8 +605,8 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         max_concurrency: u32,
     ) -> Result<bool> {
         let key = self.get_key(policy_id, scope, scope_value, "concurrency");
-        let mut counts = self.counts.write().unwrap();
-        let (count, window_end) = counts.entry(key.clone()).or_insert((0, i64::MAX));
+        let mut entry = self.counts.entry(key).or_insert((0, i64::MAX));
+        let (count, window_end) = &mut *entry;
 
         // Ensure it's marked as concurrency type (MAX window)
         *window_end = i64::MAX;
@@ -628,11 +626,10 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         scope_value: &str,
     ) -> Result<()> {
         let key = self.get_key(policy_id, scope, scope_value, "concurrency");
-        let mut counts = self.counts.write().unwrap();
-        if let Some((count, _)) = counts.get_mut(&key)
-            && *count > 0
+        if let Some(mut entry) = self.counts.get_mut(&key)
+            && entry.value().0 > 0
         {
-            *count -= 1;
+            entry.value_mut().0 -= 1;
         }
         Ok(())
     }
@@ -644,10 +641,10 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         scope_value: Option<String>,
         limit_type: Option<String>,
     ) -> Result<Vec<crate::models::frequency_limit::Model>> {
-        let counts = self.counts.read().unwrap();
         let mut results = Vec::new();
-        for (key, (count, window_end)) in counts.iter() {
-            let parts: Vec<&str> = key.split(':').collect();
+        for entry in self.counts.iter() {
+            let (count, window_end) = entry.value();
+            let parts: Vec<&str> = entry.key().split(':').collect();
             if parts.len() != 4 {
                 continue;
             }
@@ -702,41 +699,50 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         scope_value: Option<String>,
         limit_type: Option<String>,
     ) -> Result<u64> {
-        let mut counts = self.counts.write().unwrap();
-        let initial_len = counts.len();
-        counts.retain(|key, _| {
-            let parts: Vec<&str> = key.split(':').collect();
-            if parts.len() != 4 {
-                return true;
-            }
-            let p_id = parts[0];
-            let s = parts[1];
-            let s_val = parts[2];
-            let l_type = parts[3];
+        let keys_to_remove: Vec<String> = self
+            .counts
+            .iter()
+            .filter(|entry| {
+                let key = entry.key();
+                let parts: Vec<&str> = key.split(':').collect();
+                if parts.len() != 4 {
+                    return false;
+                }
+                let p_id = parts[0];
+                let s = parts[1];
+                let s_val = parts[2];
+                let l_type = parts[3];
 
-            if let Some(ref pid) = policy_id
-                && pid != p_id
-            {
-                return true;
-            }
-            if let Some(ref sc) = scope
-                && sc != s
-            {
-                return true;
-            }
-            if let Some(ref sv) = scope_value
-                && sv != s_val
-            {
-                return true;
-            }
-            if let Some(ref lt) = limit_type
-                && lt != l_type
-            {
-                return true;
-            }
-            false // Remove
-        });
-        Ok((initial_len - counts.len()) as u64)
+                if let Some(ref pid) = policy_id
+                    && pid != p_id
+                {
+                    return false;
+                }
+                if let Some(ref sc) = scope
+                    && sc != s
+                {
+                    return false;
+                }
+                if let Some(ref sv) = scope_value
+                    && sv != s_val
+                {
+                    return false;
+                }
+                if let Some(ref lt) = limit_type
+                    && lt != l_type
+                {
+                    return false;
+                }
+                true // Remove
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let removed = keys_to_remove.len() as u64;
+        for key in keys_to_remove {
+            self.counts.remove(&key);
+        }
+        Ok(removed)
     }
 }
 
@@ -1065,6 +1071,7 @@ mod tests {
     use super::*;
     use crate::models::policy::{ConcurrencyLimit, DailyLimit, FrequencyLimit};
     use std::collections::HashMap;
+    use std::sync::RwLock;
 
     /// A test limiter that records what policy_id was passed
     struct RecordingLimiter {

@@ -7425,6 +7425,16 @@ impl SipSession {
                 }
             }
 
+            let rtp_timeout = self.context.dialplan.rtp_timeout.or_else(|| {
+                self.server
+                    .proxy_config
+                    .rtp_timeout
+                    .map(Duration::from_secs)
+            });
+            if let (Some(tx), Some(timeout)) = (self.media.rtp_timeout_tx.clone(), rtp_timeout) {
+                bridge_builder = bridge_builder.with_rtp_timeout_notify(tx, timeout);
+            }
+
             let bridge = bridge_builder.build();
 
             bridge.setup_bridge().await?;
@@ -9099,6 +9109,29 @@ impl SipSession {
 
         info!(session_id = %self.context.session_id, "Session cleanup complete");
 
+        // Tear down the transport-level RTP rewrite bridge (fast-path relay)
+        // on both legs BEFORE destroying the engine session / closing the
+        // PeerConnections. The fast-path relay runs inline on the media worker
+        // (RtpTransport::receive → RewriteBridge → peer IceConn). If it is still
+        // armed when the peer PeerConnection is torn down, the relay can race
+        // with PC close and dereference cleared/freed state, causing a media-
+        // worker segfault (observed "media-worker segfault at 3 ip 0x3" under
+        // sustained ~900-concurrent load after ~35min). Clearing is idempotent.
+        {
+            let caller_peer = self.caller_peer();
+            let callee_peer = self.callee_peer();
+            if let Some(peer) = caller_peer {
+                if let Some(pc) = Self::get_peer_pc(peer, Self::CALLER_TRACK_ID).await {
+                    pc.clear_rtp_rewrite_bridge();
+                }
+            }
+            if let Some(peer) = callee_peer {
+                if let Some(pc) = Self::get_peer_pc(peer, Self::CALLEE_TRACK_ID).await {
+                    pc.clear_rtp_rewrite_bridge();
+                }
+            }
+        }
+
         // Destroy the engine session last — after all recording/bridge cleanup.
         {
             use crate::media::engine::MediaCommand;
@@ -9150,8 +9183,8 @@ impl SipSession {
             .as_any()
             .downcast_ref::<DefaultAppRuntime>()
         {
-            let ivr_end = runtime.context.get_var("ivr_end_reason").await;
-            let ivr_error = runtime.context.get_var("ivr_last_error").await;
+            let ivr_end = runtime.context.get_var("ivr_end_reason");
+            let ivr_error = runtime.context.get_var("ivr_last_error");
 
             let ivr_override = match ivr_end.as_deref() {
                 Some("hangup") => Some(CallRecordHangupReason::BySystem),

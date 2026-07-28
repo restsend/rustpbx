@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 use tracing::warn;
 
 const IVR_STATUS_KEY: &str = "ivr_status";
@@ -78,7 +78,7 @@ pub struct StepIvrApp {
     current_step_name: Option<String>,
     /// Structured trigger that caused the current step (e.g. dtmf with digit detail).
     current_trigger: Option<crate::rwi::TriggerInfo>,
-    runtime_vars: Option<Arc<RwLock<HashMap<String, String>>>>,
+    runtime_vars: Option<Arc<DashMap<String, String>>>,
     /// Session extensions clone stashed in on_enter for use in on_exit.
     /// Only populated when the IVR was started via `ivr.exec`.
     session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
@@ -325,20 +325,19 @@ impl StepIvrApp {
         }
     }
 
-    async fn set_runtime_status(&self, ctx: &ApplicationContext, status: &str) {
-        ctx.set_var(IVR_STATUS_KEY, status).await;
+    fn set_runtime_status(&self, ctx: &ApplicationContext, status: &str) {
+        ctx.set_var(IVR_STATUS_KEY, status);
         if let Some(name) = &self.ivr_name {
-            ctx.set_var(IVR_NAME_KEY, name).await;
+            ctx.set_var(IVR_NAME_KEY, name);
         }
     }
 
-    async fn set_runtime_error(&self, ctx: &ApplicationContext, error: &str) {
-        ctx.set_var(IVR_LAST_ERROR_KEY, error).await;
+    fn set_runtime_error(&self, ctx: &ApplicationContext, error: &str) {
+        ctx.set_var(IVR_LAST_ERROR_KEY, error);
     }
 
-    async fn set_runtime_error_shared(&self, error: &str) {
+    fn set_runtime_error_shared(&self, error: &str) {
         if let Some(vars) = &self.runtime_vars {
-            let mut vars = vars.write().await;
             vars.insert(IVR_LAST_ERROR_KEY.to_string(), error.to_string());
             if let Some(name) = &self.ivr_name {
                 vars.insert(IVR_NAME_KEY.to_string(), name.clone());
@@ -346,9 +345,8 @@ impl StepIvrApp {
         }
     }
 
-    async fn set_runtime_status_shared(&self, status: &str) {
+    fn set_runtime_status_shared(&self, status: &str) {
         if let Some(vars) = &self.runtime_vars {
-            let mut vars = vars.write().await;
             vars.insert(IVR_STATUS_KEY.to_string(), status.to_string());
             if let Some(name) = &self.ivr_name {
                 vars.insert(IVR_NAME_KEY.to_string(), name.clone());
@@ -356,9 +354,8 @@ impl StepIvrApp {
         }
     }
 
-    async fn set_runtime_end_reason_shared(&self, reason: &str) {
+    fn set_runtime_end_reason_shared(&self, reason: &str) {
         if let Some(vars) = &self.runtime_vars {
-            let mut vars = vars.write().await;
             vars.insert(IVR_END_REASON_KEY.to_string(), reason.to_string());
             vars.insert(IVR_STATUS_KEY.to_string(), reason.to_string());
             if let Some(name) = &self.ivr_name {
@@ -781,11 +778,11 @@ impl StepIvrApp {
                 tracing::warn!(error = %e, "StepIvrApp: provider request failed, using fallback");
                 let error_text = e.to_string();
                 if self.step_index <= 1 {
-                    self.set_runtime_status_shared("startup_error").await;
+                    self.set_runtime_status_shared("startup_error");
                 } else {
-                    self.set_runtime_status_shared("provider_error").await;
+                    self.set_runtime_status_shared("provider_error");
                 }
-                self.set_runtime_error_shared(&error_text).await;
+                self.set_runtime_error_shared(&error_text);
                 Ok(ActionNode::with_next(
                     EntryAction::Prompt {
                         file: Some("sounds/error.wav".into()),
@@ -967,7 +964,7 @@ impl CallApp for StepIvrApp {
     ) -> anyhow::Result<AppAction> {
         self.runtime_vars = Some(context.session_vars.clone());
         self.session_extensions = Some(context.session_extensions.clone());
-        self.set_runtime_status(context, "starting").await;
+        self.set_runtime_status(context, "starting");
         ctrl.answer().await?;
 
         self.sess
@@ -1002,9 +999,8 @@ impl CallApp for StepIvrApp {
             }
             // Also write to shared session_vars so the next chained app can see them.
             if let Some(ref runtime) = self.runtime_vars {
-                let mut sv = runtime.write().await;
                 for (k, v) in ivp {
-                    sv.insert(k.clone(), v.clone());
+                    runtime.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -1022,7 +1018,7 @@ impl CallApp for StepIvrApp {
             custom_data: self.custom_data.clone(),
             transferred_from: self.transferred_from.clone(),
         };
-        self.set_runtime_status(context, "provider_start").await;
+        self.set_runtime_status(context, "provider_start");
         self.provider.on_session_start(&sess_ctx).await.ok();
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
@@ -1035,18 +1031,17 @@ impl CallApp for StepIvrApp {
         )
         .await;
 
-        self.set_runtime_status(context, "awaiting_first_step")
-            .await;
+        self.set_runtime_status(context, "awaiting_first_step");
         let first_node = match self.request_next(Some(ProviderEvent::SessionStart)).await {
             Ok(node) => node,
             Err(err) => {
-                self.set_runtime_status(context, "startup_error").await;
-                self.set_runtime_error(context, &err.to_string()).await;
+                self.set_runtime_status(context, "startup_error");
+                self.set_runtime_error(context, &err.to_string());
                 return Err(err);
             }
         };
         self.current_node = Some(first_node);
-        self.set_runtime_status(context, "active").await;
+        self.set_runtime_status(context, "active");
         self.__exec_node(ctrl, context).await
     }
 
@@ -1389,7 +1384,7 @@ impl CallApp for StepIvrApp {
         self.sess
             .variables
             .insert(IVR_END_REASON_KEY.into(), end_reason_label.clone());
-        self.set_runtime_end_reason_shared(&end_reason_label).await;
+        self.set_runtime_end_reason_shared(&end_reason_label);
         // Clean up local state
         if self.current_track_id.is_some() {
             // Audio track will be cleaned up by media layer
@@ -3175,11 +3170,11 @@ mod tests {
 
         assert!(!end_called.load(Ordering::SeqCst), "cancel must skip /end");
         assert_eq!(
-            ctx.get_var(IVR_STATUS_KEY).await.as_deref(),
+            ctx.get_var(IVR_STATUS_KEY).as_deref(),
             Some("cancelled")
         );
         assert_eq!(
-            ctx.get_var(IVR_END_REASON_KEY).await.as_deref(),
+            ctx.get_var(IVR_END_REASON_KEY).as_deref(),
             Some("cancelled")
         );
 
@@ -3204,10 +3199,10 @@ mod tests {
             })
             .await;
         assert_eq!(
-            ctx.get_var(IVR_LAST_ERROR_KEY).await.as_deref(),
+            ctx.get_var(IVR_LAST_ERROR_KEY).as_deref(),
             Some("provider bootstrap failed")
         );
-        let status_before_exit = ctx.get_var(IVR_STATUS_KEY).await;
+        let status_before_exit = ctx.get_var(IVR_STATUS_KEY);
         assert!(
             matches!(
                 status_before_exit.as_deref(),
@@ -3226,13 +3221,13 @@ mod tests {
             .await
             .expect("fallback path should exit cleanly");
 
-        assert_eq!(ctx.get_var(IVR_STATUS_KEY).await.as_deref(), Some("hangup"));
+        assert_eq!(ctx.get_var(IVR_STATUS_KEY).as_deref(), Some("hangup"));
         assert_eq!(
-            ctx.get_var(IVR_NAME_KEY).await.as_deref(),
+            ctx.get_var(IVR_NAME_KEY).as_deref(),
             Some("failing-ivr")
         );
         assert_eq!(
-            ctx.get_var(IVR_END_REASON_KEY).await.as_deref(),
+            ctx.get_var(IVR_END_REASON_KEY).as_deref(),
             Some("hangup")
         );
     }

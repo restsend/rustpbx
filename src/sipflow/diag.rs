@@ -572,7 +572,7 @@ pub async fn run_diag(
     }
 
     // FlowDB pass
-    if let Ok(flowdb) = FlowDbBackend::new(&base, subdirs, None, 64, 128, 1000, 3600) {
+    if let Ok(flowdb) = FlowDbBackend::new(&base, subdirs, None, 64, 128, 1000, 3600, false, 16000) {
         let flowdb = Arc::new(flowdb);
 
         if let Ok(items) = flowdb.query_flow(call_id, start, end).await {

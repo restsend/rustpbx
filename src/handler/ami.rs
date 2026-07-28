@@ -106,15 +106,25 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         map
     };
 
+    let sip = state.sip_server();
     let sipserver_stats = serde_json::json!({
         "transactions": serde_json::json!({
             "running": tx_stats.running_transactions,
             "finished": tx_stats.finished_transactions,
             "waiting_ack": tx_stats.waiting_ack,
         }),
-        "dialogs": state.sip_server().inner.dialog_layer.len(),
-        "calls": state.sip_server().inner.active_call_registry.count(),
-        "running_tx": state.sip_server().inner.runnings_tx.load(Ordering::Relaxed),
+        "dialogs": sip.inner.dialog_layer.len(),
+        "calls": sip.inner.active_call_registry.count(),
+        "running_tx": sip.inner.runnings_tx.load(Ordering::Relaxed),
+        "dashmaps": serde_json::json!({
+            "trunks": sip.inner.data_context.trunks.len(),
+            "queues": sip.inner.data_context.queues.len(),
+            "debug_routes": sip.inner.data_context.debug_routes.len(),
+            "presence_states": sip.inner.presence_manager.states_len(),
+            "presence_subscribers": sip.inner.presence_manager.subscribers_len(),
+            "mwi_subscribers": sip.inner.presence_manager.mwi_subscribers_len(),
+            "media_sessions": sip.inner.media_engine.sessions_len(),
+        }),
     });
 
     let callrecord_stats = match state.core.callrecord_stats {

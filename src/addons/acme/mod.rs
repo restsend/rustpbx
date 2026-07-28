@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use dashmap::DashMap;
 use tokio::sync::RwLock as TokioRwLock;
 
 pub mod config;
@@ -25,7 +25,7 @@ pub enum AcmeStatus {
 
 #[derive(Clone)]
 pub struct AcmeState {
-    pub challenges: Arc<RwLock<HashMap<String, String>>>,
+    pub challenges: Arc<DashMap<String, String>>,
     pub status: Arc<RwLock<AcmeStatus>>,
     /// Auto-renewal configuration (loaded from config.toml)
     pub auto_renew_config: Arc<TokioRwLock<AcmeConfig>>,
@@ -45,7 +45,7 @@ impl AcmeAddon {
     pub fn new() -> Self {
         Self {
             state: AcmeState {
-                challenges: Arc::new(RwLock::new(HashMap::new())),
+                challenges: Arc::new(DashMap::new()),
                 status: Arc::new(RwLock::new(AcmeStatus::None)),
                 auto_renew_config: Arc::new(TokioRwLock::new(AcmeConfig::default())),
             },

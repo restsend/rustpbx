@@ -6,16 +6,16 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::transaction::transaction::Transaction;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     net::IpAddr,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -123,7 +123,7 @@ struct AclModuleInner {
     ua_white_list: HashSet<String>,
     ua_black_list: HashSet<String>,
     fallback_rules: Vec<String>,
-    dos_data: Arc<RwLock<HashMap<IpAddr, DosPerIpData>>>,
+    dos_data: Arc<DashMap<IpAddr, DosPerIpData>>,
 }
 
 #[derive(Clone)]
@@ -157,7 +157,7 @@ impl AclModule {
                 ua_white_list,
                 ua_black_list,
                 fallback_rules,
-                dos_data: Arc::new(RwLock::new(HashMap::new())),
+                dos_data: Arc::new(DashMap::new()),
             }),
         }
     }
@@ -182,8 +182,7 @@ impl AclModule {
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
         let cfg = &self.inner.config;
         let now = Instant::now();
-        let mut map = self.inner.dos_data.write().await;
-        let entry = map.entry(ip).or_insert_with(|| DosPerIpData {
+        let mut entry = self.inner.dos_data.entry(ip).or_insert_with(|| DosPerIpData {
             recent: Vec::new(),
             concurrent: 0,
             blocked_until: None,
@@ -221,7 +220,7 @@ impl AclModule {
     }
 
     async fn dos_release(&self, ip: IpAddr) {
-        if let Some(entry) = self.inner.dos_data.write().await.get_mut(&ip) {
+        if let Some(mut entry) = self.inner.dos_data.get_mut(&ip) {
             entry.concurrent = entry.concurrent.saturating_sub(1);
         }
     }

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use glob::glob;
 use ipnet::IpNet;
 use prefix_trie::joint::JointPrefixMap;
@@ -34,15 +35,15 @@ use crate::{
 
 pub struct ProxyDataContext {
     config: RwLock<Arc<ProxyConfig>>,
-    trunks: RwLock<HashMap<String, TrunkConfig>>,
+    pub trunks: DashMap<String, TrunkConfig>,
     pub(crate) acl_inbound_trunks: ArcSwap<JointPrefixMap<IpNet, Vec<String>>>,
-    queues: RwLock<HashMap<String, RouteQueueConfig>>,
+    pub queues: DashMap<String, RouteQueueConfig>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
     db: Option<DatabaseConnection>,
     trunk_registrar: Arc<TrunkRegistrar>,
     /// Debug routes — temporary overrides set by IVR Editor.
-    pub debug_routes: RwLock<HashMap<String, (String, Option<serde_json::Value>)>>,
+    pub debug_routes: DashMap<String, (String, Option<serde_json::Value>)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,14 +76,14 @@ impl ProxyDataContext {
 
         let ctx = Self {
             config: RwLock::new(config.clone()),
-            trunks: RwLock::new(HashMap::new()),
+            trunks: DashMap::new(),
             acl_inbound_trunks: ArcSwap::from_pointee(JointPrefixMap::new()),
-            queues: RwLock::new(HashMap::new()),
+            queues: DashMap::new(),
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
             db,
             trunk_registrar,
-            debug_routes: RwLock::new(HashMap::new()),
+            debug_routes: DashMap::new(),
         };
         let _ = ctx.reload_trunks(true, None).await?;
         let _ = ctx.reload_queues(false, None).await?;
@@ -116,11 +117,11 @@ impl ProxyDataContext {
     }
 
     pub fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
-        self.trunks.read().unwrap().clone()
+        self.trunks.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
     }
 
     pub fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
-        self.trunks.read().unwrap().get(name).cloned()
+        self.trunks.get(name).map(|v| v.value().clone())
     }
 
     pub fn routes_snapshot(&self) -> Vec<RouteRule> {
@@ -128,7 +129,7 @@ impl ProxyDataContext {
     }
 
     pub fn queues_snapshot(&self) -> HashMap<String, RouteQueueConfig> {
-        self.queues.read().unwrap().clone()
+        self.queues.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
     }
 
     pub fn acl_rules_snapshot(&self) -> Vec<String> {
@@ -144,12 +145,11 @@ impl ProxyDataContext {
         if let Some(id_str) = reference.strip_prefix("db-")
             && id_str.parse::<i64>().is_ok()
         {
-            let queues = self.queues.read().unwrap();
             // We need to store the ID in the map key or value to look it up efficiently.
             // Currently keys are canonical names or "db-<id>" from queue_entry_key.
             // Let's check if the key exists directly.
-            if let Some(queue) = queues.get(reference) {
-                return Ok(Some(queue.clone()));
+            if let Some(queue) = self.queues.get(reference) {
+                return Ok(Some(queue.value().clone()));
             }
         }
 
@@ -167,8 +167,9 @@ impl ProxyDataContext {
             return Ok(None);
         };
 
-        let queues = self.queues.read().unwrap();
-        for (name, queue) in queues.iter() {
+        for entry in self.queues.iter() {
+            let name = entry.key();
+            let queue = entry.value();
             if let Some(existing) = queue_utils::canonical_queue_key(name)
                 && existing == key
             {
@@ -463,7 +464,10 @@ impl ProxyDataContext {
             }
         }
         // Publish the backing trunk repository before its ACL name index.
-        *self.trunks.write().unwrap() = trunks.clone();
+        self.trunks.clear();
+        for (k, v) in &trunks {
+            self.trunks.insert(k.clone(), v.clone());
+        }
         self.acl_inbound_trunks.store(Arc::new(acl_inbound_trunks));
 
         let acl_enabled = config
@@ -593,7 +597,10 @@ impl ProxyDataContext {
         }
 
         let len = queues.len();
-        *self.queues.write().unwrap() = queues;
+        self.queues.clear();
+        for (k, v) in queues {
+            self.queues.insert(k, v);
+        }
         let finished_at = Utc::now();
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
@@ -868,13 +875,10 @@ impl ProxyDataContext {
             return Ok(None);
         };
         let store = self.config_store();
-        let trunk_lookup = {
-            let guard = self.trunks.read().unwrap();
-            guard
-                .iter()
-                .filter_map(|(name, trunk)| trunk.id.map(|id| (id, name.clone())))
-                .collect::<HashMap<i64, String>>()
-        };
+        let trunk_lookup = self.trunks
+            .iter()
+            .filter_map(|entry| entry.id.map(|id| (id, entry.key().clone())))
+            .collect::<HashMap<i64, String>>();
 
         let routes = load_routes_from_db(
             db,

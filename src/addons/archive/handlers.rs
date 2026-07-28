@@ -314,8 +314,7 @@ pub async fn manual_archive(
     // Prune tasks that finished more than 1 hour ago to prevent unbounded growth
     {
         let ttl = std::time::Duration::from_secs(3600);
-        let mut tasks = archive_state.manual_tasks.write().unwrap();
-        tasks.retain(|_, v| {
+        archive_state.manual_tasks.retain(|_, v| {
             let s = v.read().unwrap();
             s.completed_at.is_none_or(|t| t.elapsed() < ttl)
         });
@@ -323,8 +322,6 @@ pub async fn manual_archive(
 
     archive_state
         .manual_tasks
-        .write()
-        .unwrap()
         .insert(task_id.clone(), task_status.clone());
 
     let config = archive_state.config.read().unwrap().clone();
@@ -359,8 +356,7 @@ pub async fn task_status(
     Extension(archive_state): Extension<ArchiveState>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    let tasks = archive_state.manual_tasks.read().unwrap();
-    match tasks.get(&task_id) {
+    match archive_state.manual_tasks.get(&task_id) {
         Some(task) => {
             let s = task.read().unwrap();
             Json(serde_json::json!({

@@ -57,10 +57,10 @@ pub fn get_license_status(_addon_id: &str) -> Option<LicenseStatus> {
 #[cfg(feature = "commerce")]
 mod inner {
     use chrono::{DateTime, Utc};
+    use dashmap::DashMap;
     use once_cell::sync::Lazy;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     use super::{LicenseConfig, LicenseStatus};
 
@@ -92,34 +92,33 @@ mod inner {
         pub reject_reason: Option<String>,
     }
 
-    pub(super) static LICENSE_CACHE: Lazy<Mutex<HashMap<String, LicenseInfo>>> =
-        Lazy::new(|| Mutex::new(HashMap::new()));
+    pub(super) static LICENSE_CACHE: Lazy<DashMap<String, LicenseInfo>> =
+        Lazy::new(DashMap::new);
 
     /// Per-addon license results populated once at startup.
-    pub(super) static STARTUP_LICENSE_RESULTS: Lazy<Mutex<HashMap<String, LicenseStatus>>> =
-        Lazy::new(|| Mutex::new(HashMap::new()));
+    pub(super) static STARTUP_LICENSE_RESULTS: Lazy<DashMap<String, LicenseStatus>> =
+        Lazy::new(DashMap::new);
 
     // ── Startup-cache helpers ─────────────────────────────────────────────────────
 
     /// Store per-addon license results that were resolved at startup.
     pub fn record_startup_results(results: HashMap<String, LicenseStatus>) {
-        if let Ok(mut cache) = STARTUP_LICENSE_RESULTS.lock() {
-            *cache = results;
+        STARTUP_LICENSE_RESULTS.clear();
+        for (k, v) in results {
+            STARTUP_LICENSE_RESULTS.insert(k, v);
         }
     }
 
     /// Return the startup-time license status for an addon.
     pub fn get_license_status(addon_id: &str) -> Option<LicenseStatus> {
-        STARTUP_LICENSE_RESULTS.lock().ok()?.get(addon_id).cloned()
+        STARTUP_LICENSE_RESULTS.get(addon_id).map(|r| r.clone())
     }
 
     /// Update the in-memory license status for one or more addons immediately
     /// after a successful verification (no restart required).
     pub fn update_license_status(addon_ids: &[String], status: LicenseStatus) {
-        if let Ok(mut cache) = STARTUP_LICENSE_RESULTS.lock() {
-            for id in addon_ids {
-                cache.insert(id.clone(), status.clone());
-            }
+        for id in addon_ids {
+            STARTUP_LICENSE_RESULTS.insert(id.clone(), status.clone());
         }
     }
 
@@ -130,14 +129,12 @@ mod inner {
     /// without making a network request.
     pub async fn verify_license(key: &str) -> anyhow::Result<LicenseInfo> {
         // Fast path: return cached result if already verified this session.
-        if let Ok(cache) = LICENSE_CACHE.lock() {
-            if let Some(info) = cache.get(key) {
-                tracing::debug!(
-                    "License key {}... served from cache",
-                    &key[..key.len().min(8)]
-                );
-                return Ok(info.clone());
-            }
+        if let Some(info) = LICENSE_CACHE.get(key) {
+            tracing::debug!(
+                "License key {}... served from cache",
+                &key[..key.len().min(8)]
+            );
+            return Ok(info.clone());
         }
 
         let key_prefix = &key[..key.len().min(8)];
@@ -171,19 +168,15 @@ mod inner {
                     reject_reason: verify_data.reject_reason,
                 };
 
-                if let Ok(mut cache) = LICENSE_CACHE.lock() {
-                    cache.insert(key.to_string(), info.clone());
-                }
+                LICENSE_CACHE.insert(key.to_string(), info.clone());
 
                 Ok(info)
             }
             Err(e) => {
                 tracing::error!("License verification error: {}", e);
-                if let Ok(cache) = LICENSE_CACHE.lock() {
-                    if let Some(info) = cache.get(key) {
-                        tracing::warn!("Network error verifying license, using cached info: {}", e);
-                        return Ok(info.clone());
-                    }
+                if let Some(info) = LICENSE_CACHE.get(key) {
+                    tracing::warn!("Network error verifying license, using cached info: {}", e);
+                    return Ok(info.clone());
                 }
                 Err(e)
             }
@@ -201,14 +194,12 @@ mod inner {
 
     /// Get cached license info if available.
     pub fn get_cached_license(key: &str) -> Option<LicenseInfo> {
-        LICENSE_CACHE.lock().ok()?.get(key).cloned()
+        LICENSE_CACHE.get(key).map(|r| r.clone())
     }
 
     /// Clear the license cache.
     pub fn clear_cache() {
-        if let Ok(mut cache) = LICENSE_CACHE.lock() {
-            cache.clear();
-        }
+        LICENSE_CACHE.clear();
     }
 
     /// Verify license for a specific addon using the license config.
@@ -382,9 +373,7 @@ mod tests {
             reject_reason: None,
         };
 
-        if let Ok(mut cache) = inner::LICENSE_CACHE.lock() {
-            cache.insert("test-key".to_string(), info.clone());
-        }
+        inner::LICENSE_CACHE.insert("test-key".to_string(), info.clone());
 
         let cached = get_cached_license("test-key");
         assert!(cached.is_some());

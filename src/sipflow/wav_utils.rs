@@ -364,6 +364,7 @@ pub fn generate_wav_to_writer_ex<W: Write + Seek>(
     writer: &mut W,
 ) -> Result<u64> {
     generate_wav_to_writer(
+        "",
         packets,
         &HashMap::new(),
         &HashMap::new(),
@@ -380,6 +381,7 @@ pub(crate) fn generate_wav_from_packets_with_map_ex(
 ) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(Vec::new());
     generate_wav_to_writer(
+        "",
         packets,
         payload_map,
         &HashMap::new(),
@@ -391,10 +393,24 @@ pub(crate) fn generate_wav_from_packets_with_map_ex(
 }
 
 pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
+    call_id: &str,
     packets: &[(i32, u64, Vec<u8>)],
     payload_map: &PayloadTypeMap,
     leg_payload_map: &LegPayloadTypeMap,
     force_pcm: bool,
+    stereo_swap: bool,
+    writer: &mut W,
+) -> Result<u64> {
+    generate_wav_to_writer_with_rate(call_id, packets, payload_map, leg_payload_map, force_pcm, 16000, stereo_swap, writer)
+}
+
+pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(
+    call_id: &str,
+    packets: &[(i32, u64, Vec<u8>)],
+    payload_map: &PayloadTypeMap,
+    leg_payload_map: &LegPayloadTypeMap,
+    force_pcm: bool,
+    pcm_sample_rate: u32,
     stereo_swap: bool,
     writer: &mut W,
 ) -> Result<u64> {
@@ -447,16 +463,17 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     let has_pcma = legs_codecs.values().any(|s| s.contains(&CodecType::PCMA));
 
     let (target_codec, target_sample_rate) = if force_pcm {
-        (None, 16000)
+        (None, pcm_sample_rate)
     } else if !has_other && has_pcmu && !has_pcma {
         (Some(CodecType::PCMU), 8000)
     } else if !has_other && has_pcma && !has_pcmu {
         (Some(CodecType::PCMA), 8000)
     } else {
-        (None, 16000)
+        (None, pcm_sample_rate)
     };
 
     tracing::info!(
+        call_id,
         "Media export: target_codec={:?} rate={}",
         target_codec,
         target_sample_rate

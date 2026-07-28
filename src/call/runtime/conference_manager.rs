@@ -13,9 +13,10 @@ use crate::call::domain::LegId;
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tracing::info;
 
 pub const DEFAULT_CONFERENCE_TIMEOUT_SECS: u64 = 3600;
@@ -219,24 +220,32 @@ impl ParticipantChannels {
 /// Global conference manager with in-server audio mixing
 #[derive(Clone)]
 pub struct ConferenceManager {
-    conferences: Arc<RwLock<HashMap<ConferenceId, ConferenceRoom>>>,
-    leg_to_conference: Arc<RwLock<HashMap<LegId, ConferenceId>>>,
-    audio_mixers: Arc<RwLock<HashMap<ConferenceId, Arc<ConferenceAudioMixer>>>>,
-    participant_channels: Arc<RwLock<HashMap<LegId, ParticipantChannels>>>,
-    participant_output_rxs: Arc<RwLock<HashMap<LegId, mpsc::Receiver<AudioFrame>>>>,
-    timeout_tokens: Arc<RwLock<HashMap<ConferenceId, tokio_util::sync::CancellationToken>>>,
+    conferences: Arc<DashMap<ConferenceId, ConferenceRoom>>,
+    leg_to_conference: Arc<DashMap<LegId, ConferenceId>>,
+    audio_mixers: Arc<DashMap<ConferenceId, Arc<ConferenceAudioMixer>>>,
+    participant_channels: Arc<DashMap<LegId, ParticipantChannels>>,
+    participant_output_rxs: Arc<DashMap<LegId, mpsc::Receiver<AudioFrame>>>,
+    timeout_tokens: Arc<DashMap<ConferenceId, tokio_util::sync::CancellationToken>>,
 }
 
 impl ConferenceManager {
     pub fn new() -> Self {
         Self {
-            conferences: Arc::new(RwLock::new(HashMap::new())),
-            leg_to_conference: Arc::new(RwLock::new(HashMap::new())),
-            audio_mixers: Arc::new(RwLock::new(HashMap::new())),
-            participant_channels: Arc::new(RwLock::new(HashMap::new())),
-            participant_output_rxs: Arc::new(RwLock::new(HashMap::new())),
-            timeout_tokens: Arc::new(RwLock::new(HashMap::new())),
+            conferences: Arc::new(DashMap::new()),
+            leg_to_conference: Arc::new(DashMap::new()),
+            audio_mixers: Arc::new(DashMap::new()),
+            participant_channels: Arc::new(DashMap::new()),
+            participant_output_rxs: Arc::new(DashMap::new()),
+            timeout_tokens: Arc::new(DashMap::new()),
         }
+    }
+
+    pub fn conference_count(&self) -> usize {
+        self.conferences.len()
+    }
+
+    pub fn leg_to_conference_count(&self) -> usize {
+        self.leg_to_conference.len()
     }
 
     /// Create a new conference with in-server audio mixing
@@ -257,9 +266,7 @@ impl ConferenceManager {
         host_leg_id: Option<LegId>,
         max_duration_secs: Option<u64>,
     ) -> Result<ConferenceRoom> {
-        let mut conferences = self.conferences.write().await;
-
-        if conferences.contains_key(&conf_id) {
+        if self.conferences.contains_key(&conf_id) {
             return Err(anyhow!("Conference {} already exists", conf_id.0));
         }
 
@@ -270,16 +277,12 @@ impl ConferenceManager {
         if let Some(dur) = max_duration_secs {
             conference = conference.with_max_duration(dur);
         }
-        conferences.insert(conf_id.clone(), conference.clone());
+        self.conferences.insert(conf_id.clone(), conference.clone());
 
-        let mut audio_mixers = self.audio_mixers.write().await;
         let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
-        audio_mixers.insert(conf_id.clone(), mixer);
+        self.audio_mixers.insert(conf_id.clone(), mixer);
         info!(conf_id = %conf_id.0, "Conference created with local audio mixing");
-
-        drop(audio_mixers);
-        drop(conferences);
 
         if let Some(dur) = max_duration_secs {
             self.spawn_timeout(conf_id.clone(), dur).await;
@@ -293,10 +296,7 @@ impl ConferenceManager {
         let cancel = tokio_util::sync::CancellationToken::new();
         let child = cancel.child_token();
 
-        {
-            let mut tokens = self.timeout_tokens.write().await;
-            tokens.insert(conf_id.clone(), cancel);
-        }
+        self.timeout_tokens.insert(conf_id.clone(), cancel);
 
         crate::utils::spawn(async move {
             tokio::select! {
@@ -311,40 +311,30 @@ impl ConferenceManager {
 
     /// Get a conference if it exists
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
-        let conferences = self.conferences.read().await;
-        conferences.get(conf_id).cloned()
+        self.conferences.get(conf_id).map(|v| v.clone())
     }
 
     /// Destroy a conference
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
-        {
-            let mut tokens = self.timeout_tokens.write().await;
-            if let Some(token) = tokens.remove(conf_id) {
-                token.cancel();
-            }
+        if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
+            token.cancel();
         }
 
-        let mut audio_mixers = self.audio_mixers.write().await;
-        if let Some(mixer) = audio_mixers.remove(conf_id) {
+        if let Some((_, mixer)) = self.audio_mixers.remove(conf_id) {
             mixer.stop().await;
         }
 
-        let mut conferences = self.conferences.write().await;
-        let mut leg_map = self.leg_to_conference.write().await;
-        let mut participant_channels = self.participant_channels.write().await;
-        let mut participant_output_rxs = self.participant_output_rxs.write().await;
-
-        if let Some(conf) = conferences.get(conf_id) {
-            // Remove all leg mappings and channels
+        if let Some(conf) = self.conferences.get(conf_id) {
             for leg_id in conf.participant_ids() {
-                leg_map.remove(&leg_id);
-                participant_channels.remove(&leg_id);
-                participant_output_rxs.remove(&leg_id);
+                self.leg_to_conference.remove(&leg_id);
+                self.participant_channels.remove(&leg_id);
+                self.participant_output_rxs.remove(&leg_id);
             }
         }
 
-        conferences
+        self.conferences
             .remove(conf_id)
+            .map(|(_, v)| v)
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
 
         info!(conf_id = %conf_id.0, "Conference destroyed");
@@ -369,57 +359,41 @@ impl ConferenceManager {
         role: ParticipantRole,
     ) -> Result<ParticipantChannels> {
         // Check if leg is already in another conference
+        if let Some(existing_conf) = self.leg_to_conference.get(&leg_id)
+            && *existing_conf != *conf_id
         {
-            let leg_map = self.leg_to_conference.read().await;
-            if let Some(existing_conf) = leg_map.get(&leg_id)
-                && existing_conf != conf_id
-            {
-                return Err(anyhow!(
-                    "Leg {} is already in conference {}",
-                    leg_id,
-                    existing_conf.0
-                ));
-            }
+            return Err(anyhow!(
+                "Leg {} is already in conference {}",
+                leg_id,
+                existing_conf.0
+            ));
         }
 
         // Add to conference room
         {
-            let mut conferences = self.conferences.write().await;
-            let conference = conferences
-                .get_mut(conf_id)
+            let mut conference = self.conferences.get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-
             conference.add_participant_with_role(leg_id.clone(), role)?;
         }
 
         // Add to local audio mixer
-        let (input_tx, output_rx) = {
-            let audio_mixers = self.audio_mixers.read().await;
-            let mixer = audio_mixers
-                .get(conf_id)
-                .ok_or_else(|| anyhow!("Audio mixer not found for conference {}", conf_id.0))?;
-
-            mixer
-                .add_participant(leg_id.clone(), CodecType::PCMU)
-                .await?
-        };
+        let mixer = self.audio_mixers
+            .get(conf_id)
+            .ok_or_else(|| anyhow!("Audio mixer not found for conference {}", conf_id.0))?
+            .value()
+            .clone();
+        let (input_tx, output_rx) = mixer
+            .add_participant(leg_id.clone(), CodecType::PCMU)
+            .await?;
 
         let channels = ParticipantChannels::new(input_tx);
 
         // Store channels and mapping
-        {
-            let mut participant_channels = self.participant_channels.write().await;
-            participant_channels.insert(leg_id.clone(), channels.clone());
-
-            let mut leg_map = self.leg_to_conference.write().await;
-            leg_map.insert(leg_id.clone(), conf_id.clone());
-        }
+        self.participant_channels.insert(leg_id.clone(), channels.clone());
+        self.leg_to_conference.insert(leg_id.clone(), conf_id.clone());
 
         // Store output_rx separately for media path integration
-        {
-            let mut output_rxs = self.participant_output_rxs.write().await;
-            output_rxs.insert(leg_id.clone(), output_rx);
-        }
+        self.participant_output_rxs.insert(leg_id.clone(), output_rx);
 
         Ok(channels)
     }
@@ -435,32 +409,22 @@ impl ConferenceManager {
         // Remove from conference room
         let remaining;
         {
-            let mut conferences = self.conferences.write().await;
-            let conference = conferences
-                .get_mut(conf_id)
+            let mut conference = self.conferences.get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-
             conference.remove_participant(leg_id)?;
             remaining = conference.participant_count();
         }
 
         // Remove from local audio mixer
-        let audio_mixers = self.audio_mixers.read().await;
-        if let Some(mixer) = audio_mixers.get(conf_id) {
+        if let Some(mixer) = self.audio_mixers.get(conf_id) {
+            let mixer = mixer.value().clone();
             mixer.remove_participant(leg_id).await?;
         }
 
         // Remove channels and mapping
-        {
-            let mut participant_channels = self.participant_channels.write().await;
-            participant_channels.remove(leg_id);
-
-            let mut participant_output_rxs = self.participant_output_rxs.write().await;
-            participant_output_rxs.remove(leg_id);
-
-            let mut leg_map = self.leg_to_conference.write().await;
-            leg_map.remove(leg_id);
-        }
+        self.participant_channels.remove(leg_id);
+        self.participant_output_rxs.remove(leg_id);
+        self.leg_to_conference.remove(leg_id);
 
         if remaining == 0 {
             info!(
@@ -482,17 +446,14 @@ impl ConferenceManager {
     pub async fn mute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conferences = self.conferences.write().await;
-            let conference = conferences
-                .get_mut(conf_id)
+            let mut conference = self.conferences.get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-
             conference.mute_participant(leg_id)?;
         }
 
         // Update local audio mixer
-        let audio_mixers = self.audio_mixers.read().await;
-        if let Some(mixer) = audio_mixers.get(conf_id) {
+        if let Some(mixer) = self.audio_mixers.get(conf_id) {
+            let mixer = mixer.value().clone();
             mixer.set_muted(leg_id, true).await?;
         }
 
@@ -503,17 +464,14 @@ impl ConferenceManager {
     pub async fn unmute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conferences = self.conferences.write().await;
-            let conference = conferences
-                .get_mut(conf_id)
+            let mut conference = self.conferences.get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-
             conference.unmute_participant(leg_id)?;
         }
 
         // Update local audio mixer
-        let audio_mixers = self.audio_mixers.read().await;
-        if let Some(mixer) = audio_mixers.get(conf_id) {
+        if let Some(mixer) = self.audio_mixers.get(conf_id) {
+            let mixer = mixer.value().clone();
             mixer.set_muted(leg_id, false).await?;
         }
 
@@ -522,14 +480,12 @@ impl ConferenceManager {
 
     /// Get conference ID for a leg
     pub async fn get_conference_id_for_leg(&self, leg_id: &LegId) -> Option<ConferenceId> {
-        let leg_map = self.leg_to_conference.read().await;
-        leg_map.get(leg_id).cloned()
+        self.leg_to_conference.get(leg_id).map(|v| v.clone())
     }
 
     /// Get participant channels for audio streaming (input only)
     pub async fn get_participant_channels(&self, leg_id: &LegId) -> Option<ParticipantChannels> {
-        let participant_channels = self.participant_channels.read().await;
-        participant_channels.get(leg_id).cloned()
+        self.participant_channels.get(leg_id).map(|v| v.clone())
     }
 
     /// Get participant output receiver for mixed audio (to participant)
@@ -539,26 +495,22 @@ impl ConferenceManager {
         &self,
         leg_id: &LegId,
     ) -> Option<mpsc::Receiver<AudioFrame>> {
-        let mut participant_output_rxs = self.participant_output_rxs.write().await;
-        participant_output_rxs.remove(leg_id)
+        self.participant_output_rxs.remove(leg_id).map(|(_, rx)| rx)
     }
 
     /// List all conferences
     pub async fn list_conferences(&self) -> Vec<ConferenceId> {
-        let conferences = self.conferences.read().await;
-        conferences.keys().cloned().collect()
+        self.conferences.iter().map(|r| r.key().clone()).collect()
     }
 
     /// List all conferences with full details
     pub async fn list_conferences_detail(&self) -> Vec<ConferenceRoom> {
-        let conferences = self.conferences.read().await;
-        conferences.values().cloned().collect()
+        self.conferences.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Get conference statistics
     pub async fn get_conference_stats(&self, conf_id: &ConferenceId) -> Result<ConferenceStats> {
-        let conferences = self.conferences.read().await;
-        let conference = conferences
+        let conference = self.conferences
             .get(conf_id)
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
 
@@ -573,10 +525,7 @@ impl ConferenceManager {
     /// Remove a leg from any conference (called when leg hangs up).
     /// Triggers auto-destroy if too few participants remain.
     pub async fn remove_leg_from_all(&self, leg_id: &LegId) -> Result<()> {
-        let conf_id = {
-            let leg_map = self.leg_to_conference.read().await;
-            leg_map.get(leg_id).cloned()
-        };
+        let conf_id = self.leg_to_conference.get(leg_id).map(|v| v.clone());
 
         if let Some(conf_id) = conf_id {
             let _ = self.remove_participant(&conf_id, leg_id).await;
@@ -593,8 +542,7 @@ impl ConferenceManager {
         host_leg_id: &LegId,
     ) -> Result<Vec<LegId>> {
         let (is_host, participant_ids) = {
-            let conferences = self.conferences.read().await;
-            let conf = conferences
+            let conf = self.conferences
                 .get(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             (conf.is_host(host_leg_id), conf.participant_ids())

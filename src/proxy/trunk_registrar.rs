@@ -10,6 +10,7 @@
 use crate::proxy::routing::TrunkConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use rsipstack::sip::StatusCode;
 use rsipstack::{
     dialog::{authenticate::Credential, registration::Registration},
@@ -43,8 +44,8 @@ pub struct TrunkRegistrationStatus {
 
 /// Manages outbound trunk registrations.
 pub struct TrunkRegistrar {
-    statuses: Arc<RwLock<HashMap<String, TrunkRegistrationStatus>>>,
-    cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    statuses: Arc<DashMap<String, TrunkRegistrationStatus>>,
+    cancel_tokens: Arc<DashMap<String, CancellationToken>>,
     /// Global cancel token for the registrar (parent for all per-trunk tokens).
     parent_cancel: CancellationToken,
     /// SIP endpoint reference for creating transactions (set after server build).
@@ -66,8 +67,8 @@ impl Default for TrunkRegistrar {
 impl TrunkRegistrar {
     pub fn new() -> Self {
         Self {
-            statuses: Arc::new(RwLock::new(HashMap::new())),
-            cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
+            statuses: Arc::new(DashMap::new()),
+            cancel_tokens: Arc::new(DashMap::new()),
             parent_cancel: CancellationToken::new(),
             endpoint: RwLock::new(None),
         }
@@ -81,12 +82,17 @@ impl TrunkRegistrar {
 
     /// Get the registration status of all trunks.
     pub fn get_statuses(&self) -> HashMap<String, TrunkRegistrationStatus> {
-        self.statuses.read().unwrap().clone()
+        self.statuses
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
     }
 
     /// Get the registration status of a specific trunk.
     pub fn get_status(&self, trunk_name: &str) -> Option<TrunkRegistrationStatus> {
-        self.statuses.read().unwrap().get(trunk_name).cloned()
+        self.statuses
+            .get(trunk_name)
+            .map(|r| r.value().clone())
     }
 
     /// Reconcile registrations with the current set of trunks.
@@ -102,7 +108,7 @@ impl TrunkRegistrar {
         };
 
         let current_names: Vec<String> =
-            { self.cancel_tokens.read().unwrap().keys().cloned().collect() };
+            { self.cancel_tokens.iter().map(|r| r.key().clone()).collect() };
 
         // Determine which trunks need registration.
         let mut desired: HashMap<String, &TrunkConfig> = HashMap::new();
@@ -124,11 +130,7 @@ impl TrunkRegistrar {
 
         // Start / restart registrations for desired trunks.
         for (name, config) in &desired {
-            let already_running = self
-                .cancel_tokens
-                .read()
-                .unwrap()
-                .contains_key(name.as_str());
+            let already_running = self.cancel_tokens.contains_key(name.as_str());
             if !already_running {
                 info!(trunk = %name, dest = %config.dest, "starting trunk registration");
                 self.start_registration(name.clone(), (*config).clone(), endpoint.clone());
@@ -139,7 +141,7 @@ impl TrunkRegistrar {
     /// Stop all registrations (used on shutdown).
     pub async fn stop_all(&self) {
         self.parent_cancel.cancel();
-        let names: Vec<String> = self.cancel_tokens.read().unwrap().keys().cloned().collect();
+        let names: Vec<String> = self.cancel_tokens.iter().map(|r| r.key().clone()).collect();
         for name in names {
             self.stop_registration(&name).await;
         }
@@ -147,22 +149,18 @@ impl TrunkRegistrar {
 
     /// Stop registration for a single trunk, sending un-REGISTER.
     async fn stop_registration(&self, name: &str) {
-        let token = { self.cancel_tokens.write().unwrap().remove(name) };
+        let token = self.cancel_tokens.remove(name).map(|(_, v)| v);
         if let Some(token) = token {
             token.cancel();
         }
-        self.statuses.write().unwrap().remove(name);
+        self.statuses.remove(name);
     }
 
     /// Spawn a background task for trunk registration.
     fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef) {
         let child_token = self.parent_cancel.child_token();
-        {
-            self.cancel_tokens
-                .write()
-                .unwrap()
-                .insert(name.clone(), child_token.clone());
-        }
+        self.cancel_tokens
+            .insert(name.clone(), child_token.clone());
 
         let statuses = self.statuses.clone();
 
@@ -193,7 +191,7 @@ async fn registration_loop(
     name: String,
     config: TrunkConfig,
     cancel: CancellationToken,
-    statuses: Arc<RwLock<HashMap<String, TrunkRegistrationStatus>>>,
+    statuses: Arc<DashMap<String, TrunkRegistrationStatus>>,
     endpoint: EndpointInnerRef,
 ) {
     let expires = config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES);
@@ -307,15 +305,14 @@ async fn do_register(
 }
 
 fn update_status(
-    statuses: &Arc<RwLock<HashMap<String, TrunkRegistrationStatus>>>,
+    statuses: &Arc<DashMap<String, TrunkRegistrationStatus>>,
     name: &str,
     registered: bool,
     expires: Option<u32>,
     error: Option<String>,
     remote_addr: Option<String>,
 ) {
-    let mut map = statuses.write().unwrap();
-    let entry = map
+    let mut entry = statuses
         .entry(name.to_string())
         .or_insert_with(|| TrunkRegistrationStatus {
             trunk_name: name.to_string(),
@@ -368,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_update_status() {
-        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let statuses = Arc::new(DashMap::new());
 
         update_status(
             &statuses,
@@ -379,8 +376,7 @@ mod tests {
             Some("sip:1.2.3.4:5060".to_string()),
         );
 
-        let map = statuses.read().unwrap();
-        let s = map.get("trunk1").unwrap();
+        let s = statuses.get("trunk1").map(|r| r.value().clone()).unwrap();
         assert!(s.registered);
         assert_eq!(s.expires, Some(300));
         assert!(s.error.is_none());
@@ -390,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_update_status_error() {
-        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let statuses = Arc::new(DashMap::new());
 
         update_status(
             &statuses,
@@ -401,8 +397,7 @@ mod tests {
             Some("sip:1.2.3.4:5060".to_string()),
         );
 
-        let map = statuses.read().unwrap();
-        let s = map.get("trunk2").unwrap();
+        let s = statuses.get("trunk2").map(|r| r.value().clone()).unwrap();
         assert!(!s.registered);
         assert_eq!(s.error.as_deref(), Some("timeout"));
     }
@@ -427,8 +422,7 @@ mod tests {
         // Without endpoint set, reconcile should be a no-op.
         registrar.reconcile(&trunks).await;
         {
-            let tokens = registrar.cancel_tokens.read().unwrap();
-            assert!(tokens.is_empty());
+            assert!(registrar.cancel_tokens.is_empty());
         }
     }
 
@@ -452,7 +446,7 @@ mod tests {
         // First call without endpoint — must be silent no-op.
         registrar.reconcile(&trunks).await;
         assert!(
-            registrar.cancel_tokens.read().unwrap().is_empty(),
+            registrar.cancel_tokens.is_empty(),
             "no token should be created before set_endpoint"
         );
 
@@ -480,7 +474,7 @@ mod tests {
 
         registrar.reconcile(&trunks).await;
         assert!(
-            registrar.cancel_tokens.read().unwrap().is_empty(),
+            registrar.cancel_tokens.is_empty(),
             "disabled trunk must not spawn a registration task"
         );
     }

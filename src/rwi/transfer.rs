@@ -6,11 +6,11 @@ use crate::proxy::active_call_registry::{
 };
 use crate::proxy::proxy_call::sip_session::{SipSession, SipSessionHandle};
 use crate::rwi::gateway::RwiGateway;
+use dashmap::DashMap;
 use futures::FutureExt;
 use parking_lot::RwLock;
 use rsipstack::dialog::dialog::DialogState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -166,7 +166,7 @@ impl Default for TransferConfig {
 
 pub struct TransferController {
     config: TransferConfig,
-    transactions: Arc<RwLock<HashMap<String, TransferTransaction>>>,
+    transactions: Arc<DashMap<String, TransferTransaction>>,
     call_registry: Arc<ActiveProxyCallRegistry>,
     gateway: Arc<RwLock<RwiGateway>>,
     sip_server: Option<crate::proxy::server::SipServerRef>,
@@ -180,7 +180,7 @@ impl TransferController {
     ) -> Self {
         Self {
             config,
-            transactions: Arc::new(RwLock::new(HashMap::new())),
+            transactions: Arc::new(DashMap::new()),
             call_registry,
             gateway,
             sip_server: None,
@@ -236,16 +236,14 @@ impl TransferController {
             TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::SipRefer);
         transaction.update_status(TransferStatus::Accepted);
 
-        {
-            let mut txs = self.transactions.write();
-            if txs.len() >= self.config.max_concurrent_transfers {
-                crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
-                return Err(TransferFailureReason::InternalError);
-            }
-            txs.insert(transaction.transfer_id.clone(), transaction.clone());
+        if self.transactions.len() >= self.config.max_concurrent_transfers {
+            crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
+            return Err(TransferFailureReason::InternalError);
         }
+        self.transactions
+            .insert(transaction.transfer_id.clone(), transaction.clone());
 
-        crate::metrics::transfer::set_active_transfers(self.transactions.read().len());
+        crate::metrics::transfer::set_active_transfers(self.transactions.len());
 
         let _handle = self
             .get_handle(&call_id)
@@ -282,16 +280,14 @@ impl TransferController {
             TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::Replaces);
         transaction.update_status(TransferStatus::Accepted);
 
-        {
-            let mut txs = self.transactions.write();
-            if txs.len() >= self.config.max_concurrent_transfers {
-                crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
-                return Err(TransferFailureReason::InternalError);
-            }
-            txs.insert(transaction.transfer_id.clone(), transaction.clone());
+        if self.transactions.len() >= self.config.max_concurrent_transfers {
+            crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
+            return Err(TransferFailureReason::InternalError);
         }
+        self.transactions
+            .insert(transaction.transfer_id.clone(), transaction.clone());
 
-        crate::metrics::transfer::set_active_transfers(self.transactions.read().len());
+        crate::metrics::transfer::set_active_transfers(self.transactions.len());
 
         let _handle = self
             .get_handle(&call_id)
@@ -445,8 +441,7 @@ impl TransferController {
         sip_status: Option<u16>,
     ) {
         let failed_tx_opt = {
-            let mut txs = self.transactions.write();
-            if let Some(tx) = txs.get_mut(transfer_id) {
+            if let Some(mut tx) = self.transactions.get_mut(transfer_id) {
                 tx.update_status(TransferStatus::Failed(reason.clone()));
                 tx.sip_status = sip_status;
                 Some(tx.clone())
@@ -490,13 +485,11 @@ impl TransferController {
         transaction.consultation_call_id = Some(Uuid::new_v4().to_string());
         transaction.original_leg = Some(call_id.clone());
 
-        {
-            let mut txs = self.transactions.write();
-            if txs.len() >= self.config.max_concurrent_transfers {
-                return Err(TransferFailureReason::InternalError);
-            }
-            txs.insert(transaction.transfer_id.clone(), transaction.clone());
+        if self.transactions.len() >= self.config.max_concurrent_transfers {
+            return Err(TransferFailureReason::InternalError);
         }
+        self.transactions
+            .insert(transaction.transfer_id.clone(), transaction.clone());
 
         let handle = self
             .get_handle(&call_id)
@@ -529,15 +522,14 @@ impl TransferController {
         call_id: String,
         consultation_call_id: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
-        let transaction = {
-            let txs = self.transactions.read();
-            txs.values()
-                .find(|tx| {
-                    tx.call_id == call_id
-                        && tx.consultation_call_id.as_ref() == Some(&consultation_call_id)
-                })
-                .cloned()
-        };
+        let transaction = self
+            .transactions
+            .iter()
+            .find(|r| {
+                r.value().call_id == call_id
+                    && r.value().consultation_call_id.as_ref() == Some(&consultation_call_id)
+            })
+            .map(|r| r.value().clone());
 
         let mut transaction = transaction.ok_or(TransferFailureReason::InvalidState)?;
 
@@ -573,12 +565,11 @@ impl TransferController {
         &self,
         consultation_call_id: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
-        let transaction = {
-            let txs = self.transactions.read();
-            txs.values()
-                .find(|tx| tx.consultation_call_id.as_ref() == Some(&consultation_call_id))
-                .cloned()
-        };
+        let transaction = self
+            .transactions
+            .iter()
+            .find(|r| r.value().consultation_call_id.as_ref() == Some(&consultation_call_id))
+            .map(|r| r.value().clone());
 
         let mut transaction = transaction.ok_or(TransferFailureReason::InvalidState)?;
 
@@ -637,8 +628,7 @@ impl TransferController {
         }
 
         let (tx_clone, gw_event) = {
-            let mut txs = self.transactions.write();
-            let tx = txs.get_mut(&transfer_id)?;
+            let mut tx = self.transactions.get_mut(&transfer_id)?;
 
             tx.set_sip_status(sip_status);
 
@@ -726,8 +716,7 @@ impl TransferController {
         }
 
         let (result_tx, post_action) = {
-            let mut txs = self.transactions.write();
-            let tx = txs.get_mut(&transfer_id)?;
+            let mut tx = self.transactions.get_mut(&transfer_id)?;
 
             tx.set_sip_status(notify_status);
 
@@ -743,30 +732,29 @@ impl TransferController {
                 200 => {
                     tx.update_status(TransferStatus::Completed);
                     crate::metrics::transfer::success_total("refer");
-                    let active_count = txs
-                        .values()
-                        .filter(|t| {
+                    let completed_tx = tx.clone();
+                    drop(tx);
+                    let active_count = self
+                        .transactions
+                        .iter()
+                        .filter(|r| {
                             !matches!(
-                                t.status,
+                                r.value().status,
                                 TransferStatus::Completed | TransferStatus::Failed(_)
                             )
                         })
                         .count();
                     crate::metrics::transfer::set_active_transfers(active_count);
-                    let completed_tx = txs.get(&transfer_id)?.clone();
-                    return {
-                        drop(txs);
-                        let gw = self.gateway.read();
-                        let event = crate::rwi::event::to_legacy_event(
-                            &crate::rwi::CallTransferred {
-                                call_id: completed_tx.call_id.clone(),
-                                transfer_target: Some(completed_tx.target.clone()),
-                            },
-                            None,
-                        );
-                        gw.send_event_to_call_owner(&completed_tx.call_id, &event);
-                        Some(completed_tx)
-                    };
+                    let gw = self.gateway.read();
+                    let event = crate::rwi::event::to_legacy_event(
+                        &crate::rwi::CallTransferred {
+                            call_id: completed_tx.call_id.clone(),
+                            transfer_target: Some(completed_tx.target.clone()),
+                        },
+                        None,
+                    );
+                    gw.send_event_to_call_owner(&completed_tx.call_id, &event);
+                    return Some(completed_tx);
                 }
                 _ if notify_status >= 400 => {
                     crate::metrics::transfer::failed_total(
@@ -816,12 +804,11 @@ impl TransferController {
         call_id: &str,
         sip_status: u16,
     ) -> Option<TransferTransaction> {
-        let transfer_id = {
-            let txs = self.transactions.read();
-            txs.values()
-                .find(|tx| tx.call_id == call_id && !tx.is_terminal())
-                .map(|tx| tx.transfer_id.clone())?
-        };
+        let transfer_id = self
+            .transactions
+            .iter()
+            .find(|r| r.value().call_id == call_id && !r.value().is_terminal())
+            .map(|r| r.value().transfer_id.clone())?;
         self.handle_refer_response(transfer_id, sip_status).await
     }
 
@@ -831,24 +818,22 @@ impl TransferController {
         call_id: &str,
         notify_status: u16,
     ) -> Option<TransferTransaction> {
-        let transfer_id = {
-            let txs = self.transactions.read();
-            txs.values()
-                .find(|tx| tx.call_id == call_id && !tx.is_terminal())
-                .map(|tx| tx.transfer_id.clone())?
-        };
+        let transfer_id = self
+            .transactions
+            .iter()
+            .find(|r| r.value().call_id == call_id && !r.value().is_terminal())
+            .map(|r| r.value().transfer_id.clone())?;
         self.handle_notify(transfer_id, notify_status).await
     }
 
     pub async fn fallback_to_3pcc(&self, transfer_id: String) -> Option<TransferTransaction> {
-        let mut txs = self.transactions.write();
-        let tx = txs.get_mut(&transfer_id)?;
+        let mut tx = self.transactions.get_mut(&transfer_id)?;
 
         if !self.config.three_pcc_fallback_enabled {
             let reason = TransferFailureReason::ReferRejected;
             tx.update_status(TransferStatus::Failed(reason.clone()));
             let failed_tx = tx.clone();
-            drop(txs);
+            drop(tx);
             let gw = self.gateway.read();
             let event = crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallTransferFailed {
@@ -883,11 +868,11 @@ impl TransferController {
         transfer_id: &str,
     ) -> Result<TransferTransaction, TransferFailureReason> {
         // Get transaction
-        let tx = {
-            let txs = self.transactions.read();
-            txs.get(transfer_id).cloned()
-        }
-        .ok_or(TransferFailureReason::InvalidState)?;
+        let tx = self
+            .transactions
+            .get(transfer_id)
+            .map(|v| v.clone())
+            .ok_or(TransferFailureReason::InvalidState)?;
 
         // Verify we're in 3PCC mode
         if tx.mode != TransferMode::ThreePccFallback {
@@ -943,12 +928,10 @@ impl TransferController {
                 info!(%new_call_id, "3PCC originate initiated successfully");
 
                 // Update transaction with new call leg
-                {
-                    let mut txs = self.transactions.write();
-                    if let Some(tx) = txs.get_mut(transfer_id) {
-                        tx.consultation_call_id = Some(new_call_id.clone());
-                        tx.update_status(TransferStatus::NotifyProgress);
-                    }
+                // SAFETY: guard scope is tight — no self.transactions.* call inside the block.
+                if let Some(mut tx) = self.transactions.get_mut(transfer_id) {
+                    tx.consultation_call_id = Some(new_call_id.clone());
+                    tx.update_status(TransferStatus::NotifyProgress);
                 }
 
                 // Emit 3PCC started event
@@ -978,14 +961,12 @@ impl TransferController {
                 });
 
                 // Update transaction as failed
-                {
-                    let mut txs = self.transactions.write();
-                    if let Some(tx) = txs.get_mut(transfer_id) {
-                        tx.update_status(TransferStatus::Failed(
-                            TransferFailureReason::ThreePccFailed,
-                        ));
-                        tx.error_message = Some(format!("Originate failed: {}", e));
-                    }
+                // SAFETY: guard scope is tight — no self.transactions.* call inside the block.
+                if let Some(mut tx) = self.transactions.get_mut(transfer_id) {
+                    tx.update_status(TransferStatus::Failed(
+                        TransferFailureReason::ThreePccFailed,
+                    ));
+                    tx.error_message = Some(format!("Originate failed: {}", e));
                 }
 
                 // Emit failure event
@@ -1279,11 +1260,11 @@ impl TransferController {
         &self,
         transfer_id: &str,
     ) -> Result<TransferTransaction, TransferFailureReason> {
-        let tx = {
-            let txs = self.transactions.read();
-            txs.get(transfer_id).cloned()
-        }
-        .ok_or(TransferFailureReason::InvalidState)?;
+        let tx = self
+            .transactions
+            .get(transfer_id)
+            .map(|v| v.clone())
+            .ok_or(TransferFailureReason::InvalidState)?;
 
         if tx.mode != TransferMode::ThreePccFallback {
             return Err(TransferFailureReason::InvalidState);
@@ -1314,11 +1295,8 @@ impl TransferController {
         });
 
         // Update transaction status
-        {
-            let mut txs = self.transactions.write();
-            if let Some(tx) = txs.get_mut(transfer_id) {
-                tx.update_status(TransferStatus::Completed);
-            }
+        if let Some(mut tx) = self.transactions.get_mut(transfer_id) {
+            tx.update_status(TransferStatus::Completed);
         }
 
         // Emit completion event
@@ -1345,11 +1323,11 @@ impl TransferController {
         transfer_id: &str,
         reason: &str,
     ) -> Result<(), TransferFailureReason> {
-        let tx = {
-            let txs = self.transactions.read();
-            txs.get(transfer_id).cloned()
-        }
-        .ok_or(TransferFailureReason::InvalidState)?;
+        let tx = self
+            .transactions
+            .get(transfer_id)
+            .map(|v| v.clone())
+            .ok_or(TransferFailureReason::InvalidState)?;
 
         let call_id = &tx.call_id;
 
@@ -1368,14 +1346,11 @@ impl TransferController {
         }
 
         // Update transaction status
-        {
-            let mut txs = self.transactions.write();
-            if let Some(tx) = txs.get_mut(transfer_id) {
-                tx.update_status(TransferStatus::Failed(
-                    TransferFailureReason::ThreePccFailed,
-                ));
-                tx.error_message = Some(reason.to_string());
-            }
+        if let Some(mut tx) = self.transactions.get_mut(transfer_id) {
+            tx.update_status(TransferStatus::Failed(
+                TransferFailureReason::ThreePccFailed,
+            ));
+            tx.error_message = Some(reason.to_string());
         }
 
         // Emit failure event
@@ -1395,33 +1370,34 @@ impl TransferController {
     }
 
     pub async fn get_transaction(&self, transfer_id: &str) -> Option<TransferTransaction> {
-        let txs = self.transactions.read();
-        txs.get(transfer_id).cloned()
+        self.transactions.get(transfer_id).map(|v| v.clone())
     }
 
     pub async fn get_transaction_by_call_id(&self, call_id: &str) -> Option<TransferTransaction> {
-        let txs = self.transactions.read();
-        txs.values().find(|tx| tx.call_id == call_id).cloned()
+        self.transactions
+            .iter()
+            .find(|r| r.value().call_id == call_id)
+            .map(|r| r.value().clone())
     }
 
     pub async fn cleanup_terminal_transactions(&self) -> usize {
-        let mut txs = self.transactions.write();
-        let before = txs.len();
-        txs.retain(|_, tx| !tx.is_terminal());
-        before - txs.len()
+        let before = self.transactions.len();
+        self.transactions.retain(|_, tx| !tx.is_terminal());
+        before - self.transactions.len()
     }
 
     pub async fn get_active_transfer_count(&self) -> usize {
-        let txs = self.transactions.read();
-        txs.values().filter(|tx| !tx.is_terminal()).count()
+        self.transactions
+            .iter()
+            .filter(|r| !r.value().is_terminal())
+            .count()
     }
 
     pub async fn cancel_all_transfers_for_call(&self, call_id: &str) -> usize {
-        let mut txs = self.transactions.write();
         let mut count = 0;
-        for tx in txs.values_mut() {
-            if tx.call_id == call_id && !tx.is_terminal() {
-                tx.update_status(TransferStatus::Canceled);
+        for mut r in self.transactions.iter_mut() {
+            if r.value().call_id == call_id && !r.value().is_terminal() {
+                r.value_mut().update_status(TransferStatus::Canceled);
                 count += 1;
             }
         }
@@ -1851,10 +1827,7 @@ mod tests {
         ctrl.handle_notify(tx.transfer_id.clone(), 200).await;
 
         // Count total transactions before cleanup (includes terminal ones)
-        let before_total = {
-            let txs = ctrl.transactions.read();
-            txs.len()
-        };
+        let before_total = ctrl.transactions.len();
         assert!(
             before_total >= 1,
             "should have at least one transaction before cleanup"
@@ -1868,10 +1841,7 @@ mod tests {
         );
 
         // After cleanup, total count should be lower
-        let after_total = {
-            let txs = ctrl.transactions.read();
-            txs.len()
-        };
+        let after_total = ctrl.transactions.len();
         assert!(
             after_total < before_total,
             "total count should decrease after cleanup"

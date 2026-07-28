@@ -28,10 +28,9 @@ use crate::call::{
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 use tracing::{debug, info, warn};
 
 // ===================================================================
@@ -333,7 +332,7 @@ pub struct QueueApp {
     /// When the call entered the queue.
     enqueued_at: Option<Instant>,
     /// Queue statistics.
-    stats: Arc<RwLock<HashMap<String, QueueStats>>>,
+    stats: Arc<DashMap<String, QueueStats>>,
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
@@ -373,7 +372,7 @@ impl QueueApp {
             agent_registry: None,
             call_id: String::new(),
             enqueued_at: None,
-            stats: Arc::new(RwLock::new(HashMap::new())),
+            stats: Arc::new(DashMap::new()),
             pending_agents: Vec::new(),
             callback_requested: false,
             callback_offered: false,
@@ -398,7 +397,7 @@ impl QueueApp {
     }
 
     /// Set queue statistics tracker.
-    pub fn with_stats(mut self, stats: Arc<RwLock<HashMap<String, QueueStats>>>) -> Self {
+    pub fn with_stats(mut self, stats: Arc<DashMap<String, QueueStats>>) -> Self {
         self.stats = stats;
         self
     }
@@ -415,15 +414,14 @@ impl QueueApp {
     }
 
     /// Update queue statistics.
-    async fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
-        let mut stats = self.stats.write().await;
-        let stat = stats
+    fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
+        let mut stat = self.stats
             .entry(queue_id.to_string())
             .or_insert_with(|| QueueStats {
                 queue_id: queue_id.to_string(),
                 ..Default::default()
             });
-        f(stat);
+        f(&mut stat);
     }
 
     /// Get the next action based on fallback configuration.
@@ -672,8 +670,7 @@ impl QueueApp {
 
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
-        })
-        .await;
+        });
 
         info!(
             queue = %queue_id,
@@ -713,8 +710,7 @@ impl QueueApp {
 
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
-        })
-        .await;
+        });
 
         info!(
             queue = %queue_id,
@@ -792,7 +788,7 @@ impl QueueApp {
                 }
             };
             if should_announce {
-                let ewt_secs = self.calculate_ewt().await;
+                let ewt_secs = self.calculate_ewt();
                 debug!(
                     ewt_secs,
                     "Queue: playing EWT announcement (pre-recorded fallback)"
@@ -851,9 +847,8 @@ impl QueueApp {
     }
 
     /// Calculate a simple EWT estimate based on queue statistics.
-    async fn calculate_ewt(&self) -> u64 {
-        let stats = self.stats.read().await;
-        if let Some(qs) = stats.get(&self.config.name) {
+    fn calculate_ewt(&self) -> u64 {
+        if let Some(qs) = self.stats.get(&self.config.name) {
             if qs.available_agents > 0 && qs.current_waiting > 0 {
                 let avg = if qs.calls_answered > 0 {
                     qs.total_wait_secs / qs.calls_answered.max(1)
@@ -1009,8 +1004,7 @@ impl CallApp for QueueApp {
         self.update_stats(&queue_id, |stats| {
             stats.calls_offered += 1;
             stats.current_waiting += 1;
-        })
-        .await;
+        });
 
         // Notify external systems that the call entered the queue.
         self.emit_rwi(&crate::rwi::event::QueueJoined {
@@ -1364,8 +1358,7 @@ impl CallApp for QueueApp {
                             stats.calls_answered += 1;
                             stats.total_wait_secs += wait_secs;
                             stats.current_waiting = stats.current_waiting.saturating_sub(1);
-                        })
-                        .await;
+                        });
 
                         if let Some(ref registry) = self.agent_registry {
                             let agent_id = data
@@ -1577,10 +1570,9 @@ impl CallApp for QueueApp {
         ) {
             let queue_id = self.config.name.clone();
 
-            self.update_stats(&queue_id, |stats| {
-                stats.current_waiting = stats.current_waiting.saturating_sub(1);
-            })
-            .await;
+        self.update_stats(&queue_id, |stats| {
+            stats.calls_abandoned += 1;
+        });
 
             // Emit RWI queue lifecycle event: the caller abandoned (e.g. hung
             // up while waiting). The gateway was captured in `on_enter`.

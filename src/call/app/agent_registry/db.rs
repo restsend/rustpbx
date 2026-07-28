@@ -7,6 +7,7 @@
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy, select_best_agent};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -19,7 +20,7 @@ use tracing::info;
 /// Suitable for production multi-node deployments.
 pub struct DbRegistry {
     /// Local cache for fast reads
-    cache: RwLock<HashMap<String, AgentRecord>>,
+    cache: DashMap<String, AgentRecord>,
     /// Round-robin counter
     rr_counter: RwLock<u64>,
     /// Event callbacks for state changes
@@ -32,7 +33,7 @@ pub struct DbRegistry {
 impl DbRegistry {
     pub fn new(_db: DatabaseConnection) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: DashMap::new(),
             rr_counter: RwLock::new(0),
             event_handlers: RwLock::new(Vec::new()),
             cache_ttl_secs: 30, // Default 30 second cache
@@ -81,9 +82,7 @@ impl AgentRegistry for DbRegistry {
         };
 
         // Update cache
-        let mut cache = self.cache.write().await;
-        cache.insert(agent_id.clone(), record.clone());
-        drop(cache);
+        self.cache.insert(agent_id.clone(), record.clone());
 
         info!(agent_id = %agent_id, "Agent registered in database");
         self.notify_handlers(&record).await;
@@ -93,8 +92,7 @@ impl AgentRegistry for DbRegistry {
 
     async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
         // Remove from cache
-        let mut cache = self.cache.write().await;
-        if cache.remove(agent_id).is_some() {
+        if self.cache.remove(agent_id).is_some() {
             info!(agent_id = %agent_id, "Agent unregistered from database");
             Ok(())
         } else {
@@ -104,11 +102,9 @@ impl AgentRegistry for DbRegistry {
 
     async fn get_agent(&self, agent_id: &str) -> Option<AgentRecord> {
         // Try cache first
-        let cache = self.cache.read().await;
-        if let Some(record) = cache.get(agent_id) {
+        if let Some(record) = self.cache.get(agent_id) {
             return Some(record.clone());
         }
-        drop(cache);
 
         // In production, this would query the database
         // For now, return None if not in cache
@@ -116,8 +112,7 @@ impl AgentRegistry for DbRegistry {
     }
 
     async fn list_agents(&self) -> Vec<AgentRecord> {
-        let cache = self.cache.read().await;
-        cache.values().cloned().collect()
+        self.cache.iter().map(|e| e.value().clone()).collect()
     }
 
     async fn update_presence(
@@ -125,8 +120,7 @@ impl AgentRegistry for DbRegistry {
         agent_id: &str,
         new_state: PresenceState,
     ) -> anyhow::Result<()> {
-        let mut cache = self.cache.write().await;
-        let agent = cache
+        let mut agent = self.cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -142,15 +136,14 @@ impl AgentRegistry for DbRegistry {
         );
 
         let record = agent.clone();
-        drop(cache);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut cache = self.cache.write().await;
-        let agent = cache
+        let mut agent = self.cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -159,15 +152,14 @@ impl AgentRegistry for DbRegistry {
         agent.last_state_change = Instant::now();
 
         let record = agent.clone();
-        drop(cache);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-        let mut cache = self.cache.write().await;
-        let agent = cache
+        let mut agent = self.cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -184,18 +176,17 @@ impl AgentRegistry for DbRegistry {
         }
 
         let record = agent.clone();
-        drop(cache);
+        drop(agent);
         self.notify_handlers(&record).await;
 
         Ok(())
     }
 
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord> {
-        let cache = self.cache.read().await;
-        cache
-            .values()
-            .filter(|a| a.has_capacity() && a.has_skills(required_skills))
-            .cloned()
+        self.cache
+            .iter()
+            .filter(|e| e.value().has_capacity() && e.value().has_skills(required_skills))
+            .map(|e| e.value().clone())
             .collect()
     }
 

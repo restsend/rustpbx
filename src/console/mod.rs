@@ -12,11 +12,11 @@ use lru::LruCache;
 use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
+use dashmap::DashMap;
 use tracing::warn;
 
 pub mod auth;
@@ -67,7 +67,7 @@ pub struct ConsoleState {
     /// Call record config (for rotation-aware CDR queries).
     callrecord_cfg: Option<CallRecordConfig>,
     /// Connection cache for daily rotated SQLite files.
-    cdr_conn_cache: Arc<tokio::sync::RwLock<HashMap<String, DatabaseConnection>>>,
+    cdr_conn_cache: Arc<DashMap<String, DatabaseConnection>>,
 }
 
 /// Trait for addon state types that can be stored in ConsoleState.
@@ -104,7 +104,7 @@ impl ConsoleState {
             pending_reload: Arc::new(RwLock::new(BTreeSet::new())),
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
             callrecord_cfg,
-            cdr_conn_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            cdr_conn_cache: Arc::new(DashMap::new()),
         }))
     }
 
@@ -134,11 +134,8 @@ impl ConsoleState {
         let key = format!("{}{}", table_name, date_str);
 
         // Check cache
-        {
-            let cache = self.cdr_conn_cache.read().await;
-            if let Some(conn) = cache.get(&key) {
-                return conn.clone();
-            }
+        if let Some(conn) = self.cdr_conn_cache.get(&key) {
+            return conn.clone();
         }
 
         // Build the daily URL and connect
@@ -157,8 +154,7 @@ impl ConsoleState {
 
         match crate::models::connect_db(&daily_url).await {
             Ok(conn) => {
-                let mut cache = self.cdr_conn_cache.write().await;
-                cache.insert(key.clone(), conn.clone());
+                self.cdr_conn_cache.insert(key.clone(), conn.clone());
                 conn
             }
             Err(e) => {

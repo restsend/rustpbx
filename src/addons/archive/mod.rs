@@ -8,9 +8,9 @@ use axum::{
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use dashmap::DashMap;
 use tokio::time;
 use tracing::{error, info};
 
@@ -33,7 +33,7 @@ pub struct ManualTaskStatus {
 pub struct ArchiveState {
     pub last_run: Arc<RwLock<Option<DateTime<Utc>>>>,
     pub config: Arc<RwLock<Option<ArchiveConfig>>>,
-    pub manual_tasks: Arc<RwLock<HashMap<String, Arc<RwLock<ManualTaskStatus>>>>>,
+    pub manual_tasks: Arc<DashMap<String, Arc<RwLock<ManualTaskStatus>>>>,
 }
 
 pub struct ArchiveAddon {
@@ -220,7 +220,7 @@ impl ArchiveAddon {
             state: ArchiveState {
                 last_run: Arc::new(RwLock::new(None)),
                 config: Arc::new(RwLock::new(None)),
-                manual_tasks: Arc::new(RwLock::new(HashMap::new())),
+                manual_tasks: Arc::new(DashMap::new()),
             },
         }
     }

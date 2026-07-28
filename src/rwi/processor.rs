@@ -16,6 +16,7 @@ use crate::rwi::session::{
     QueueEnqueueRequest, RecordStartRequest, RwiCommandPayload, SupervisorMode,
 };
 use crate::rwi::transfer::TransferController;
+use dashmap::DashMap;
 use futures::FutureExt;
 use std::collections::HashMap;
 
@@ -206,7 +207,7 @@ const COMMAND_DEDUP_SOFT_CAP: usize = 256;
 
 #[derive(Clone)]
 struct CommandDeduplicationCache {
-    entries: Arc<RwLock<HashMap<String, CommandCacheEntry>>>,
+    entries: Arc<DashMap<String, CommandCacheEntry>>,
     ttl: Duration,
 }
 
@@ -214,7 +215,7 @@ struct CommandDeduplicationCache {
 impl CommandDeduplicationCache {
     fn new(ttl_secs: u64) -> Self {
         Self {
-            entries: Arc::new(RwLock::new(HashMap::new())),
+            entries: Arc::new(DashMap::new()),
             ttl: Duration::from_secs(ttl_secs),
         }
     }
@@ -224,8 +225,7 @@ impl CommandDeduplicationCache {
     }
 
     async fn is_duplicate(&self, action_id: &str) -> bool {
-        let entries = self.entries.read().await;
-        if let Some(entry) = entries.get(action_id)
+        if let Some(entry) = self.entries.get(action_id)
             && entry.received_at.elapsed() < self.ttl
         {
             return true;
@@ -234,15 +234,14 @@ impl CommandDeduplicationCache {
     }
 
     async fn record(&self, action_id: String, result: Option<String>) {
-        let mut entries = self.entries.write().await;
         // Opportunistic GC: when the cache grows past a soft cap, evict expired
         // entries before inserting the new one. Keeps memory bounded for
         // long-lived sessions without adding a background task.
-        if entries.len() >= COMMAND_DEDUP_SOFT_CAP {
+        if self.entries.len() >= COMMAND_DEDUP_SOFT_CAP {
             let now = Instant::now();
-            entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+            self.entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
         }
-        entries.insert(
+        self.entries.insert(
             action_id.clone(),
             CommandCacheEntry {
                 action_id,
@@ -253,14 +252,12 @@ impl CommandDeduplicationCache {
     }
 
     async fn cleanup_expired(&self) {
-        let mut entries = self.entries.write().await;
         let now = Instant::now();
-        entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+        self.entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
     }
 
     async fn len(&self) -> usize {
-        let entries = self.entries.read().await;
-        entries.len()
+        self.entries.len()
     }
 }
 
@@ -352,19 +349,19 @@ pub struct RwiCommandProcessor {
     call_registry: Arc<ActiveProxyCallRegistry>,
     gateway: RwiGatewayRef,
     sip_server: Option<SipServerRef>,
-    queue_states: Arc<RwLock<HashMap<String, QueueState>>>,
-    record_states: Arc<RwLock<HashMap<String, RecordState>>>,
-    ringback_states: Arc<RwLock<HashMap<String, RingbackState>>>,
-    supervisor_states: Arc<RwLock<HashMap<String, SupervisorState>>>,
-    media_stream_states: Arc<RwLock<HashMap<String, MediaStreamState>>>,
-    media_inject_states: Arc<RwLock<HashMap<String, MediaInjectState>>>,
+    queue_states: Arc<DashMap<String, QueueState>>,
+    record_states: Arc<DashMap<String, RecordState>>,
+    ringback_states: Arc<DashMap<String, RingbackState>>,
+    supervisor_states: Arc<DashMap<String, SupervisorState>>,
+    media_stream_states: Arc<DashMap<String, MediaStreamState>>,
+    media_inject_states: Arc<DashMap<String, MediaInjectState>>,
     mixer_registry: Arc<crate::proxy::proxy_call::session_registry::MixerRegistry>,
     conference_manager: Arc<ConferenceManager>,
     transfer_controller: Arc<RwLock<TransferController>>,
     command_dedup_cache: CommandDeduplicationCache,
 
-    agent_skills: Arc<RwLock<HashMap<String, AgentSkill>>>,
-    queue_overflow_configs: Arc<RwLock<HashMap<String, QueueOverflowConfig>>>,
+    agent_skills: Arc<DashMap<String, AgentSkill>>,
+    queue_overflow_configs: Arc<DashMap<String, QueueOverflowConfig>>,
     #[cfg(test)]
     force_seat_replace_rollback_failure: Arc<AtomicBool>,
 }
@@ -384,12 +381,12 @@ impl RwiCommandProcessor {
             call_registry,
             gateway,
             sip_server: None,
-            queue_states: Arc::new(RwLock::new(HashMap::new())),
-            record_states: Arc::new(RwLock::new(HashMap::new())),
-            ringback_states: Arc::new(RwLock::new(HashMap::new())),
-            supervisor_states: Arc::new(RwLock::new(HashMap::new())),
-            media_stream_states: Arc::new(RwLock::new(HashMap::new())),
-            media_inject_states: Arc::new(RwLock::new(HashMap::new())),
+            queue_states: Arc::new(DashMap::new()),
+            record_states: Arc::new(DashMap::new()),
+            ringback_states: Arc::new(DashMap::new()),
+            supervisor_states: Arc::new(DashMap::new()),
+            media_stream_states: Arc::new(DashMap::new()),
+            media_inject_states: Arc::new(DashMap::new()),
             mixer_registry: Arc::new(
                 crate::proxy::proxy_call::session_registry::MixerRegistry::new(),
             ),
@@ -397,8 +394,8 @@ impl RwiCommandProcessor {
             transfer_controller,
             command_dedup_cache: CommandDeduplicationCache::with_default_ttl(),
 
-            agent_skills: Arc::new(RwLock::new(HashMap::new())),
-            queue_overflow_configs: Arc::new(RwLock::new(HashMap::new())),
+            agent_skills: Arc::new(DashMap::new()),
+            queue_overflow_configs: Arc::new(DashMap::new()),
             #[cfg(test)]
             force_seat_replace_rollback_failure: Arc::new(AtomicBool::new(false)),
         }
@@ -3049,9 +3046,7 @@ impl RwiCommandProcessor {
             overflow_count: 0,
         };
 
-        let mut states = self.queue_states.write().await;
-        states.insert(req.call_id.clone(), queue_state);
-        drop(states);
+        self.queue_states.insert(req.call_id.clone(), queue_state);
 
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::QueueJoined {
@@ -3094,11 +3089,13 @@ impl RwiCommandProcessor {
     }
 
     async fn check_queue_overflow(&self, queue_id: &str) -> Option<QueueOverflowAction> {
-        let configs = self.queue_overflow_configs.read().await;
-        let config = configs.get(queue_id)?;
+        let config = self.queue_overflow_configs.get(queue_id)?;
 
-        let states = self.queue_states.read().await;
-        let queue_count = states.values().filter(|s| s.queue_id == queue_id).count() as u32;
+        let queue_count = self
+            .queue_states
+            .iter()
+            .filter(|r| r.value().queue_id == queue_id)
+            .count() as u32;
 
         if queue_count >= config.max_calls {
             return Some(QueueOverflowAction {
@@ -3144,9 +3141,7 @@ impl RwiCommandProcessor {
                         overflow_count: 1,
                     };
 
-                    let mut states = self.queue_states.write().await;
-                    states.insert(req.call_id.clone(), queue_state);
-                    drop(states);
+                    self.queue_states.insert(req.call_id.clone(), queue_state);
 
                     let overflow_event = crate::rwi::event::to_legacy_event(
                         &crate::rwi::QueueOverflowed {
@@ -3212,11 +3207,11 @@ impl RwiCommandProcessor {
     }
 
     async fn find_matching_agent(&self, required_skills: &[String]) -> Option<String> {
-        let agents = self.agent_skills.read().await;
-
         let mut best_match: Option<(String, usize, f32)> = None;
 
-        for (agent_id, agent) in agents.iter() {
+        for r in self.agent_skills.iter() {
+            let agent_id = r.key();
+            let agent = r.value();
             if agent.current_calls >= agent.max_concurrent_calls {
                 continue;
             }
@@ -3261,12 +3256,11 @@ impl RwiCommandProcessor {
 
     async fn queue_dequeue(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let _handle = self.get_handle(call_id).await?;
-        let queue_id = {
-            let states = self.queue_states.read().await;
-            states.get(call_id).map(|s| s.queue_id.clone())
-        };
-        let mut states = self.queue_states.write().await;
-        states.remove(call_id);
+        let queue_id = self
+            .queue_states
+            .get(call_id)
+            .map(|s| s.queue_id.clone());
+        self.queue_states.remove(call_id);
         if let Some(qid) = queue_id {
             let event = crate::rwi::event::to_legacy_event(
                 &crate::rwi::QueueLeft {
@@ -3287,12 +3281,10 @@ impl RwiCommandProcessor {
 
         let handle = self.get_handle(call_id).await?;
         {
-            let mut states = self.queue_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                state.is_hold = true;
-            } else {
-                return Err(CommandError::CommandFailed("Call not in queue".to_string()));
-            }
+            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("Call not in queue".to_string())
+            })?;
+            state.is_hold = true;
         }
         handle
             .send_command(CallCommand::Play {
@@ -3321,12 +3313,10 @@ impl RwiCommandProcessor {
     async fn queue_unhold(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         {
-            let mut states = self.queue_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                state.is_hold = false;
-            } else {
-                return Err(CommandError::CommandFailed("Call not in queue".to_string()));
-            }
+            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("Call not in queue".to_string())
+            })?;
+            state.is_hold = false;
         }
         handle
             .send_command(CallCommand::StopPlayback {
@@ -3351,18 +3341,12 @@ impl RwiCommandProcessor {
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
 
-        {
-            let states = self.queue_states.read().await;
-            if !states.contains_key(call_id) {
-                return Err(CommandError::CommandFailed("Call not in queue".to_string()));
-            }
+        if !self.queue_states.contains_key(call_id) {
+            return Err(CommandError::CommandFailed("Call not in queue".to_string()));
         }
 
-        {
-            let mut states = self.queue_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                state.priority = Some(priority);
-            }
+        if let Some(mut state) = self.queue_states.get_mut(call_id) {
+            state.priority = Some(priority);
         }
 
         info!(call_id = %call_id, priority = %priority, "Queue priority updated");
@@ -3377,12 +3361,10 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let queue_id = {
-            let states = self.queue_states.read().await;
-            if let Some(state) = states.get(call_id) {
-                state.queue_id.clone()
-            } else {
-                return Err(CommandError::CommandFailed("Call not in queue".to_string()));
-            }
+            let state = self.queue_states.get(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("Call not in queue".to_string())
+            })?;
+            state.queue_id.clone()
         };
 
         let event = crate::rwi::event::to_legacy_event(
@@ -3409,17 +3391,15 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let old_queue_id = {
-            let mut states = self.queue_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                let old = state.queue_id.clone();
-                state.queue_id = queue_id.to_string();
-                if let Some(p) = priority {
-                    state.priority = Some(p);
-                }
-                old
-            } else {
-                return Err(CommandError::CommandFailed("Call not in queue".to_string()));
+            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("Call not in queue".to_string())
+            })?;
+            let old = state.queue_id.clone();
+            state.queue_id = queue_id.to_string();
+            if let Some(p) = priority {
+                state.priority = Some(p);
             }
+            old
         };
 
         let event = crate::rwi::event::to_legacy_event(
@@ -3459,8 +3439,7 @@ impl RwiCommandProcessor {
             current_calls: 0,
         };
 
-        let mut agents = self.agent_skills.write().await;
-        agents.insert(agent_id.clone(), agent);
+        self.agent_skills.insert(agent_id.clone(), agent);
 
         info!(
             agent_id = %agent_id,
@@ -3470,15 +3449,13 @@ impl RwiCommandProcessor {
     }
 
     pub async fn unregister_agent(&self, agent_id: &str) {
-        let mut agents = self.agent_skills.write().await;
-        agents.remove(agent_id);
+        self.agent_skills.remove(agent_id);
 
         info!(agent_id = %agent_id, "Agent unregistered");
     }
 
     pub async fn update_agent_call_count(&self, agent_id: &str, delta: i32) {
-        let mut agents = self.agent_skills.write().await;
-        if let Some(agent) = agents.get_mut(agent_id) {
+        if let Some(mut agent) = self.agent_skills.get_mut(agent_id) {
             if delta > 0 {
                 agent.current_calls += delta as u32;
             } else {
@@ -3502,8 +3479,7 @@ impl RwiCommandProcessor {
             overflow_action,
         };
 
-        let mut configs = self.queue_overflow_configs.write().await;
-        configs.insert(queue_id.clone(), config);
+        self.queue_overflow_configs.insert(queue_id.clone(), config);
 
         info!(
             queue_id = %queue_id,
@@ -3514,17 +3490,17 @@ impl RwiCommandProcessor {
     }
 
     pub async fn remove_queue_overflow_config(&self, queue_id: &str) {
-        let mut configs = self.queue_overflow_configs.write().await;
-        configs.remove(queue_id);
+        self.queue_overflow_configs.remove(queue_id);
 
         info!(queue_id = %queue_id, "Queue overflow configuration removed");
     }
 
     pub async fn get_queue_stats(&self, queue_id: &str) -> Option<QueueStats> {
-        let states = self.queue_states.read().await;
-
-        let queue_calls: Vec<&QueueState> =
-            states.values().filter(|s| s.queue_id == queue_id).collect();
+        let queue_calls: Vec<_> = self
+            .queue_states
+            .iter()
+            .filter(|r| r.value().queue_id == queue_id)
+            .collect();
 
         if queue_calls.is_empty() {
             return None;
@@ -3566,8 +3542,7 @@ impl RwiCommandProcessor {
             _path: path,
             is_paused: false,
         };
-        let mut states = self.record_states.write().await;
-        states.insert(req.call_id.clone(), record_state);
+        self.record_states.insert(req.call_id.clone(), record_state);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::RecordStarted {
                 call_id: req.call_id.clone(),
@@ -3582,14 +3557,10 @@ impl RwiCommandProcessor {
     async fn record_pause(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         {
-            let mut states = self.record_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                state.is_paused = true;
-            } else {
-                return Err(CommandError::CommandFailed(
-                    "No recording in progress".to_string(),
-                ));
-            }
+            let mut state = self.record_states.get_mut(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("No recording in progress".to_string())
+            })?;
+            state.is_paused = true;
         }
         handle
             .send_command(CallCommand::PauseRecording)
@@ -3608,14 +3579,10 @@ impl RwiCommandProcessor {
     async fn record_resume(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         {
-            let mut states = self.record_states.write().await;
-            if let Some(state) = states.get_mut(call_id) {
-                state.is_paused = false;
-            } else {
-                return Err(CommandError::CommandFailed(
-                    "No recording in progress".to_string(),
-                ));
-            }
+            let mut state = self.record_states.get_mut(call_id).ok_or_else(|| {
+                CommandError::CommandFailed("No recording in progress".to_string())
+            })?;
+            state.is_paused = false;
         }
         handle
             .send_command(CallCommand::ResumeRecording)
@@ -3633,10 +3600,7 @@ impl RwiCommandProcessor {
 
     async fn record_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let has_recording = {
-            let mut states = self.record_states.write().await;
-            states.remove(call_id).is_some()
-        };
+        let has_recording = self.record_states.remove(call_id).is_some();
         handle
             .send_command(CallCommand::StopRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
@@ -4265,19 +4229,19 @@ impl RwiCommandProcessor {
             _target_call_id: target_call_id.to_string(),
             _source_call_id: source_call_id.to_string(),
         };
-        let mut states = self.ringback_states.write().await;
         // Opportunistic GC: drop entries whose target/source call has already
         // left the registry. RingbackState has no explicit "stop" path, so
         // without this the map would grow unbounded inside a long-lived
         // session. Behaviour is unchanged because such entries are stale.
-        if states.len() >= RINGBACK_STATES_SOFT_CAP {
+        if self.ringback_states.len() >= RINGBACK_STATES_SOFT_CAP {
             let registry = self.call_registry.clone();
-            states.retain(|id, state| {
+            self.ringback_states.retain(|id, state| {
                 registry.get_handle(id).is_some()
                     || registry.get_handle(&state._source_call_id).is_some()
             });
         }
-        states.insert(target_call_id.to_string(), ringback_state);
+        self.ringback_states
+            .insert(target_call_id.to_string(), ringback_state);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaRingbackPassthroughStarted {
                 source: source_call_id.to_string(),
@@ -4328,8 +4292,7 @@ impl RwiCommandProcessor {
             "Supervisor listen mode started"
         );
 
-        let mut states = self.supervisor_states.write().await;
-        states.insert(
+        self.supervisor_states.insert(
             supervisor_call_id.to_string(),
             SupervisorState {
                 supervisor_call_id: supervisor_call_id.to_string(),
@@ -4405,8 +4368,7 @@ impl RwiCommandProcessor {
             "Supervisor whisper mode started"
         );
 
-        let mut states = self.supervisor_states.write().await;
-        states.insert(
+        self.supervisor_states.insert(
             supervisor_call_id.to_string(),
             SupervisorState {
                 supervisor_call_id: supervisor_call_id.to_string(),
@@ -4491,8 +4453,7 @@ impl RwiCommandProcessor {
             "Supervisor barge mode started"
         );
 
-        let mut states = self.supervisor_states.write().await;
-        states.insert(
+        self.supervisor_states.insert(
             supervisor_call_id.to_string(),
             SupervisorState {
                 supervisor_call_id: supervisor_call_id.to_string(),
@@ -4567,8 +4528,7 @@ impl RwiCommandProcessor {
             "Supervisor takeover mode started"
         );
 
-        let mut states = self.supervisor_states.write().await;
-        states.insert(
+        self.supervisor_states.insert(
             supervisor_call_id.to_string(),
             SupervisorState {
                 supervisor_call_id: supervisor_call_id.to_string(),
@@ -4627,8 +4587,7 @@ impl RwiCommandProcessor {
             "Supervisor mode stopped"
         );
 
-        let mut states = self.supervisor_states.write().await;
-        states.remove(supervisor_call_id);
+        self.supervisor_states.remove(supervisor_call_id);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::SupervisorModeStopped {
                 supervisor_call_id: supervisor_call_id.to_string(),
@@ -4658,8 +4617,8 @@ impl RwiCommandProcessor {
         // fires the event.  Actual bidirectional WebSocket/RTP wiring is handled
         // by the caller after receiving MediaStreamStarted.
         tracing::debug!(call_id, "media_stream_start: tracking state, firing event");
-        let mut states = self.media_stream_states.write().await;
-        states.insert(call_id.to_string(), MediaStreamState);
+        self.media_stream_states
+            .insert(call_id.to_string(), MediaStreamState);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStarted {
                 call_id: call_id.to_string(),
@@ -4674,8 +4633,7 @@ impl RwiCommandProcessor {
     async fn media_stream_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
         tracing::debug!(call_id, "media_stream_stop: clearing state, firing event");
-        let mut states = self.media_stream_states.write().await;
-        states.remove(call_id);
+        self.media_stream_states.remove(call_id);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStopped {
                 call_id: call_id.to_string(),
@@ -4698,8 +4656,8 @@ impl RwiCommandProcessor {
         // fires the event.  Actual PCM/RTP injection is handled by the caller
         // via the WebSocket media stream after receiving MediaStreamStarted.
         tracing::debug!(call_id, "media_inject_start: tracking state, firing event");
-        let mut states = self.media_inject_states.write().await;
-        states.insert(call_id.to_string(), MediaInjectState);
+        self.media_inject_states
+            .insert(call_id.to_string(), MediaInjectState);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStarted {
                 call_id: call_id.to_string(),
@@ -4714,8 +4672,7 @@ impl RwiCommandProcessor {
     async fn media_inject_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
         tracing::debug!(call_id, "media_inject_stop: clearing state, firing event");
-        let mut states = self.media_inject_states.write().await;
-        states.remove(call_id);
+        self.media_inject_states.remove(call_id);
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStopped {
                 call_id: call_id.to_string(),
@@ -6124,19 +6081,16 @@ mod tests {
         let (processor, _cm) = create_test_processor_with_registry(registry.clone());
 
         // Pre-populate ringback_states with stale entries above the soft cap.
-        {
-            let mut states = processor.ringback_states.write().await;
-            for i in 0..(RINGBACK_STATES_SOFT_CAP + 1) {
-                states.insert(
-                    format!("stale-target-{i}"),
-                    RingbackState {
-                        _target_call_id: format!("stale-target-{i}"),
-                        _source_call_id: format!("stale-source-{i}"),
-                    },
-                );
-            }
-            assert!(states.len() > RINGBACK_STATES_SOFT_CAP);
+        for i in 0..(RINGBACK_STATES_SOFT_CAP + 1) {
+            processor.ringback_states.insert(
+                format!("stale-target-{i}"),
+                RingbackState {
+                    _target_call_id: format!("stale-target-{i}"),
+                    _source_call_id: format!("stale-source-{i}"),
+                },
+            );
         }
+        assert!(processor.ringback_states.len() > RINGBACK_STATES_SOFT_CAP);
 
         // Triggering insert: target/source both live, must succeed and run GC.
         let result = processor
@@ -6148,14 +6102,13 @@ mod tests {
         assert!(result.is_ok(), "{:?}", result);
 
         // After GC: only the live entry we just inserted must remain.
-        let states = processor.ringback_states.read().await;
         assert_eq!(
-            states.len(),
+            processor.ringback_states.len(),
             1,
             "stale ringback entries were not evicted, remaining: {}",
-            states.len()
+            processor.ringback_states.len()
         );
-        assert!(states.contains_key("live-target"));
+        assert!(processor.ringback_states.contains_key("live-target"));
         // Sanity: registry still reports the live handles.
         assert!(registry.get_handle("live-target").is_some());
         assert!(registry.get_handle("live-source").is_some());
@@ -7808,8 +7761,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let states = processor.queue_states.read().await;
-        let state = states.get("call-1").unwrap();
+        let state = processor.queue_states.get("call-1").unwrap();
         assert_eq!(state.agent_id, Some("agent-1".to_string()));
     }
 
@@ -7863,8 +7815,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let states = processor.queue_states.read().await;
-        let state = states.get("call-3").unwrap();
+        let state = processor.queue_states.get("call-3").unwrap();
         assert_eq!(state.queue_id, "overflow-queue");
         assert_eq!(state.overflow_count, 1);
     }
@@ -7908,8 +7859,7 @@ mod tests {
 
         processor.unregister_agent("agent-1").await;
 
-        let agents = processor.agent_skills.read().await;
-        assert!(!agents.contains_key("agent-1"));
+        assert!(!processor.agent_skills.contains_key("agent-1"));
     }
 
     #[tokio::test]

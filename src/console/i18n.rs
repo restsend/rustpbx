@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -46,7 +47,7 @@ impl From<&crate::config::ConsoleConfig> for LocaleConfig {
 /// memory as flat `"section.key" -> "value"` maps so lookups are O(1).
 pub struct I18n {
     /// lang code -> flat translation map
-    translations: RwLock<HashMap<String, Translations>>,
+    translations: DashMap<String, Translations>,
     config: LocaleConfig,
     core_locales_dir: String,
     /// Extra locale directories registered by addons
@@ -61,7 +62,7 @@ impl I18n {
 
     fn new_with_core_dir(config: LocaleConfig, core_locales_dir: String) -> Self {
         let i18n = Self {
-            translations: RwLock::new(HashMap::new()),
+            translations: DashMap::new(),
             config,
             core_locales_dir,
             addon_locales_dirs: RwLock::new(vec![]),
@@ -76,14 +77,7 @@ impl I18n {
 
     /// (Re)load all translations from disk, replacing the current cache.
     pub fn reload(&self) {
-        let mut cache = match self.translations.write() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("i18n: failed to acquire write lock: {}", e);
-                return;
-            }
-        };
-        cache.clear();
+        self.translations.clear();
 
         // Load core locales
         let addon_dirs = self
@@ -96,7 +90,7 @@ impl I18n {
             for dir in addon_dirs.iter() {
                 Self::merge_locale_dir(&mut flat, dir, &info.code);
             }
-            cache.insert(info.code.clone(), flat);
+            self.translations.insert(info.code.clone(), flat);
         }
     }
 
@@ -210,10 +204,8 @@ impl I18n {
     /// Falls back to `self.config.default` if the key is missing in the
     /// requested locale, and finally returns the key itself as a last resort.
     pub fn t(&self, locale: &str, key: &str) -> String {
-        let cache = self.translations.read().unwrap_or_else(|e| e.into_inner());
-
         // 1. Requested locale
-        if let Some(flat) = cache.get(locale)
+        if let Some(flat) = self.translations.get(locale)
             && let Some(v) = flat.get(key)
         {
             return v.clone();
@@ -221,7 +213,7 @@ impl I18n {
 
         // 2. Default locale fallback
         if locale != self.config.default
-            && let Some(flat) = cache.get(&self.config.default)
+            && let Some(flat) = self.translations.get(&self.config.default)
             && let Some(v) = flat.get(key)
         {
             return v.clone();
@@ -246,15 +238,14 @@ impl I18n {
     /// The flat `"nav.dashboard"` key is re-hydrated into
     /// `{"nav": {"dashboard": "…"}}`.
     pub fn get_translations_json(&self, locale: &str) -> serde_json::Value {
-        let cache = self.translations.read().unwrap_or_else(|e| e.into_inner());
-
-        let flat = cache
+        let flat = self
+            .translations
             .get(locale)
-            .or_else(|| cache.get(&self.config.default));
+            .or_else(|| self.translations.get(&self.config.default));
 
         let mut root = serde_json::Map::new();
         if let Some(flat) = flat {
-            for (dotted_key, value) in flat {
+            for (dotted_key, value) in flat.iter() {
                 Self::set_nested(
                     &mut root,
                     dotted_key,

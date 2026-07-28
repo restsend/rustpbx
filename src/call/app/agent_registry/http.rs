@@ -7,6 +7,7 @@
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -21,7 +22,7 @@ pub struct HttpRegistry {
     api_key: Option<String>,
     client: reqwest::Client,
     /// Local cache for fast reads
-    cache: RwLock<HashMap<String, (AgentRecord, Instant)>>,
+    cache: DashMap<String, (AgentRecord, Instant)>,
     /// Round-robin counter
     rr_counter: RwLock<u64>,
     /// Event callbacks for state changes
@@ -39,7 +40,7 @@ impl HttpRegistry {
             api_key,
             client: crate::http_util::build_keepalive_client(None, None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            cache: RwLock::new(HashMap::new()),
+            cache: DashMap::new(),
             rr_counter: RwLock::new(0),
             event_handlers: RwLock::new(Vec::new()),
             cache_ttl: Duration::from_secs(30),
@@ -87,8 +88,7 @@ impl HttpRegistry {
         let record = Self::parse_agent_from_json(&data)?;
 
         // Update cache
-        let mut cache = self.cache.write().await;
-        cache.insert(agent_id.to_string(), (record.clone(), Instant::now()));
+        self.cache.insert(agent_id.to_string(), (record.clone(), Instant::now()));
 
         Ok(Some(record))
     }
@@ -183,8 +183,7 @@ impl AgentRegistry for HttpRegistry {
         crate::http_util::execute_request(req, &self.headers_map(), None).await?;
 
         // Remove from cache
-        let mut cache = self.cache.write().await;
-        cache.remove(agent_id);
+        self.cache.remove(agent_id);
 
         info!(agent_id = %agent_id, "Agent unregistered via HTTP API");
         Ok(())
@@ -192,13 +191,12 @@ impl AgentRegistry for HttpRegistry {
 
     async fn get_agent(&self, agent_id: &str) -> Option<AgentRecord> {
         // Try cache first
-        let cache = self.cache.read().await;
-        if let Some((record, timestamp)) = cache.get(agent_id)
-            && self.is_cache_valid(*timestamp)
-        {
-            return Some(record.clone());
+        if let Some(entry) = self.cache.get(agent_id) {
+            let (record, timestamp) = entry.value();
+            if self.is_cache_valid(*timestamp) {
+                return Some(record.clone());
+            }
         }
-        drop(cache);
 
         // Fetch from API
         match self.fetch_agent(agent_id).await {
@@ -225,14 +223,12 @@ impl AgentRegistry for HttpRegistry {
                     Vec::new()
                 }
             },
-            Err(_) => {
-                let cache = self.cache.read().await;
-                cache
-                    .values()
-                    .filter(|(_, ts)| self.is_cache_valid(*ts))
-                    .map(|(record, _)| record.clone())
-                    .collect()
-            }
+            Err(_) => self
+                .cache
+                .iter()
+                .filter(|e| self.is_cache_valid(e.value().1))
+                .map(|e| e.value().0.clone())
+                .collect(),
         }
     }
 
@@ -248,10 +244,9 @@ impl AgentRegistry for HttpRegistry {
         self.update_agent_api(agent_id, updates).await?;
 
         // Update cache
-        let mut cache = self.cache.write().await;
-        if let Some((record, _)) = cache.get_mut(agent_id) {
-            record.presence = new_state;
-            record.last_state_change = Instant::now();
+        if let Some(mut entry) = self.cache.get_mut(agent_id) {
+            entry.value_mut().0.presence = new_state;
+            entry.value_mut().0.last_state_change = Instant::now();
         }
 
         info!(agent_id = %agent_id, "Presence updated via HTTP API");
@@ -267,8 +262,8 @@ impl AgentRegistry for HttpRegistry {
         self.update_agent_api(agent_id, updates).await?;
 
         // Update cache
-        let mut cache = self.cache.write().await;
-        if let Some((record, _)) = cache.get_mut(agent_id) {
+        if let Some(mut entry) = self.cache.get_mut(agent_id) {
+            let (record, _) = entry.value_mut();
             record.current_calls += 1;
             record.presence = PresenceState::Busy { call_id: None };
             record.last_state_change = Instant::now();
@@ -285,8 +280,8 @@ impl AgentRegistry for HttpRegistry {
         self.update_agent_api(agent_id, updates).await?;
 
         // Update cache
-        let mut cache = self.cache.write().await;
-        if let Some((record, _)) = cache.get_mut(agent_id) {
+        if let Some(mut entry) = self.cache.get_mut(agent_id) {
+            let (record, _) = entry.value_mut();
             if record.current_calls > 0 {
                 record.current_calls -= 1;
             }
