@@ -456,7 +456,8 @@ fn main() -> Result<()> {
         fmt_layer = Some(
             tracing_subscriber::fmt::layer()
                 .with_timer(LocalTime::rfc_3339())
-                .event_format(AccessLogEventFormat::new(LocalTime::rfc_3339())),
+                .event_format(AccessLogEventFormat::new(LocalTime::rfc_3339()))
+                .with_ansi(false),
         );
     }
     // Every branch receives the same OTel reload layer so that the commercial
