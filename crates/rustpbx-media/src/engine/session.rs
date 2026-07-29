@@ -104,7 +104,7 @@ impl MediaSession {
         self.playback_tracks.drain();
         self.bridge_playback_track_ids.clear();
 
-        if self.mcu.mode() == crate::media::engine::mcu_switch::MediaMode::Mcu {
+        if self.mcu.mode() == crate::engine::mcu_switch::MediaMode::Mcu {
             self.mcu.switch_to_bridge();
         }
 

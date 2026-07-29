@@ -2239,7 +2239,7 @@ impl BridgePeer {
             let drain_cancel = common.cancel_token.clone();
             let drain_bid = bridge_id.to_string();
             let drain_dir = dir.direction;
-            let h = crate::utils::media_spawn(async move {
+            let h = tokio::spawn(async move {
                 info!(
                     bridge_id = %drain_bid,
                     direction = %drain_dir,

@@ -284,7 +284,7 @@ rustpbx-media = { path = "crates/rustpbx-media" }
 [dev-dependencies]
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
-sipbot = { version = "0.2.48", default-features = false }
+sipbot = { version = "0.2.49", default-features = false }
 serde_urlencoded = "0.7"
 ctor = "1.0.7"
 
