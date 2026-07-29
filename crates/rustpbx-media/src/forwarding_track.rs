@@ -434,16 +434,9 @@ impl ForwardingTrack {
 
         let mut guard = self.transcoder.lock();
         if let Some(transcoder) = guard.as_mut() {
-            let mut output = transcoder.transcode(frame);
-            let mut timing_guard = self.audio_timing.lock();
-            if let Some(timing) = timing_guard.as_mut() {
-                timing.rewrite(
-                    &mut output,
-                    audio_mapping.source_clock_rate,
-                    audio_mapping.target_clock_rate,
-                    audio_mapping.target_pt,
-                );
-            }
+            // Transcoder already returns a frame in the target RTP clock domain.
+            // Rewriting it here would apply the clock-rate ratio a second time.
+            let output = transcoder.transcode(frame);
             return Some(MediaSample::Audio(output));
         }
         drop(guard);
@@ -1737,6 +1730,147 @@ mod tests {
             data: Bytes::from(vec![0u8; data_len]),
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn transcoder_owns_cross_clock_rtp_timing() {
+        use audio_codec::create_encoder;
+
+        let pcm = vec![0i16; 160];
+        let mut encoder = create_encoder(CodecType::PCMA);
+        let encoded = Bytes::from(encoder.encode(&pcm));
+        let samples = vec![
+            MediaSample::Audio(AudioFrame {
+                payload_type: Some(8),
+                clock_rate: 8000,
+                rtp_timestamp: 10_000,
+                sequence_number: Some(100),
+                data: encoded.clone(),
+                ..Default::default()
+            }),
+            MediaSample::Audio(AudioFrame {
+                payload_type: Some(8),
+                clock_rate: 8000,
+                rtp_timestamp: 10_160,
+                sequence_number: Some(101),
+                data: encoded,
+                ..Default::default()
+            }),
+        ];
+        let ingress = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMA,
+                payload_type: 8,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        };
+        let egress = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::Opus,
+                payload_type: 96,
+                clock_rate: 48000,
+                channels: 2,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        };
+        let ft = ForwardingTrack::new(
+            "test-cross-clock-timing".into(),
+            MultiShotTrack::new(samples),
+            None,
+            None,
+            Leg::A,
+            ingress,
+            egress,
+        );
+
+        let MediaSample::Audio(first) = ft.recv().await.unwrap() else {
+            panic!("expected first audio frame");
+        };
+        let MediaSample::Audio(second) = ft.recv().await.unwrap() else {
+            panic!("expected second audio frame");
+        };
+
+        assert_eq!(first.clock_rate, 48000);
+        assert_eq!(first.payload_type, Some(96));
+        assert_eq!(
+            second.rtp_timestamp.wrapping_sub(first.rtp_timestamp),
+            960,
+            "20 ms PCMA input must advance 20 ms in the Opus clock domain"
+        );
+
+        let pcm = vec![0i16; 960];
+        let mut encoder = create_encoder(CodecType::Opus);
+        let encoded = Bytes::from(encoder.encode(&pcm));
+        let samples = vec![
+            MediaSample::Audio(AudioFrame {
+                payload_type: Some(96),
+                clock_rate: 48000,
+                rtp_timestamp: 20_000,
+                sequence_number: Some(200),
+                data: encoded.clone(),
+                ..Default::default()
+            }),
+            MediaSample::Audio(AudioFrame {
+                payload_type: Some(96),
+                clock_rate: 48000,
+                rtp_timestamp: 20_960,
+                sequence_number: Some(201),
+                data: encoded,
+                ..Default::default()
+            }),
+        ];
+        let ingress = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::Opus,
+                payload_type: 96,
+                clock_rate: 48000,
+                channels: 2,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        };
+        let egress = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMA,
+                payload_type: 8,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        };
+        let ft = ForwardingTrack::new(
+            "test-reverse-cross-clock-timing".into(),
+            MultiShotTrack::new(samples),
+            None,
+            None,
+            Leg::A,
+            ingress,
+            egress,
+        );
+
+        let MediaSample::Audio(first) = ft.recv().await.unwrap() else {
+            panic!("expected first audio frame");
+        };
+        let MediaSample::Audio(second) = ft.recv().await.unwrap() else {
+            panic!("expected second audio frame");
+        };
+
+        assert_eq!(first.clock_rate, 8000);
+        assert_eq!(first.payload_type, Some(8));
+        assert_eq!(
+            second.rtp_timestamp.wrapping_sub(first.rtp_timestamp),
+            160,
+            "20 ms Opus input must advance 20 ms in the PCMA clock domain"
+        );
     }
 
     /// Stats counters must increment for every forwarded sample.
