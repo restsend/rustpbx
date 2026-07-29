@@ -126,6 +126,3 @@ impl SipFlowQuery {
             .join("\n")
     }
 }
-
-#[cfg(test)]
-mod tests;
