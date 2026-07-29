@@ -13,6 +13,8 @@ addr = "0.0.0.0"
 udp_port = 5060
 # Multiple UDP ports (e.g., for multi-tenant or port range binding)
 # udp_ports = [5060, 5062, 5064]
+# Omit both udp_port and udp_ports to disable UDP listening.
+# Port 0 requests an OS-assigned ephemeral port; it does not disable UDP.
 tcp_port = 5060
 
 # Encrypted SIP (SIPS)
