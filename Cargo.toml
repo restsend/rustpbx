@@ -154,7 +154,7 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.22"
+rsipstack = "0.5.24"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
