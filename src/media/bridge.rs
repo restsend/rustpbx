@@ -219,13 +219,6 @@ impl LegTransport {
             Self::Callee => "Callee",
         }
     }
-
-    const fn endpoint(self) -> BridgeEndpoint {
-        match self {
-            Self::Caller => BridgeEndpoint::Caller,
-            Self::Callee => BridgeEndpoint::Callee,
-        }
-    }
 }
 
 /// Typed metadata describing source and destination leg transports.
@@ -238,18 +231,6 @@ struct ForwardPath {
 impl ForwardPath {
     const fn new(from: LegTransport, to: LegTransport) -> Self {
         Self { from, to }
-    }
-
-    const fn source_endpoint(self) -> BridgeEndpoint {
-        self.from.endpoint()
-    }
-
-    /// Strip WebRTC-only header extensions when forwarding from caller (WebRTC) to callee (RTP) leg.
-    const fn should_strip_caller_audio_metadata(self) -> bool {
-        matches!(
-            (self.from, self.to),
-            (LegTransport::Caller, LegTransport::Callee)
-        )
     }
 }
 
@@ -306,25 +287,8 @@ impl FileOutputContextBuilder {
     }
 }
 
-fn output_mode_name(mode: u8) -> &'static str {
-    match mode {
-        BRIDGE_OUTPUT_PEER => "peer",
-        BRIDGE_OUTPUT_FILE => "file",
-        BRIDGE_OUTPUT_MUTED => "muted",
-        _ => "unknown",
-    }
-}
-
 fn frame_ticks_20ms(clock_rate: u32) -> u32 {
     (clock_rate / 50).max(1)
-}
-
-fn scale_rtp_timestamp(rtp_timestamp: u32, source_rate: u32, target_rate: u32) -> u32 {
-    if source_rate == target_rate {
-        rtp_timestamp
-    } else {
-        (rtp_timestamp as u64 * target_rate as u64 / source_rate as u64) as u32
-    }
 }
 
 /// Wrapper around a side's egress `MediaSender` that taps every outbound
@@ -774,27 +738,20 @@ pub struct BridgePeer {
 struct ForwardTrackArgs {
     cancel_token: CancellationToken,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
-    recording_paused: Arc<AtomicBool>,
     sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
-    receive_clock: ReceiveTimestampClock,
     dtmf_sink: Arc<parking_lot::RwLock<Option<DtmfSink>>>,
 }
 
 /// Per-direction parameters for process_track_event.
 struct DirectionParams {
     target_pc: PeerConnection,
-    sender_weak: std::sync::Weak<parking_lot::Mutex<Option<EgressTap>>>,
-    output_mode: Arc<AtomicU8>,
     direction: &'static str,
     path: ForwardPath,
-    leg_stats: Arc<LegStats>,
     recorder_leg: Option<RecLeg>,
     video_payload_type: Arc<AtomicU8>,
     video_payload_map: Arc<DashMap<u8, u8>>,
     video_track_label: &'static str,
     pli_label: &'static str,
-    transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
-    transcoder_timing: Option<Arc<parking_lot::Mutex<Option<RtpTiming>>>>,
     dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<PayloadMapping>>>>,
     gate: Option<Arc<AtomicBool>>,
     /// Codec info from DirectionCodecState for ForwardingTrack profile construction.
@@ -2393,26 +2350,19 @@ impl BridgePeer {
         let common = ForwardTrackArgs {
             cancel_token: self.cancel_token.clone(),
             recorder: self.recorder.clone(),
-            recording_paused: self.recording_paused.clone(),
             sipflow_tx: self.sipflow_tx.clone(),
-            receive_clock: self.receive_clock.clone(),
             dtmf_sink: Arc::clone(&self.dtmf_sink),
         };
 
         let caller = DirectionParams {
             target_pc: self.callee.pc(),
-            sender_weak: Arc::downgrade(&self.callee.send),
-            output_mode: Arc::clone(&self.callee.output_mode),
             direction: "Caller->Callee",
             path: ForwardPath::new(LegTransport::Caller, LegTransport::Callee),
-            leg_stats: Arc::clone(&self.stats.caller_to_callee),
             recorder_leg: Some(RecLeg::A),
             video_payload_type: Arc::clone(&self.callee.video_payload_type),
             video_payload_map: Arc::clone(&self.callee.video_payload_map),
             video_track_label: "caller-to-callee-video",
             pli_label: "Callee PLI -> Caller source",
-            transcoder: Some(Arc::clone(&self.caller_to_callee_codec.transcoder)),
-            transcoder_timing: Some(Arc::clone(&self.caller_to_callee_codec.timing)),
             dtmf_mapping: Some(Arc::clone(&self.caller_to_callee_codec.dtmf_mapping)),
             gate: Some(Arc::clone(&self.caller_gate)),
             source_codec_info: self.caller_to_callee_codec.source_codec.lock().clone(),
@@ -2423,11 +2373,8 @@ impl BridgePeer {
 
         let callee = DirectionParams {
             target_pc: self.caller.pc(),
-            sender_weak: Arc::downgrade(&self.caller.send),
-            output_mode: Arc::clone(&self.caller.output_mode),
             direction: "Callee->Caller",
             path: ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
-            leg_stats: Arc::clone(&self.stats.callee_to_caller),
             // A-leg (Caller) egress is recorded as leg B by the EgressTap
             // wrapping caller.send, so the callee-side ingress is NOT tapped
             // here (avoids duplicating leg B). Only the A-leg ingress (caller,
@@ -2437,8 +2384,6 @@ impl BridgePeer {
             video_payload_map: Arc::clone(&self.caller.video_payload_map),
             video_track_label: "callee-to-caller-video",
             pli_label: "Caller PLI -> Callee source",
-            transcoder: Some(Arc::clone(&self.callee_to_caller_codec.transcoder)),
-            transcoder_timing: Some(Arc::clone(&self.callee_to_caller_codec.timing)),
             dtmf_mapping: Some(Arc::clone(&self.callee_to_caller_codec.dtmf_mapping)),
             gate: None,
             source_codec_info: self.callee_to_caller_codec.source_codec.lock().clone(),
@@ -4600,41 +4545,7 @@ mod tests {
         bridge.stop().await;
     }
 
-    use rustrtc::media::{MediaResult, TrackState};
-
     // ── Transcoding integration tests ────────────────────────────────────
-
-    /// Mock audio track that yields one pre-defined sample then blocks forever.
-    /// The test uses the CancellationToken to stop the forwarding loop.
-    struct OneShotAudioTrack {
-        sample: parking_lot::Mutex<Option<MediaSample>>,
-    }
-
-    #[async_trait::async_trait]
-    impl MediaStreamTrack for OneShotAudioTrack {
-        fn id(&self) -> &str {
-            "one-shot-audio"
-        }
-        fn kind(&self) -> MediaKind {
-            MediaKind::Audio
-        }
-        fn state(&self) -> TrackState {
-            TrackState::Live
-        }
-        async fn recv(&self) -> MediaResult<MediaSample> {
-            let s = self.sample.lock().take();
-            if let Some(s) = s {
-                Ok(s)
-            } else {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(999)).await;
-                }
-            }
-        }
-        async fn request_key_frame(&self) -> MediaResult<()> {
-            Ok(())
-        }
-    }
 
     /// Verify that set_transcoder / clear_transcoder store and clear correctly.
     #[tokio::test]
