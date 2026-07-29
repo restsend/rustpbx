@@ -99,6 +99,14 @@ struct SipFlowRequestQuery {
 struct UpdateCallRecordPayload {
     #[serde(default)]
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    note: Option<NotePayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotePayload {
+    text: Option<String>,
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -906,7 +914,7 @@ async fn update_call_record(
     AuthRequired(_user): AuthRequired,
     Json(payload): Json<UpdateCallRecordPayload>,
 ) -> Response {
-    if payload.tags.is_none() {
+    if payload.tags.is_none() && payload.note.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "message": "No updates supplied" })),
@@ -944,6 +952,33 @@ async fn update_call_record(
             changed = true;
         }
     }
+
+    let notes_payload = if let Some(note) = &payload.note {
+        let new_text = note.text.as_deref().unwrap_or("").to_string();
+        let existing_text = record
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("call_notes"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if new_text != existing_text {
+            let mut merged = match record.metadata.take() {
+                Some(Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+            merged.insert("call_notes".into(), Value::String(new_text.clone()));
+            active.metadata = Set(Some(Value::Object(merged)));
+            changed = true;
+        }
+        Some(json!({
+            "text": new_text,
+            "updated_at": Utc::now(),
+            "updated_by": Value::Null,
+        }))
+    } else {
+        None
+    };
+
     if !changed {
         let response = json!({
             "status": "noop",
@@ -951,7 +986,7 @@ async fn update_call_record(
                 "id": record.id,
                 "tags": extract_tags(&record.tags),
             },
-            "notes": Value::Null,
+            "notes": notes_payload.unwrap_or(Value::Null),
         });
         return Json(response).into_response();
     }
@@ -975,7 +1010,7 @@ async fn update_call_record(
             "id": updated_record.id,
             "tags": extract_tags(&updated_record.tags),
         },
-        "notes": Value::Null,
+        "notes": notes_payload.unwrap_or(Value::Null),
     });
     Json(response).into_response()
 }
@@ -1673,12 +1708,24 @@ fn build_detail_payload(
         download_recording = inline_recording_url.clone();
     }
 
+    let notes = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("call_notes"))
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty())
+        .map(|text| json!({
+            "text": text,
+            "updated_at": Value::Null,
+            "updated_by": Value::Null,
+        }));
+
     json!({
         "back_url": state.url_for("/call-records"),
         "record": record_payload,
         //"sip_flow": sip_flow_download,
         "media_metrics": media_metrics,
-        "notes": Value::Null,
+        "notes": notes.unwrap_or(Value::Null),
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
