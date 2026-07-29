@@ -1,0 +1,40 @@
+[package]
+name = "rustpbx-sipflow"
+version = "0.4.12"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1.9.2"
+async-trait = "0.1.88"
+audio-codec = "0.3.40"
+bytes = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+flate2 = "1"
+flowdb = { version = "0.8.2", default-features = false }
+futures = "0.3.31"
+libc = "0.2"
+lru = "0.18"
+metrics = "0.24"
+rand = "0.10"
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "rustls",
+] }
+rustpbx-http-util = { path = "../rustpbx-http-util" }
+rustpbx-storage = { path = "../rustpbx-storage" }
+ruzstd = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "sqlite",
+] }
+tempfile = "3.27.0"
+tokio = { version = "1.53", features = ["fs", "io-util", "net", "sync"] }
+tokio-util = "0.7.18"
+tracing = "0.1.43"
+uuid = { version = "1.23.3", features = ["v4"] }
+
+[dev-dependencies]

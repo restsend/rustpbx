@@ -1,0 +1,31 @@
+[package]
+name = "rustpbx-models"
+version = "0.4.12"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1.88"
+chrono = { version = "0.4", features = ["serde"] }
+rsipstack = "0.5.22"
+sea-orm = { version = "2", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlite-use-returning-for-3_35",
+] }
+sea-orm-migration = { version = "2", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlite-use-returning-for-3_35",
+] }
+sea-query = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53", features = ["fs"] }
+tracing = "0.1.43"
+argon2 = { version = "0.5.3", features = ["password-hash"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
