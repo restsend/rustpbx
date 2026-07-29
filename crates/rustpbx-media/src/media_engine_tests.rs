@@ -169,11 +169,6 @@ mod media_engine_tests {
         };
         assert_eq!(cmd.session_id(), Some("s1"));
 
-        let cmd = MediaCommand::DestroySession {
-            session_id: "s1".into(),
-        };
-        assert_eq!(cmd.session_id(), Some("s1"));
-
         let cmd = MediaCommand::Play {
             session_id: "s1".into(),
             leg_id: None,
@@ -198,13 +193,6 @@ mod media_engine_tests {
             }
             .name(),
             "create_session"
-        );
-        assert_eq!(
-            MediaCommand::DestroySession {
-                session_id: "x".into()
-            }
-            .name(),
-            "destroy_session"
         );
         assert_eq!(
             MediaCommand::Play {
@@ -341,8 +329,7 @@ mod media_engine_tests {
         let (engine, handle) = MediaEngine::new(MediaEngineConfig {
             command_channel_capacity: 8192,
             event_channel_capacity: 8192,
-            session_reaper_interval: std::time::Duration::from_secs(3600),
-            session_idle_ttl: std::time::Duration::from_secs(7200),
+            // (reaper removed — session lifecycle is now RAII)
         });
         let rx = engine.subscribe();
         engine.spawn(handle);
@@ -385,11 +372,7 @@ mod media_engine_tests {
             per_cmd.as_micros()
         );
 
-        engine
-            .send(MediaCommand::DestroySession {
-                session_id: "bench-sess".into(),
-            })
-            .unwrap();
+        engine.destroy_session("bench-sess");
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -408,9 +391,7 @@ mod media_engine_tests {
                 })
                 .unwrap();
             let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
-            engine
-                .send(MediaCommand::DestroySession { session_id: sid })
-                .unwrap();
+            engine.destroy_session(&sid);
             let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
         }
 

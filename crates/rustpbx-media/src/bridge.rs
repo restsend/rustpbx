@@ -751,6 +751,11 @@ pub struct BridgePeer {
     /// when PeerConnection(s) are replaced (e.g. RTP → WebRTC callee).
     forwarder_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     caller_gate: Arc<AtomicBool>,
+    /// When true, the caller→callee ForwardingTrack is drained by a dedicated
+    /// task (app/IVR bridge) because the callee PC has no real transport and
+    /// its RtpSender never polls recv(). Driving recv() keeps the caller-side
+    /// stats and RFC 2833 DTMF detection alive.
+    app_ingress_drain: AtomicBool,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     recording_paused: Arc<AtomicBool>,
     sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
@@ -809,6 +814,11 @@ struct DirectionParams {
     target_codec_info: Option<(AudioCodecType, u8, u32)>,
     /// Slot to store the ForwardingTrack's shared stats Arc.
     stats_slot: Option<Arc<parking_lot::Mutex<Option<Arc<ForwardStats>>>>>,
+    /// When true (app/IVR bridge whose callee PC has no real transport), the
+    /// target PC's RtpSender never polls the ForwardingTrack, so caller audio,
+    /// stats and DTMF detection stall. A dedicated drain task polls recv()
+    /// instead to drive stats + DTMF (the app only needs DTMF, not the audio).
+    drain_ingress: bool,
 }
 
 enum DirectionEventResult {
@@ -832,6 +842,7 @@ impl BridgePeer {
             forwarding_stopped: AtomicBool::new(false),
             forwarder_handle: Arc::new(parking_lot::Mutex::new(None)),
             caller_gate: Arc::new(AtomicBool::new(false)),
+            app_ingress_drain: AtomicBool::new(false),
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
             sipflow_tx: None,
@@ -855,10 +866,12 @@ impl BridgePeer {
     /// re-INVITE, NOT on 183 early media. This prevents sending WebRTC audio to a SIP
     /// endpoint that may not be ready to receive it yet.
     pub fn open_caller_gate(&self) {
+        let was_open = self.caller_gate.load(Ordering::Acquire);
         self.caller_gate.store(true, Ordering::Release);
-        debug!(
+        info!(
             bridge_id = %self.id,
             session_id = ?self.session_id,
+            was_open,
             "Caller gate opened — WebRTC→RTP forwarding enabled"
         );
     }
@@ -866,6 +879,21 @@ impl BridgePeer {
     /// Returns whether the caller gate has been opened.
     pub fn is_caller_gate_open(&self) -> bool {
         self.caller_gate.load(Ordering::Acquire)
+    }
+
+    /// Mark this bridge as an application (IVR/queue) bridge whose callee PC has
+    /// no real transport. The caller→callee ForwardingTrack is then drained by a
+    /// dedicated task (see `process_track_event`) so caller-side stats and DTMF
+    /// detection keep working even though the callee RtpSender never polls.
+    pub fn set_app_ingress_drain(&self, enabled: bool) {
+        self.app_ingress_drain.store(enabled, Ordering::Release);
+        info!(
+            bridge_id = %self.id,
+            session_id = ?self.session_id,
+            enabled,
+            "App ingress drain configured (drives caller→app stats/DTMF via a \
+             dedicated task since the app callee PC has no transport)"
+        );
     }
 
     fn side_state(&self, side: BridgeSide) -> &BridgeSideState {
@@ -1197,6 +1225,7 @@ impl BridgePeer {
             let r_fwd = Arc::clone(&self.caller.forward_stats);
             let w_rtcp = Arc::clone(&self.stats.caller_to_callee_rtcp);
             let r_rtcp = Arc::clone(&self.stats.callee_to_caller_rtcp);
+            let caller_gate = Arc::clone(&self.caller_gate);
             let bridge_id = self.id.clone();
             let cancel = self.cancel_token.clone();
             let rtp_timeout = self.rtp_timeout.duration;
@@ -1287,7 +1316,27 @@ impl BridgePeer {
                                 && let Some(timeout) = rtp_timeout
                             {
                                 if dw_pkts == 0 {
+                                    let first_silent = caller_silence_start.is_none();
                                     caller_silence_start.get_or_insert(std::time::Instant::now());
+                                    if first_silent {
+                                        let gate_open = caller_gate.load(Ordering::Relaxed);
+                                        let fwd_wired = w_fwd.lock().is_some();
+                                        let total_w = match w_fwd.lock().as_ref() {
+                                            Some(fs) => fs.packets.load(Ordering::Relaxed),
+                                            None => w2r.packets.load(Ordering::Relaxed),
+                                        };
+                                        warn!(
+                                            bridge_id = %bridge_id,
+                                            gate_open,
+                                            fwd_stats_wired = fwd_wired,
+                                            total_caller_pkts = total_w,
+                                            leg_stats_pkts = w2r.packets.load(Ordering::Relaxed),
+                                            "Caller side went silent — gate_open=false means the \
+                                             caller gate was never opened (app/IVR answer path); \
+                                             fwd_stats_wired=false means no ForwardingTrack is \
+                                             feeding the caller→callee stats"
+                                        );
+                                    }
                                 } else {
                                     caller_silence_start = None;
                                 }
@@ -1370,10 +1419,11 @@ impl BridgePeer {
             handler,
         });
 
-        debug!(
+        info!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
             payload_types = ?payload_types,
+            gate_open = self.caller_gate.load(Ordering::Relaxed),
             "Bridge DTMF sink installed"
         );
     }
@@ -2167,14 +2217,70 @@ impl BridgePeer {
         if !cname_val.starts_with("rustrtc-cname-") {
             sender_builder = sender_builder.cname(cname_val.to_string());
         }
+        // Copy all interceptors from the existing sender onto the replacement
+        // (e.g. RecorderTap sender interceptor for leg-B recording, stats
+        // collector for RTCP).  Without this, recording stops after every
+        // sender replacement because the new sender has no interceptors.
+        for interceptor in existing_sender.interceptors() {
+            sender_builder = sender_builder.interceptor(interceptor.clone());
+        }
         let sender = sender_builder.build();
         target_transceiver.set_sender(Some(sender.clone()));
+
+        // App/IVR bridge: the callee PC has no real transport, so its RtpSender
+        // never polls the ForwardingTrack. Without a consumer, caller→app RTP
+        // never flows, the caller-side stats stay 0 (→ misleading "caller side
+        // silent" RTP timeout) and RFC 2833 DTMF is never observed. Spawn a
+        // dedicated drain task that polls recv() — this drives stats increment
+        // and observe_dtmf. The drained audio is discarded (the app only needs
+        // DTMF events, delivered via the shared DtmfSink handler, not the audio).
+        if dir.drain_ingress {
+            let drain_track = forwarding.clone();
+            let drain_cancel = common.cancel_token.clone();
+            let drain_bid = bridge_id.to_string();
+            let drain_dir = dir.direction;
+            let h = crate::utils::media_spawn(async move {
+                info!(
+                    bridge_id = %drain_bid,
+                    direction = %drain_dir,
+                    "App ingress drain started — polling ForwardingTrack.recv() \
+                     to drive caller-side stats and DTMF detection"
+                );
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = drain_cancel.cancelled() => break,
+                        res = drain_track.recv() => {
+                            if let Err(e) = res {
+                                debug!(
+                                    bridge_id = %drain_bid,
+                                    direction = %drain_dir,
+                                    error = %e,
+                                    "App ingress drain track ended"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                debug!(
+                    bridge_id = %drain_bid,
+                    direction = %drain_dir,
+                    "App ingress drain stopped"
+                );
+            });
+            Self::prune_sub_tasks(sub_tasks).await;
+            sub_tasks.lock().push(h);
+        }
 
         debug!(
             bridge_id = %bridge_id,
             direction = dir.direction,
             source_track = %track.id(),
             target_ssrc = existing_sender.ssrc(),
+            gate_present = dir.gate.is_some(),
+            stats_slot_wired = dir.stats_slot.is_some(),
+            drain_ingress = dir.drain_ingress,
             "Wired audio forwarding track"
         );
     }
@@ -2186,7 +2292,7 @@ impl BridgePeer {
     /// is not available (passthrough mode).
     fn build_leg_profiles(
         dir: &DirectionParams,
-        source_transceiver: &Arc<rustrtc::RtpTransceiver>,
+        _source_transceiver: &Arc<rustrtc::RtpTransceiver>,
     ) -> (NegotiatedLegProfile, NegotiatedLegProfile) {
         use crate::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
 
@@ -2213,19 +2319,22 @@ impl BridgePeer {
         let (ingress_audio, egress_audio) = if ingress_audio.is_some() && egress_audio.is_some() {
             (ingress_audio, egress_audio)
         } else {
+            // Passthrough (no transcoder): source and target carry the same
+            // negotiated codec/PT, so derive the ingress profile from the
+            // target sender params. Previously this picked an arbitrary entry
+            // from `source_transceiver.get_payload_map()` (a HashMap), which
+            // could mismatch the actual audio PT (e.g. agent Opus 111 after an
+            // IVR→queue→agent transfer on the same codec). That made the
+            // PT-mismatch filter in `ForwardingTrack::recv()` drop EVERY audio
+            // packet, starving the sender (caller heard silence, no audio in
+            // the recording).
             let target_params = existing_sender_params(dir).unwrap_or_default();
-            let source_pt_map = source_transceiver.get_payload_map();
-            let source_params = source_pt_map
-                .values()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| target_params.clone());
             (
                 Some(NegotiatedCodec {
                     codec: AudioCodecType::PCMU,
-                    payload_type: source_params.payload_type,
-                    clock_rate: source_params.clock_rate,
-                    channels: source_params.channels as u16,
+                    payload_type: target_params.payload_type,
+                    clock_rate: target_params.clock_rate,
+                    channels: target_params.channels as u16,
                 }),
                 Some(NegotiatedCodec {
                     codec: AudioCodecType::PCMU,
@@ -2235,6 +2344,7 @@ impl BridgePeer {
                 }),
             )
         };
+
 
         // DTMF: read from bridge's dtmf_mapping if available.
         let dtmf_pt = dir
@@ -2322,6 +2432,7 @@ impl BridgePeer {
             source_codec_info: self.caller_to_callee_codec.source_codec.lock().clone(),
             target_codec_info: self.caller_to_callee_codec.target_codec.lock().clone(),
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
+            drain_ingress: self.app_ingress_drain.load(Ordering::Acquire),
         };
 
         let callee = DirectionParams {
@@ -2347,6 +2458,7 @@ impl BridgePeer {
             source_codec_info: self.callee_to_caller_codec.source_codec.lock().clone(),
             target_codec_info: self.callee_to_caller_codec.target_codec.lock().clone(),
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
+            drain_ingress: false,
         };
 
         let caller_pc = self.caller.pc();

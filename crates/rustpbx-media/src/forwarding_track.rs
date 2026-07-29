@@ -12,7 +12,7 @@ use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use tokio::sync::mpsc;
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 /// Output modes for ForwardingTrack.
 pub const OUTPUT_PEER: u8 = 0;
@@ -84,6 +84,14 @@ pub struct ForwardingTrack {
 
     // ── Gate (caller gate: prevents forwarding before 200 OK) ────────
     gate: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// One-shot flag: log the first packet dropped due to a closed gate so a
+    /// misconfigured gate surfaces clearly instead of as a "caller silent"
+    /// RTP timeout.
+    gate_drop_logged: std::sync::atomic::AtomicBool,
+    /// One-shot flag: log the very first ingress sample (with gate/mode/sink
+    /// state) so we can confirm the target RtpSender is actually polling
+    /// recv() and see why forwarding/DTMF may be stalled.
+    first_recv_logged: std::sync::atomic::AtomicBool,
 
     // ── DTMF detection (optional) ────────────────────────────────────
     /// Shared DTMF sink — read on every recv() so the handler can be
@@ -165,6 +173,8 @@ impl ForwardingTrack {
             output_mode: Arc::new(AtomicU8::new(OUTPUT_PEER)),
             file_source: Mutex::new(None),
             gate: None,
+            gate_drop_logged: std::sync::atomic::AtomicBool::new(false),
+            first_recv_logged: std::sync::atomic::AtomicBool::new(false),
             shared_dtmf_sink: None,
             dtmf_detector: Mutex::new(DtmfDetector::default()),
         }
@@ -546,15 +556,47 @@ impl MediaStreamTrack for ForwardingTrack {
                 }
             } else {
                 let sample = self.inner.recv().await?;
+                if !self.first_recv_logged.swap(true, Ordering::Relaxed) {
+                    let gate_open = self
+                        .gate
+                        .as_ref()
+                        .map(|g| g.load(Ordering::Relaxed))
+                        .unwrap_or(true);
+                    let dtmf_sink_installed = self
+                        .shared_dtmf_sink
+                        .as_ref()
+                        .is_some_and(|s| s.read().is_some());
+                    info!(
+                        track_id = %self.track_id,
+                        output_mode = mode,
+                        output_mode_note = match mode {
+                            OUTPUT_PEER => "PEER",
+                            OUTPUT_FILE => "FILE",
+                            OUTPUT_MUTED => "MUTED",
+                            _ => "?",
+                        },
+                        gate_present = self.gate.is_some(),
+                        gate_open,
+                        dtmf_sink_installed,
+                        "ForwardingTrack first ingress sample — recv() is being polled"
+                    );
+                }
                 // MUTED: drain the queue but discard.
                 if mode == OUTPUT_MUTED {
                     continue;
                 }
                 // Gate: when closed, drain inner but don't forward.
-                if let Some(ref gate) = self.gate {
-                    if !gate.load(Ordering::Relaxed) {
-                        continue;
+                if let Some(ref gate) = self.gate
+                    && !gate.load(Ordering::Relaxed)
+                {
+                    if !self.gate_drop_logged.swap(true, Ordering::Relaxed) {
+                        debug!(
+                            track_id = %self.track_id,
+                            "Forwarding gate closed — dropping ingress \
+                             (no stats/DTMF) until the gate is opened"
+                        );
                     }
+                    continue;
                 }
                 sample
             };
@@ -1942,6 +1984,100 @@ mod tests {
             "recv() should return immediately when gate is open"
         );
         assert_eq!(ft.stats().packets.load(Ordering::Relaxed), 1);
+    }
+
+    /// Regression for the agent→caller audio loss after IVR→queue→agent
+    /// transfer: when both legs use the same codec (passthrough, no transcoder),
+    /// the ForwardingTrack must forward audio whose PT matches the negotiated
+    /// audio PT. `build_leg_profiles` now derives source_pt == target_pt from
+    /// the target sender params; previously it picked an arbitrary HashMap
+    /// entry, so the PT-mismatch filter dropped every packet and the caller
+    /// heard silence.
+    #[tokio::test]
+    async fn passthrough_same_pt_forwards_audio() {
+        fn opus_profile(pt: u8) -> NegotiatedLegProfile {
+            NegotiatedLegProfile {
+                audio: Some(NegotiatedCodec {
+                    codec: CodecType::Opus,
+                    payload_type: pt,
+                    clock_rate: 48000,
+                    channels: 2,
+                }),
+                video: None,
+                dtmf: None,
+                transport: rustrtc::TransportMode::Rtp,
+            }
+        }
+
+        // Agent sends Opus PT 111; caller also expects Opus PT 111 (same codec).
+        let sample = audio_sample(111 /* Opus */);
+        let track = OneShotTrack::new(sample);
+        let ft = ForwardingTrack::new(
+            "test-passthrough".into(),
+            track,
+            None,
+            None,
+            Leg::A,
+            opus_profile(111),
+            opus_profile(111),
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), ft.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv error");
+
+        // Audio must be returned unchanged (passthrough — no transcode/remap).
+        match result {
+            MediaSample::Audio(frame) => {
+                assert_eq!(frame.payload_type, Some(111), "PT must be preserved");
+            }
+            other => panic!("expected audio sample, got {:?}", other),
+        }
+        assert_eq!(ft.stats().packets.load(Ordering::Relaxed), 1);
+    }
+
+    /// Companion guard: when audio_mapping.source_pt does NOT match the actual
+    /// audio PT, the filter drops the packet (recv() loops and times out). This
+    /// documents why `build_leg_profiles` MUST set the correct source PT — the
+    /// behaviour the passthrough fix relies on.
+    #[tokio::test]
+    async fn passthrough_wrong_source_pt_drops_audio() {
+        fn profile(pt: u8) -> NegotiatedLegProfile {
+            NegotiatedLegProfile {
+                audio: Some(NegotiatedCodec {
+                    codec: CodecType::Opus,
+                    payload_type: pt,
+                    clock_rate: 48000,
+                    channels: 2,
+                }),
+                video: None,
+                dtmf: None,
+                transport: rustrtc::TransportMode::Rtp,
+            }
+        }
+
+        // Ingress profile claims source PT 0 (PCMU), but the agent sends Opus 111.
+        let sample = audio_sample(111 /* Opus */);
+        let track = OneShotTrack::new(sample);
+        let ft = ForwardingTrack::new(
+            "test-mismatch".into(),
+            track,
+            None,
+            None,
+            Leg::A,
+            profile(0 /* wrong source PT */),
+            profile(111),
+        );
+
+        // recv() drops the mismatched packet and loops → times out.
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), ft.recv()).await;
+        assert!(
+            result.is_err(),
+            "recv() must drop the packet when source_pt != actual PT (filter guards this)"
+        );
+        // (stats increment before the filter, but recv() never returns a sample
+        // to the sender — this is exactly what starved the caller-side sender.)
     }
 
     /// Output mode MUTED: samples consumed but not returned.

@@ -175,10 +175,13 @@ pub struct RecordConfig {
 /// domain-specific operations into `MediaCommand` variants.
 pub enum MediaCommand {
     // ── Session lifecycle ────────────────────────────────────────────────
+    /// Create a session in the engine's session map.
+    ///
+    /// Prefer [`MediaEngine::create_session_guarded`] for new code — it
+    /// returns an RAII [`MediaSessionGuard`] whose `Drop` synchronously
+    /// removes the session from the map and finalizes resources, avoiding
+    /// the lost-command leak that `DestroySession` was vulnerable to.
     CreateSession {
-        session_id: String,
-    },
-    DestroySession {
         session_id: String,
     },
 
@@ -336,9 +339,7 @@ impl MediaCommand {
     /// Extract the session_id this command targets, if any.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::CreateSession { session_id } | Self::DestroySession { session_id } => {
-                Some(session_id)
-            }
+            Self::CreateSession { session_id } => Some(session_id),
             Self::AddLeg { session_id, .. }
             | Self::RemoveLeg { session_id, .. }
             | Self::BridgeLegs { session_id, .. }
@@ -373,7 +374,6 @@ impl MediaCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::CreateSession { .. } => "create_session",
-            Self::DestroySession { .. } => "destroy_session",
             Self::AddLeg { .. } => "add_leg",
             Self::RemoveLeg { .. } => "remove_leg",
             Self::BridgeLegs { .. } => "bridge_legs",

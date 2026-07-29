@@ -6,10 +6,10 @@ use crate::call::app::{
     AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController, RecordingInfo,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use dashmap::DashMap;
 use tracing::warn;
 
 const IVR_STATUS_KEY: &str = "ivr_status";
@@ -3169,10 +3169,7 @@ mod tests {
         stack.join().await.expect("cancel should stop app");
 
         assert!(!end_called.load(Ordering::SeqCst), "cancel must skip /end");
-        assert_eq!(
-            ctx.get_var(IVR_STATUS_KEY).as_deref(),
-            Some("cancelled")
-        );
+        assert_eq!(ctx.get_var(IVR_STATUS_KEY).as_deref(), Some("cancelled"));
         assert_eq!(
             ctx.get_var(IVR_END_REASON_KEY).as_deref(),
             Some("cancelled")
@@ -3222,14 +3219,8 @@ mod tests {
             .expect("fallback path should exit cleanly");
 
         assert_eq!(ctx.get_var(IVR_STATUS_KEY).as_deref(), Some("hangup"));
-        assert_eq!(
-            ctx.get_var(IVR_NAME_KEY).as_deref(),
-            Some("failing-ivr")
-        );
-        assert_eq!(
-            ctx.get_var(IVR_END_REASON_KEY).as_deref(),
-            Some("hangup")
-        );
+        assert_eq!(ctx.get_var(IVR_NAME_KEY).as_deref(), Some("failing-ivr"));
+        assert_eq!(ctx.get_var(IVR_END_REASON_KEY).as_deref(), Some("hangup"));
     }
 
     #[tokio::test]
@@ -3665,6 +3656,7 @@ mod tests {
                 external_ip: None,
                 recorders: None,
                 accounts: vec![],
+                ws_url: None,
             },
             stats.clone(),
             false,

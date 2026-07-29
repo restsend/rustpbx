@@ -210,9 +210,13 @@ pub struct SipSession {
     #[allow(dead_code)]
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
-    /// Tracks whether `DestroySession` has already been sent to the media
-    /// engine, so the `Drop` safety-net does not fire a duplicate destroy.
-    engine_session_destroyed: bool,
+    /// RAII guard that ties the `MediaSession` lifecycle in the `MediaEngine`
+    /// to this `SipSession`.  When the session is dropped, the guard's `Drop`
+    /// synchronously removes the `MediaSession` from the engine's session map
+    /// and finalizes its resources (playback tracks, MCU mixer, recorder,
+    /// bridge).  No command-channel communication is involved, so the
+    /// leak-by-lost-command failure mode cannot occur.
+    media_session_guard: Option<crate::media::engine::session::MediaSessionGuard>,
 }
 
 #[derive(Clone)]
@@ -1075,7 +1079,7 @@ impl SipSession {
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
-            engine_session_destroyed: false,
+            media_session_guard: None,
         };
 
         // Create the rtp-timeout channel at construction time so the sender is
@@ -1204,20 +1208,17 @@ impl SipSession {
 
         let mut server_dialog_clone = server_dialog.clone();
 
-        // Register a session in the media engine and attach the recorder so
-        // recording / playback commands route correctly.
+        // Register a session in the media engine via RAII guard and attach
+        // the recorder so recording / playback commands route correctly.
         {
-            use crate::media::engine::MediaCommand;
             let engine = &server.media_engine;
             let sid = session_id.clone();
+            let guard = engine.create_session_guarded(sid.clone());
+            session.media_session_guard = Some(guard);
+
             let recorder = session.recorder.clone();
             let recording_paused = session.recording_paused.clone();
-            if let Err(e) = engine.send(MediaCommand::CreateSession {
-                session_id: sid.clone(),
-            }) {
-                warn!(session_id = %sid, error = %e, "Failed to create engine session");
-            }
-            if let Err(e) = engine.send(MediaCommand::AttachRecorder {
+            if let Err(e) = engine.send(crate::media::engine::MediaCommand::AttachRecorder {
                 session_id: sid,
                 recorder,
                 paused: recording_paused,
@@ -4546,6 +4547,11 @@ impl SipSession {
         }
 
         let bridge = bridge_builder.build();
+        // The app/IVR callee PC has no real transport (the application is
+        // in-process), so its RtpSender never polls the caller→callee
+        // ForwardingTrack. Enable a dedicated drain task so caller-side stats
+        // and RFC 2833 DTMF detection keep working.
+        bridge.set_app_ingress_drain(true);
         bridge.setup_bridge().await?;
         self.media.media_bridge = Some(bridge);
 
@@ -6616,10 +6622,10 @@ impl SipSession {
                             "Bridge DTMF sink observed RTP DTMF with no active app receiver"
                         );
                     } else {
-                        debug!(
+                        info!(
                             session_id = %session_id,
                             digit = %digit,
-                            "Injected RTP DTMF from bridge sink"
+                            "Injected RTP DTMF from bridge sink into app"
                         );
                         // Emit RWI DTMF event
                         if let Some(ref gw) = rwi_gateway {
@@ -7966,6 +7972,31 @@ impl SipSession {
                     return Err(anyhow!("Failed to send answer: {}", e));
                 }
             }
+        }
+
+        // App/IVR answer: open the caller→app forwarding gate now that the
+        // dialog is confirmed (200 OK sent). The SIP-callee answer paths open
+        // this gate on confirmed dialog; the application path must too, or
+        // caller audio and RFC 2833 DTMF are dropped at the gate, producing a
+        // misleading "caller side silent" RTP timeout and IVR digit timeouts.
+        if self.media.caller_answer_uses_media_bridge
+            && let Some(bridge) = self.media.media_bridge.as_ref()
+        {
+            let was_open = bridge.is_caller_gate_open();
+            bridge.open_caller_gate();
+            info!(
+                session_id = %self.context.session_id,
+                bridge_id = %bridge.id,
+                was_open,
+                "accept_call: opened caller gate for app/IVR answer (200 OK sent)"
+            );
+        } else {
+            info!(
+                session_id = %self.context.session_id,
+                caller_answer_uses_media_bridge = self.media.caller_answer_uses_media_bridge,
+                media_bridge_present = self.media.media_bridge.is_some(),
+                "accept_call: caller gate NOT opened (no app media bridge)"
+            );
         }
 
         self.meta.answer_time = Some(Instant::now());
@@ -9343,13 +9374,9 @@ impl SipSession {
         }
 
         // Destroy the engine session last — after all recording/bridge cleanup.
-        {
-            use crate::media::engine::MediaCommand;
-            self.engine_send(MediaCommand::DestroySession {
-                session_id: self.context.session_id.clone(),
-            });
-            self.engine_session_destroyed = true;
-        }
+        // The RAII guard's Drop synchronously removes the MediaSession from
+        // the engine's map and finalizes resources.
+        drop(self.media_session_guard.take());
     }
 
     /// Enrich `meta.hangup_reason` with higher-level context before emitting
@@ -11947,23 +11974,7 @@ impl Drop for SipSession {
             }
         }
 
-        // Safety net: ensure the engine session is destroyed even if
-        // cleanup() was never called (e.g. tokio task cancellation).
-        if !self.engine_session_destroyed {
-            if let Err(e) =
-                self.server
-                    .media_engine
-                    .send(crate::media::engine::MediaCommand::DestroySession {
-                        session_id: self.context.session_id.clone(),
-                    })
-            {
-                debug!(
-                    session_id = %self.context.session_id,
-                    error = %e,
-                    "Drop: engine DestroySession failed (session may already be destroyed)"
-                );
-            }
-        }
+        // engine session is cleaned up by media_session_guard's Drop (RAII).
 
         // Safety net: send CDR if cleanup() was never called
         // (e.g. tokio task cancellation, B2BUA session stuck in process()).
@@ -12819,6 +12830,216 @@ mod tests {
         }
     }
 
+    /// Regression: preparing the app/IVR caller media bridge must NOT open the
+    /// caller gate — the gate opens only when the 200 OK is sent (accept_call).
+    /// Before the fix, the app path never opened the gate at all, so caller
+    /// audio + RFC 2833 DTMF were dropped → "RTP timeout: caller side silent"
+    /// and IVR digit timeout.
+    #[tokio::test]
+    async fn test_prepare_app_bridge_leaves_caller_gate_closed() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-gate-prepare".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-gate-prepare".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer,
+        );
+
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        let answer = session
+            .prepare_app_caller_media_bridge()
+            .await
+            .expect("app caller bridge answer should be prepared");
+        assert!(answer.contains("RTP/AVP"));
+        assert!(session.media.caller_answer_uses_media_bridge);
+
+        let gate_open = session
+            .media
+            .media_bridge
+            .as_ref()
+            .map(|b| b.is_caller_gate_open())
+            .unwrap_or(false);
+        assert!(
+            !gate_open,
+            "caller gate must be closed right after prepare_app_caller_media_bridge \
+             (opened only on 200 OK)"
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
+    /// Regression: the app/IVR answer flow (prepare bridge → accept_call/200 OK)
+    /// must open the caller gate. Before the fix, accept_call never opened the
+    /// gate for the app path, dropping all caller→app RTP/DTMF.
+    #[tokio::test]
+    async fn test_app_answer_opens_caller_gate() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-gate-answer".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-gate-answer".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer,
+        );
+
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        // Mirror CallCommand::Answer { leg_id: "caller" } when an app is running:
+        // prepare the media bridge, then answer (send 200 OK).
+        let answer_sdp = session
+            .prepare_app_caller_media_bridge()
+            .await
+            .expect("app caller bridge answer should be prepared");
+        assert!(session.media.caller_answer_uses_media_bridge);
+
+        // Bug repro: gate is closed before the 200 OK.
+        let gate_before = session
+            .media
+            .media_bridge
+            .as_ref()
+            .map(|b| b.is_caller_gate_open())
+            .unwrap_or(false);
+        assert!(!gate_before, "gate must be closed before the 200 OK");
+
+        session
+            .accept_call(None, Some(answer_sdp), None)
+            .await
+            .expect("accept_call should complete the 200 OK for the app answer");
+
+        // Fix: gate must now be open so caller→app RTP/DTMF are forwarded.
+        let gate_after = session
+            .media
+            .media_bridge
+            .as_ref()
+            .map(|b| b.is_caller_gate_open())
+            .unwrap_or(false);
+        assert!(
+            gate_after,
+            "caller gate must be open after the app answer (200 OK) — \
+             otherwise caller audio/DTMF are dropped (RTP timeout, IVR digit timeout)"
+        );
+
+        if let Some(bridge) = session.media.media_bridge.take() {
+            bridge.stop().await;
+        }
+    }
+
     #[tokio::test]
     async fn test_handle_play_both_legs_creates_two_tracks() {
         use crate::call::{DialDirection, Dialplan, TransactionCookie};
@@ -12925,10 +13146,9 @@ mod tests {
         // Enable callee bridge (app path leaves it false for IVR/queue)
         session.media.callee_offer_uses_media_bridge = true;
 
-        // Open bridge gate for forwarding
-        if let Some(ref bridge) = session.media.media_bridge {
-            bridge.open_caller_gate();
-        }
+        // NOTE: caller gate is opened by accept_call() in production; this test
+        // bypasses accept_call, but only exercises playback (the non-gated
+        // callee→caller direction), so a closed caller gate is fine here.
 
         let num_before = session.media.playback_tracks.len();
 
@@ -13096,9 +13316,9 @@ mod tests {
         );
 
         session.media.callee_offer_uses_media_bridge = true;
-        if let Some(ref bridge) = session.media.media_bridge {
-            bridge.open_caller_gate();
-        }
+        // NOTE: caller gate is opened by accept_call() in production; this test
+        // bypasses accept_call and only exercises playback (non-gated
+        // callee→caller direction), so the closed caller gate is fine here.
 
         let audio_path = "config/sounds/phone-calling.wav";
 
@@ -16008,9 +16228,8 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         let _answer = session.prepare_app_caller_media_bridge().await;
         assert!(session.media.media_bridge.is_some());
         session.media.callee_offer_uses_media_bridge = true;
-        if let Some(ref bridge) = session.media.media_bridge {
-            bridge.open_caller_gate();
-        }
+        // NOTE: caller gate is opened by accept_call() in production; this helper
+        // bypasses accept_call and only sets up playback (non-gated direction).
     }
 
     async fn play_test_file(session: &mut SipSession, tag: &str, leg: LegId) {
