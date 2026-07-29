@@ -824,7 +824,7 @@
             sipFlowLoading: false,
             selectedSipEntry: null,
             flowStartEpoch: null,
-            pbxAliases: [],
+            pbxEndpoints: [],
             rtpStreams: [],
 
             updateUrl: '',
@@ -2367,7 +2367,7 @@
                         this.sipMessages = this.sipFlowEntries.filter(e =>
                             e.msg_type === 'Sip' && e.raw_message && e.raw_message.trim()
                         );
-                        this.pbxAliases = this.detectPbxAliases();
+                        this.pbxEndpoints = this.detectPbxEndpoints();
                         this.applyEntryRoles();
                     }
                 } catch (err) {
@@ -2422,8 +2422,8 @@
                 return null;
             },
 
-            detectPbxAliases() {
-                const aliases = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0']);
+            detectPbxEndpoints() {
+                const endpoints = new Set();
 
                 const callerInvite = this.sipMessages.find((entry) => {
                     const meta = entry?._sipMeta;
@@ -2432,7 +2432,10 @@
                         && meta?.method === 'INVITE';
                 });
                 if (callerInvite) {
-                    this.collectPbxAlias(aliases, callerInvite?._sipMeta?.requestUriHost);
+                    const endpoint = this.normalizeAddr(callerInvite.dst_addr).toLowerCase();
+                    if (endpoint) {
+                        endpoints.add(endpoint);
+                    }
                 }
 
                 const calleeInvite = this.sipMessages.find((entry) => {
@@ -2442,36 +2445,29 @@
                         && meta?.method === 'INVITE';
                 });
                 if (calleeInvite) {
-                    this.collectPbxAlias(aliases, calleeInvite?._sipMeta?.viaHost);
-                    this.collectPbxAlias(aliases, calleeInvite?._sipMeta?.contactHost);
+                    const endpoint = this.normalizeAddr(calleeInvite.src_addr).toLowerCase();
+                    if (endpoint) {
+                        endpoints.add(endpoint);
+                    }
                 }
 
-                return Array.from(aliases);
-            },
-
-            collectPbxAlias(aliases, candidate) {
-                const normalized = this.normalizeHost(candidate);
-                if (normalized) {
-                    aliases.add(normalized);
-                }
+                return Array.from(endpoints);
             },
 
             detectMessageDirection(entry) {
                 const meta = entry?._sipMeta || this.parseSipMessage(entry?.raw_message);
-                const srcHost = this.extractAddrHost(entry?.src_addr);
-                const dstHost = this.extractAddrHost(entry?.dst_addr);
-                const srcIsPbx = this.isPbxAlias(srcHost);
-                const dstIsPbx = this.isPbxAlias(dstHost);
+                const srcEndpoint = this.normalizeAddr(entry?.src_addr).toLowerCase();
+                const dstEndpoint = this.normalizeAddr(entry?.dst_addr).toLowerCase();
+                const srcIsPbxEndpoint = this.pbxEndpoints.includes(srcEndpoint);
+                const dstIsPbxEndpoint = this.pbxEndpoints.includes(dstEndpoint);
 
-                if (srcHost && dstHost && srcIsPbx !== dstIsPbx) {
-                    return srcIsPbx ? 'out' : 'in';
+                if (srcEndpoint && dstEndpoint && srcIsPbxEndpoint !== dstIsPbxEndpoint) {
+                    return srcIsPbxEndpoint ? 'out' : 'in';
                 }
 
-                // B2BUA leg-semantic fallback: when address-based detection is
-                // ambiguous (e.g. callee and PBX share the same host/IP, so ports
-                // are stripped and both look like the PBX), fall back to the
-                // authoritative `role` + message type.  In a B2BUA each leg has a
-                // deterministic direction:
+                // Legacy fallback for incomplete captures where exact endpoints
+                // are unavailable. This is safe for initial dialog setup, but
+                // in-dialog requests may originate from either side:
                 //   caller leg: requests come IN, responses go OUT
                 //   callee leg: requests go OUT, responses come IN
                 const legRole = this.normalizeLegRole(entry?.role);
@@ -2482,34 +2478,6 @@
                     return meta?.isResponse ? 'in' : 'out';
                 }
 
-                if (meta?.isRequest) {
-                    if (this.isPbxAlias(meta.requestUriHost)) {
-                        return 'in';
-                    }
-                    if (this.isPbxAlias(meta.viaHost)) {
-                        return 'out';
-                    }
-                    if (this.isPbxAlias(meta.contactHost)) {
-                        return 'out';
-                    }
-                }
-
-                if (meta?.isResponse) {
-                    if (meta.viaHost) {
-                        return this.isPbxAlias(meta.viaHost) ? 'in' : 'out';
-                    }
-                    if (this.isPbxAlias(meta.contactHost)) {
-                        return 'out';
-                    }
-                }
-
-                if (this.isPlaceholderPbxHost(srcHost) && !this.isPlaceholderPbxHost(dstHost)) {
-                    return 'out';
-                }
-                if (this.isPlaceholderPbxHost(dstHost) && !this.isPlaceholderPbxHost(srcHost)) {
-                    return 'in';
-                }
-
                 return null;
             },
 
@@ -2517,131 +2485,23 @@
                 const raw = (message || '').toString();
                 const lines = raw.split(/\r?\n/);
                 const firstLine = (lines[0] || '').trim();
-                const headers = new Map();
-                let currentHeader = null;
-
-                for (let idx = 1; idx < lines.length; idx += 1) {
-                    const line = lines[idx];
-                    if (!line) {
-                        break;
-                    }
-
-                    if (/^[ \t]/.test(line) && currentHeader) {
-                        const values = headers.get(currentHeader) || [];
-                        if (values.length) {
-                            values[values.length - 1] = `${values[values.length - 1]} ${line.trim()}`;
-                            headers.set(currentHeader, values);
-                        }
-                        continue;
-                    }
-
-                    const match = line.match(/^([^:]+):(.*)$/);
-                    if (!match) {
-                        continue;
-                    }
-
-                    currentHeader = match[1].trim().toLowerCase();
-                    const value = match[2].trim();
-                    const values = headers.get(currentHeader) || [];
-                    values.push(value);
-                    headers.set(currentHeader, values);
-                }
 
                 const isResponse = /^SIP\/\d\.\d\b/i.test(firstLine);
                 const requestMatch = isResponse
                     ? null
                     : firstLine.match(/^([A-Z]+)\s+(.+?)\s+SIP\/\d\.\d$/i);
                 const method = requestMatch ? requestMatch[1] : null;
-                const requestUri = requestMatch ? requestMatch[2] : '';
-                const responseMatch = isResponse
-                    ? firstLine.match(/^SIP\/\d\.\d\s+(\d{3})/)
-                    : null;
 
                 return {
-                    firstLine,
                     isRequest: Boolean(requestMatch),
                     isResponse,
                     method,
-                    responseCode: responseMatch ? Number.parseInt(responseMatch[1], 10) : null,
-                    requestUriHost: this.extractSipUriHost(requestUri),
-                    viaHost: this.extractViaHost(this.getHeaderValue(headers, 'via', 'v')),
-                    contactHost: this.extractSipUriHost(this.getHeaderValue(headers, 'contact', 'm')),
                 };
-            },
-
-            getHeaderValue(headers, ...names) {
-                for (const name of names) {
-                    const values = headers.get(name);
-                    if (values && values.length) {
-                        return values[0];
-                    }
-                }
-                return '';
             },
 
             normalizeAddr(addr) {
                 if (!addr) return '';
                 return addr.split('_').pop().trim();
-            },
-
-            extractAddrHost(addr) {
-                return this.extractHostPort(this.normalizeAddr(addr));
-            },
-
-            normalizeHost(host) {
-                return this.extractHostPort(host);
-            },
-
-            extractHostPort(value) {
-                const raw = (value || '').toString().trim().replace(/;.*$/, '');
-                if (!raw) {
-                    return '';
-                }
-                if (raw.startsWith('[')) {
-                    const end = raw.indexOf(']');
-                    return end > 0 ? raw.slice(1, end).toLowerCase() : raw.toLowerCase();
-                }
-
-                const lastColon = raw.lastIndexOf(':');
-                if (lastColon > -1 && raw.indexOf(':') === lastColon && /^\d+$/.test(raw.slice(lastColon + 1))) {
-                    return raw.slice(0, lastColon).toLowerCase();
-                }
-
-                return raw.toLowerCase();
-            },
-
-            extractSipUriHost(value) {
-                const text = (value || '').toString();
-                const match = text.match(/(?:sips?):(?:[^@<>\s;]+@)?(\[[^\]]+\]|[^;>\s]+)/i);
-                if (!match) {
-                    return '';
-                }
-                return this.extractHostPort(match[1]);
-            },
-
-            extractViaHost(value) {
-                const text = (value || '').toString();
-                const match = text.match(/SIP\/2\.0\/\S+\s+([^;,\s]+)/i);
-                if (!match) {
-                    return '';
-                }
-                return this.extractHostPort(match[1]);
-            },
-
-            isPlaceholderPbxHost(host) {
-                const normalized = this.normalizeHost(host);
-                return normalized === '127.0.0.1'
-                    || normalized === '::1'
-                    || normalized === 'localhost'
-                    || normalized === '0.0.0.0';
-            },
-
-            isPbxAlias(host) {
-                const normalized = this.normalizeHost(host);
-                if (!normalized) {
-                    return false;
-                }
-                return Array.isArray(this.pbxAliases) && this.pbxAliases.includes(normalized);
             },
 
             // Extract SIP method from message
