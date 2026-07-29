@@ -33,7 +33,6 @@ pub use event::{MediaEvent, RecordResult};
 pub use transport::resolve_audio_path;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
@@ -51,12 +50,6 @@ use crate::media::Track as _;
 pub struct MediaEngineConfig {
     pub command_channel_capacity: usize,
     pub event_channel_capacity: usize,
-    /// How often the reaper sweeps the session map for stale entries.
-    pub session_reaper_interval: Duration,
-    /// A session whose `last_activity` is older than this is considered stale
-    /// and will be evicted by the reaper (safety net for lost
-    /// `DestroySession` commands).
-    pub session_idle_ttl: Duration,
 }
 
 impl Default for MediaEngineConfig {
@@ -64,8 +57,6 @@ impl Default for MediaEngineConfig {
         Self {
             command_channel_capacity: 512,
             event_channel_capacity: 1024,
-            session_reaper_interval: Duration::from_secs(60),
-            session_idle_ttl: Duration::from_secs(7200),
         }
     }
 }
@@ -82,8 +73,6 @@ impl Default for MediaEngineConfig {
 pub struct MediaEngine {
     cmd_tx: mpsc::Sender<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
-    reaper_interval: Duration,
-    session_idle_ttl: Duration,
     sessions: Arc<DashMap<String, session::MediaSession>>,
 }
 
@@ -108,8 +97,6 @@ impl MediaEngine {
         let engine = Self {
             cmd_tx,
             event_tx: event_tx.clone(),
-            reaper_interval: config.session_reaper_interval,
-            session_idle_ttl: config.session_idle_ttl,
             sessions: sessions.clone(),
         };
 
@@ -128,8 +115,6 @@ impl MediaEngine {
             cmd_rx: handle.cmd_rx,
             event_tx: handle.event_tx,
             sessions: handle.sessions,
-            reaper_interval: self.reaper_interval,
-            session_idle_ttl: self.session_idle_ttl,
         };
         crate::utils::media_spawn(async move {
             core.run().await;
@@ -166,6 +151,47 @@ impl MediaEngine {
             .await
             .map_err(|e| anyhow!("MediaEngine command channel: {}", e))
     }
+
+    /// Insert a media session into the shared map and return an RAII guard.
+    ///
+    /// When the guard is dropped, the session is synchronously removed from
+    /// the map and [`MediaSession::finalize`] is called.  This is the
+    /// preferred way to create sessions in production — it cannot lose the
+    /// cleanup signal like the command-channel path could.
+    pub fn create_session_guarded(&self, session_id: String) -> session::MediaSessionGuard {
+        self.sessions.insert(
+            session_id.clone(),
+            session::MediaSession::new(session_id.clone()),
+        );
+        let _ = self
+            .event_tx
+            .send(MediaEvent::SessionCreated { session_id: session_id.clone() });
+        session::MediaSessionGuard::new(
+            Arc::downgrade(&self.sessions),
+            self.event_tx.clone(),
+            session_id,
+        )
+    }
+
+    /// Synchronously remove a session from the map and finalize its resources.
+    ///
+    /// Returns `true` if the session existed and was cleaned up, `false` if
+    /// no session with that ID was found.  Prefer [`create_session_guarded`]
+    /// for production code; this method is primarily for tests and external
+    /// callers that need one-shot teardown.
+    pub fn destroy_session(&self, session_id: &str) -> bool {
+        if let Some((_, mut sess)) = self.sessions.remove(session_id) {
+            sess.finalize();
+            let _ = self
+                .event_tx
+                .send(MediaEvent::SessionDestroyed {
+                    session_id: session_id.to_string(),
+                });
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,23 +202,11 @@ struct EngineCore {
     cmd_rx: mpsc::Receiver<MediaCommand>,
     event_tx: broadcast::Sender<MediaEvent>,
     sessions: Arc<DashMap<String, session::MediaSession>>,
-    reaper_interval: Duration,
-    session_idle_ttl: Duration,
 }
 
 impl EngineCore {
     async fn run(mut self) {
-        info!(
-            reaper_interval = ?self.reaper_interval,
-            session_idle_ttl = ?self.session_idle_ttl,
-            "MediaEngine command loop started"
-        );
-
-        let mut reaper = tokio::time::interval(self.reaper_interval);
-        reaper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Consume the immediate first tick so the reaper only fires after one
-        // full interval has elapsed.
-        reaper.tick().await;
+        info!("MediaEngine command loop started");
 
         loop {
             tokio::select! {
@@ -212,9 +226,6 @@ impl EngineCore {
                         }
                         None => break,
                     }
-                }
-                _ = reaper.tick() => {
-                    self.reap_stale_sessions().await;
                 }
             }
         }
@@ -236,19 +247,6 @@ impl EngineCore {
         );
         let _guard = span.enter();
 
-        // Blanket refresh of `last_activity` for every session-scoped command.
-        // This keeps long-running sessions alive in the reaper even if the
-        // session timer or DTMF path doesn't produce engine events.
-        //
-        // Done *before* the match so even commands that only take a read lock
-        // (e.g. GetSessionInfo) still count as activity.
-        if let Some(sid) = cmd.session_id() {
-            let now = std::time::Instant::now();
-            if let Some(mut sess) = self.sessions.get_mut(sid) {
-                sess.last_activity = now;
-            }
-        }
-
         match cmd {
             MediaCommand::CreateSession { session_id } => {
                 self.sessions.insert(
@@ -259,17 +257,6 @@ impl EngineCore {
                 let _ = self
                     .event_tx
                     .send(MediaEvent::SessionCreated { session_id });
-            }
-
-            MediaCommand::DestroySession { session_id } => {
-                let sess = self.sessions.remove(&session_id).map(|(_, v)| v);
-                if let Some(sess) = sess {
-                    Self::finalize_session_resources(sess).await;
-                }
-                info!(session_id = %session_id, "MediaEngine session destroyed");
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::SessionDestroyed { session_id });
             }
 
             MediaCommand::AddLeg {
@@ -812,98 +799,6 @@ impl EngineCore {
 
         Ok(())
     }
-
-    /// Tear down all resources owned by a [`session::MediaSession`] *outside*
-    /// the sessions write lock (tracks and MCU require `.await`).
-    ///
-    /// Shared by `DestroySession` dispatch and the periodic reaper so both
-    /// paths produce identical cleanup.
-    async fn finalize_session_resources(mut sess: session::MediaSession) {
-        // Stop playback tracks (drain avoids cloning each FileTrack).
-        for (_, track) in sess.playback_tracks.drain() {
-            track.stop().await;
-        }
-
-        // Switch MCU back to bridge mode (releases mixer task if active).
-        if sess.mcu.mode() == mcu_switch::MediaMode::Mcu {
-            sess.mcu.switch_to_bridge().await.ok();
-        }
-
-        // Finalize recorder.
-        {
-            let mut guard = sess.recorder.write();
-            if let Some(ref mut rec) = *guard {
-                let _ = rec.finalize();
-            }
-            *guard = None;
-        }
-
-        // Drop the bridge reference. BridgePeer::Drop calls close_sync() which
-        // cancels forwarding tasks and closes both PeerConnections.
-        sess.bridge = None;
-    }
-
-    /// Periodic sweep: remove sessions whose `last_activity` is older than
-    /// `session_idle_ttl`.
-    ///
-    /// This is a safety net for the case where `DestroySession` was lost
-    /// (e.g. command channel was full so `try_send` failed). Without this
-    /// sweep the `MediaSession` would leak forever because the engine session
-    /// map has no other eviction mechanism.
-    async fn reap_stale_sessions(&self) {
-        let ttl = self.session_idle_ttl;
-        let now = std::time::Instant::now();
-
-        // Step 1: identify stale session IDs (read lock).
-        let stale_ids: Vec<String> = {
-            self.sessions
-                .iter()
-                .filter_map(|r| {
-                    let idle = now.duration_since(r.last_activity);
-                    if idle > ttl {
-                        warn!(
-                            session_id = r.key(),
-                            idle_secs = idle.as_secs(),
-                            ttl_secs = ttl.as_secs(),
-                            "Reaping stale MediaEngine session (DestroySession was likely lost)"
-                        );
-                        Some(r.key().clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        if stale_ids.is_empty() {
-            let remaining = self.sessions.len();
-            debug!(active_sessions = remaining, "MediaEngine session map size");
-            return;
-        }
-
-        // Step 2: remove & collect the MediaSession values (write lock).
-        let stale: Vec<session::MediaSession> = {
-            stale_ids
-                .iter()
-                .filter_map(|sid| self.sessions.remove(sid).map(|(_, v)| v))
-                .collect()
-        };
-
-        // Step 3: async cleanup outside the lock.
-        let count = stale.len();
-        for (sid, sess) in stale_ids.into_iter().zip(stale) {
-            Self::finalize_session_resources(sess).await;
-            let _ = self
-                .event_tx
-                .send(MediaEvent::SessionDestroyed { session_id: sid });
-        }
-
-        let remaining = self.sessions.len();
-        warn!(
-            reaped = count,
-            remaining, "MediaEngine reaper swept stale sessions"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -943,9 +838,6 @@ mod tests {
         let (engine, handle) = MediaEngine::new(MediaEngineConfig {
             command_channel_capacity: 64,
             event_channel_capacity: 64,
-            // Short reaper interval for tests so sweep tests don't take long.
-            session_reaper_interval: Duration::from_millis(100),
-            session_idle_ttl: Duration::from_millis(300),
         });
         let rx = engine.subscribe();
         let _task = engine.spawn(handle);
@@ -973,71 +865,13 @@ mod tests {
             matches!(ev, MediaEvent::SessionCreated { ref session_id } if session_id == "test-1")
         );
 
-        engine
-            .send(MediaCommand::DestroySession {
-                session_id: "test-1".into(),
-            })
-            .unwrap();
+        assert!(engine.destroy_session("test-1"));
 
         let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
             .await
             .expect("timeout")
             .expect("channel closed");
         assert!(matches!(ev, MediaEvent::SessionDestroyed { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_reaper_evicts_stale_session() {
-        // setup_engine uses idle_ttl=300ms, reaper_interval=100ms.
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "leaked-1").await;
-        let _ = event_rx.recv().await; // SessionCreated
-
-        // Do NOT send DestroySession — simulate a lost command.
-        // Wait long enough for the TTL to expire and the reaper to sweep.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-
-        // The reaper should have evicted the session and emitted SessionDestroyed.
-        let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .expect("timeout waiting for reaper SessionDestroyed")
-            .expect("channel closed");
-        assert!(
-            matches!(ev, MediaEvent::SessionDestroyed { ref session_id } if session_id == "leaked-1")
-        );
-
-        // Confirm the session is gone from the map.
-        assert_eq!(engine.sessions.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_reaper_keeps_active_session() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "active-1").await;
-        let _ = event_rx.recv().await; // SessionCreated
-
-        // Keep the session alive by sending periodic commands that refresh
-        // last_activity.  Reaper interval=100ms, idle_ttl=300ms.
-        for _ in 0..5 {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            // AddLeg touches the session, refreshing last_activity.
-            engine
-                .send(MediaCommand::AddLeg {
-                    session_id: "active-1".into(),
-                    leg_id: "keepalive".into(),
-                    transport: LegTransport::File {
-                        path: "/dev/null".into(),
-                    },
-                    codec_profile: Some(CodecProfile::pcmu()),
-                })
-                .unwrap();
-            // Drain the LegAdded event so it doesn't clog the pipe.
-            let _ = event_rx.recv().await;
-        }
-
-        // After ~750ms (well past the 300ms TTL) the session should still
-        // be alive because last_activity was refreshed.
-        assert_eq!(engine.sessions.len(), 1);
     }
 
     #[tokio::test]
@@ -1203,11 +1037,7 @@ mod tests {
         assert!(matches!(ev, MediaEvent::RecordingResumed { .. }));
 
         // Cleanup
-        engine
-            .send(MediaCommand::DestroySession {
-                session_id: "rec2".into(),
-            })
-            .unwrap();
+        assert!(engine.destroy_session("rec2"));
         let _ = event_rx.recv().await; // SessionDestroyed
     }
 
@@ -1403,7 +1233,7 @@ mod tests {
         let _ = std::fs::remove_file(&wav_path);
     }
 
-    // ── DestroySession cleanup ──────────────────────────────────────────
+    // ── Session cleanup ─────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_destroy_session_cleans_up_recorder() {
@@ -1435,11 +1265,7 @@ mod tests {
         let _ = event_rx.recv().await;
 
         // Destroy session — should finalize the recorder
-        engine
-            .send(MediaCommand::DestroySession {
-                session_id: "cln1".into(),
-            })
-            .unwrap();
+        assert!(engine.destroy_session("cln1"));
         let _ = event_rx.recv().await; // SessionDestroyed
 
         // The WAV file should have been finalized (header with data_size)
@@ -1896,11 +1722,7 @@ mod tests {
             format_tag
         );
 
-        engine
-            .send(MediaCommand::DestroySession {
-                session_id: "rcc1".into(),
-            })
-            .unwrap();
+        engine.destroy_session("rcc1");
         let _ = event_rx.recv().await;
         let _ = std::fs::remove_file(&tmp);
     }

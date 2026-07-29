@@ -8,17 +8,21 @@
 //! * a [`McuSwitch`] for dynamic Bridge↔MCU transitions
 //!
 //! The session is created by [`MediaCommand::CreateSession`] and destroyed by
-//! [`MediaCommand::DestroySession`].  The `BridgePeer` is injected later,
+//! [`MediaSessionGuard`] (RAII).  The `BridgePeer` is injected later,
 //! once SDP negotiation is complete, via [`MediaCommand::AttachBridge`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Weak;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
+use tokio::sync::broadcast;
 
 use crate::media::FileTrack;
 use crate::media::bridge::{BridgeEndpoint, BridgePeer};
+use crate::media::engine::event::MediaEvent;
 use crate::media::engine::mcu_switch::McuSwitch;
 use crate::media::recorder::Recorder;
 
@@ -68,12 +72,6 @@ pub struct MediaSession {
     /// Manages dynamic switching between direct bridge forwarding (low CPU)
     /// and MCU mixing (needed for TTS injection, conference).
     pub mcu: McuSwitch,
-
-    // ── Reaper ─────────────────────────────────────────────────────────
-    /// Wall-clock instant of the last engine command that touched this session.
-    /// Updated by [`EngineCore::dispatch`] and checked by the periodic reaper
-    /// to evict sessions whose `DestroySession` was lost (channel full etc.).
-    pub last_activity: std::time::Instant,
 }
 
 impl MediaSession {
@@ -92,8 +90,33 @@ impl MediaSession {
             playback_tracks: HashMap::new(),
             bridge_playback_track_ids: Vec::new(),
             mcu,
-            last_activity: std::time::Instant::now(),
         }
+    }
+
+    /// Synchronously finalize all session resources.
+    ///
+    /// Called by [`MediaSessionGuard::drop`] — drains playback tracks (each
+    /// `FileTrack::Drop` cancels + closes its PC), switches MCU back to bridge
+    /// mode (drops the mixer, `ConferenceAudioMixer::Drop` aborts the mixing
+    /// task), finalizes the recorder, and drops the bridge (`BridgePeer::Drop`
+    /// calls `close_sync()`).
+    pub fn finalize(&mut self) {
+        self.playback_tracks.drain();
+        self.bridge_playback_track_ids.clear();
+
+        if self.mcu.mode() == crate::media::engine::mcu_switch::MediaMode::Mcu {
+            self.mcu.switch_to_bridge();
+        }
+
+        {
+            let mut guard = self.recorder.write();
+            if let Some(ref mut rec) = *guard {
+                let _ = rec.finalize();
+            }
+            *guard = None;
+        }
+
+        self.bridge = None;
     }
 
     /// Resolve the bridge endpoint for the SIP caller leg.
@@ -121,6 +144,61 @@ impl MediaSession {
             "callee" => self.callee_endpoint(),
             _ => self.caller_endpoint(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MediaSessionGuard — RAII eviction from the shared session map
+// ---------------------------------------------------------------------------
+
+/// An RAII guard that ties the [`MediaSession`] lifecycle to its owner.
+///
+/// When the guard is dropped, the session is synchronously removed from the
+/// engine's shared session map and [`MediaSession::finalize`] is called
+/// inline.  No command-channel communication is involved, so the leak-by-lost-
+/// command failure mode cannot occur.
+pub struct MediaSessionGuard {
+    sessions: Weak<DashMap<String, MediaSession>>,
+    event_tx: broadcast::Sender<MediaEvent>,
+    session_id: String,
+    finalized: AtomicBool,
+}
+
+impl MediaSessionGuard {
+    pub fn new(
+        sessions: Weak<DashMap<String, MediaSession>>,
+        event_tx: broadcast::Sender<MediaEvent>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            sessions,
+            event_tx,
+            session_id,
+            finalized: AtomicBool::new(false),
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+impl Drop for MediaSessionGuard {
+    fn drop(&mut self) {
+        if self.finalized.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(sessions) = self.sessions.upgrade() else {
+            return;
+        };
+        if let Some((_, mut sess)) = sessions.remove(&self.session_id) {
+            sess.finalize();
+        }
+        let _ = self
+            .event_tx
+            .send(MediaEvent::SessionDestroyed {
+                session_id: self.session_id.clone(),
+            });
     }
 }
 

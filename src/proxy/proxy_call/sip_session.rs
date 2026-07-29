@@ -210,9 +210,13 @@ pub struct SipSession {
     #[allow(dead_code)]
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
-    /// Tracks whether `DestroySession` has already been sent to the media
-    /// engine, so the `Drop` safety-net does not fire a duplicate destroy.
-    engine_session_destroyed: bool,
+    /// RAII guard that ties the `MediaSession` lifecycle in the `MediaEngine`
+    /// to this `SipSession`.  When the session is dropped, the guard's `Drop`
+    /// synchronously removes the `MediaSession` from the engine's session map
+    /// and finalizes its resources (playback tracks, MCU mixer, recorder,
+    /// bridge).  No command-channel communication is involved, so the
+    /// leak-by-lost-command failure mode cannot occur.
+    media_session_guard: Option<crate::media::engine::session::MediaSessionGuard>,
 }
 
 #[derive(Clone)]
@@ -1075,7 +1079,7 @@ impl SipSession {
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
-            engine_session_destroyed: false,
+            media_session_guard: None,
         };
 
         // Create the rtp-timeout channel at construction time so the sender is
@@ -1204,20 +1208,17 @@ impl SipSession {
 
         let mut server_dialog_clone = server_dialog.clone();
 
-        // Register a session in the media engine and attach the recorder so
-        // recording / playback commands route correctly.
+        // Register a session in the media engine via RAII guard and attach
+        // the recorder so recording / playback commands route correctly.
         {
-            use crate::media::engine::MediaCommand;
             let engine = &server.media_engine;
             let sid = session_id.clone();
+            let guard = engine.create_session_guarded(sid.clone());
+            session.media_session_guard = Some(guard);
+
             let recorder = session.recorder.clone();
             let recording_paused = session.recording_paused.clone();
-            if let Err(e) = engine.send(MediaCommand::CreateSession {
-                session_id: sid.clone(),
-            }) {
-                warn!(session_id = %sid, error = %e, "Failed to create engine session");
-            }
-            if let Err(e) = engine.send(MediaCommand::AttachRecorder {
+            if let Err(e) = engine.send(crate::media::engine::MediaCommand::AttachRecorder {
                 session_id: sid,
                 recorder,
                 paused: recording_paused,
@@ -9373,13 +9374,9 @@ impl SipSession {
         }
 
         // Destroy the engine session last — after all recording/bridge cleanup.
-        {
-            use crate::media::engine::MediaCommand;
-            self.engine_send(MediaCommand::DestroySession {
-                session_id: self.context.session_id.clone(),
-            });
-            self.engine_session_destroyed = true;
-        }
+        // The RAII guard's Drop synchronously removes the MediaSession from
+        // the engine's map and finalizes resources.
+        drop(self.media_session_guard.take());
     }
 
     /// Enrich `meta.hangup_reason` with higher-level context before emitting
@@ -11971,23 +11968,7 @@ impl Drop for SipSession {
             }
         }
 
-        // Safety net: ensure the engine session is destroyed even if
-        // cleanup() was never called (e.g. tokio task cancellation).
-        if !self.engine_session_destroyed {
-            if let Err(e) =
-                self.server
-                    .media_engine
-                    .send(crate::media::engine::MediaCommand::DestroySession {
-                        session_id: self.context.session_id.clone(),
-                    })
-            {
-                debug!(
-                    session_id = %self.context.session_id,
-                    error = %e,
-                    "Drop: engine DestroySession failed (session may already be destroyed)"
-                );
-            }
-        }
+        // engine session is cleaned up by media_session_guard's Drop (RAII).
 
         // Safety net: send CDR if cleanup() was never called
         // (e.g. tokio task cancellation, B2BUA session stuck in process()).

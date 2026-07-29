@@ -89,21 +89,20 @@ impl McuSwitch {
     /// - Stopping the ConferenceMediaBridge forward/reverse loops
     ///
     /// This method stops and drops the ConferenceAudioMixer.
-    pub async fn switch_to_bridge(&mut self) -> Result<()> {
+    /// Synchronous: dropping the `Arc<ConferenceAudioMixer>` triggers
+    /// `Drop` which cancels the cancel-token and aborts the mixing task.
+    pub fn switch_to_bridge(&mut self) {
         if self.mode == MediaMode::Bridge {
-            return Ok(());
+            return;
         }
 
         info!(session_id = %self.session_id, "Switching from MCU to bridge mode");
 
-        if let Some(mixer) = self.mixer.take() {
-            mixer.stop().await;
-        }
+        self.mixer.take();
 
         self.mode = MediaMode::Bridge;
 
         info!(session_id = %self.session_id, "Bridge mode restored");
-        Ok(())
     }
 }
 
@@ -125,7 +124,7 @@ mod tests {
         let _mixer2 = switcher.switch_to_mcu().await.unwrap();
         assert_eq!(switcher.mode(), MediaMode::Mcu);
 
-        switcher.switch_to_bridge().await.unwrap();
+        switcher.switch_to_bridge();
         assert_eq!(switcher.mode(), MediaMode::Bridge);
         assert!(switcher.mixer().is_none());
     }
@@ -133,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcu_switch_idempotent_bridge() {
         let mut switcher = McuSwitch::new("test".into(), 8000);
-        switcher.switch_to_bridge().await.unwrap();
+        switcher.switch_to_bridge();
         assert_eq!(switcher.mode(), MediaMode::Bridge);
     }
 
