@@ -114,8 +114,19 @@ pub async fn sip_ws_handler(
                                     "WebSocket received binary SIP message: \n{}",
                                     sip_msg.to_string()
                                 );
-                                if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
+                                let msg = match SipConnection::update_msg_received(
                                     sip_msg,
+                                    client_addr.addr,
+                                    transport_type,
+                                ) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        warn!(addr = %local_addr_clone, "error updating binary SIP via: {}", e);
+                                        continue;
+                                    }
+                                };
+                                if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
+                                    msg,
                                     sip_connection_clone.clone(),
                                     local_addr_clone.clone(),
                                 )) {
