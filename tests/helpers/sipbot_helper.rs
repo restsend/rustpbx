@@ -85,6 +85,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
@@ -156,6 +157,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
@@ -283,6 +285,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", opts.sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
@@ -347,6 +350,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
@@ -435,6 +439,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
@@ -528,6 +533,7 @@ impl TestUa {
             addr: Some(format!("127.0.0.1:{}", sip_port)),
             external_ip: None,
             recorders: None,
+            ws_url: None,
             accounts: vec![account.clone()],
         };
 
