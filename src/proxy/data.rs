@@ -2117,6 +2117,12 @@ mod tests {
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
             db.execute_unprepared(&sql).await.unwrap();
+            db.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_config_entries_category_name \
+                 ON config_entries (category, entry_name)",
+            )
+            .await
+            .unwrap();
             // sip_trunks table is needed by ProxyDataContext::new -> reload_trunks
             let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
@@ -2156,6 +2162,12 @@ mod tests {
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
             db.execute_unprepared(&sql).await.unwrap();
+            db.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_config_entries_category_name \
+                 ON config_entries (category, entry_name)",
+            )
+            .await
+            .unwrap();
             let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
             db.execute_unprepared(&sql).await.unwrap();
@@ -2187,6 +2199,12 @@ mod tests {
             let stmt = schema.create_table_from_entity(crate::models::config_entry::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
             db.execute_unprepared(&sql).await.unwrap();
+            db.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_config_entries_category_name \
+                 ON config_entries (category, entry_name)",
+            )
+            .await
+            .unwrap();
             let stmt = schema.create_table_from_entity(crate::models::sip_trunk::Entity);
             let sql = stmt.to_string(SqliteQueryBuilder);
             db.execute_unprepared(&sql).await.unwrap();

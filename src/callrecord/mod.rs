@@ -29,6 +29,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+pub mod database_hook;
 pub mod recording_upload;
 pub mod sipflow;
 pub mod sipflow_remote_upload;
@@ -954,7 +955,7 @@ pub(crate) struct BuiltinDatabaseSaver {
 #[async_trait::async_trait]
 impl CallRecordSaver for BuiltinDatabaseSaver {
     async fn save(&self, record: &CallRecord) -> Result<String> {
-        crate::models::call_record::persist_call_record(&self.db, record).await?;
+        database_hook::persist_call_record(&self.db, record).await?;
         Ok(format!("rustpbx_call_records/{}", record.call_id))
     }
 }
@@ -1313,5 +1314,70 @@ impl CallRecordManager {
             }
         }
         info!(pending = futures.len(), "CallRecordManager exiting");
+    }
+}
+
+// ── Model conversion ──────────────────────────────────────────────────
+
+impl From<rustpbx_models::call_record::Model> for CallRecord {
+    fn from(val: rustpbx_models::call_record::Model) -> Self {
+        let details = CallDetails {
+            direction: val.direction,
+            status: val.status,
+            from_number: val.from_number.clone(),
+            to_number: val.to_number.clone(),
+            caller_name: val.caller_name,
+            agent_name: val.agent_name,
+            queue: val.queue,
+            department_id: val.department_id,
+            extension_id: val.extension_id,
+            sip_trunk_id: val.sip_trunk_id,
+            outbound_sip_trunk_id: val.outbound_sip_trunk_id,
+            route_id: val.route_id,
+            sip_gateway: val.sip_gateway,
+            recording_url: val.recording_url,
+            recording_duration_secs: val.recording_duration_secs,
+            has_transcript: val.has_transcript,
+            transcript_status: Some(val.transcript_status),
+            transcript_language: val.transcript_language,
+            tags: val.tags,
+            metadata: val.metadata.and_then(|v| serde_json::from_value(v).ok()),
+            rewrite: CallRecordRewrite {
+                caller_original: val.rewrite_original_from.unwrap_or_default(),
+                caller_final: String::new(),
+                callee_original: val.rewrite_original_to.unwrap_or_default(),
+                callee_final: String::new(),
+                contact: None,
+                destination: None,
+            },
+            last_error: None,
+        };
+
+        let leg_timeline = val
+            .leg_timeline
+            .and_then(|json| serde_json::from_value(json).ok())
+            .unwrap_or_default();
+
+        CallRecord {
+            call_id: val.call_id,
+            start_time: val.started_at,
+            ring_time: None,
+            answer_time: None,
+            end_time: val.ended_at.unwrap_or(val.started_at),
+            caller: val
+                .caller_uri
+                .unwrap_or_else(|| val.from_number.unwrap_or_default()),
+            callee: val
+                .callee_uri
+                .unwrap_or_else(|| val.to_number.unwrap_or_default()),
+            status_code: 0,
+            hangup_reason: None,
+            hangup_messages: Vec::new(),
+            recorder: Vec::new(),
+            sip_leg_roles: std::collections::HashMap::new(),
+            leg_timeline,
+            details,
+            extensions: http::Extensions::new(),
+        }
     }
 }

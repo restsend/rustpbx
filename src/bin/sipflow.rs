@@ -1008,7 +1008,7 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use rustpbx::sipflow::wav_utils::generate_wav_from_packets;
+    use rustpbx_sipflow::wav_utils::generate_wav_from_packets;
 
     #[test]
     fn test_generate_wav_pcmu_no_transcode() {

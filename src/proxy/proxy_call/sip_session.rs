@@ -11908,8 +11908,12 @@ impl Drop for SipSession {
         self.supervisor_mixer.take();
 
         // Media bridge — sync close in Drop for RAII.
+        // Guard with runtime check: during runtime shutdown tokio::spawn
+        // (called by pc().close()) would panic, causing a double-panic → SIGABRT.
         if let Some(bridge) = self.media.media_bridge.take() {
-            bridge.close_sync();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                bridge.close_sync();
+            }
         }
 
         // Abort leg-specific spawned tasks so they can't outlive the session.
@@ -11931,13 +11935,15 @@ impl Drop for SipSession {
         let remaining_holds = std::mem::take(&mut *self.context.dialplan.concurrency_holds.lock());
         if !remaining_holds.is_empty() {
             if let Some(limiter) = self.server.frequency_limiter.clone() {
-                crate::utils::spawn(async move {
-                    crate::call::policy::PolicyGuard::release_concurrency_holds(
-                        &remaining_holds,
-                        limiter.as_ref(),
-                    )
-                    .await;
-                });
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    crate::utils::spawn(async move {
+                        crate::call::policy::PolicyGuard::release_concurrency_holds(
+                            &remaining_holds,
+                            limiter.as_ref(),
+                        )
+                        .await;
+                    });
+                }
             }
         }
 

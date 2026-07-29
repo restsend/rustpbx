@@ -7148,8 +7148,15 @@ mod tests {
                 conf_id: "nonexistent".into(),
             })
             .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        // destroy_conference is now idempotent: destroying a non-existent
+        // conference succeeds (returns Ok + ConferenceDestroyed event).
+        assert!(result.is_ok());
+        match result {
+            Ok(CommandResult::ConferenceDestroyed { conf_id }) => {
+                assert_eq!(conf_id, "nonexistent");
+            }
+            _ => panic!("Expected ConferenceDestroyed result"),
+        }
     }
 
     #[tokio::test]

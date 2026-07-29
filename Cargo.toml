@@ -1,9 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/rustpbx-models",
+    "crates/rustpbx-storage",
+    "crates/rustpbx-http-util",
+    "crates/rustpbx-sipflow",
+    "crates/rustpbx-media",
+]
+
 [package]
 name = "rustpbx"
 version = "0.4.12"
 edition = "2024"
 default-run = "rustpbx"
-authors = ["jinti<shenjindi@fourz.cn>"]
+authors = ["jinti<shenjind@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
 license = "MIT"
 repository = "https://github.com/restsend/rustpbx"
@@ -95,7 +106,6 @@ default = [
     "addon-transcript",
     "addon-archive",
     "addon-observability",
-    "jemalloc",
 ]
 
 
@@ -152,7 +162,7 @@ rustrtc = "0.3.110"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
-    "rustls-no-provider",
+    "rustls",
     "multipart",
     "form",
     "query",
@@ -262,6 +272,13 @@ iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
 flowdb = { version = "0.8.2", default-features = false }
+
+# Workspace crates
+rustpbx-models = { path = "crates/rustpbx-models" }
+rustpbx-storage = { path = "crates/rustpbx-storage" }
+rustpbx-http-util = { path = "crates/rustpbx-http-util" }
+rustpbx-sipflow = { path = "crates/rustpbx-sipflow" }
+rustpbx-media = { path = "crates/rustpbx-media" }
 
 
 [dev-dependencies]

@@ -100,7 +100,7 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
 
     // 4. Callee processes the RTP offer and creates answer
     let callee = create_rtp_callee(port_base + 200);
-    let callee_answer = callee.handshake(bridge_rtp_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_rtp_sdp, SdpType::Offer).await.unwrap();
     assert!(
         callee_answer.contains("RTP/AVP"),
         "Callee answer must be plain RTP"
@@ -161,7 +161,7 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     );
 
     // 8. Caller processes the answer (simulates JsSIP setRemoteDescription)
-    caller.set_remote_description(&answer_sdp).await.unwrap();
+    caller.set_remote_description(&answer_sdp, SdpType::Answer).await.unwrap();
 
     // Verify full connectivity
     assert!(bridge.callee_pc().remote_description().is_some());
@@ -220,7 +220,7 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
 
     // 4. Callee processes the WebRTC offer and creates answer
     let callee = create_webrtc_caller(port_base + 200);
-    let callee_answer = callee.handshake(bridge_webrtc_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_webrtc_sdp, SdpType::Offer).await.unwrap();
     assert!(
         callee_answer.contains("SAVPF"),
         "Callee answer must be WebRTC"
@@ -266,7 +266,7 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     );
 
     // 8. Caller processes the answer
-    caller.set_remote_description(&answer_sdp).await.unwrap();
+    caller.set_remote_description(&answer_sdp, SdpType::Answer).await.unwrap();
 
     // Verify full connectivity
     assert!(bridge.callee_pc().remote_description().is_some());
@@ -466,7 +466,7 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
 
     // 5. RTP callee answers
     let callee = create_rtp_callee(port_base + 200);
-    let callee_answer = callee.handshake(bridge_rtp_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_rtp_sdp, SdpType::Offer).await.unwrap();
 
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
@@ -502,7 +502,7 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
     );
 
     // 7. Caller processes answer
-    caller.set_remote_description(&answer_sdp).await.unwrap();
+    caller.set_remote_description(&answer_sdp, SdpType::Answer).await.unwrap();
 
     // Verify connectivity
     assert!(bridge.callee_pc().remote_description().is_some());
@@ -625,7 +625,7 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
 
     // 5. WebRTC callee answers
     let callee = create_webrtc_caller(port_base + 200);
-    let callee_answer = callee.handshake(bridge_webrtc_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_webrtc_sdp, SdpType::Offer).await.unwrap();
 
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
@@ -664,7 +664,7 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
 
     // 7. Caller processes answer
     caller
-        .set_remote_description(&rtp_answer_sdp)
+        .set_remote_description(&rtp_answer_sdp, SdpType::Answer)
         .await
         .unwrap();
 
@@ -1220,7 +1220,7 @@ async fn test_e2e_srtp_caller_to_webrtc_callee_via_bridge() {
 
     // 5. Callee processes the WebRTC offer and creates answer
     let callee = create_webrtc_caller(port_base + 300);
-    let callee_answer = callee.handshake(bridge_webrtc_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_webrtc_sdp, SdpType::Offer).await.unwrap();
     assert!(
         callee_answer.contains("SAVPF"),
         "Callee answer must be WebRTC"
@@ -1262,7 +1262,7 @@ async fn test_e2e_srtp_caller_to_webrtc_callee_via_bridge() {
     );
 
     // 9. Caller processes the answer
-    caller.set_remote_description(&answer_sdp).await.unwrap();
+    caller.set_remote_description(&answer_sdp, SdpType::Answer).await.unwrap();
 
     // Verify full connectivity
     assert!(bridge.callee_pc().remote_description().is_some());
@@ -1326,7 +1326,7 @@ async fn test_e2e_webrtc_caller_to_srtp_callee_via_bridge() {
 
     // 5. Callee processes the SRTP offer and creates answer
     let callee = create_srtp_callee(port_base + 300);
-    let callee_answer = callee.handshake(bridge_srtp_sdp).await.unwrap();
+    let callee_answer = callee.handshake(bridge_srtp_sdp, SdpType::Offer).await.unwrap();
     assert!(
         callee_answer.contains("RTP/SAVP") || callee_answer.contains("a=crypto"),
         "Callee answer must be SRTP"
@@ -1367,7 +1367,7 @@ async fn test_e2e_webrtc_caller_to_srtp_callee_via_bridge() {
     );
 
     // 9. Caller processes the answer
-    caller.set_remote_description(&answer_sdp).await.unwrap();
+    caller.set_remote_description(&answer_sdp, SdpType::Answer).await.unwrap();
 
     // Verify full connectivity
     assert!(bridge.callee_pc().remote_description().is_some());

@@ -18,16 +18,16 @@ pub mod handler;
 pub mod license;
 pub mod log_reload;
 
-pub mod http_util;
-pub mod media;
+pub use rustpbx_http_util as http_util;
+pub use rustpbx_media as media;
 pub mod metrics;
-pub mod models;
+pub use rustpbx_models as models;
 pub mod observability;
 pub mod preflight;
 pub mod proxy;
 pub mod rwi;
-pub mod sipflow;
-pub mod storage;
+pub use rustpbx_sipflow as sipflow;
+pub use rustpbx_storage as storage;
 pub mod tls_reloader;
 pub mod tts;
 pub mod untracked_tasks;
@@ -37,7 +37,8 @@ pub mod version;
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn init_rustls_crypto_provider() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider for tests");
+    let _ = rustls::crypto::ring::default_provider()
+        .install_default();
 }
+
+

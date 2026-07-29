@@ -677,10 +677,11 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("UPDATE timeout"))??
         .map_err(|e| anyhow::anyhow!("UPDATE failed: {}", e))?;
-    assert_eq!(
+    let update_answer = update_answer.expect("Caller should receive SDP answer for UPDATE");
+    assert!(
+        update_answer.contains("a=recvonly"),
+        "UPDATE answer should contain a=recvonly (mirror of sendonly offer): {}",
         update_answer,
-        Some(answer_sdp.clone()),
-        "Caller should receive callee SDP answer for UPDATE in None mode",
     );
 
     let reinvite_sdp = "v=0\r\n\

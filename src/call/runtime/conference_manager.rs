@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub const DEFAULT_CONFERENCE_TIMEOUT_SECS: u64 = 3600;
 
@@ -332,10 +332,10 @@ impl ConferenceManager {
             }
         }
 
-        self.conferences
-            .remove(conf_id)
-            .map(|(_, v)| v)
-            .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
+        if self.conferences.remove(conf_id).is_none() {
+            warn!("Conference {} already destroyed", conf_id.0);
+            return Ok(());
+        }
 
         info!(conf_id = %conf_id.0, "Conference destroyed");
         Ok(())

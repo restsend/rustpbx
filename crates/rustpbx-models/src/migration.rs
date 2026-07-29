@@ -1,0 +1,35 @@
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![
+            Box::new(super::user::Migration),
+            Box::new(super::department::Migration),
+            Box::new(super::extension::Migration),
+            Box::new(super::extension_department::Migration),
+            Box::new(super::sip_trunk::Migration),
+            Box::new(super::presence::Migration),
+            Box::new(super::routing::Migration),
+            Box::new(super::call_record::Migration),
+            Box::new(super::frequency_limit::Migration),
+            Box::new(super::call_record_indices::Migration),
+            Box::new(super::call_record_optimization_indices::Migration),
+            Box::new(super::call_record_dashboard_index::Migration),
+            Box::new(super::call_record_from_number_index::Migration),
+            Box::new(super::add_leg_timeline_column::Migration),
+            Box::new(super::add_rewrite_columns::Migration),
+            Box::new(super::system_notification::Migration),
+            Box::new(super::add_user_mfa_columns::Migration),
+            Box::new(super::add_sip_trunk_register_columns::Migration),
+            Box::new(super::rbac::Migration),
+            Box::new(super::add_sip_trunk_rewrite_hostport::Migration),
+            Box::new(super::add_metadata_column::Migration),
+            Box::new(super::alter_rewrite_columns_length::Migration),
+            Box::new(super::add_outbound_sip_trunk_id::Migration),
+            Box::new(super::config_entry::Migration),
+            // The queue addon migration is registered in the addon's own migrator.
+        ]
+    }
+}
