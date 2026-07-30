@@ -18,16 +18,16 @@ fn default_sipflow_flush_interval() -> u64 {
     0
 }
 
-fn default_remote_batch_size() -> usize {
-    256
-}
-
-fn default_remote_batch_flush_ms() -> u64 {
-    20
-}
-
 fn default_remote_channel_capacity() -> usize {
     40000
+}
+
+fn default_mtu() -> usize {
+    0
+}
+
+fn default_report_interval_secs() -> u64 {
+    10
 }
 
 fn default_sipflow_timeout() -> u64 {
@@ -155,14 +155,14 @@ pub enum SipFlowConfig {
         http_addr: Option<String>,
         #[serde(default = "default_sipflow_timeout")]
         timeout_secs: u64,
-        #[serde(default = "default_remote_batch_size")]
-        batch_size: usize,
-        #[serde(default = "default_remote_batch_flush_ms")]
-        batch_flush_ms: u64,
         #[serde(default = "default_remote_channel_capacity")]
         channel_capacity: usize,
         #[serde(default = "default_sipflow_dns_ttl")]
         dns_ttl_secs: u64,
+        #[serde(default = "default_mtu")]
+        mtu: usize,
+        #[serde(default = "default_report_interval_secs")]
+        report_interval_secs: u64,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
         #[serde(default)]

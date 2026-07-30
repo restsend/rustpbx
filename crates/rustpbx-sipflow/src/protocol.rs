@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-const PACKET_VERSION: u8 = 2;
+pub const PACKET_VERSION: u8 = 3;
 
 /// Magic header for a single-packet datagram ("SF").
 pub const PACKET_MAGIC: u16 = 0x5346;
@@ -13,7 +13,7 @@ pub const PACKET_MAGIC: u16 = 0x5346;
 /// side. The receiver dispatches on the magic to decide whether to parse a
 /// single packet or a batch.
 pub const BATCH_MAGIC: u16 = 0x5347;
-const BATCH_VERSION: u8 = 1;
+pub const BATCH_VERSION: u8 = 1;
 
 /// Maximum number of packets that can be packed into a single batch
 /// datagram. Limited by the `u16` count field on the wire.
@@ -34,6 +34,10 @@ pub struct Packet {
     pub call_id: Option<String>,
     pub leg: Option<i32>,
     pub payload: Bytes,
+    /// Client/process identifier (like SSRC), set by the sender so the
+    /// receiver can attribute packets to a specific client instance.
+    /// v2 → 0 (default), v3 → read from wire.
+    pub client_id: u32,
 }
 
 pub fn parse_packet(data: &[u8]) -> anyhow::Result<Packet> {
@@ -47,8 +51,8 @@ pub fn parse_packet(data: &[u8]) -> anyhow::Result<Packet> {
         ));
     }
     let version = buf.try_get_u8()?;
-    if version != PACKET_VERSION {
-        return Err(anyhow::anyhow!("Unsupported packet version"));
+    if version != 2 && version != 3 {
+        return Err(anyhow::anyhow!("Unsupported packet version: {version}"));
     }
     let msg_type_raw = buf.try_get_u8()?;
     let msg_type = match msg_type_raw {
@@ -70,6 +74,11 @@ pub fn parse_packet(data: &[u8]) -> anyhow::Result<Packet> {
     };
     let dst_port = buf.try_get_u16()?;
     let timestamp = buf.try_get_u64()?;
+    let client_id = if version == 3 {
+        buf.try_get_u32()?
+    } else {
+        0
+    };
     let metadata_len = buf.try_get_u32()? as usize;
     let (call_id, leg) = if metadata_len == 0 {
         (None, None)
@@ -110,6 +119,7 @@ pub fn parse_packet(data: &[u8]) -> anyhow::Result<Packet> {
         call_id,
         leg,
         payload: payload.into(),
+        client_id,
     })
 }
 
@@ -127,7 +137,7 @@ pub fn encode_packet(packet: &Packet) -> Vec<u8> {
 /// has enough capacity (or accepting the amortized growth cost).
 pub fn encode_packet_into(buf: &mut Vec<u8>, packet: &Packet) {
     buf.put_u16(PACKET_MAGIC); // Magic
-    buf.put_u8(PACKET_VERSION);
+    buf.put_u8(3); // version — always write v3 with client_id field
     buf.put_u8(packet.msg_type as u8);
 
     let ip_family = match packet.src.0 {
@@ -151,6 +161,7 @@ pub fn encode_packet_into(buf: &mut Vec<u8>, packet: &Packet) {
     buf.put_u16(packet.dst.1);
 
     buf.put_u64(packet.timestamp);
+    buf.put_u32(packet.client_id);
 
     if packet.call_id.is_some() || packet.leg.is_some() {
         let call_id = packet.call_id.as_deref().unwrap_or("");
@@ -288,6 +299,7 @@ mod tests {
             call_id: Some("call-123".to_string()),
             leg: Some(0),
             payload: rtp.clone(),
+            client_id: 0,
         };
 
         let decoded = parse_packet(&encode_packet(&packet)).expect("packet should decode");
@@ -308,13 +320,14 @@ mod tests {
             call_id: Some("abc".to_string()),
             leg: Some(0x0102_0304),
             payload: Bytes::from_static(&[0xaa, 0xbb]),
+            client_id: 0xdead_beef,
         };
 
         assert_eq!(
             encode_packet(&packet),
             vec![
                 0x53, 0x46, // magic
-                0x02, // wrapper version
+                0x03, // wrapper version
                 0x01, // RTP
                 0x04, // IPv4
                 0x01, 0x02, 0x03, 0x04, // src IP
@@ -322,6 +335,7 @@ mod tests {
                 0x05, 0x06, 0x07, 0x08, // dst IP
                 0x56, 0x78, // dst port
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // timestamp
+                0xde, 0xad, 0xbe, 0xef, // client id
                 0x00, 0x00, 0x00, 0x0b, // metadata length
                 0x01, 0x02, 0x03, 0x04, // leg
                 0x00, 0x00, 0x00, 0x03, // call id length
@@ -352,13 +366,14 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from_static(&[0xaa]),
+            client_id: 0,
         };
 
         assert_eq!(
             encode_packet(&packet),
             vec![
                 0x53, 0x46, // magic
-                0x02, // wrapper version
+                0x03, // wrapper version
                 0x00, // SIP
                 0x06, // IPv6
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // src IP
@@ -368,6 +383,7 @@ mod tests {
                 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, // dst IP
                 0x56, 0x78, // dst port
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // timestamp
+                0x00, 0x00, 0x00, 0x00, // client id = 0
                 0x00, 0x00, 0x00, 0x00, // metadata length
                 0x00, 0x00, 0x00, 0x01, // payload length
                 0xaa, // payload
@@ -385,6 +401,7 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from_static(b"INVITE sip:bob@example.com SIP/2.0\r\n\r\n"),
+            client_id: 0,
         };
         let mut data = encode_packet(&packet);
         data[2] = PACKET_VERSION + 1;
@@ -407,6 +424,7 @@ mod tests {
             call_id: Some(format!("call-{}", idx)),
             leg: Some(idx as i32),
             payload: Bytes::from(vec![idx; idx as usize + 1]),
+            client_id: idx as u32,
         }
     }
 
@@ -426,6 +444,7 @@ mod tests {
             assert_eq!(got.call_id, orig.call_id, "call_id mismatch at {i}");
             assert_eq!(got.leg, orig.leg, "leg mismatch at {i}");
             assert_eq!(got.payload, orig.payload, "payload mismatch at {i}");
+            assert_eq!(got.client_id, orig.client_id, "client_id mismatch at {i}");
         }
     }
 

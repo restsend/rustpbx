@@ -120,6 +120,7 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
         call_id,
         leg,
         payload,
+        ..
     } = packet;
     let mut callid = call_id;
     let src_addr = format!("{}:{}", src.0, src.1);
@@ -862,6 +863,7 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from(payload),
+            client_id: 0,
         })
     }
 
@@ -880,6 +882,7 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from(payload.to_vec()),
+            client_id: 0,
         });
         packet.callid = Some(call_id.to_string());
         packet.leg = Some(leg);
@@ -910,6 +913,7 @@ mod tests {
             call_id: Some("remote-call-1".to_string()),
             leg: Some(1),
             payload: rtp.clone(),
+            client_id: 0,
         });
 
         assert_eq!(processed.callid, Some("remote-call-1".to_string()));
@@ -934,6 +938,7 @@ mod tests {
             call_id: Some("remote-call-2".to_string()),
             leg: Some(0),
             payload: rtp.clone(),
+            client_id: 0,
         });
         storage.write_processed(processed).await.expect("write RTP");
         storage.force_flush().await.expect("flush");
@@ -1189,6 +1194,7 @@ mod tests {
                 call_id: None,
                 leg: None,
                 payload: Bytes::from(sip_payload.clone()),
+                client_id: 0,
             },
             None,
         );
@@ -1244,6 +1250,7 @@ mod tests {
             call_id: Some(call_id.to_string()),
             leg: None,
             payload: compressed.clone(),
+            client_id: 0,
         });
         assert_eq!(processed.callid, Some(call_id.to_string()));
         assert_eq!(

@@ -135,6 +135,7 @@ impl LocalBackend {
                                     call_id: packet_call_id,
                                     leg: packet_leg,
                                     payload: item.payload,
+                                    client_id: 0,
                                 };
 
                                 let processed = process_packet_with(packet, compress);

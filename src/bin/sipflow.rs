@@ -26,6 +26,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use lru::LruCache;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_appender::non_blocking;
@@ -127,6 +129,7 @@ struct AppState {
     root: String,
     subdirs: SipFlowSubdirs,
     client: reqwest::Client,
+    receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
 }
 
 fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
@@ -300,11 +303,14 @@ async fn main() -> Result<()> {
         Some(std::time::Duration::from_secs(10)),
     )?;
 
+    let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
+
     let app_state = AppState {
         backend: backend.clone(),
         root: args.root.clone(),
         subdirs,
         client: http_client,
+        receiver_counters: receiver_counters.clone(),
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
@@ -395,6 +401,7 @@ async fn main() -> Result<()> {
     let flush_interval_secs = args.flush_interval.max(1);
     let storage_backend = backend.clone();
     let perf_worker = perf_counters.clone();
+    let recv_counters = receiver_counters.clone();
     rustpbx::utils::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
@@ -407,12 +414,19 @@ async fn main() -> Result<()> {
                         break;
                     }
                     for packet in batch.drain(..) {
+                        let client_id = packet.client_id;
                         let (call_id, item) = convert_packet_to_item(packet);
                         if !call_id.is_empty() {
                             let _ = storage_backend.record(&call_id, item);
                             perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
                         } else {
                             perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // Track per-client receive count (LRU to bound memory)
+                        if client_id != 0 {
+                            let mut cache = recv_counters.lock().unwrap();
+                            let val = cache.get(&client_id).copied().unwrap_or(0) + 1;
+                            cache.put(client_id, val);
                         }
                     }
                     perf_worker.set_pending(rx.len() as i64);
@@ -446,6 +460,7 @@ async fn main() -> Result<()> {
         .route("/debug/flow", get(debug_flow_handler))
         .route("/debug/raw", get(debug_raw_handler))
         .route("/upload", post(upload_handler))
+        .route("/report", post(report_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(app_state);
 
@@ -1004,6 +1019,25 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
         "Prometheus support not enabled (build with --features addon-observability)",
     )
         .into_response()
+}
+
+async fn report_handler(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let client_id = body["client_id"].as_u64().unwrap_or(0) as u32;
+    let packets_received = state
+        .receiver_counters
+        .lock()
+        .unwrap()
+        .get(&client_id)
+        .copied()
+        .unwrap_or(0);
+    axum::Json(serde_json::json!({
+        "status": "success",
+        "client_id": client_id,
+        "packets_received": packets_received,
+    }))
 }
 
 #[cfg(test)]

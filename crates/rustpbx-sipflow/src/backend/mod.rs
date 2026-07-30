@@ -144,10 +144,10 @@ pub async fn create_backend(
             udp_addr,
             http_addr,
             timeout_secs,
-            batch_size,
-            batch_flush_ms,
             channel_capacity,
             dns_ttl_secs,
+            mtu,
+            report_interval_secs,
             ..
         } => {
             let resolved = if !nodes.is_empty() {
@@ -165,10 +165,10 @@ pub async fn create_backend(
             remote::RemoteBackend::new(
                 resolved,
                 *timeout_secs,
-                *batch_size,
-                *batch_flush_ms,
                 *channel_capacity,
+                *mtu,
                 *dns_ttl_secs,
+                *report_interval_secs,
                 cancel_token,
             )
             .await
