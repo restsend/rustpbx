@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{info, warn};
 
+use std::borrow::Cow;
 use crate::backend::SipFlowBackend;
 use crate::config::SipFlowClusterNode;
 use crate::perf::PerfCounters;
@@ -399,7 +400,8 @@ fn sender_thread(
 
     const FLUSH_DURATION: Duration = Duration::from_millis(20);
     let mut batch: Vec<Packet> = Vec::new();
-    let mut send_buf: Vec<u8> = Vec::with_capacity(mtu.max(1500));
+    let initial_cap = if mtu > 0 { mtu } else { 65535 };
+    let mut send_buf: Vec<u8> = Vec::with_capacity(initial_cap);
 
     let flush_and_count = |batch: &mut Vec<Packet>,
                            socket: &std::net::UdpSocket,
@@ -709,12 +711,12 @@ async fn report_loop(
 
 #[async_trait]
 impl SipFlowBackend for RemoteBackend {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
         let result = self
             .sender
             .try_send(Command::RecordItem {
-                call_id: call_id.to_string(),
+                call_id: call_id.into_owned(),
                 item,
             })
             .map_err(|e| anyhow::anyhow!("{e}"));

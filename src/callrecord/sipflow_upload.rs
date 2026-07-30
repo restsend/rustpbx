@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -522,7 +521,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SipFlowBackend for MockBackend {
-        fn record(&self, _call_id: &str, _item: SipFlowItem) -> anyhow::Result<()> {
+        fn record(&self, _call_id: Cow<'_, str>, _item: SipFlowItem) -> anyhow::Result<()> {
             Ok(())
         }
         async fn flush(&self) -> anyhow::Result<()> {

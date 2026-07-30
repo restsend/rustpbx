@@ -17,7 +17,7 @@ use rustpbx::callrecord::{
 };
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
-    SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
+    SipFlowBackend, create_backend,
     perf::PerfCounters,
     protocol::{MsgType, Packet, parse_datagram},
     storage::{extract_callid, maybe_compress_payload},
@@ -130,39 +130,6 @@ struct AppState {
     subdirs: SipFlowSubdirs,
     client: reqwest::Client,
     receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
-}
-
-fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
-    let call_id = packet
-        .call_id
-        .clone()
-        .or_else(|| {
-            if packet.msg_type == MsgType::Sip {
-                extract_callid(&packet.payload)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-
-    let src = format!("{}:{}", packet.src.0, packet.src.1);
-    let dst = format!("{}:{}", packet.dst.0, packet.dst.1);
-
-    let item = SipFlowItem {
-        timestamp: packet.timestamp,
-        seq: 0,
-        leg: packet.leg,
-        msg_type: if packet.msg_type == MsgType::Sip {
-            SipFlowMsgType::Sip
-        } else {
-            SipFlowMsgType::Rtp
-        },
-        src_addr: src,
-        dst_addr: dst,
-        payload: packet.payload,
-    };
-
-    (call_id, item)
 }
 
 /// Bind a UDP socket with a custom SO_RCVBUF (and SO_REUSEPORT when
@@ -364,16 +331,17 @@ async fn main() -> Result<()> {
                                         .fetch_add(packets.len() as u64, Ordering::Relaxed);
                                     for mut packet in packets {
                                         if let Some(level) = compress_early {
-                                            // The Call-ID header must be
-                                            // extracted before the payload is
-                                            // compressed.
-                                            if packet.msg_type == MsgType::Sip
-                                                && packet.call_id.is_none()
-                                            {
-                                                packet.call_id = extract_callid(&packet.payload);
+                                            match packet.msg_type {
+                                                MsgType::Sip => {
+                                                    if packet.call_id.is_none() {
+                                                        packet.call_id = extract_callid(&packet.payload);
+                                                    }
+                                                    packet.payload =
+                                                        maybe_compress_payload(packet.payload, level);
+                                                }
+                                                // RTP: 包小压缩比极低，跳过以节省 CPU
+                                                MsgType::Rtp => {}
                                             }
-                                            packet.payload =
-                                                maybe_compress_payload(packet.payload, level);
                                         }
                                         if tx.try_send(packet).is_err() {
                                             perf_rx.items_dropped.fetch_add(1, Ordering::Relaxed);
@@ -415,9 +383,10 @@ async fn main() -> Result<()> {
                     }
                     for packet in batch.drain(..) {
                         let client_id = packet.client_id;
-                        let (call_id, item) = convert_packet_to_item(packet);
-                        if !call_id.is_empty() {
-                            let _ = storage_backend.record(&call_id, item);
+                        let has_call_id = packet.call_id.is_some()
+                            || (packet.msg_type == MsgType::Sip && !packet.payload.is_empty());
+                        if has_call_id {
+                            let _ = storage_backend.record_packet(packet);
                             perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
                         } else {
                             perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
@@ -506,13 +475,9 @@ async fn flow_handler(
             let flow_items: Vec<serde_json::Value> = flow
                 .iter()
                 .map(|item| {
-                    let payload: serde_json::Value = if let Ok(s) = String::from_utf8(item.payload.to_vec()) {
-                        serde_json::Value::String(s)
-                    } else {
-                        serde_json::Value::Array(
-                            item.payload.iter().map(|&b| serde_json::Value::Number(b.into())).collect(),
-                        )
-                    };
+                    let payload: serde_json::Value = serde_json::Value::String(
+                        String::from_utf8_lossy(&item.payload).into_owned(),
+                    );
                     serde_json::json!({
                         "timestamp": item.timestamp,
                         "seq": item.seq,

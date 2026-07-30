@@ -1,6 +1,7 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
+use std::borrow::Cow;
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
@@ -270,7 +271,7 @@ impl SipFlow {
     ) {
         // Process batch
         for (call_id, item, pool_idx) in batch.drain(..) {
-            let _ = backend.record(&call_id, item);
+            let _ = backend.record(Cow::Owned(call_id), item);
 
             // Return item to pool
             if let Some(idx) = pool_idx {
@@ -342,7 +343,7 @@ impl SipFlow {
             } else {
                 // Fallback: direct synchronous write (writer_tx is None)
                 if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
-                    let _ = backend.record(&call_id, item);
+                    let _ = backend.record(Cow::Owned(call_id), item);
                 }
             }
         }

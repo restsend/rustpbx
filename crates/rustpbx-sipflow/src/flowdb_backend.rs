@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use flowdb::{Config as FlowDbConfig, Engine, Record, ScanRange};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -509,8 +510,8 @@ impl Drop for FlowDbBackend {
 
 #[async_trait]
 impl SipFlowBackend for FlowDbBackend {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
-        if call_id.is_empty() {
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
+        if call_id.as_ref().is_empty() {
             return Ok(());
         }
 
@@ -520,7 +521,7 @@ impl SipFlowBackend for FlowDbBackend {
 
         let record = match item.msg_type {
             SipFlowMsgType::Sip => {
-                let key = make_sip_key(call_id, counter);
+                let key = make_sip_key(call_id.as_ref(), counter);
                 let value = encode_sip_value(&item.src_addr, &item.dst_addr, &item.payload);
                 Record {
                     key: key.into(),
@@ -531,7 +532,7 @@ impl SipFlowBackend for FlowDbBackend {
             }
             SipFlowMsgType::Rtp => {
                 let leg = item.leg.unwrap_or(0);
-                let key = make_rtp_key(call_id, leg, counter);
+                let key = make_rtp_key(call_id.as_ref(), leg, counter);
                 let value = encode_rtp_value(leg, &item.src_addr, &item.payload);
                 Record {
                     key: key.into(),
@@ -796,9 +797,9 @@ mod tests {
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
-        backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
-        backend.record(call_id, make_sip_item(t2, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t2, call_id)).unwrap();
         backend.flush().await.unwrap();
 
         let items = backend
@@ -828,9 +829,9 @@ mod tests {
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
-        backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
-        backend.record(call_id, make_sip_item(t2, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(t2, call_id)).unwrap();
         backend.flush().await.unwrap();
 
         let items = backend
@@ -857,7 +858,7 @@ mod tests {
         for i in 0..5u64 {
             let ts = (base + i as i64 * 20_000) as u64;
             backend
-                .record(call_id, make_rtp_item(ts, 0, "127.0.0.1:4000"))
+                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 0, "127.0.0.1:4000"))
                 .unwrap();
         }
         backend.flush().await.unwrap();
@@ -888,7 +889,7 @@ mod tests {
             let ts = (base + i as i64 * 20_000) as u64;
             let item = make_rtp_item_with_seq(ts, 0, "127.0.0.1:4000", seq);
             seq = seq.wrapping_add(1);
-            backend.record(call_id, item).unwrap();
+            backend.record(Cow::Borrowed(call_id), item).unwrap();
         }
         backend.flush().await.unwrap();
 
@@ -919,7 +920,7 @@ mod tests {
         for (i, seq) in [1000u16, 1002u16].iter().enumerate() {
             let ts = (base + i as i64 * 20_000) as u64;
             let item = make_rtp_item_with_seq(ts, 0, "127.0.0.1:4000", *seq);
-            backend.record(call_id, item).unwrap();
+            backend.record(Cow::Borrowed(call_id), item).unwrap();
         }
         backend.flush().await.unwrap();
 
@@ -950,10 +951,10 @@ mod tests {
         for i in 0..3u64 {
             let ts = (base + i as i64 * 20_000) as u64;
             backend
-                .record(call_id, make_rtp_item(ts, 0, "127.0.0.1:4000"))
+                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 0, "127.0.0.1:4000"))
                 .unwrap();
             backend
-                .record(call_id, make_rtp_item(ts, 1, "127.0.0.1:4002"))
+                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 1, "127.0.0.1:4002"))
                 .unwrap();
         }
         backend.flush().await.unwrap();
@@ -1011,10 +1012,10 @@ mod tests {
         let base = chrono::Utc::now().timestamp_micros();
 
         backend
-            .record("call-a", make_sip_item(base as u64, "call-a"))
+            .record(Cow::Borrowed("call-a"), make_sip_item(base as u64, "call-a"))
             .unwrap();
         backend
-            .record("call-b", make_sip_item(base as u64, "call-b"))
+            .record(Cow::Borrowed("call-b"), make_sip_item(base as u64, "call-b"))
             .unwrap();
         backend.flush().await.unwrap();
 
@@ -1060,7 +1061,7 @@ mod tests {
             let backend =
                 FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
             backend
-                .record(call_id, make_sip_item(base as u64, call_id))
+                .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
                 .unwrap();
             backend.flush().await.unwrap();
         }
@@ -1087,7 +1088,7 @@ mod tests {
             FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000).unwrap();
 
         // Empty call_id should be silently skipped
-        backend.record("", make_sip_item(1000, "")).unwrap();
+        backend.record(Cow::Borrowed(""), make_sip_item(1000, "")).unwrap();
         backend.flush().await.unwrap();
     }
 
@@ -1102,7 +1103,7 @@ mod tests {
         let now = Local::now();
         let call_id = "subdirs-hourly";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
-        backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+        backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
         backend.flush().await.unwrap();
 
         let expected_subdir = format!(
@@ -1137,7 +1138,7 @@ mod tests {
         // Write several SIP messages "now".
         for i in 0..3u64 {
             let ts = (base + i as i64) as u64;
-            backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
         }
         backend.flush().await.unwrap();
 
@@ -1167,7 +1168,7 @@ mod tests {
         let call_id = "subdirs-daily";
         let base = chrono::Utc::now().timestamp_micros();
         backend
-            .record(call_id, make_sip_item(base as u64, call_id))
+            .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
             .unwrap();
         backend.flush().await.unwrap();
 
@@ -1196,7 +1197,7 @@ mod tests {
         let now = Local::now();
         let base = chrono::Utc::now().timestamp_micros();
         backend
-            .record(call_id, make_sip_item(base as u64, call_id))
+            .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
             .unwrap();
         backend.flush().await.unwrap();
 
@@ -1229,7 +1230,7 @@ mod tests {
             let backend =
                 FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000).unwrap();
             backend
-                .record(call_id, make_sip_item(base as u64, call_id))
+                .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
                 .unwrap();
             backend.flush().await.unwrap();
         }

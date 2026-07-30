@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::net::IpAddr;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
@@ -21,6 +22,9 @@ enum Command {
     RecordItem {
         call_id: String,
         item: SipFlowItem,
+    },
+    RecordPacket {
+        packet: Packet,
     },
     Flush {
         done: tokio::sync::oneshot::Sender<()>,
@@ -141,6 +145,11 @@ impl LocalBackend {
                                 let processed = process_packet_with(packet, compress);
                                 let _ = storage.write_processed(processed).await;
                             }
+                            Command::RecordPacket { packet } => {
+                                perf.items_recorded.fetch_add(1, Ordering::Relaxed);
+                                let processed = process_packet_with(packet, compress);
+                                let _ = storage.write_processed(processed).await;
+                            }
                             Command::Flush { done } => {
                                 let _ = storage.force_flush().await;
                                 perf.flushes.fetch_add(1, Ordering::Relaxed);
@@ -193,13 +202,20 @@ impl SipFlowBackend for LocalBackend {
         }
     }
 
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         self.sender
             .send(Command::RecordItem {
-                call_id: call_id.to_string(),
+                call_id: call_id.into_owned(),
                 item,
             })
             .map_err(|e| anyhow::anyhow!("Failed to send record command: {}", e))?;
+        Ok(())
+    }
+
+    fn record_packet(&self, packet: Packet) -> Result<()> {
+        self.sender
+            .send(Command::RecordPacket { packet })
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 

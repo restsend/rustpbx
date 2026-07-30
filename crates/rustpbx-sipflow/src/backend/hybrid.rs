@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use std::borrow::Cow;
 
 use crate::config::{SipFlowEngine, SipFlowSubdirs};
 use crate::backend::SipFlowBackend;
@@ -83,7 +84,7 @@ impl HybridLocalBackend {
 
 #[async_trait]
 impl SipFlowBackend for HybridLocalBackend {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         self.primary().record(call_id, item)
     }
 
@@ -283,7 +284,7 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -312,7 +313,7 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -342,12 +343,12 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 
