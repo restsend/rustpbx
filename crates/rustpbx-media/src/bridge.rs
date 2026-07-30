@@ -1663,6 +1663,33 @@ impl BridgePeer {
         );
     }
 
+    /// Set codec info without creating a transcoder.
+    /// Used when caller and callee selected the same codec — no transcoding needed,
+    /// but `build_leg_profiles` still needs `source_codec` / `target_codec` to
+    /// derive the correct PT mapping for `ForwardingTrack`.
+    pub fn set_codec_info(
+        &self,
+        from_endpoint: BridgeEndpoint,
+        source: audio_codec::CodecType,
+        target: audio_codec::CodecType,
+        target_pt: u8,
+    ) {
+        let (source_slot, target_slot) = match from_endpoint {
+            BridgeEndpoint::Callee => (
+                &self.callee_to_caller_codec.source_codec,
+                &self.callee_to_caller_codec.target_codec,
+            ),
+            BridgeEndpoint::Caller => (
+                &self.caller_to_callee_codec.source_codec,
+                &self.caller_to_callee_codec.target_codec,
+            ),
+        };
+        let source_cr = source.clock_rate();
+        let target_cr = target.clock_rate();
+        *source_slot.lock() = Some((source, target_pt, source_cr));
+        *target_slot.lock() = Some((target, target_pt, target_cr));
+    }
+
     /// Remove the transcoder for a given direction.
     pub fn clear_transcoder(&self, from_endpoint: BridgeEndpoint) {
         let (transcoder_slot, timing_slot) = match from_endpoint {

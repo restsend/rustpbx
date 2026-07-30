@@ -24,6 +24,7 @@ pub mod rtp_utils;
 mod test_183_early_media_regression;
 mod test_call_e2e;
 mod test_caller_gate_regression;
+mod test_early_media_sdp_change_regression;
 
 mod test_bridge_e2e;
 mod test_inbound_refer;

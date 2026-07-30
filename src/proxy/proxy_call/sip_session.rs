@@ -6020,8 +6020,22 @@ impl SipSession {
         if caller_audio.codec == callee_audio.codec {
             bridge.clear_transcoder(caller_endpoint);
             bridge.clear_transcoder(callee_endpoint);
+            bridge.set_codec_info(
+                caller_endpoint,
+                caller_audio.codec,
+                callee_audio.codec,
+                callee_audio.payload_type,
+            );
+            bridge.set_codec_info(
+                callee_endpoint,
+                callee_audio.codec,
+                caller_audio.codec,
+                caller_audio.payload_type,
+            );
             debug!(
                 session_id = %self.context.session_id,
+                caller_pt = caller_audio.payload_type,
+                callee_pt = callee_audio.payload_type,
                 codec = ?caller_audio.codec,
                 "Bridge transcoder not needed; caller and callee selected the same codec"
             );
@@ -6051,10 +6065,6 @@ impl SipSession {
     }
 
     async fn start_media_bridge_forwarding(&mut self) {
-        if self.media.media_bridge_started {
-            return;
-        }
-
         if let Some(ref bridge) = self.media.media_bridge {
             let caller_pc = if self.is_caller_webrtc() {
                 bridge.caller_pc()
