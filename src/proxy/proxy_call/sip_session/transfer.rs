@@ -375,10 +375,33 @@ impl SipSession {
 
                 if !self.server.proxy_config.blind_transfer_use_refer {
                     info!(%leg_id, target = %uri, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Blind transfer via B-leg INVITE (B2BUA)");
-                    let location = crate::call::Location {
-                        aor: refer_to_uri,
+                    let mut location = crate::call::Location {
+                        aor: refer_to_uri.clone(),
                         ..Default::default()
                     };
+                    match self.server.locator.lookup(&refer_to_uri).await {
+                        Ok(registered_locations) => {
+                            if let Some(registered_location) =
+                                registered_locations.into_iter().next()
+                            {
+                                info!(
+                                    target = %refer_to_uri,
+                                    registered_contact = %registered_location.aor,
+                                    webrtc = registered_location.supports_webrtc,
+                                    transport = ?registered_location.transport,
+                                    "Resolved B-leg transfer target through locator"
+                                );
+                                location = registered_location;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                target = %refer_to_uri,
+                                %error,
+                                "Failed to resolve B-leg transfer target through locator; using bare SIP target"
+                            );
+                        }
+                    }
                     let result = self
                         .try_single_target(&location, callee_state_rx, None, None)
                         .await;

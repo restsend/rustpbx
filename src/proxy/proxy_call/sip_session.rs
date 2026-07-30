@@ -4547,11 +4547,11 @@ impl SipSession {
         }
 
         let bridge = bridge_builder.build();
-        // The app/IVR callee PC has no real transport (the application is
-        // in-process), so its RtpSender never polls the caller→callee
-        // ForwardingTrack. Enable a dedicated drain task so caller-side stats
-        // and RFC 2833 DTMF detection keep working.
-        bridge.set_app_ingress_drain(true);
+        // The app/IVR peer PC has no real transport (the application is
+        // in-process), so its RtpSender never polls the ForwardingTrack carrying
+        // caller ingress. That track is Caller→Callee for WebRTC callers and
+        // Callee→Caller for RTP/SRTP callers.
+        bridge.set_app_ingress_drain(self.leg_bridge_endpoint(&LegId::from("caller")));
         bridge.setup_bridge().await?;
         self.media.media_bridge = Some(bridge);
 

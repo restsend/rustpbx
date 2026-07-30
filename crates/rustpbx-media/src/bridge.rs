@@ -715,11 +715,11 @@ pub struct BridgePeer {
     /// when PeerConnection(s) are replaced (e.g. RTP → WebRTC callee).
     forwarder_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     caller_gate: Arc<AtomicBool>,
-    /// When true, the caller→callee ForwardingTrack is drained by a dedicated
-    /// task (app/IVR bridge) because the callee PC has no real transport and
-    /// its RtpSender never polls recv(). Driving recv() keeps the caller-side
-    /// stats and RFC 2833 DTMF detection alive.
-    app_ingress_drain: AtomicBool,
+    /// The bridge endpoint carrying caller ingress for an app/IVR bridge.
+    /// Its ForwardingTrack is drained by a dedicated task because the app-side
+    /// PC has no real transport and its RtpSender never polls recv(). Driving
+    /// recv() keeps caller-side stats and RFC 2833 DTMF detection alive.
+    app_ingress_drain: parking_lot::RwLock<Option<BridgeEndpoint>>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     recording_paused: Arc<AtomicBool>,
     sipflow_tx: Option<mpsc::Sender<(RecLeg, SharedMediaSample, u64)>>,
@@ -794,7 +794,7 @@ impl BridgePeer {
             forwarding_stopped: AtomicBool::new(false),
             forwarder_handle: Arc::new(parking_lot::Mutex::new(None)),
             caller_gate: Arc::new(AtomicBool::new(false)),
-            app_ingress_drain: AtomicBool::new(false),
+            app_ingress_drain: parking_lot::RwLock::new(None),
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
             sipflow_tx: None,
@@ -833,18 +833,18 @@ impl BridgePeer {
         self.caller_gate.load(Ordering::Acquire)
     }
 
-    /// Mark this bridge as an application (IVR/queue) bridge whose callee PC has
-    /// no real transport. The caller→callee ForwardingTrack is then drained by a
-    /// dedicated task (see `process_track_event`) so caller-side stats and DTMF
-    /// detection keep working even though the callee RtpSender never polls.
-    pub fn set_app_ingress_drain(&self, enabled: bool) {
-        self.app_ingress_drain.store(enabled, Ordering::Release);
+    /// Mark the bridge endpoint carrying caller ingress for an application
+    /// (IVR/queue) bridge. Its ForwardingTrack is then drained by a dedicated
+    /// task (see `process_track_event`) so caller-side stats and DTMF detection
+    /// keep working even though the app-side RtpSender never polls.
+    pub fn set_app_ingress_drain(&self, endpoint: BridgeEndpoint) {
+        *self.app_ingress_drain.write() = Some(endpoint);
         info!(
             bridge_id = %self.id,
             session_id = ?self.session_id,
-            enabled,
+            ?endpoint,
             "App ingress drain configured (drives caller→app stats/DTMF via a \
-             dedicated task since the app callee PC has no transport)"
+             dedicated task since the app peer PC has no transport)"
         );
     }
 
@@ -2399,6 +2399,7 @@ impl BridgePeer {
 
     fn spawn_bidirectional_forwarder(&self) -> tokio::task::JoinHandle<()> {
         let bridge_id = self.id.clone();
+        let app_ingress_drain = *self.app_ingress_drain.read();
 
         let common = ForwardTrackArgs {
             cancel_token: self.cancel_token.clone(),
@@ -2424,7 +2425,7 @@ impl BridgePeer {
                 &self.caller_to_callee_codec.forwarding_track,
             ),
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
-            drain_ingress: self.app_ingress_drain.load(Ordering::Acquire),
+            drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Caller),
         };
 
         let callee = DirectionParams {
@@ -2448,7 +2449,7 @@ impl BridgePeer {
                 &self.callee_to_caller_codec.forwarding_track,
             ),
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
-            drain_ingress: false,
+            drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Callee),
         };
 
         let caller_pc = self.caller.pc();
