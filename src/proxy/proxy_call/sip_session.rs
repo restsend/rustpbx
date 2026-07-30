@@ -6052,12 +6052,14 @@ impl SipSession {
                 caller_endpoint,
                 caller_audio.codec,
                 callee_audio.codec,
+                caller_audio.payload_type,
                 callee_audio.payload_type,
             );
             bridge.set_codec_info(
                 callee_endpoint,
                 callee_audio.codec,
                 caller_audio.codec,
+                callee_audio.payload_type,
                 caller_audio.payload_type,
             );
             debug!(
@@ -6074,12 +6076,14 @@ impl SipSession {
             caller_endpoint,
             caller_audio.codec,
             callee_audio.codec,
+            caller_audio.payload_type,
             callee_audio.payload_type,
         );
         bridge.set_transcoder(
             callee_endpoint,
             callee_audio.codec,
             caller_audio.codec,
+            callee_audio.payload_type,
             caller_audio.payload_type,
         );
         info!(

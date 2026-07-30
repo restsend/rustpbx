@@ -1641,6 +1641,7 @@ impl BridgePeer {
         from_endpoint: BridgeEndpoint,
         source: audio_codec::CodecType,
         target: audio_codec::CodecType,
+        source_pt: u8,
         target_pt: u8,
     ) {
         let (transcoder_slot, timing_slot, source_slot, target_slot) = match from_endpoint {
@@ -1660,7 +1661,7 @@ impl BridgePeer {
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
         *transcoder_slot.lock() = Some(Transcoder::new(source, target, target_pt));
-        *source_slot.lock() = Some((source, source.payload_type(), source_cr));
+        *source_slot.lock() = Some((source, source_pt, source_cr));
         *target_slot.lock() = Some((target, target_pt, target_cr));
         if source_cr != target_cr {
             *timing_slot.lock() = Some(RtpTiming::default());
@@ -1685,6 +1686,7 @@ impl BridgePeer {
         from_endpoint: BridgeEndpoint,
         source: audio_codec::CodecType,
         target: audio_codec::CodecType,
+        source_pt: u8,
         target_pt: u8,
     ) {
         let (source_slot, target_slot) = match from_endpoint {
@@ -1699,7 +1701,7 @@ impl BridgePeer {
         };
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
-        *source_slot.lock() = Some((source, source.payload_type(), source_cr));
+        *source_slot.lock() = Some((source, source_pt, source_cr));
         *target_slot.lock() = Some((target, target_pt, target_cr));
     }
 
@@ -4684,14 +4686,14 @@ mod tests {
         assert!(bridge.caller_to_callee_codec.transcoder.lock().is_none());
 
         // Set RTP→WebRTC transcoder (G.729→PCMU)
-        bridge.set_transcoder(BridgeEndpoint::Callee, CodecType::G729, CodecType::PCMU, 0);
+        bridge.set_transcoder(BridgeEndpoint::Callee, CodecType::G729, CodecType::PCMU, 18, 0);
         assert!(
             bridge.callee_to_caller_codec.transcoder.lock().is_some(),
             "RTP→WebRTC transcoder should be set"
         );
 
         // Set WebRTC→RTP transcoder (PCMU→G.729)
-        bridge.set_transcoder(BridgeEndpoint::Caller, CodecType::PCMU, CodecType::G729, 18);
+        bridge.set_transcoder(BridgeEndpoint::Caller, CodecType::PCMU, CodecType::G729, 0, 18);
         assert!(
             bridge.caller_to_callee_codec.transcoder.lock().is_some(),
             "WebRTC→RTP transcoder should be set"
@@ -4724,6 +4726,7 @@ mod tests {
             BridgeEndpoint::Caller,
             CodecType::PCMA,
             CodecType::PCMA,
+            8,
             8,
         );
 
@@ -5162,7 +5165,8 @@ mod tests {
             BridgeEndpoint::Caller,
             AudioCodecType::G729,
             AudioCodecType::PCMU,
-            0, // target PT
+            18, // source PT (G729)
+            0,  // target PT (PCMU)
         );
 
         let source = bridge.caller_to_callee_codec.source_codec.lock().clone();
@@ -5194,6 +5198,7 @@ mod tests {
             BridgeEndpoint::Caller,
             AudioCodecType::G722,
             AudioCodecType::PCMU,
+            9, // source PT (G722)
             0,
         );
         assert!(bridge.caller_to_callee_codec.source_codec.lock().is_some());
