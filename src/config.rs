@@ -4,6 +4,7 @@ use crate::{
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
+use rustpbx_models::DatabasePoolConfig;
 use anyhow::{Error, Result};
 use clap::Parser;
 use ipnet::IpNet;
@@ -241,6 +242,8 @@ pub struct Config {
     pub console: Option<ConsoleConfig>,
     #[serde(default = "default_database_url")]
     pub database_url: String,
+    #[serde(default)]
+    pub database_pool: DatabasePoolConfig,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default)]
@@ -1245,6 +1248,7 @@ impl Default for Config {
             console: None,
             rwi: None,
             database_url: default_database_url(),
+            database_pool: DatabasePoolConfig::default(),
             recording: None,
             demo_mode: false,
             storage: None,

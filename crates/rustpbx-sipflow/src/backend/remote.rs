@@ -12,15 +12,15 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{info, warn};
 
-use crate::config::SipFlowClusterNode;
-use rustpbx_http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::backend::SipFlowBackend;
+use crate::config::SipFlowClusterNode;
 use crate::perf::PerfCounters;
 use crate::protocol::{
     BATCH_MAGIC, BATCH_VERSION, MsgType, Packet, encode_batch_into, encode_packet_into,
 };
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use arc_swap::ArcSwap;
+use rustpbx_http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 
 /// Jump Consistent Hash
 ///
@@ -210,22 +210,35 @@ impl RemoteBackend {
         let dispatcher_handle = std::thread::Builder::new()
             .name("sipflow-dispatch".to_string())
             .spawn(move || {
-                dispatcher_thread(rx, node_senders, cancel_dispatcher, perf_dispatcher, dispatcher_client_id);
+                dispatcher_thread(
+                    rx,
+                    node_senders,
+                    cancel_dispatcher,
+                    perf_dispatcher,
+                    dispatcher_client_id,
+                );
             })?;
 
         // Start DNS refresh task if TTL is configured
         if dns_ttl_secs > 0 {
             let dns_nodes = nodes.clone();
-            tokio::spawn(async move {
-                dns_refresh_loop(dns_nodes, dns_ttl_secs, cancel_dns).await
-            });
+            tokio::spawn(
+                async move { dns_refresh_loop(dns_nodes, dns_ttl_secs, cancel_dns).await },
+            );
         }
 
         // Start report loop if interval > 0
         if report_interval_secs > 0 {
             let report_client = client.clone();
             tokio::spawn(async move {
-                report_loop(report_nodes, report_client, report_interval_secs, client_id, cancel_report).await
+                report_loop(
+                    report_nodes,
+                    report_client,
+                    report_interval_secs,
+                    client_id,
+                    cancel_report,
+                )
+                .await
             });
         }
 
@@ -327,12 +340,13 @@ fn dispatcher_thread(
             break;
         }
 
-        match rx.recv_timeout(Duration::from_millis(1)) {
+        match rx.recv_timeout(Duration::from_millis(5)) {
             Ok(cmd) => {
                 let Command::RecordItem { call_id, item } = cmd;
                 let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
                 let packet = build_packet(call_id, item, client_id);
-                let idx = jump_consistent_hash(&packet.call_id.as_deref().unwrap_or(""), node_count);
+                let idx =
+                    jump_consistent_hash(&packet.call_id.as_deref().unwrap_or(""), node_count);
 
                 match node_senders[idx].try_send(packet) {
                     Ok(()) => {
@@ -387,7 +401,10 @@ fn sender_thread(
     let mut batch: Vec<Packet> = Vec::new();
     let mut send_buf: Vec<u8> = Vec::with_capacity(mtu.max(1500));
 
-    let flush_and_count = |batch: &mut Vec<Packet>, socket: &std::net::UdpSocket, addr: &Arc<ArcSwap<SocketAddr>>, send_buf: &mut Vec<u8>| {
+    let flush_and_count = |batch: &mut Vec<Packet>,
+                           socket: &std::net::UdpSocket,
+                           addr: &Arc<ArcSwap<SocketAddr>>,
+                           send_buf: &mut Vec<u8>| {
         let n = flush_batch(batch, socket, addr, send_buf, mtu, node_index);
         sent_count.fetch_add(n as u64, Ordering::Relaxed);
     };
@@ -621,73 +638,71 @@ async fn report_loop(
                 continue;
             }
 
-                        let node_addr = node.http_addr.clone();
-                        match client
-                            .post(format!("{}/report", node_addr))
-                            .json(&serde_json::json!({ "client_id": client_id }))
-                            .timeout(Duration::from_secs(5))
-                            .send()
-                            .await
-                        {
-                            Ok(resp) => {
-                                match resp.json::<serde_json::Value>().await {
-                                    Ok(data) => {
-                                        let current_recv = data["packets_received"].as_u64().unwrap_or(0);
-                                        let recv_delta = current_recv - last_recv[i];
-                                        let loss = sent_delta.saturating_sub(recv_delta);
-                                        let loss_rate = if sent_delta > 0 {
-                                            loss as f64 / sent_delta as f64
-                                        } else {
-                                            0.0
-                                        };
-                                        tracing::info!(
-                                            node = %node_addr,
-                                            client_id,
-                                            interval_s = interval_secs,
-                                            sent = sent_delta,
-                                            recv = recv_delta,
-                                            loss = loss,
-                                            loss_rate = loss_rate,
-                                            "sipflow report"
-                                        );
-                                        metrics::gauge!(
-                                            "sipflow_loss_rate",
-                                            "node" => node_addr.clone(),
-                                            "client_id" => client_id.to_string(),
-                                        )
-                                        .set(loss_rate);
-                                        metrics::counter!(
-                                            "sipflow_report_sent_total",
-                                            "node" => node_addr.clone(),
-                                            "client_id" => client_id.to_string(),
-                                        )
-                                        .increment(sent_delta);
-                                        metrics::counter!(
-                                            "sipflow_report_lost_total",
-                                            "node" => node_addr.clone(),
-                                            "client_id" => client_id.to_string(),
-                                        )
-                                        .increment(loss);
-                                        last_sent[i] = current_sent;
-                                        last_recv[i] = current_recv;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            node = %node_addr,
-                                            error = %e,
-                                            "sipflow report: failed to parse response"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    node = %node_addr,
-                                    error = %e,
-                                    "sipflow report failed"
-                                );
-                            }
-                        }
+            let node_addr = node.http_addr.clone();
+            match client
+                .post(format!("{}/report", node_addr))
+                .json(&serde_json::json!({ "client_id": client_id }))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        let current_recv = data["packets_received"].as_u64().unwrap_or(0);
+                        let recv_delta = current_recv - last_recv[i];
+                        let loss = sent_delta.saturating_sub(recv_delta);
+                        let loss_rate = if sent_delta > 0 {
+                            loss as f64 / sent_delta as f64
+                        } else {
+                            0.0
+                        };
+                        tracing::info!(
+                            node = %node_addr,
+                            client_id,
+                            interval_s = interval_secs,
+                            sent = sent_delta,
+                            recv = recv_delta,
+                            loss = loss,
+                            loss_rate = loss_rate,
+                            "sipflow report"
+                        );
+                        metrics::gauge!(
+                            "sipflow_loss_rate",
+                            "node" => node_addr.clone(),
+                            "client_id" => client_id.to_string(),
+                        )
+                        .set(loss_rate);
+                        metrics::counter!(
+                            "sipflow_report_sent_total",
+                            "node" => node_addr.clone(),
+                            "client_id" => client_id.to_string(),
+                        )
+                        .increment(sent_delta);
+                        metrics::counter!(
+                            "sipflow_report_lost_total",
+                            "node" => node_addr.clone(),
+                            "client_id" => client_id.to_string(),
+                        )
+                        .increment(loss);
+                        last_sent[i] = current_sent;
+                        last_recv[i] = current_recv;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            node = %node_addr,
+                            error = %e,
+                            "sipflow report: failed to parse response"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        node = %node_addr,
+                        error = %e,
+                        "sipflow report failed"
+                    );
+                }
+            }
         }
     }
 }
@@ -891,10 +906,7 @@ mod tests {
 
     /// Minimal HTTP handler that serves POST /report
     /// Returns `{"status":"success","client_id":<id>,"packets_received":<counter[client_id]>}`
-    async fn serve_report(
-        listener: tokio::net::TcpListener,
-        counters: Arc<DashMap<u32, u64>>,
-    ) {
+    async fn serve_report(listener: tokio::net::TcpListener, counters: Arc<DashMap<u32, u64>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         loop {
             let (mut stream, _) = match listener.accept().await {

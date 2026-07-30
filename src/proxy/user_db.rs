@@ -2,7 +2,9 @@ use super::user::UserBackend;
 use crate::{call::user::SipUser, proxy::auth::AuthError};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use rustpbx_models::DatabasePoolConfig;
 use sqlx::{AnyPool, Row};
+use std::time::Duration;
 
 pub struct DbBackendConfig {
     pub table_name: String,
@@ -41,8 +43,28 @@ pub struct DbBackend {
 }
 
 impl DbBackend {
-    pub async fn new(url: String, config: DbBackendConfig) -> Result<Self> {
-        let db = sqlx::any::AnyPoolOptions::new()
+    pub async fn new(
+        url: String,
+        config: DbBackendConfig,
+        pool_config: Option<&DatabasePoolConfig>,
+    ) -> Result<Self> {
+        let default_cfg = DatabasePoolConfig::default();
+        let cfg = pool_config.unwrap_or(&default_cfg);
+        let mut opts = sqlx::any::AnyPoolOptions::new()
+            .max_connections(cfg.max_connections);
+        if let Some(v) = cfg.min_connections {
+            opts = opts.min_connections(v);
+        }
+        if let Some(v) = cfg.acquire_timeout_secs {
+            opts = opts.acquire_timeout(Duration::from_secs(v));
+        }
+        if let Some(v) = cfg.idle_timeout_secs {
+            opts = opts.idle_timeout(Duration::from_secs(v));
+        }
+        if let Some(v) = cfg.max_lifetime_secs {
+            opts = opts.max_lifetime(Duration::from_secs(v));
+        }
+        let db = opts
             .connect(&url)
             .await
             .map_err(|e| anyhow!("Database connection error: {}", e))?;

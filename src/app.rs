@@ -253,10 +253,11 @@ impl AppStateBuilder {
         let token = self.cancel_token.unwrap_or_default();
         let config_loaded_at = self.config_loaded_at.unwrap_or_else(Utc::now);
         let config_path = self.config_path.clone();
+        let pool_cfg = Some(&config.database_pool);
         let db_conn = if self.skip_migrate {
-            crate::models::connect_db(&config.database_url).await?
+            crate::models::connect_db(&config.database_url, pool_cfg).await?
         } else {
-            crate::models::create_db(&config.database_url).await?
+            crate::models::create_db(&config.database_url, pool_cfg).await?
         };
 
         let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
@@ -318,7 +319,8 @@ impl AppStateBuilder {
             // exclusively to that storage — no DB writes.
             let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
-                .with_main_db(db_conn.clone());
+                .with_main_db(db_conn.clone())
+                .with_pool_config(config.database_pool.clone());
 
             match config.callrecord.as_ref() {
                 Some(cr) => {

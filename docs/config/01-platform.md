@@ -51,14 +51,32 @@ media_cache_path = "./config/mediacache"
 ```
 
 ## Database
-Primary database connection. Currently supports SQLite (and MySQL in some builds).
+Primary database connection. Supports SQLite, PostgreSQL, and MySQL.
 
 ```toml
-# SQLite
+# SQLite (default)
 database_url = "sqlite://rustpbx.sqlite3"
 
+# PostgreSQL
+# database_url = "postgres://user:pass@localhost:5432/rustpbx"
+
 # MySQL
-# database_url = "mysql://user:pass@localhost:3306/rustpbx"
+# database_url = "mysql://root@localhost:3306/rustpbx"
+```
+
+### Database Connection Pool
+
+Controls the connection pool for PostgreSQL/MySQL databases. SQLite connections
+are single-connection and ignore these settings. When this section is omitted,
+`max_connections` defaults to 64.
+
+```toml
+[database_pool]
+max_connections = 64       # Maximum pool size (default: 64)
+min_connections = 0        # Minimum idle connections
+acquire_timeout_secs = 30  # Timeout in seconds to acquire a connection from pool
+idle_timeout_secs = 600    # Max idle time (seconds) before closing; None = no limit
+max_lifetime_secs = 1800   # Max connection lifetime (seconds); None = no limit
 ```
 
 ## Demo Mode

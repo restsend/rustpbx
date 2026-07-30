@@ -152,7 +152,7 @@ impl ConsoleState {
             derive_daily_url(base, date_str)
         };
 
-        match crate::models::connect_db(&daily_url).await {
+        match crate::models::connect_db(&daily_url, None).await {
             Ok(conn) => {
                 self.cdr_conn_cache.insert(key.clone(), conn.clone());
                 conn

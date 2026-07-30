@@ -2,6 +2,7 @@ use crate::{
     config::{CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_MAX_CONCURRENT},
     utils::sanitize_id,
 };
+use rustpbx_models::DatabasePoolConfig;
 use anyhow::Result;
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -517,6 +518,7 @@ pub struct CallRecordManagerBuilder {
     pub max_concurrent: Option<usize>,
     hooks: Vec<Box<dyn CallRecordHook>>,
     main_db: Option<DatabaseConnection>,
+    pool_config: Option<DatabasePoolConfig>,
 }
 
 impl Default for CallRecordManagerBuilder {
@@ -533,6 +535,7 @@ impl CallRecordManagerBuilder {
             max_concurrent: None,
             hooks: Vec::new(),
             main_db: None,
+            pool_config: None,
         }
     }
 
@@ -548,6 +551,11 @@ impl CallRecordManagerBuilder {
 
     pub fn with_config(mut self, config: CallRecordConfig) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    pub fn with_pool_config(mut self, pool_config: DatabasePoolConfig) -> Self {
+        self.pool_config = Some(pool_config);
         self
     }
 
@@ -567,6 +575,7 @@ impl CallRecordManagerBuilder {
             max_concurrent,
             hooks,
             main_db,
+            pool_config,
         } = self;
         let cancel_token = cancel_token.unwrap_or_default();
         let (sender, receiver) = tokio::sync::mpsc::channel(CALL_RECORD_CHANNEL_CAPACITY);
@@ -598,7 +607,7 @@ impl CallRecordManagerBuilder {
                 rotate,
             }) => {
                 let (db, _db_url) = match &database_url {
-                    Some(url) => (crate::models::connect_db(url).await?, url.clone()),
+                    Some(url) => (crate::models::connect_db(url, pool_config.as_ref()).await?, url.clone()),
                     None => (
                         main_db.clone().ok_or_else(|| {
                             anyhow::anyhow!("either database_url or main_db is required")
@@ -1006,7 +1015,7 @@ impl CallRecordSaver for RotatingSqliteSaver {
             let mut st = self.state.lock().await;
             if st.current_date != today {
                 let url = derive_daily_url(&self.base_url, &today);
-                let new_db = crate::models::connect_db(&url).await?;
+                let new_db = crate::models::connect_db(&url, None).await?;
                 if !self.skip_create_table {
                     create_call_record_table(&new_db, &self.table_name).await?;
                 }

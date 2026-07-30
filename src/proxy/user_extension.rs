@@ -29,7 +29,7 @@ impl ExtensionUserBackend {
     }
 
     pub async fn connect(database_url: &str, ttl_secs: u64) -> Result<Self> {
-        let db = crate::models::connect_db(database_url).await?;
+        let db = crate::models::connect_db(database_url, None).await?;
         Ok(Self::new(db, ttl_secs))
     }
 

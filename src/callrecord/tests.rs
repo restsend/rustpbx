@@ -34,7 +34,7 @@ fn make_record() -> CallRecord {
 }
 
 async fn in_memory_db() -> DatabaseConnection {
-    crate::models::connect_db("sqlite::memory:").await.unwrap()
+    crate::models::connect_db("sqlite::memory:", None).await.unwrap()
 }
 
 async fn count_rows(db: &DatabaseConnection, table: &str) -> i64 {
@@ -169,7 +169,7 @@ async fn test_rotating_sqlite_saver_creates_daily_file() {
     let base = format!("sqlite://{}/cdr.db", dir.path().display());
     let today = today_string();
     let daily_url = derive_daily_url(&base, &today);
-    let db = crate::models::connect_db(&daily_url).await.unwrap();
+    let db = crate::models::connect_db(&daily_url, None).await.unwrap();
     create_call_record_table(&db, "rustpbx_call_records")
         .await
         .unwrap();
