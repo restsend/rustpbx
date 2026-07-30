@@ -506,6 +506,10 @@ struct DirectionCodecState {
     /// NegotiatedLegProfile for ForwardingTrack.
     source_codec: parking_lot::Mutex<Option<(AudioCodecType, u8, u32)>>, // (codec, pt, clock_rate)
     target_codec: parking_lot::Mutex<Option<(AudioCodecType, u8, u32)>>,
+    /// Live audio forwarding track for this direction, exposed for runtime
+    /// SDP profile updates without taking ownership away from the RTP sender.
+    forwarding_track:
+        Arc<parking_lot::Mutex<Option<std::sync::Weak<ForwardingTrack>>>>,
 }
 
 impl DirectionCodecState {
@@ -516,6 +520,7 @@ impl DirectionCodecState {
             dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
             source_codec: parking_lot::Mutex::new(None),
             target_codec: parking_lot::Mutex::new(None),
+            forwarding_track: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }
@@ -757,6 +762,8 @@ struct DirectionParams {
     /// Codec info from DirectionCodecState for ForwardingTrack profile construction.
     source_codec_info: Option<(AudioCodecType, u8, u32)>,
     target_codec_info: Option<(AudioCodecType, u8, u32)>,
+    forwarding_track_slot:
+        Arc<parking_lot::Mutex<Option<std::sync::Weak<ForwardingTrack>>>>,
     /// Slot to store the ForwardingTrack's shared stats Arc.
     stats_slot: Option<Arc<parking_lot::Mutex<Option<Arc<ForwardStats>>>>>,
     /// When true (app/IVR bridge whose callee PC has no real transport), the
@@ -1690,6 +1697,21 @@ impl BridgePeer {
         *target_slot.lock() = Some((target, target_pt, target_cr));
     }
 
+    /// Return the live audio forwarding track for media received from an endpoint.
+    pub fn forwarding_track(
+        &self,
+        from_endpoint: BridgeEndpoint,
+    ) -> Option<Arc<ForwardingTrack>> {
+        let slot = match from_endpoint {
+            BridgeEndpoint::Callee => &self.callee_to_caller_codec.forwarding_track,
+            BridgeEndpoint::Caller => &self.caller_to_callee_codec.forwarding_track,
+        };
+        slot
+            .lock()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+    }
+
     /// Remove the transcoder for a given direction.
     pub fn clear_transcoder(&self, from_endpoint: BridgeEndpoint) {
         let (transcoder_slot, timing_slot) = match from_endpoint {
@@ -2179,7 +2201,9 @@ impl BridgePeer {
             *slot.lock() = Some(Arc::clone(&ft_stats));
         }
 
-        let forwarding: Arc<dyn MediaStreamTrack> = Arc::new(forwarding);
+        let forwarding = Arc::new(forwarding);
+        *dir.forwarding_track_slot.lock() = Some(Arc::downgrade(&forwarding));
+        let forwarding: Arc<dyn MediaStreamTrack> = forwarding;
 
         let mut sender_builder =
             rustrtc::RtpSender::builder(forwarding.clone(), existing_sender.ssrc())
@@ -2396,6 +2420,9 @@ impl BridgePeer {
             gate: Some(Arc::clone(&self.caller_gate)),
             source_codec_info: self.caller_to_callee_codec.source_codec.lock().clone(),
             target_codec_info: self.caller_to_callee_codec.target_codec.lock().clone(),
+            forwarding_track_slot: Arc::clone(
+                &self.caller_to_callee_codec.forwarding_track,
+            ),
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
             drain_ingress: self.app_ingress_drain.load(Ordering::Acquire),
         };
@@ -2417,6 +2444,9 @@ impl BridgePeer {
             gate: None,
             source_codec_info: self.callee_to_caller_codec.source_codec.lock().clone(),
             target_codec_info: self.callee_to_caller_codec.target_codec.lock().clone(),
+            forwarding_track_slot: Arc::clone(
+                &self.callee_to_caller_codec.forwarding_track,
+            ),
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
             drain_ingress: false,
         };
@@ -4624,6 +4654,95 @@ mod tests {
         // Clear all
         bridge.clear_transcoder(BridgeEndpoint::Caller);
         assert!(bridge.caller_to_callee_codec.transcoder.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_forwarding_track_lookup_supports_runtime_profile_update() {
+        use crate::negotiate::NegotiatedCodec;
+
+        let bridge = BridgePeerBuilder::new("final-sdp-codec-change".to_string())
+            .with_rtp_port_range(38100, 38200)
+            .build();
+        bridge.set_codec_info(
+            BridgeEndpoint::Caller,
+            CodecType::PCMA,
+            CodecType::PCMA,
+            8,
+        );
+
+        let early_profile = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMA,
+                payload_type: 8,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: TransportMode::Rtp,
+        };
+        let (source, track, _) =
+            rustrtc::media::track::sample_track(MediaKind::Audio, 4);
+        let forwarding = Arc::new(ForwardingTrack::new(
+            "caller-to-callee-final-sdp".to_string(),
+            track,
+            None,
+            None,
+            RecLeg::A,
+            early_profile.clone(),
+            early_profile,
+        ));
+        *bridge
+            .caller_to_callee_codec
+            .forwarding_track
+            .lock() = Some(Arc::downgrade(&forwarding));
+
+        let final_profile = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMU,
+                payload_type: 0,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: TransportMode::Rtp,
+        };
+        let forwarding_from_bridge = bridge
+            .forwarding_track(BridgeEndpoint::Caller)
+            .expect("live caller-to-callee forwarding track");
+        assert!(Arc::ptr_eq(&forwarding, &forwarding_from_bridge));
+        forwarding_from_bridge.stage_ingress_profile(final_profile.clone());
+        forwarding_from_bridge.stage_egress_profile(final_profile);
+        source
+            .send_audio(AudioFrame {
+                rtp_timestamp: 160,
+                clock_rate: 8000,
+                data: vec![0u8; 160].into(),
+                sequence_number: Some(1),
+                payload_type: Some(0),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            forwarding.recv(),
+        )
+        .await
+        .expect("updated forwarding track must not filter final-answer PT 0")
+        .unwrap();
+        let MediaSample::Audio(output) = output else {
+            panic!("expected audio");
+        };
+        assert_eq!(output.payload_type, Some(0));
+        assert_eq!(
+            forwarding
+                .ingress_profile()
+                .and_then(|profile| profile.audio)
+                .map(|codec| codec.codec),
+            Some(CodecType::PCMU)
+        );
     }
 
     /// Verify Opus → PCMU transcoding via Transcoder produces correct output.

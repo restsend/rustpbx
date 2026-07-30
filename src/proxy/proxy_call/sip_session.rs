@@ -6017,6 +6017,15 @@ impl SipSession {
             return;
         };
 
+        if let Some(caller_to_callee) = bridge.forwarding_track(caller_endpoint) {
+            caller_to_callee.stage_ingress_profile(caller_profile.clone());
+            caller_to_callee.stage_egress_profile(callee_profile.clone());
+        }
+        if let Some(callee_to_caller) = bridge.forwarding_track(callee_endpoint) {
+            callee_to_caller.stage_ingress_profile(callee_profile.clone());
+            callee_to_caller.stage_egress_profile(caller_profile.clone());
+        }
+
         if caller_audio.codec == callee_audio.codec {
             bridge.clear_transcoder(caller_endpoint);
             bridge.clear_transcoder(callee_endpoint);
