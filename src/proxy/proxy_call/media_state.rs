@@ -114,6 +114,11 @@ pub struct MediaState {
     /// `apply_bridge_callee_answer`, `bridge_callee_offer_sdp` to pick the
     /// correct PeerConnection (bridge.callee_pc() instead of bridge.caller_pc()).
     pub callee_pc_is_webrtc: bool,
+    /// True when the bridge's caller PC was replaced with an RTP PC because
+    /// both caller and callee are SIP/RTP endpoints after IVR transfer.
+    /// Used by `apply_bridge_callee_answer` to route the callee's answer SDP
+    /// to the correct PeerConnection.
+    pub callee_uses_caller_pc: bool,
     pub media_bridge_started: bool,
     pub bridge_playback_track_ids: HashMap<String, String>,
     pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
@@ -192,6 +197,7 @@ impl MediaState {
             caller_answer_uses_media_bridge: false,
             callee_offer_uses_media_bridge: false,
             callee_pc_is_webrtc: false,
+            callee_uses_caller_pc: false,
             media_bridge_started: false,
             bridge_playback_track_ids: HashMap::new(),
             rtp_timeout_tx: None,

@@ -131,9 +131,10 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
     }
 
     let orig_size = payload.len();
-    let payload = match compress {
-        Some(level) => maybe_compress_payload(payload, level),
-        None => payload,
+    let payload = match (compress, msg_type) {
+        (Some(level), MsgType::Sip) => maybe_compress_payload(payload, level),
+        // RTP: 包小压缩比极低，跳过以节省 CPU
+        _ => payload,
     };
     let comp_size = payload.len();
 
@@ -586,12 +587,6 @@ impl StorageManager {
             if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
                 || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
             {
-                let db_ex = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
-                let raw_ex = tokio::fs::try_exists(&raw_path).await.unwrap_or(false);
-                tracing::debug!(
-                    "query_media_packets[SKIP]: callid={} dir={} db={} raw={} db_ex={} raw_ex={}",
-                    callid, dir.display(), db_path.display(), raw_path.display(), db_ex, raw_ex,
-                );
                 continue;
             }
 
@@ -625,21 +620,13 @@ impl StorageManager {
                     "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
                     callid, dir.display(), db_path.display(), rows.len(), start_ts, end_ts,
                 );
-            } else {
-                let db_sz = tokio::fs::metadata(&db_path).await.map(|m| m.len()).unwrap_or(0);
-                let raw_sz = tokio::fs::metadata(&raw_path).await.map(|m| m.len()).unwrap_or(0);
-                tracing::info!(
-                    "query_media_packets[EMPTY]: callid={} dir={} db_path={} raw_path={} start_ts={} end_ts={} db_size={} raw_size={}",
-                    callid, dir.display(), db_path.display(), raw_path.display(),
-                    start_ts, end_ts, db_sz, raw_sz,
-                );
             }
 
             for row in rows {
                 let offset = match u64::try_from(row.offset) {
                     Ok(o) => o,
                     Err(e) => {
-                        tracing::warn!("skip bad media packet: offset overflow: {e}");
+                        tracing::debug!("skip bad media packet: offset overflow: {e}");
                         current_pos = None;
                         continue;
                     }
@@ -647,7 +634,7 @@ impl StorageManager {
                 let size = match usize::try_from(row.size) {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             "skip bad media packet: size overflow: {e} offset={offset}"
                         );
                         current_pos = None;
@@ -664,7 +651,7 @@ impl StorageManager {
                         });
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             callid,
                             offset,
                             size,

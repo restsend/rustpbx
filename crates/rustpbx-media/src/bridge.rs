@@ -769,8 +769,10 @@ struct DirectionParams {
     /// When true (app/IVR bridge whose callee PC has no real transport), the
     /// target PC's RtpSender never polls the ForwardingTrack, so caller audio,
     /// stats and DTMF detection stall. A dedicated drain task polls recv()
-    /// instead to drive stats + DTMF (the app only needs DTMF, not the audio).
+    /// instead and forwards samples to `drain_sender`.
     drain_ingress: bool,
+    /// The target side's MediaSender, used by the drain task to forward audio.
+    drain_sender: Option<MediaSender>,
 }
 
 enum DirectionEventResult {
@@ -846,6 +848,10 @@ impl BridgePeer {
             "App ingress drain configured (drives caller→app stats/DTMF via a \
              dedicated task since the app peer PC has no transport)"
         );
+    }
+
+    pub fn clear_app_ingress_drain(&self) {
+        self.app_ingress_drain.write().take();
     }
 
     fn side_state(&self, side: BridgeSide) -> &BridgeSideState {
@@ -1654,7 +1660,7 @@ impl BridgePeer {
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
         *transcoder_slot.lock() = Some(Transcoder::new(source, target, target_pt));
-        *source_slot.lock() = Some((source, target_pt, source_cr));
+        *source_slot.lock() = Some((source, source.payload_type(), source_cr));
         *target_slot.lock() = Some((target, target_pt, target_cr));
         if source_cr != target_cr {
             *timing_slot.lock() = Some(RtpTiming::default());
@@ -1693,7 +1699,7 @@ impl BridgePeer {
         };
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
-        *source_slot.lock() = Some((source, target_pt, source_cr));
+        *source_slot.lock() = Some((source, source.payload_type(), source_cr));
         *target_slot.lock() = Some((target, target_pt, target_cr));
     }
 
@@ -2223,14 +2229,27 @@ impl BridgePeer {
         let sender = sender_builder.build();
         target_transceiver.set_sender(Some(sender.clone()));
 
-        // App/IVR bridge: the callee PC has no real transport, so its RtpSender
-        // never polls the ForwardingTrack. Without a consumer, caller→app RTP
-        // never flows, the caller-side stats stay 0 (→ misleading "caller side
-        // silent" RTP timeout) and RFC 2833 DTMF is never observed. Spawn a
-        // dedicated drain task that polls recv() — this drives stats increment
-        // and observe_dtmf. The drained audio is discarded (the app only needs
-        // DTMF events, delivered via the shared DtmfSink handler, not the audio).
-        if dir.drain_ingress {
+        // App/IVR bridge: the target PC (e.g. WebRTC in-process for the app)
+        // has no real transport, so its RtpSender never polls the
+        // ForwardingTrack. Without a consumer, RFC 2833 DTMF is never observed
+        // and audio never flows.
+        //
+        // The drain task acts as a permanent relay: it polls
+        // ForwardingTrack.recv() (which triggers DTMF detection, transcoding,
+        // stats) and forwards the result to the sender via sender.send().
+        // This works for ALL scenarios:
+        //   - IVR: sender has no transport → audio silently dropped (app
+        //     doesn't need it; only DTMF events matter).
+        //   - After transfer (WebRTC callee): sender's transport connects →
+        //     audio is sent to the remote party.
+        //   - After transfer (SIP callee with replaced RTP PC): same.
+        //
+        // The sender's own send-loop also calls track.recv(), but since the
+        // drain is the sole consumer of the single-consumer track, the
+        // send-loop gets nothing and stays idle. No duplication.
+        if dir.drain_ingress
+            && let Some(drain_sender) = dir.drain_sender.clone()
+        {
             let drain_track = forwarding.clone();
             let drain_cancel = common.cancel_token.clone();
             let drain_bid = bridge_id.to_string();
@@ -2239,22 +2258,34 @@ impl BridgePeer {
                 info!(
                     bridge_id = %drain_bid,
                     direction = %drain_dir,
-                    "App ingress drain started — polling ForwardingTrack.recv() \
-                     to drive caller-side stats and DTMF detection"
+                    "Drain relay started — polling ForwardingTrack.recv() and forwarding to sender"
                 );
                 loop {
                     tokio::select! {
                         biased;
                         _ = drain_cancel.cancelled() => break,
                         res = drain_track.recv() => {
-                            if let Err(e) = res {
-                                debug!(
-                                    bridge_id = %drain_bid,
-                                    direction = %drain_dir,
-                                    error = %e,
-                                    "App ingress drain track ended"
-                                );
-                                break;
+                            match res {
+                                Ok(sample) => {
+                                    if let Err(e) = drain_sender.send(sample) {
+                                        debug!(
+                                            bridge_id = %drain_bid,
+                                            direction = %drain_dir,
+                                            error = %e,
+                                            "Drain relay sender.send failed, stopping"
+                                        );
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        bridge_id = %drain_bid,
+                                        direction = %drain_dir,
+                                        error = %e,
+                                        "Drain relay track ended"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
@@ -2262,7 +2293,7 @@ impl BridgePeer {
                 debug!(
                     bridge_id = %drain_bid,
                     direction = %drain_dir,
-                    "App ingress drain stopped"
+                    "Drain relay stopped"
                 );
             });
             Self::prune_sub_tasks(sub_tasks).await;
@@ -2426,6 +2457,7 @@ impl BridgePeer {
             ),
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
             drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Caller),
+            drain_sender: self.callee.send.lock().as_ref().map(|t| t.inner_sender().clone()),
         };
 
         let callee = DirectionParams {
@@ -2450,6 +2482,7 @@ impl BridgePeer {
             ),
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
             drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Callee),
+            drain_sender: self.caller.send.lock().as_ref().map(|t| t.inner_sender().clone()),
         };
 
         let caller_pc = self.caller.pc();
@@ -2577,9 +2610,22 @@ impl BridgePeer {
         self.callee.replace_pc(pc);
     }
 
+    /// Replace the caller-side PeerConnection. Used when an IVR app bridge
+    /// (originally built with a WebRTC caller PC for the in-process app) needs
+    /// to serve a real SIP/RTP callee after IVR transfer.
+    pub fn replace_caller_pc(&self, pc: PeerConnection) {
+        info!(bridge_id = %self.id, "Replacing caller PeerConnection");
+        self.caller.replace_pc(pc);
+    }
+
     /// Install (or replace) the audio sample track on the callee side.
     pub fn setup_callee_audio(&self, params: RtpCodecParameters) {
         self.setup_audio_side(BridgeSide::Callee, params);
+    }
+
+    /// Install (or replace) the audio sample track on the caller side.
+    pub fn setup_caller_audio(&self, params: RtpCodecParameters) {
+        self.setup_audio_side(BridgeSide::Caller, params);
     }
 
     /// Return the sender codec configured for the caller leg at build time.
@@ -2612,6 +2658,16 @@ impl BridgePeer {
             task.abort();
         }
         self.forwarding_stopped.store(true, Ordering::Release);
+    }
+
+    /// Abort only the drain relay tasks (sub_tasks) without stopping the
+    /// forwarder itself. Used when transitioning from IVR→transfer so the
+    /// target RtpSender send-loop can take over ForwardingTrack.recv()
+    /// without competing with the drain relay.
+    pub fn kill_drain_tasks(&self) {
+        for task in self.sub_tasks.lock().drain(..) {
+            task.abort();
+        }
     }
 
     /// Returns `true` after `stop_forwarding()` has been called and forwarding

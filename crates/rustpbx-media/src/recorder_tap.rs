@@ -23,6 +23,7 @@ use rustrtc::media::frame::AudioFrame;
 use rustrtc::rtp::{RtcpPacket, RtpPacket};
 use rustrtc::transports::rtp::RtpTransport;
 use rustrtc::{RtpReceiverInterceptor, RtpSenderInterceptor};
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{trace, warn};
@@ -196,7 +197,7 @@ impl RecorderTap {
                     dst_addr,
                     payload: Bytes::from(rtp_bytes),
                 };
-                if let Err(e) = backend.record(&self.call_id, item) {
+                if let Err(e) = backend.record(Cow::Borrowed(self.call_id.as_str()), item) {
                     trace!("sipflow record error: {e}");
                 }
             }
@@ -292,7 +293,7 @@ mod tests {
     }
     #[async_trait]
     impl SipFlowBackend for CountingBackend {
-        fn record(&self, _call_id: &str, _item: SipFlowItem) -> anyhow::Result<()> {
+        fn record(&self, _call_id: Cow<'_, str>, _item: SipFlowItem) -> anyhow::Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

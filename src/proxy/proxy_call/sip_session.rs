@@ -801,7 +801,8 @@ impl SipSession {
         // Spawn the drain task locally — no engine involvement needed.
         // The task exits automatically when all senders (in ForwardingTrack) are dropped.
         crate::utils::media_spawn(async move {
-            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+                use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+                use std::borrow::Cow;
             while let Some((leg, sample, received_at_micros)) = rx.recv().await {
                 if let rustrtc::media::frame::MediaSample::Audio(frame) = &*sample
                     && let Some(rtp_packet) = &frame.raw_packet
@@ -823,7 +824,7 @@ impl SipSession {
                         dst_addr: String::new(),
                         payload: bytes::Bytes::from(rtp_bytes),
                     };
-                    let _ = backend.record(&call_id, item);
+                    let _ = backend.record(Cow::Borrowed(call_id.as_str()), item);
                 }
             }
         });
@@ -4387,6 +4388,12 @@ impl SipSession {
 
         match self.prepare_bridge_caller_answer().await {
             Ok(answer) => {
+                debug!(
+                    session_id = %self.context.session_id,
+                    answer_sdp = %answer,
+                    caller_answer_uses_media_bridge = true,
+                    "prepare_app_caller_media_bridge: answer SDP stored"
+                );
                 self.media.answer = Some(answer.clone());
                 self.media.caller_answer_uses_media_bridge = true;
                 self.replace_caller_bridge_output_with_silence().await;
@@ -4698,6 +4705,12 @@ impl SipSession {
             );
             return answer_sdp.to_string();
         }
+        debug!(
+            session_id = %self.context.session_id,
+            context,
+            selected_codecs = ?selected_codecs.iter().map(|c| (c.payload_type, &c.codec, c.clock_rate)).collect::<Vec<_>>(),
+            "SDP answer codec selection before rewrite"
+        );
 
         MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_codecs).unwrap_or_else(|| {
             warn!(
@@ -4759,6 +4772,12 @@ impl SipSession {
             .local_description()
             .map(|desc| desc.to_sdp_string())
             .ok_or_else(|| anyhow!("Bridge caller side has no local answer"))?;
+
+        debug!(
+            session_id = %self.context.session_id,
+            raw_answer_sdp = %answer_sdp,
+            "Bridge caller raw answer SDP before codec rewrite"
+        );
 
         Ok(self.rewrite_answer_to_selected_codecs(
             &answer_sdp,
@@ -6080,7 +6099,10 @@ impl SipSession {
             } else {
                 bridge.callee_pc()
             };
-            let callee_pc = if self.is_callee_webrtc() {
+            let callee_pc = if self.media.callee_uses_caller_pc {
+                // SIP↔SIP: callee leg runs on the (now RTP) caller PC
+                bridge.caller_pc()
+            } else if self.is_callee_webrtc() {
                 if self.media.callee_pc_is_webrtc {
                     bridge.callee_pc()
                 } else {
@@ -6117,6 +6139,12 @@ impl SipSession {
                 session_id = %self.context.session_id,
                 "Starting media bridge forwarding"
             );
+            // Kill the drain tasks so the target RtpSenders can take over
+            // single-consumer ForwardingTrack.recv() without competing with
+            // the drain relay. The forwarder itself stays alive to maintain
+            // PC event listeners and the sink.
+            bridge.kill_drain_tasks();
+            bridge.clear_app_ingress_drain();
             bridge.start_bridge().await;
             self.media.media_bridge_started = true;
         }
@@ -6580,10 +6608,17 @@ impl SipSession {
 
         let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
         let Some(dtmf_codec) = caller_profile.dtmf else {
+            let all_codecs = MediaNegotiator::extract_all_codecs(answer_sdp);
             warn!(
                 session_id = %self.context.session_id,
-                "Cannot start caller ingress monitor: no DTMF codec found in SDP. Available audio codec: {:?}",
-                caller_profile.audio.as_ref().map(|a| &a.codec)
+                audio_codec = ?caller_profile.audio,
+                all_audio_codecs = ?all_codecs.iter().map(|c| (c.payload_type, &c.codec, c.clock_rate)).collect::<Vec<_>>(),
+                "Cannot start caller ingress monitor: no DTMF codec found in SDP"
+            );
+            debug!(
+                session_id = %self.context.session_id,
+                answer_sdp = %answer_sdp,
+                "Answer SDP content when DTMF codec was not found"
             );
             return;
         };
@@ -6660,7 +6695,13 @@ impl SipSession {
                     }
                 }),
             );
-            bridge.start_bridge().await;
+            // Only restart if the forwarder hasn't been started yet (first
+            // call during IVR setup). On subsequent calls (e.g. after
+            // transfer) the forwarder is already running and the shared
+            // dtmf_sink is read on every recv() — no restart needed.
+            if !bridge.forwarding_started() {
+                bridge.start_bridge().await;
+            }
             return;
         }
 
@@ -7280,7 +7321,11 @@ impl SipSession {
         };
 
         let callee_is_webrtc = self.is_callee_webrtc();
-        let pc = if callee_is_webrtc && !self.media.callee_pc_is_webrtc {
+        let pc = if self.media.callee_uses_caller_pc {
+            // SIP↔SIP: the bridge's caller PC was replaced with RTP and
+            // serves the callee leg. Apply the callee's answer SDP to it.
+            bridge.caller_pc()
+        } else if callee_is_webrtc && !self.media.callee_pc_is_webrtc {
             bridge.caller_pc()
         } else {
             bridge.callee_pc()
@@ -7418,15 +7463,16 @@ impl SipSession {
             return Self::bridge_callee_offer_sdp(bridge, callee_is_webrtc, false).await;
         }
 
-        // Bug 4 fix: Reuse the app media bridge for same-transport (RTP→RTP)
-        // callee legs. Previously this fell through to the
-        // "anchored no transport bridge" path (line 6953) which created a
-        // separate callee RtpTrack that the bridge forwarder could not reach.
-        // By reusing the bridge's callee PC, the bridge forwarder naturally
-        // connects caller ↔ callee without needing ForwardingTrack wiring.
+        // Bug 4 fix: Reuse the app media bridge for same-transport (RTP→RTP
+        // or WebRTC→sip) callee legs.
         //
-        // This does NOT match WebRTC+WebRTC (handled by Check 1 above) or
-        // transport-bridge scenarios (handled by Check 2/3).
+        // For SIP↔SIP: the bridge's caller PC is WebRTC (in-process for IVR).
+        // We replace it with a fresh RTP PC so the SIP callee gets its own
+        // RTP endpoint — each leg owns one RTP PC, the bridge forwarder
+        // bridges between them correctly.
+        //
+        // For WebRTC+SIP: the bridge's caller PC (WebRTC) already serves the
+        // SIP callee. The callee PC (RTP) serves the SIP caller.
         if !need_transport_bridge
             && !(caller_is_webrtc && callee_is_webrtc)
             && self.media.caller_answer_uses_media_bridge
@@ -7434,6 +7480,52 @@ impl SipSession {
         {
             self.media.callee_offer_uses_media_bridge = true;
             let bridge = self.media.media_bridge.as_ref().unwrap();
+
+            // SIP↔SIP: replace WebRTC caller PC with RTP for the callee leg.
+            if !caller_is_webrtc && !callee_is_webrtc {
+                let rtp_config = rustrtc::RtcConfiguration {
+                    transport_mode: rustrtc::TransportMode::Rtp,
+                    external_ip: self.context.dialplan.media.external_ip.clone(),
+                    bind_ip: self.context.dialplan.media.bind_ip.clone(),
+                    rtp_start_port: self.context.dialplan.media.rtp_start_port,
+                    rtp_end_port: self.context.dialplan.media.rtp_end_port,
+                    enable_latching: self.context.dialplan.media.enable_latching,
+                    probation_max_packets: self.context.dialplan.media.probation_max_packets,
+                    cname: Some(self.server.rtc_cname.clone()),
+                    buffer_drop_strategy: rustrtc::config::BufferDropStrategy::DropOldest,
+                    rtp_buffer_capacity: 500,
+                    runtime_handle: crate::utils::media_runtime_handle(),
+                    ..Default::default()
+                };
+                let rtp_pc = rustrtc::PeerConnection::new(rtp_config);
+                bridge.replace_caller_pc(rtp_pc);
+                self.media.callee_uses_caller_pc = true;
+
+                if let Some(codec_params) = bridge.caller_sender_codec() {
+                    bridge.setup_caller_audio(codec_params);
+                } else {
+                    warn!(session_id = %self.id, "No caller sender codec on bridge; falling back to PCMU");
+                    bridge.setup_caller_audio(rustrtc::RtpCodecParameters {
+                        payload_type: 0,
+                        clock_rate: 8000,
+                        channels: 1,
+                    });
+                }
+
+                info!(
+                    session_id = %self.id,
+                    "Replaced app bridge caller PC (WebRTC → RTP) for SIP callee leg"
+                );
+
+                let pc = bridge.caller_pc();
+                let offer = pc.create_offer().await?;
+                pc.set_local_description(offer)?;
+                return pc
+                    .local_description()
+                    .map(|desc| desc.to_sdp_string())
+                    .ok_or_else(|| anyhow!("Bridge caller PC has no local offer after RTP replacement"));
+            }
+
             return Self::bridge_callee_offer_sdp(bridge, callee_is_webrtc, false).await;
         }
 
@@ -7898,6 +7990,11 @@ impl SipSession {
                 debug!(
                     session_id = %self.context.session_id,
                     "Generated PBX answer SDP for caller"
+                );
+                debug!(
+                    session_id = %self.context.session_id,
+                    answer_sdp = %answer_sdp,
+                    "Caller answer SDP content (ensure_caller_answer_sdp)"
                 );
                 if let Some(peer) = self.caller_peer() {
                     peer.update_track(Box::new(track), None).await;
