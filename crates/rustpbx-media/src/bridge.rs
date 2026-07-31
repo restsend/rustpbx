@@ -2199,6 +2199,14 @@ impl BridgePeer {
         // Gate (caller gate prevents WebRTC→RTP forwarding before 200 OK).
         forwarding.set_gate(dir.gate.clone());
 
+        // A WebRTC source leg's RTP header extensions (abs-send-time, sdes:mid,
+        // transport-cc, audio-level) are meaningless to a plain RTP/SRTP
+        // endpoint and can cause it to reject or misparse the packets (one-way
+        // audio). Strip them unless the target leg is also WebRTC.
+        forwarding.set_strip_header_extensions(
+            dir.target_pc.config().transport_mode != TransportMode::WebRtc,
+        );
+
         // DTMF: share the bridge's DtmfSink Arc so handler installed AFTER
         // ForwardingTrack creation (via set_dtmf_sink) is visible on every recv().
         forwarding.set_shared_dtmf_sink(Some(Arc::clone(&common.dtmf_sink)));

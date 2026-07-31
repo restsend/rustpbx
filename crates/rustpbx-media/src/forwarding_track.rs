@@ -92,6 +92,12 @@ pub struct ForwardingTrack {
     /// state) so we can confirm the target RtpSender is actually polling
     /// recv() and see why forwarding/DTMF may be stalled.
     first_recv_logged: std::sync::atomic::AtomicBool,
+    /// When the target leg is a plain RTP/SRTP endpoint (not WebRTC), the
+    /// source leg's RTP header extensions (abs-send-time, sdes:mid,
+    /// transport-cc, audio-level) are meaningless and can cause the peer to
+    /// reject or misparse the packets (one-way audio). Strip them from the
+    /// egress sample before handing it to the target RtpSender.
+    strip_header_extensions: bool,
 
     // ── DTMF detection (optional) ────────────────────────────────────
     /// Shared DTMF sink — read on every recv() so the handler can be
@@ -175,6 +181,7 @@ impl ForwardingTrack {
             gate: None,
             gate_drop_logged: std::sync::atomic::AtomicBool::new(false),
             first_recv_logged: std::sync::atomic::AtomicBool::new(false),
+            strip_header_extensions: false,
             shared_dtmf_sink: None,
             dtmf_detector: Mutex::new(DtmfDetector::default()),
         }
@@ -207,6 +214,25 @@ impl ForwardingTrack {
     /// Install a gate (e.g. caller gate that blocks forwarding until 200 OK).
     pub fn set_gate(&mut self, gate: Option<Arc<std::sync::atomic::AtomicBool>>) {
         self.gate = gate;
+    }
+
+    /// Strip RTP header extensions from the egress sample. Enable when the
+    /// target leg is a plain RTP/SRTP endpoint (non-WebRTC), which never
+    /// negotiates the source leg's WebRTC header extensions.
+    pub fn set_strip_header_extensions(&mut self, strip: bool) {
+        self.strip_header_extensions = strip;
+    }
+
+    /// Strip the source leg's RTP header extensions from the egress sample
+    /// when the target is a non-WebRTC (RTP/SRTP) endpoint.
+    #[inline]
+    fn sanitize_egress(&self, mut sample: MediaSample) -> MediaSample {
+        if self.strip_header_extensions
+            && let MediaSample::Audio(frame) = &mut sample
+        {
+            frame.header_extension = None;
+        }
+        sample
     }
 
     /// Install a shared DTMF sink — read on every recv() so the handler
@@ -638,21 +664,21 @@ impl MediaStreamTrack for ForwardingTrack {
                 if let Some(result) = self.try_map_dtmf(frame, &dtmf_mapping, matched_dtmf) {
                     // Capture the post-remap egress (caller's output)
                     self.tee_egress_to_capture_channels(&result);
-                    return Ok(result);
+                    return Ok(self.sanitize_egress(result));
                 }
 
                 if let Some(result) = self.try_transcode_audio(frame, &audio_mapping, matched_audio)
                 {
                     // Capture the post-transcode egress (caller's output)
                     self.tee_egress_to_capture_channels(&result);
-                    return Ok(result);
+                    return Ok(self.sanitize_egress(result));
                 }
             }
 
             // No remap/transcode needed: the ingress is returned as the egress.
             // Capture this as the egress for callee→caller direction.
             self.tee_egress_to_capture_channels(&sample);
-            return Ok(sample);
+            return Ok(self.sanitize_egress(sample));
         }
     }
 
@@ -2359,6 +2385,54 @@ mod tests {
         assert_eq!(leg, Leg::A);
         match &*sample {
             MediaSample::Audio(f) => assert_eq!(f.payload_type, Some(0)),
+            other => panic!("Expected Audio, got {:?}", other),
+        }
+    }
+
+    /// RTP-header-extension stripping: enabled (RTP/SRTP target) clears the
+    /// extension, disabled (WebRTC target) preserves it.
+    #[tokio::test]
+    async fn strip_header_extensions_only_for_rtp_target() {
+        let ext = rustrtc::rtp::RtpHeaderExtension::new(0xBEDE, vec![0x21, 0xAA, 0xBB]);
+        let with_ext = |sample: &mut MediaSample| {
+            if let MediaSample::Audio(frame) = sample {
+                frame.header_extension = Some(ext.clone());
+            }
+        };
+
+        // Disabled (WebRTC target): extension preserved.
+        let mut sample = audio_sample_seq(0, 1, 100, 160);
+        with_ext(&mut sample);
+        let mut ft = ForwardingTrack::new(
+            "test-webrtc".to_string(),
+            OneShotTrack::new(sample),
+            None,
+            None,
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+        ft.set_strip_header_extensions(false);
+        match ft.recv().await.unwrap() {
+            MediaSample::Audio(frame) => assert!(frame.header_extension.is_some()),
+            other => panic!("Expected Audio, got {:?}", other),
+        }
+
+        // Enabled (RTP/SRTP target): extension removed.
+        let mut sample = audio_sample_seq(0, 1, 100, 160);
+        with_ext(&mut sample);
+        let mut ft = ForwardingTrack::new(
+            "test-rtp".to_string(),
+            OneShotTrack::new(sample),
+            None,
+            None,
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+        ft.set_strip_header_extensions(true);
+        match ft.recv().await.unwrap() {
+            MediaSample::Audio(frame) => assert!(frame.header_extension.is_none()),
             other => panic!("Expected Audio, got {:?}", other),
         }
     }
