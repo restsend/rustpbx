@@ -10771,9 +10771,33 @@ impl SipSession {
             "Adding new SIP leg to session"
         );
 
-        // Parse target as SIP URI
         let uri = rsipstack::sip::Uri::try_from(target.as_str())
             .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))?;
+        let mut location = crate::call::Location {
+            aor: uri.clone(),
+            ..Default::default()
+        };
+        match self.server.locator.lookup(&uri).await {
+            Ok(registered_locations) => {
+                if let Some(registered_location) = registered_locations.into_iter().next() {
+                    info!(
+                        target = %uri,
+                        registered_contact = %registered_location.aor,
+                        webrtc = registered_location.supports_webrtc,
+                        transport = ?registered_location.transport,
+                        "Resolved dynamic leg target through locator"
+                    );
+                    location = registered_location;
+                }
+            }
+            Err(error) => {
+                warn!(
+                    target = %uri,
+                    %error,
+                    "Failed to resolve dynamic leg target through locator; using bare SIP target"
+                );
+            }
+        }
 
         // Create leg
         let leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
@@ -10781,7 +10805,7 @@ impl SipSession {
         self.update_leg_state(&new_leg_id, LegState::Initializing);
 
         // Create peer and initiate INVITE in background
-        if let Err(e) = self.initiate_sip_leg(&new_leg_id, uri).await {
+        if let Err(e) = self.initiate_sip_leg(&new_leg_id, location).await {
             warn!(
                 session_id = %self.id,
                 error = %e,
@@ -10832,6 +10856,7 @@ impl SipSession {
     async fn create_leg_peer(
         &self,
         leg_id: &LegId,
+        mode: rustrtc::TransportMode,
     ) -> Result<(Arc<dyn MediaPeer>, Box<dyn crate::media::Track>, String)> {
         let track_id = format!("leg-{}-{}", self.id.0, leg_id);
 
@@ -10844,16 +10869,26 @@ impl SipSession {
         // Create peer (using VoiceEnginePeer for now - can be extended for WebRTC)
         let peer: Arc<dyn MediaPeer> = Arc::new(VoiceEnginePeer::new(Arc::new(media_stream)));
 
-        // Create RTP track
-        let mut track_builder = crate::media::RtpTrackBuilder::new(track_id.clone())
-            .with_cancel_token(self.cancel_token.child_token())
-            .with_cname(self.server.rtc_cname.clone());
-
-        if let Some(ref external_ip) = self.context.dialplan.media.external_ip {
-            track_builder = track_builder.with_external_ip(external_ip.clone());
+        let mut track_builder = self.build_rtp_track_builder(
+            track_id.clone(),
+            self.cancel_token.child_token(),
+            mode.clone(),
+        );
+        if let Some(ref caller_offer) = self.media.caller_offer {
+            let allow_codecs = self.resolve_effective_codecs();
+            let mut codecs =
+                MediaNegotiator::build_callee_codec_offer_with_allow(caller_offer, &allow_codecs);
+            if mode == rustrtc::TransportMode::WebRtc {
+                codecs = MediaNegotiator::filter_webrtc_offer_codecs(caller_offer, codecs);
+            }
+            if !codecs.is_empty() {
+                track_builder = track_builder.with_codec_info(codecs);
+            }
         }
-        if let Some(ref bind_ip) = self.context.dialplan.media.bind_ip {
-            track_builder = track_builder.with_bind_ip(bind_ip.clone());
+        if mode == rustrtc::TransportMode::WebRtc
+            && let Some(ref ice_servers) = self.context.dialplan.media.ice_servers
+        {
+            track_builder = track_builder.with_ice_servers(ice_servers.clone());
         }
 
         let track = track_builder.build();
@@ -10880,17 +10915,31 @@ impl SipSession {
     async fn initiate_sip_leg(
         &mut self,
         leg_id: &LegId,
-        callee_uri: rsipstack::sip::Uri,
+        location: crate::call::Location,
     ) -> Result<()> {
-        // Create peer for this leg
-        let (peer, _track, sdp_offer) = self.create_leg_peer(leg_id).await?;
+        let callee_is_webrtc = Self::callee_supports_webrtc(&location);
+        let transport_mode = self.callee_transport_mode(callee_is_webrtc);
+        let (peer, _track, sdp_offer) = self
+            .create_leg_peer(leg_id, transport_mode.clone())
+            .await?;
         self.legs.set_peer(leg_id.clone(), peer.clone());
+        self.legs.set_transport(leg_id.clone(), transport_mode);
 
-        // Dynamic legs are plain RTP (SIP) by default
-        self.legs
-            .set_transport(leg_id.clone(), rustrtc::TransportMode::Rtp);
+        let local_addrs = self.server.endpoint.get_addrs();
+        let route_via_home_proxy = Self::route_via_home_proxy(
+            &location,
+            &local_addrs,
+            !self.server.cluster_peer_ips.is_empty(),
+        );
+        let callee_uri = Self::resolve_outbound_callee_uri(&location, route_via_home_proxy);
 
-        info!(%leg_id, %callee_uri, sdp_len = %sdp_offer.len(), "Initiating SIP leg");
+        info!(
+            %leg_id,
+            %callee_uri,
+            callee_is_webrtc,
+            sdp_len = %sdp_offer.len(),
+            "Initiating SIP leg"
+        );
 
         // Build INVITE option
         let caller = self
@@ -10913,8 +10962,12 @@ impl SipSession {
             contact: contact.clone(),
             content_type: Some("application/sdp".to_string()),
             offer: Some(sdp_offer.into_bytes()),
-            destination: None,
-            credential: None,
+            destination: if route_via_home_proxy {
+                None
+            } else {
+                location.destination.clone()
+            },
+            credential: location.credential.clone(),
             headers: None,
             call_id: Some(format!("{}-{}", self.id.0, leg_id)),
             ..Default::default()
