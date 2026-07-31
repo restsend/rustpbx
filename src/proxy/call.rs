@@ -1678,7 +1678,14 @@ impl CallModule {
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
-                debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                // Peers retransmit BYE if we already tore the dialog down. Answer
+                // with 200 so endpoints clear; other methods stay silent at debug.
+                if matches!(tx.original.method, rsipstack::sip::Method::Bye) {
+                    info!(%dialog_id, "BYE with no matching dialog; replying 200 so peer clears");
+                    let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;
+                } else {
+                    debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                }
                 return Ok(());
             }
         };
