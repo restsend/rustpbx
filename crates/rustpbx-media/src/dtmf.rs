@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
-use crate::bridge::BridgeEndpoint;
-
-/// Callback invoked when a DTMF digit is detected from a bridge endpoint.
+/// Callback invoked when a DTMF digit is detected from a leg.
 pub type DtmfHandler = Arc<dyn Fn(char) + Send + Sync + 'static>;
 
-/// Per-endpoint DTMF sink — which payload types carry telephone-events
+/// Per-leg DTMF sink — which payload types carry telephone-events
 /// and where to forward detected digits.
 #[derive(Clone)]
 pub struct DtmfSink {
-    pub endpoint: BridgeEndpoint,
     pub payload_types: Vec<u8>,
     pub handler: DtmfHandler,
 }

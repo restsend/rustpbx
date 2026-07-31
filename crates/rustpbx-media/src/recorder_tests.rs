@@ -1354,7 +1354,6 @@ mod recorder_advanced_tests {
     }
 
     #[test]
-    #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
     fn test_telephone_event_recorded_as_dtmf_audio_digit5() {
         let temp_path = std::env::temp_dir().join("test_te_renders_dtmf_5.wav");
         let path_str = temp_path.to_str().unwrap();

@@ -1,25 +1,7 @@
 use crate::media::FileTrack;
+use crate::media::media_bridge::MediaBridge;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-
-pub(crate) struct CallerIngressMonitor {
-    pub cancel_token: CancellationToken,
-    pub task: JoinHandle<()>,
-}
-
-/// Lightweight RTP-inactivity watchdog for anchored media that does NOT flow
-/// through a [`crate::media::bridge::BridgePeer`] (i.e. the rewrite-bridge
-/// fast-path relay `AnchoredMediaMode::RelayOnly` and the ForwardingTrack slow
-/// path). The bridge has its own in-line rtp-timeout detection, so this monitor
-/// is only armed when no app/transport `media_bridge` is active.
-pub(crate) struct AnchoredRtpTimeoutMonitor {
-    pub cancel_token: CancellationToken,
-    pub task: JoinHandle<()>,
-}
 
 #[derive(Debug, Clone)]
 pub enum RecordingPhase {
@@ -89,90 +71,14 @@ impl RecordingPhase {
 pub struct MediaState {
     pub caller_offer: Option<String>,
     pub callee_offer: Option<String>,
-    /// When Some, records what transport type the cached callee_offer was
-    /// generated for, so prepare_callee_media_offer knows whether to reuse
-    /// the cache or regenerate when the next fork target uses a different
-    /// transport (Bug 3 fix: parallel-fork port mismatch).
     pub callee_offer_cached_webrtc: Option<bool>,
     pub answer: Option<String>,
     pub early_media_sent: bool,
     pub callee_answer_sdp: Option<String>,
     pub recording_state: RecordingPhase,
     pub playback_tracks: HashMap<String, FileTrack>,
-    pub caller_ingress_monitor: Option<CallerIngressMonitor>,
-    /// RTP-inactivity watchdog for anchored media that bypasses the BridgePeer
-    /// (rewrite-bridge fast-path relay and ForwardingTrack). `None` when the
-    /// call is not anchored, or when media flows through a `media_bridge`
-    /// (which performs its own in-line rtp-timeout detection).
-    pub anchored_rtp_timeout_monitor: Option<AnchoredRtpTimeoutMonitor>,
-    pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
-    pub caller_answer_uses_media_bridge: bool,
-    pub callee_offer_uses_media_bridge: bool,
-    /// True when the bridge's callee PC was replaced with a WebRTC PC because
-    /// both caller and callee are WebRTC endpoints and an app media_bridge is
-    /// being reused. Used by `start_media_bridge_forwarding`,
-    /// `apply_bridge_callee_answer`, `bridge_callee_offer_sdp` to pick the
-    /// correct PeerConnection (bridge.callee_pc() instead of bridge.caller_pc()).
-    pub callee_pc_is_webrtc: bool,
-    pub media_bridge_started: bool,
-    pub bridge_playback_track_ids: HashMap<String, String>,
-    pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
-    /// Receiver end of the rtp-timeout channel, created at session construction
-    /// and consumed by `SipSession::process`'s select arm. Stored on MediaState
-    /// so the channel pair exists before any media path (which may race ahead
-    /// of `process`) tries to clone the sender.
-    pub rtp_timeout_rx: Option<mpsc::Receiver<String>>,
-    /// How anchored media is currently forwarded between the two legs.
-    ///
-    /// `RelayOnly` = the RTP fast-path (transport-level rewrite bridge) is
-    /// active, so no ForwardingTrack exists. `ForwardingTrack` = the per-leg
-    /// depacketize → (transcode/record) → re-packetize chain is wired. Some
-    /// operations (VoipBridge, and in future Play) need to read/inject media
-    /// and call [`SipSession::ensure_media_anchored`] to downgrade from
-    /// `RelayOnly` to `ForwardingTrack` on demand, without a re-INVITE.
-    pub anchored_mode: AnchoredMediaMode,
-}
-
-/// Which path anchored media takes between the caller and callee legs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AnchoredMediaMode {
-    /// RTP fast-path: transport-level rewrite bridge, ForwardingTrack bypassed.
-    /// This is the default while no forwarding has been set up yet, and the
-    /// state held while the fast-path relay is active.
-    #[default]
-    RelayOnly,
-    /// Slow path: ForwardingTrack chain wired for both directions.
-    ForwardingTrack,
-}
-
-impl AnchoredMediaMode {
-    /// True when media already flows through ForwardingTracks (or an app
-    /// media_bridge) and therefore does not need a fast-path downgrade.
-    pub fn is_anchored_slow_path(self) -> bool {
-        matches!(self, AnchoredMediaMode::ForwardingTrack)
-    }
-}
-
-/// Decide whether [`ensure_media_anchored`](super::sip_session::SipSession::ensure_media_anchored)
-/// would attempt a fast-path → ForwardingTrack downgrade, given the current
-/// [`AnchoredMediaMode`] and whether an app `media_bridge` is active.
-///
-/// Extracted as a free function so the full truth table is unit-testable
-/// without constructing a `SipSession`.
-pub(crate) fn needs_fast_path_downgrade(
-    media_bridge_active: bool,
-    mode: AnchoredMediaMode,
-) -> bool {
-    // App media_bridge path is already anchored — never downgrade.
-    if media_bridge_active {
-        return false;
-    }
-    // Already on the slow path — nothing to do.
-    if mode.is_anchored_slow_path() {
-        return false;
-    }
-    // RelayOnly with no app bridge → downgrade is required.
-    true
+    pub bridge: Option<MediaBridge>,
+    pub playback_track_ids: HashMap<String, String>,
 }
 
 impl MediaState {
@@ -186,17 +92,8 @@ impl MediaState {
             callee_answer_sdp: None,
             recording_state: RecordingPhase::Idle,
             playback_tracks: HashMap::new(),
-            caller_ingress_monitor: None,
-            anchored_rtp_timeout_monitor: None,
-            media_bridge: None,
-            caller_answer_uses_media_bridge: false,
-            callee_offer_uses_media_bridge: false,
-            callee_pc_is_webrtc: false,
-            media_bridge_started: false,
-            bridge_playback_track_ids: HashMap::new(),
-            rtp_timeout_tx: None,
-            rtp_timeout_rx: None,
-            anchored_mode: AnchoredMediaMode::default(),
+            bridge: None,
+            playback_track_ids: HashMap::new(),
         }
     }
 }
@@ -271,98 +168,5 @@ mod tests {
         };
         let elapsed = state.elapsed().unwrap();
         assert!(elapsed < Duration::from_millis(100));
-    }
-
-    /// Regression for Fix A: `bridge_playback_track_ids` must track caller and
-    /// callee track ids independently. Previously this was a single
-    /// `Option<String>` that only ever held the caller's id, so stopping the
-    /// callee track never matched and the callee endpoint was left muted.
-    #[test]
-    fn test_bridge_playback_track_ids_tracks_both_legs_independently() {
-        let mut state = MediaState::new(None);
-        assert!(state.bridge_playback_track_ids.is_empty());
-
-        // Simulate `play_to_leg!("both", ...)` writing one entry per leg.
-        state
-            .bridge_playback_track_ids
-            .insert("caller".to_string(), "pb-base-caller".to_string());
-        state
-            .bridge_playback_track_ids
-            .insert("callee".to_string(), "pb-base-callee".to_string());
-
-        // Each leg resolves to its own track id — the lookup the stop path uses.
-        assert_eq!(
-            state
-                .bridge_playback_track_ids
-                .get("caller")
-                .map(String::as_str),
-            Some("pb-base-caller"),
-        );
-        assert_eq!(
-            state
-                .bridge_playback_track_ids
-                .get("callee")
-                .map(String::as_str),
-            Some("pb-base-callee"),
-        );
-
-        // Stopping the callee leg removes only the callee entry; the caller
-        // entry is unaffected (with the old single-field, stopping callee was
-        // a no-op and the field still held the caller id).
-        state.bridge_playback_track_ids.remove("callee");
-        assert!(state.bridge_playback_track_ids.get("callee").is_none());
-        assert_eq!(
-            state
-                .bridge_playback_track_ids
-                .get("caller")
-                .map(String::as_str),
-            Some("pb-base-caller"),
-        );
-
-        // Cleanup clears everything.
-        state.bridge_playback_track_ids.clear();
-        assert!(state.bridge_playback_track_ids.is_empty());
-    }
-
-    // ── AnchoredMediaMode + fast-path downgrade logic ───────────────────────
-
-    #[test]
-    fn test_anchored_mode_defaults_to_relay_only() {
-        // Before any forwarding is set up the mode is RelayOnly (the fast-path
-        // is the implicit default for plain RTP relay).
-        assert_eq!(AnchoredMediaMode::default(), AnchoredMediaMode::RelayOnly);
-        // And a freshly-built MediaState starts in that mode.
-        assert_eq!(
-            MediaState::new(None).anchored_mode,
-            AnchoredMediaMode::RelayOnly
-        );
-    }
-
-    #[test]
-    fn test_only_forwarding_track_counts_as_slow_path() {
-        assert!(!AnchoredMediaMode::RelayOnly.is_anchored_slow_path());
-        assert!(AnchoredMediaMode::ForwardingTrack.is_anchored_slow_path());
-    }
-
-    /// Full truth table for the downgrade decision — the one piece of control
-    /// logic that guards VoipBridge (and future Play) from touching media that
-    /// isn't anchored the way it needs.
-    #[test]
-    fn test_needs_fast_path_downgrade_truth_table() {
-        use AnchoredMediaMode::*;
-        // (media_bridge_active, mode) → expected
-        let cases: [(bool, AnchoredMediaMode, bool); 4] = [
-            (false, RelayOnly, true),        // fast-path active → MUST downgrade
-            (false, ForwardingTrack, false), // already slow → idempotent no-op
-            (true, RelayOnly, false),        // app bridge anchors media → skip
-            (true, ForwardingTrack, false),  // app bridge + slow → skip
-        ];
-        for (bridge, mode, expected) in cases {
-            assert_eq!(
-                needs_fast_path_downgrade(bridge, mode),
-                expected,
-                "bridge={bridge}, mode={mode:?}"
-            );
-        }
     }
 }

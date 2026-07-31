@@ -97,19 +97,17 @@ async fn test_predecode_loop_reset() {
 }
 
 #[tokio::test]
-async fn test_predecode_skip_large_file() {
+async fn test_predecode_all_files_loaded_into_memory() {
+    // After the async-IO rewrite, every file is read via tokio::fs and
+    // fully decoded into pcm_cache at construction (no streaming path).
     let samples = vec![0i16; 4_000_000];
     let tmp = write_wav(8000, &samples);
     let path = tmp.path().to_string_lossy().to_string();
 
     let src = FileAudioSource::new(path, false).await.unwrap();
     assert!(
-        src.pcm_cache.is_empty(),
-        "file > 5 MB should skip pre-decode"
-    );
-    assert!(
-        src.wav_reader.is_some(),
-        "streaming reader should be present"
+        !src.pcm_cache.is_empty(),
+        "all files are pre-decoded into pcm_cache (async read + decode)"
     );
 }
 

@@ -1,7 +1,21 @@
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
-use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription};
+use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription, TransportMode};
 use std::collections::{HashMap, HashSet};
+
+/// Detect the transport mode implied by an SDP body.
+///
+/// A DTLS fingerprint (`a=fingerprint`) or an explicit `a=setup:` attribute
+/// indicates WebRTC (DTLS/SRTP over ICE); otherwise the session is treated as
+/// plain RTP. Used by [`crate::leg::Leg`] construction to pick the right
+/// `RtcConfiguration.transport_mode` before the PeerConnection is created.
+pub fn detect_transport(sdp: &str) -> TransportMode {
+    if sdp.contains("a=fingerprint") || sdp.contains("a=setup:") {
+        TransportMode::WebRtc
+    } else {
+        TransportMode::Rtp
+    }
+}
 
 /// Parsed RTP codec information from SDP, including payload-specific parameters.
 #[derive(Debug, Clone)]

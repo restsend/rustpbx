@@ -2,22 +2,22 @@
 //!
 //! This crate provides all real-time media operations (bridging, playback,
 //! recording, DTMF, MCU mixing, transcoding) with zero SIP dependencies.
-//! Inputs and outputs are expressed as SDP strings, [`MediaCommand`]s, and
-//! [`MediaEvent`]s.
 
 pub mod audio_source;
-pub mod bridge;
+pub mod app_ingress;
 pub mod conference_mixer;
 pub mod dtmf;
-pub mod engine;
+pub mod egress;
 pub mod file_track;
-pub mod forwarding_track;
+pub mod ingress_tap;
+pub mod leg;
 pub mod leg_id;
+pub mod media_bridge;
+pub mod media_recorder;
 pub mod media_stream;
 pub mod mixer;
 pub mod negotiate;
 pub mod recorder;
-pub mod recorder_tap;
 pub mod rtc_track;
 pub mod rtp_track_builder;
 pub mod telephone_event;
@@ -29,10 +29,6 @@ pub mod wav_writer;
 
 #[cfg(test)]
 mod file_track_tests;
-#[cfg(test)]
-mod info_recording_tests;
-#[cfg(test)]
-mod media_engine_tests;
 #[cfg(test)]
 mod media_track_tests;
 #[cfg(test)]
@@ -46,7 +42,6 @@ mod unified_pc_tests;
 pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
-pub(crate) use file_track::FileTrackPlaybackSource;
 #[cfg(test)]
 pub(crate) use file_track::audio_frame_timing;
 pub use file_track::{FileTrack, PlaybackEndCallback, PlaybackEndReason};
@@ -58,7 +53,7 @@ pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;
 pub use track::Track;
-pub use transcoder::Transcoder; // Tests in `file_track_tests` need this via `use super::*`.
+pub use transcoder::Transcoder;
 
 // ── Shared utility types ────────────────────────────────────────────
 

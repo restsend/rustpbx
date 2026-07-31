@@ -114,8 +114,7 @@ pub struct SipServerInner {
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
     pub rtc_cname: String,
-    /// In-process media engine: handles bridge/playback/recording/MCU for all sessions.
-    pub media_engine: crate::media::engine::MediaEngine,
+
 }
 
 fn random_hex() -> String {
@@ -926,16 +925,6 @@ impl SipServerBuilder {
                 .clone()
                 .unwrap_or_else(random_hex),
             rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
-            media_engine: {
-                use crate::media::engine::{MediaEngine, MediaEngineConfig};
-                let (engine, handle) = MediaEngine::new(MediaEngineConfig {
-                    command_channel_capacity: self.config.media_cmd_channel_capacity,
-                    event_channel_capacity: self.config.media_event_channel_capacity,
-                    ..MediaEngineConfig::default()
-                });
-                let _task = engine.spawn(handle);
-                engine
-            },
         });
 
         let inner_weak = Arc::downgrade(&inner);

@@ -23,7 +23,6 @@ use rustpbx::{
     call::app::agent_registry::AgentRegistry,
     callrecord::CallRecordSender,
     config::ProxyConfig,
-    media::engine::MediaEngine,
     proxy::{
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthModule,
@@ -75,8 +74,7 @@ pub struct TestPbx {
     pub registry: Arc<ActiveProxyCallRegistry>,
     /// Cancellation token — cancel to shut everything down.
     pub cancel_token: CancellationToken,
-    /// In-process media engine — can send InjectAudio / StopPlayback etc.
-    pub media_engine: MediaEngine,
+
 }
 
 impl TestPbx {
@@ -215,8 +213,6 @@ impl TestPbx {
 
         let rwi_url = format!("ws://127.0.0.1:{}/rwi/v1", http_port);
 
-        let media_engine = sip_server_ref.media_engine.clone();
-
         Self {
             rwi_url,
             sip_port,
@@ -224,7 +220,6 @@ impl TestPbx {
             gateway,
             registry,
             cancel_token,
-            media_engine,
         }
     }
 

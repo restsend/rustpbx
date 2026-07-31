@@ -63,43 +63,13 @@ impl SipSession {
             info!(%leg_id, "Added participant to conference");
 
             if let Some(peer) = peer {
-                let fallback_pc = if leg_id.0 == "caller" {
-                    self.media
-                        .media_bridge
-                        .as_ref()
-                        .map(|b| b.caller_pc().clone())
-                } else if leg_id.0 == "callee" {
-                    self.media
-                        .media_bridge
-                        .as_ref()
-                        .map(|b| b.callee_pc().clone())
-                } else {
-                    None
-                };
-
-                let fallback_sender = if leg_id.0 == "caller" {
-                    if let Some(b) = self.media.media_bridge.as_ref() {
-                        b.get_caller_sender().await
-                    } else {
-                        None
-                    }
-                } else if leg_id.0 == "callee" {
-                    if let Some(b) = self.media.media_bridge.as_ref() {
-                        b.get_callee_sender().await
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
                 if let Err(e) = self
                     .start_conference_media_bridge_for_peer(
                         &conf_id_str,
                         &leg_id,
                         &peer,
-                        fallback_pc,
-                        fallback_sender,
+                        None,
+                        None,
                     )
                     .await
                 {
@@ -208,7 +178,7 @@ impl SipSession {
 
         let (audio_sender, track, _feedback_rx) = sample_track(
             MediaKind::Audio,
-            crate::media::bridge::BRIDGE_AUDIO_RING_CAPACITY_DEFAULT,
+            100,
         );
 
         let mut pc = None;

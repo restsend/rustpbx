@@ -3,12 +3,10 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
-use audio_codec::create_encoder;
 use rustrtc::{
     Attribute, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
     SessionDescription, TransceiverDirection, TransportMode,
     config::BufferDropStrategy,
-    media::{AudioFrame, MediaSample},
 };
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
@@ -275,67 +273,6 @@ impl FileTrack {
         self.start_playback_on(None).await
     }
 
-    pub(crate) async fn create_playback_source(&self) -> Result<FileTrackPlaybackSource> {
-        let file_path = self.file_path.as_deref();
-
-        if let Some(file_path) = file_path {
-            let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
-            if !is_remote && !std::path::Path::new(file_path).exists() {
-                return Err(anyhow!("Audio file not found: {}", file_path));
-            }
-        }
-
-        let selected = self.codec_info.clone().unwrap_or_else(|| {
-            let codec = self
-                .codec_preference
-                .first()
-                .copied()
-                .unwrap_or(CodecType::PCMU);
-            negotiate::MediaNegotiator::codec_info_for_type(codec)
-        });
-        let frame_timing = audio_frame_timing(selected.codec, selected.clock_rate);
-        let audio_source_manager = {
-            if let Some(ref mgr) = self.audio_source_manager {
-                mgr.clone()
-            } else {
-                let mgr = Arc::new(audio_source::AudioSourceManager::new(
-                    frame_timing.pcm_sample_rate,
-                ));
-                if let Some(file_path) = file_path {
-                    mgr.switch_to_file(file_path.to_string(), self.loop_playback)
-                        .await?;
-                } else {
-                    mgr.switch_to_silence();
-                }
-                mgr
-            }
-        };
-
-        debug!(
-            track_id = %self.track_id,
-            session_id = ?self.session_id,
-            file = %file_path.unwrap_or("<silence>"),
-            loop_playback = self.loop_playback,
-            codec = ?selected.codec,
-            samples_per_frame = frame_timing.pcm_samples_per_frame,
-            pcm_sample_rate = frame_timing.pcm_sample_rate,
-            rtp_ticks_per_frame = frame_timing.rtp_ticks_per_frame,
-            "FileTrack playback source created"
-        );
-
-        Ok(FileTrackPlaybackSource {
-            audio_source_manager,
-            encoder: create_encoder(selected.codec),
-            codec_info: selected,
-            rtp_ticks_per_frame: frame_timing.rtp_ticks_per_frame,
-            rtp_timestamp: rand::random(),
-            sequence_number: rand::random(),
-            on_end: self.on_end.clone(),
-            loop_playback: self.loop_playback,
-            pcm_buf: vec![0i16; frame_timing.pcm_samples_per_frame],
-        })
-    }
-
     pub async fn start_playback_on(&self, target_pc: Option<PeerConnection>) -> Result<()> {
         use audio_codec::create_encoder;
         use rustrtc::media::{AudioFrame, MediaSample};
@@ -511,69 +448,6 @@ impl FileTrack {
     pub fn switch_to_silence(&mut self) {
         if let Some(ref manager) = self.audio_source_manager {
             manager.switch_to_silence();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FileTrackPlaybackSource
-// ---------------------------------------------------------------------------
-
-pub(crate) struct FileTrackPlaybackSource {
-    audio_source_manager: Arc<audio_source::AudioSourceManager>,
-    encoder: Box<dyn audio_codec::Encoder>,
-    codec_info: negotiate::CodecInfo,
-    rtp_ticks_per_frame: u32,
-    rtp_timestamp: u32,
-    sequence_number: u16,
-    on_end: Option<PlaybackEndCallback>,
-    loop_playback: bool,
-    pcm_buf: Vec<i16>,
-}
-
-impl FileTrackPlaybackSource {
-    pub(crate) fn next_audio_sample(&mut self) -> Option<MediaSample> {
-        let read = {
-            let buf = &mut self.pcm_buf;
-            let mut read = self.audio_source_manager.read_samples(buf);
-            if read == 0 && self.loop_playback {
-                read = self.audio_source_manager.read_samples(buf);
-            }
-            read
-        };
-
-        if read == 0 {
-            debug!("FileTrack playback completed (source exhausted)");
-            if let Some(on_end) = self.on_end.take() {
-                on_end(PlaybackEndReason::Completed);
-            }
-            return None;
-        }
-
-        let encoded = self.encoder.encode(&self.pcm_buf[..read]);
-        let frame = AudioFrame {
-            rtp_timestamp: self.rtp_timestamp,
-            clock_rate: self.codec_info.clock_rate,
-            data: encoded.into(),
-            sequence_number: Some(self.sequence_number),
-            payload_type: Some(self.codec_info.payload_type),
-            marker: false,
-            header_extension: None,
-            raw_packet: None,
-            source_addr: None,
-        };
-
-        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(self.rtp_ticks_per_frame);
-        self.sequence_number = self.sequence_number.wrapping_add(1);
-
-        Some(MediaSample::Audio(frame))
-    }
-}
-
-impl Drop for FileTrackPlaybackSource {
-    fn drop(&mut self) {
-        if let Some(on_end) = self.on_end.take() {
-            on_end(PlaybackEndReason::Interrupted);
         }
     }
 }

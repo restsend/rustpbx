@@ -523,12 +523,7 @@ async fn test_guest_call_allowed_extension() {
         session_hooks: Arc::new(Vec::new()),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
-        media_engine: {
-            use crate::media::engine::{MediaEngine, MediaEngineConfig};
-            let (engine, handle) = MediaEngine::new(MediaEngineConfig::default());
-            let _ = engine.spawn(handle);
-            engine
-        },
+
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 

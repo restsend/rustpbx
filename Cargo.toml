@@ -308,3 +308,9 @@ opt-level = 1
 codegen-units = 256
 incremental = true
 debug = 1
+
+# Local rustrtc with RtpObserver (bidirectional plaintext observation covering
+# the relay fast-path) + handle_reinvite sender.set_params fix. Remove this
+# patch once rustrtc >= 0.3.111 is published to the registry.
+[patch.crates-io]
+rustrtc = { path = "../rustrtc" }

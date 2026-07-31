@@ -74,8 +74,7 @@ impl SipSession {
 
         if plan.accept_immediately {
             info!("Queue: answering call immediately");
-            let caller_answer = self.prepare_app_caller_media_bridge().await;
-            if let Err(e) = self.accept_call(None, caller_answer, None).await {
+            if let Err(e) = self.accept_call(None, None, None).await {
                 warn!(error = %e, "Failed to answer call in queue");
             }
         }
@@ -503,14 +502,13 @@ impl SipSession {
 
     pub(super) async fn prepare_queue_playback_media(&mut self) {
         if self.server_dialog.state().is_confirmed() {
-            if !self.media.caller_answer_uses_media_bridge {
+            if !true {
                 warn!("Queue playback: caller leg is already answered without media bridge");
             }
             return;
         }
 
-        let caller_answer = self.prepare_app_caller_media_bridge().await;
-        if let Err(error) = self.accept_call(None, caller_answer, None).await {
+        if let Err(error) = self.accept_call(None, None, None).await {
             warn!(
                 error = %error,
                 "Queue playback: failed to prepare caller media before audio"

@@ -125,15 +125,6 @@ impl LegRegistry {
         self.has_video.insert(id.clone(), has_video);
     }
 
-    pub fn set_bridge_video_state(&mut self, source: &LegId, target: &LegId, has_video: bool) {
-        self.has_video.insert(source.clone(), has_video);
-        self.has_video.insert(target.clone(), has_video);
-    }
-
-    pub fn any_has_video(&self) -> bool {
-        self.has_video.values().any(|v| *v)
-    }
-
     pub fn push_task(&mut self, id: LegId, handle: JoinHandle<()>) {
         self.tasks.entry(id).or_default().push(handle);
     }

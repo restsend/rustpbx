@@ -693,14 +693,6 @@ impl SipSession {
     ) -> Result<()> {
         info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
 
-        // Bridge needs to read/inject per-packet media, which the RTP
-        // fast-path relay bypasses. Downgrade to the ForwardingTrack path on
-        // demand (no-op when already on the slow path or an app media_bridge).
-        // Must happen before we read the leg's track sender / PeerConnection.
-        self.ensure_media_anchored()
-            .await
-            .map_err(|e| anyhow!("Bridge media anchor failed: {}", e))?;
-
         // ── 1. Establish WebSocket connection ──────────────────────────
         let ws_connect = tokio_tungstenite::connect_async(&endpoint);
         let (ws_stream, _) = if let Some(ms) = timeout_ms {
@@ -717,40 +709,8 @@ impl SipSession {
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
-        //        Prefer the app media_bridge when present: calls that arrived via
-        //        an IVR/Queue app flow have their caller-side media anchored in
-        //        `media_bridge` (a BridgePeer), and the leg's VoiceEnginePeer
-        //        tracks don't expose a SampleStreamSource sender in that path.
-        //        The bridge's forward loops consume the same single-consumer
-        //        audio track that PeerConnectionAudioReceiver reads from, so we
-        //        stop the bridge's forwarding (keeping the PeerConnections alive)
-        //        to remove the contention before reading.
         let mut audio_sender: Option<SampleStreamSource> = None;
         let mut pc: Option<PeerConnection> = None;
-
-        if let Some(bridge) = self.media.media_bridge.clone() {
-            // The app media_bridge has two sides: "caller" (WebRTC) and "callee"
-            // (RTP). The SIP caller faces bridge.caller_pc when it is WebRTC, and
-            // bridge.callee_pc when it is plain RTP (see prepare_bridge_caller_answer).
-            // Bridge must read from / inject into the SAME side the SIP leg
-            // is anchored on. The callee leg (if any) is on the opposite side.
-            let is_caller = leg_id == LegId::from("caller");
-            let caller_is_webrtc = self.is_caller_webrtc();
-            let sip_leg_is_webrtc = if is_caller {
-                caller_is_webrtc
-            } else {
-                !caller_is_webrtc
-            };
-            bridge.stop_forwarding();
-            if sip_leg_is_webrtc {
-                pc = Some(bridge.caller_pc().clone());
-                audio_sender = bridge.get_caller_sender().await;
-            } else {
-                pc = Some(bridge.callee_pc().clone());
-                audio_sender = bridge.get_callee_sender().await;
-            }
-            info!(%leg_id, is_caller, sip_leg_is_webrtc, "Bridge sourcing media from app media_bridge");
-        }
 
         // Fallback: leg's VoiceEnginePeer tracks (non-app B2BUA path).
         if audio_sender.is_none() || pc.is_none() {

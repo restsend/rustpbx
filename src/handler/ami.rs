@@ -123,7 +123,6 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
             "presence_states": sip.inner.presence_manager.states_len(),
             "presence_subscribers": sip.inner.presence_manager.subscribers_len(),
             "mwi_subscribers": sip.inner.presence_manager.mwi_subscribers_len(),
-            "media_sessions": sip.inner.media_engine.sessions_len(),
         }),
     });
 
