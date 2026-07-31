@@ -136,7 +136,9 @@ struct AppState {
     receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
     /// Per-sender report tracking: client_id → (last_sent, last_recv), used to
     /// derive per-interval loss on the collector when a report is received.
-    report_tracking: Arc<Mutex<HashMap<u32, (u64, u64)>>>,
+    /// Bounded (LRU) because `client_id` is random per sender process, so old
+    /// entries from restarted senders must not accumulate forever.
+    report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>>,
 }
 
 /// Bind a UDP socket with a custom SO_RCVBUF (and SO_REUSEPORT when
@@ -279,8 +281,8 @@ async fn main() -> Result<()> {
     )?;
 
     let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
-    let report_tracking: Arc<Mutex<HashMap<u32, (u64, u64)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>> =
+        Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
 
     let app_state = AppState {
         backend: backend.clone(),
@@ -1034,7 +1036,7 @@ async fn report_handler(
     } else {
         0.0
     };
-    tracking.insert(client_id, (sent_count, packets_received));
+    tracking.put(client_id, (sent_count, packets_received));
     drop(tracking);
 
     tracing::info!(
