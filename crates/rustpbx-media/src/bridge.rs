@@ -1188,6 +1188,11 @@ impl BridgePeer {
             let cancel = self.cancel_token.clone();
             let rtp_timeout = self.rtp_timeout.duration;
             let rtp_timeout_tx = self.rtp_timeout.notify_tx.clone();
+            // Caller PeerConnection: used to read the transport-level inbound
+            // RTP counter (post-SRTP) so the "caller silent" warning can tell
+            // "caller sent nothing" (0) from "received+decrypted but dropped
+            // downstream" (>0).
+            let caller_pc = self.caller.pc();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1289,10 +1294,15 @@ impl BridgePeer {
                                             fwd_stats_wired = fwd_wired,
                                             total_caller_pkts = total_w,
                                             leg_stats_pkts = w2r.packets.load(Ordering::Relaxed),
+                                            caller_rx_rtp = caller_pc.received_rtp_packets(),
                                             "Caller side went silent — gate_open=false means the \
                                              caller gate was never opened (app/IVR answer path); \
                                              fwd_stats_wired=false means no ForwardingTrack is \
-                                             feeding the caller→callee stats"
+                                             feeding the caller→callee stats; caller_rx_rtp is the \
+                                             transport-level inbound RTP count (post-SRTP): 0 means \
+                                             the caller sent no decryptable RTP (DTLS not complete \
+                                             on caller side, or not sending); >0 means packets \
+                                             arrived+decrypted but were dropped downstream"
                                         );
                                     }
                                 } else {
@@ -2523,6 +2533,20 @@ impl BridgePeer {
                         if state != caller_last_state {
                             debug!(bridge_id = %bridge_id, session_id = ?monitor_session_id, leg = "caller", from = ?caller_last_state, to = ?state, "PC state changed");
                             caller_last_state = state;
+                            if state == rustrtc::PeerConnectionState::Connected
+                                && let Some(pair) = caller_pc.ice_transport().get_selected_pair()
+                            {
+                                debug!(
+                                    bridge_id = %bridge_id,
+                                    session_id = ?monitor_session_id,
+                                    leg = "caller",
+                                    local = %pair.local.address,
+                                    local_type = ?pair.local.typ,
+                                    remote = %pair.remote.address,
+                                    remote_type = ?pair.remote.typ,
+                                    "Caller ICE selected pair"
+                                );
+                            }
                         }
                     }
                     _ = callee_state_rx.changed() => {
