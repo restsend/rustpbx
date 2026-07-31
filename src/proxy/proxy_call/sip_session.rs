@@ -10216,7 +10216,38 @@ impl SipSession {
                 leg_id,
                 source,
                 options,
-            } => Self::ok_or_failure(self.handle_play(leg_id, source, options).await),
+            } => {
+                let plays_to_caller = leg_id.as_ref().is_none_or(|leg| {
+                    leg == &LegId::from("caller") || leg == &LegId::from("both")
+                });
+                let caller_dialog_ready = {
+                    let state = self.server_dialog.state();
+                    state.is_confirmed() || state.waiting_ack()
+                };
+                if plays_to_caller
+                    && self.app_runtime.current_app().as_deref() == Some("queue")
+                    && (!caller_dialog_ready
+                        || !self.media.caller_answer_uses_media_bridge
+                        || self.media.media_bridge.is_none())
+                {
+                    self.prepare_queue_playback_media().await;
+                    let caller_dialog_ready = {
+                        let state = self.server_dialog.state();
+                        state.is_confirmed() || state.waiting_ack()
+                    };
+                    if !caller_dialog_ready
+                        || !self.media.caller_answer_uses_media_bridge
+                        || self.media.media_bridge.is_none()
+                    {
+                        return CommandResult::failure(
+                            "Queue playback could not establish caller media".to_string(),
+                        );
+                    }
+                    self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+                    self.update_media_path().await;
+                }
+                Self::ok_or_failure(self.handle_play(leg_id, source, options).await)
+            }
 
             CallCommand::StopPlayback { leg_id } => {
                 Self::ok_or_failure(self.handle_stop_playback(leg_id).await)
@@ -10817,6 +10848,22 @@ impl SipSession {
             }
         }
 
+        if self.app_runtime.current_app().as_deref() == Some("queue")
+            && (!self.media.caller_answer_uses_media_bridge
+                || self.media.media_bridge.is_none())
+        {
+            self.prepare_app_caller_media_bridge()
+                .await
+                .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
+            if !self.media.caller_answer_uses_media_bridge
+                || self.media.media_bridge.is_none()
+            {
+                return Err(anyhow!(
+                    "Queue caller media is not backed by a playback-capable bridge"
+                ));
+            }
+        }
+
         // Create leg
         let leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
         self.legs.insert(new_leg_id.clone(), leg);
@@ -10937,10 +10984,39 @@ impl SipSession {
     ) -> Result<()> {
         let callee_is_webrtc = Self::callee_supports_webrtc(&location);
         let transport_mode = self.callee_transport_mode(callee_is_webrtc);
-        let (peer, _track, sdp_offer) = self
-            .create_leg_peer(leg_id, transport_mode.clone())
-            .await?;
-        self.legs.set_peer(leg_id.clone(), peer.clone());
+        let queue_media_path = self.app_runtime.current_app().as_deref() == Some("queue")
+            && self.media.caller_answer_uses_media_bridge
+            && self.media.media_bridge.is_some();
+        let (peer, sdp_offer) = if queue_media_path {
+            if !self.media.callee_offer_uses_media_bridge {
+                self.media.callee_offer = None;
+                self.media.callee_offer_cached_webrtc = None;
+            }
+            let sdp_offer = String::from_utf8(
+                self.prepare_callee_media_offer(&location)
+                    .await?
+                    .ok_or_else(|| anyhow!("Queue media path did not produce an agent SDP offer"))?,
+            )
+            .map_err(|error| anyhow!("Queue agent SDP offer is not UTF-8: {}", error))?;
+            if !self.media.callee_offer_uses_media_bridge {
+                return Err(anyhow!(
+                    "Queue agent offer was not created from the queue media path"
+                ));
+            }
+            info!(
+                session_id = %self.id,
+                %leg_id,
+                callee_is_webrtc,
+                "Queue agent is using the existing queue media path"
+            );
+            (None, sdp_offer)
+        } else {
+            let (peer, _track, sdp_offer) = self
+                .create_leg_peer(leg_id, transport_mode.clone())
+                .await?;
+            self.legs.set_peer(leg_id.clone(), peer.clone());
+            (Some(peer), sdp_offer)
+        };
         self.legs.set_transport(leg_id.clone(), transport_mode);
 
         let local_addrs = self.server.endpoint.get_addrs();
@@ -11025,16 +11101,20 @@ impl SipSession {
 
                                         let answer_sdp = if !resp.body().is_empty() {
                                             let sdp = String::from_utf8_lossy(resp.body()).to_string();
-                                            if let Err(e) =
-                                                peer.update_remote_description(
-                                                    &track_id,
-                                                    &sdp,
-                                                    rustrtc::SdpType::Answer,
-                                                ).await
-                                            {
-                                                warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
+                                            if let Some(ref peer) = peer {
+                                                if let Err(e) =
+                                                    peer.update_remote_description(
+                                                        &track_id,
+                                                        &sdp,
+                                                        rustrtc::SdpType::Answer,
+                                                    ).await
+                                                {
+                                                    warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
+                                                } else {
+                                                    info!(%leg_id, "Remote description set successfully");
+                                                }
                                             } else {
-                                                info!(%leg_id, "Remote description set successfully");
+                                                debug!(%leg_id, "Queue agent answer will be applied to the shared media path by setup_bridge");
                                             }
                                             Some(sdp)
                                         } else {
@@ -11085,16 +11165,18 @@ impl SipSession {
                                 let body = resp.body();
                                 if !body.is_empty() {
                                     let sdp = String::from_utf8_lossy(body).to_string();
-                                    if let Err(e) =
-                                        peer.update_remote_description(
-                                            &track_id,
-                                            &sdp,
-                                            rustrtc::SdpType::Pranswer,
-                                        ).await
-                                    {
-                                        warn!(%leg_id, error = %e, "Failed to set early media remote description");
-                                    } else {
-                                        info!(%leg_id, "Early media remote description set");
+                                    if let Some(ref peer) = peer {
+                                        if let Err(e) =
+                                            peer.update_remote_description(
+                                                &track_id,
+                                                &sdp,
+                                                rustrtc::SdpType::Pranswer,
+                                            ).await
+                                        {
+                                            warn!(%leg_id, error = %e, "Failed to set early media remote description");
+                                        } else {
+                                            info!(%leg_id, "Early media remote description set");
+                                        }
                                     }
                                 }
                             }
@@ -11230,8 +11312,55 @@ impl SipSession {
         };
 
         if self.media.caller_answer_uses_media_bridge
+            && self.media.callee_offer_uses_media_bridge
+            && self.media.media_bridge.is_some()
+            && self.app_runtime.current_app().as_deref() == Some("queue")
+            && let Some(target_leg) = target_leg
+        {
+            if let Some(target_transport) = self.legs.get_transport(&target_leg) {
+                self.legs
+                    .set_transport(LegId::from("callee"), target_transport);
+            }
+            let caller_answer = self.media.answer.clone();
+            let target_answer = self.legs.get_answer(&target_leg).map(str::to_string);
+            let Some(target_answer) = target_answer else {
+                warn!(
+                    session_id = %self.id,
+                    %target_leg,
+                    "Cannot activate queue media path: target has no answer SDP"
+                );
+                return false;
+            };
+
+            let playback_tracks: Vec<String> = self
+                .media
+                .bridge_playback_track_ids
+                .values()
+                .cloned()
+                .collect();
+            for track_id in playback_tracks {
+                self.stop_playback_track(&track_id, false).await;
+            }
+
+            if let Err(error) = self.apply_bridge_callee_answer(&target_answer).await {
+                warn!(
+                    session_id = %self.id,
+                    %target_leg,
+                    %error,
+                    "Cannot activate queue media path: failed to apply target answer"
+                );
+                return false;
+            }
+            self.media.callee_answer_sdp = Some(target_answer.clone());
+            self.configure_media_bridge_transcoders(
+                caller_answer.as_deref(),
+                Some(&target_answer),
+            );
+            self.start_media_bridge_forwarding().await;
+        } else if self.media.caller_answer_uses_media_bridge
             && !self.media.callee_offer_uses_media_bridge
             && self.media.media_bridge.is_some()
+            && self.app_runtime.current_app().as_deref() != Some("queue")
             && let Some(target_leg) = target_leg
         {
             let Some(target_peer) = self.legs.get_peer(&target_leg).cloned() else {
@@ -11338,7 +11467,9 @@ impl SipSession {
             .or_else(|| leg_id.as_ref().map(|l| l.to_string()))
             .unwrap_or_else(|| "playback".to_string());
         let file_path = match source {
-            crate::call::domain::MediaSource::File { path } => path,
+            crate::call::domain::MediaSource::File { path } => {
+                Self::resolve_audio_file_path(&path)
+            }
             crate::call::domain::MediaSource::Url { url } => url,
             _ => return Err(anyhow!("Only file/URL playback supported")),
         };
@@ -13389,8 +13520,8 @@ mod tests {
 
         let num_before = session.media.playback_tracks.len();
 
-        // Call handle_play with leg_id = "both", use audio file from config/
-        let audio_path = "config/sounds/phone-calling.wav";
+        // Relative app paths resolve against config/ before playback.
+        let audio_path = "sounds/phone-calling.wav";
         session
             .handle_play(
                 Some(LegId::from("both")),

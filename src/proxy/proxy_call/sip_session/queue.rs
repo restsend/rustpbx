@@ -502,7 +502,8 @@ impl SipSession {
     }
 
     pub(super) async fn prepare_queue_playback_media(&mut self) {
-        if self.server_dialog.state().is_confirmed() {
+        let caller_state = self.server_dialog.state();
+        if caller_state.is_confirmed() || caller_state.waiting_ack() {
             if !self.media.caller_answer_uses_media_bridge {
                 warn!("Queue playback: caller leg is already answered without media bridge");
             }

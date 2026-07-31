@@ -666,6 +666,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent3@example.com"}),
         );
 
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
         // Should cancel agent2 leg then connect to agent 3
         stack
             .assert_cmd(200, "LegRemove-agent2", |c| {
@@ -1020,6 +1025,11 @@ mod tests {
         );
 
         stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
             .assert_cmd(200, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
@@ -1165,6 +1175,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
 
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
         stack
             .assert_cmd(200, "PlayPrompt-en-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
@@ -1429,6 +1444,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
         );
 
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
         let remove = stack.next_cmd(200).await.expect("LegRemove");
         match &remove {
@@ -1522,6 +1542,11 @@ mod tests {
         // Send DTMF "2"
         stack.dtmf("2");
 
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
         // Should play callback confirmation prompt
         stack
             .assert_cmd(200, "PlayCallbackConfirm", |c| {

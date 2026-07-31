@@ -528,13 +528,6 @@ impl QueueApp {
         Ok(())
     }
 
-    /// Stop hold music.
-    async fn _stop_hold_music(&mut self) {
-        if self.hold_playback.take().is_some() {
-            debug!("Queue: stopping hold music");
-        }
-    }
-
     /// Get agent locations from dial strategy or dynamic agents.
     fn get_agents(&self) -> Vec<&Location> {
         if let Some(ref agents) = self.dynamic_agents {
@@ -1219,7 +1212,10 @@ impl CallApp for QueueApp {
             "Queue: callback requested via DTMF"
         );
         self.callback_requested = true;
-        self._stop_hold_music().await;
+        if self.hold_playback.take().is_some() {
+            debug!("Queue: stopping hold music");
+            ctrl.stop_audio().await?;
+        }
 
         let prompts = self
             .plan
@@ -1260,6 +1256,7 @@ impl CallApp for QueueApp {
             }
             QueueState::PlayingTransferPrompt { agent_uri } => {
                 let agent_uri = agent_uri.clone();
+                ctrl.stop_audio().await?;
                 // Answer the caller if not already answered
                 if !self.answered {
                     ctrl.answer().await?;
@@ -1330,7 +1327,10 @@ impl CallApp for QueueApp {
                 "agent_connected" => {
                     if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
                         info!(agent = %agent_uri, "Queue: agent connected");
-                        self._stop_hold_music().await;
+                        if self.hold_playback.take().is_some() {
+                            debug!("Queue: stopping hold music");
+                            ctrl.stop_audio().await?;
+                        }
 
                         // In parallel mode, cancel all remaining pending agent legs
                         // EXCEPT the one that just answered.
