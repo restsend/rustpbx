@@ -22,6 +22,8 @@ tls_port = 5061
 # Uses proxy-level ssl_* configs (if not set, falls back to top-level ssl_*)
 ssl_certificate = "./certs/fullchain.pem"
 ssl_private_key = "./certs/privkey.pem"
+# PEM bundle used to validate certificates on outbound SIP/TLS connections
+tls_ca_certificates = "/etc/ssl/certs/ca-certificates.crt"
 
 # WebRTC (SIP over WebSocket)
 ws_port = 8089

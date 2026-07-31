@@ -494,6 +494,26 @@ impl SipServerBuilder {
         #[cfg(unix)]
         log_rlimit_nofile().await;
         let transport_layer = TransportLayer::new(cancel_token.clone());
+        if let Some(ca_path) = config.tls_ca_certificates.as_deref()
+            && !ca_path.trim().is_empty()
+        {
+            let ca_path = ca_path.trim();
+            let ca_certs = tokio::fs::read(ca_path).await.map_err(|e| {
+                anyhow!(
+                    "failed to read outbound SIP/TLS CA certificates {}: {}",
+                    ca_path,
+                    e
+                )
+            })?;
+            transport_layer.set_tls_config(TlsConfig {
+                ca_certs: Some(ca_certs),
+                ..Default::default()
+            });
+            info!(
+                path = ca_path,
+                "configured outbound SIP/TLS CA certificates"
+            );
+        }
         // Clone of TLS listener for hot-reload support (initialized inside if !self.no_bind block)
         let mut tls_listener_clone: Option<rsipstack::transport::TlsListenerConnection> = None;
 
