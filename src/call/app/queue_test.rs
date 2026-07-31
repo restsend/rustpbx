@@ -1515,6 +1515,63 @@ mod tests {
             .await;
     }
 
+    #[tokio::test]
+    async fn test_queue_parallel_waits_until_every_agent_fails() {
+        let mut config = build_parallel_queue_config();
+        config.fallback = Some(QueueFallbackAction::Failure(FailureAction::Hangup {
+            code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            reason: Some("All agents busy".to_string()),
+        }));
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let first = stack.next_cmd(200).await.expect("first parallel LegAdd");
+        let first_leg = match first {
+            CallCommand::LegAdd {
+                leg_id: Some(leg_id),
+                ..
+            } => leg_id,
+            other => panic!("expected first LegAdd, got {other:?}"),
+        };
+        let second = stack.next_cmd(200).await.expect("second parallel LegAdd");
+        let second_leg = match second {
+            CallCommand::LegAdd {
+                leg_id: Some(leg_id),
+                ..
+            } => leg_id,
+            other => panic!("expected second LegAdd, got {other:?}"),
+        };
+
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({"leg_id": first_leg.0}),
+        );
+        assert!(
+            stack.next_cmd(50).await.is_none(),
+            "one failed parallel agent must not trigger fallback"
+        );
+
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({"leg_id": second_leg.0}),
+        );
+        stack
+            .assert_cmd(200, "FallbackHangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
+            .await;
+    }
+
     // ── 按键回拨（Queue Callback on Request） ──
 
     #[tokio::test]

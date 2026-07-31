@@ -626,9 +626,31 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
         reason: AgentUnavailableReason,
+        failed_leg_id: Option<&str>,
     ) -> anyhow::Result<AppAction> {
         if self.is_parallel() {
-            self.pending_agents.clear();
+            if let Some(failed_leg_id) = failed_leg_id {
+                let pending_before = self.pending_agents.len();
+                self.pending_agents
+                    .retain(|(_, call_id)| call_id != failed_leg_id);
+                if self.pending_agents.len() == pending_before {
+                    warn!(
+                        %failed_leg_id,
+                        "Queue: failed parallel leg was not in the pending agent list"
+                    );
+                }
+            } else if !self.pending_agents.is_empty() {
+                self.pending_agents.pop();
+            }
+
+            if !self.pending_agents.is_empty() {
+                info!(
+                    remaining_agents = self.pending_agents.len(),
+                    "Queue: parallel agent failed; waiting for remaining agents"
+                );
+                return Ok(AppAction::Continue);
+            }
+
             return match reason {
                 AgentUnavailableReason::Busy => self.play_busy_and_then_fallback(ctrl).await,
                 AgentUnavailableReason::NoAnswer => {
@@ -1463,8 +1485,12 @@ impl CallApp for QueueApp {
                             )
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy)
-                        .await
+                    self.handle_agent_unavailable(
+                        ctrl,
+                        AgentUnavailableReason::Busy,
+                        data.get("leg_id").and_then(|value| value.as_str()),
+                    )
+                    .await
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
@@ -1475,8 +1501,12 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Idle)
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer)
-                        .await
+                    self.handle_agent_unavailable(
+                        ctrl,
+                        AgentUnavailableReason::NoAnswer,
+                        data.get("leg_id").and_then(|value| value.as_str()),
+                    )
+                    .await
                 }
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
@@ -1522,7 +1552,10 @@ impl CallApp for QueueApp {
                     }
                 }
 
-                self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer)
+                if self.is_parallel() {
+                    self.pending_agents.clear();
+                }
+                self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer, None)
                     .await
             }
             "max_wait_timeout" => {
