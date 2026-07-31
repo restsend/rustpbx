@@ -1084,8 +1084,7 @@ impl ProxyConfig {
     }
 
     pub fn all_udp_ports(&self) -> Vec<u16> {
-        let primary = self.udp_port.unwrap_or(5060);
-        let mut ports = vec![primary];
+        let mut ports = self.udp_port.into_iter().collect::<Vec<_>>();
         if let Some(extra) = &self.udp_ports {
             for p in extra {
                 if !ports.contains(p) {
@@ -1352,6 +1351,46 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_all_udp_ports_preserves_default_primary_port() {
+        let config = ProxyConfig::default();
+
+        assert_eq!(config.all_udp_ports(), vec![5060]);
+    }
+
+    #[test]
+    fn test_all_udp_ports_is_empty_when_udp_configuration_is_omitted() {
+        let config: ProxyConfig = toml::from_str(
+            r#"
+            addr = "::"
+            tls_port = 5061
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.udp_port, None);
+        assert_eq!(config.udp_ports, None);
+        assert!(config.all_udp_ports().is_empty());
+    }
+
+    #[test]
+    fn test_all_udp_ports_uses_explicit_additional_ports_without_primary() {
+        let mut config = ProxyConfig::default();
+        config.udp_port = None;
+        config.udp_ports = Some(vec![5062, 5064, 5062]);
+
+        assert_eq!(config.all_udp_ports(), vec![5062, 5064]);
+    }
+
+    #[test]
+    fn test_all_udp_ports_combines_primary_and_unique_additional_ports() {
+        let mut config = ProxyConfig::default();
+        config.udp_port = Some(5060);
+        config.udp_ports = Some(vec![5060, 5062, 5064, 5062]);
+
+        assert_eq!(config.all_udp_ports(), vec![5060, 5062, 5064]);
+    }
 
     #[test]
     fn test_callrecord_max_concurrent_is_shared_config() {
