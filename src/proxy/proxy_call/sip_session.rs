@@ -11198,12 +11198,58 @@ impl SipSession {
     }
 
     async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
-        if self.legs.contains_key(&leg_a) && self.legs.contains_key(&leg_b) {
-            self.bridge = BridgeConfig::bridge(leg_a, leg_b);
-            true
-        } else {
-            false
+        if !self.legs.contains_key(&leg_a) || !self.legs.contains_key(&leg_b) {
+            return false;
         }
+
+        let caller_leg = LegId::from("caller");
+        let target_leg = if leg_a == caller_leg {
+            Some(leg_b.clone())
+        } else if leg_b == caller_leg {
+            Some(leg_a.clone())
+        } else {
+            None
+        };
+
+        if self.media.caller_answer_uses_media_bridge
+            && !self.media.callee_offer_uses_media_bridge
+            && self.media.media_bridge.is_some()
+            && let Some(target_leg) = target_leg
+        {
+            let Some(target_peer) = self.legs.get_peer(&target_leg).cloned() else {
+                warn!(
+                    session_id = %self.id,
+                    %target_leg,
+                    "Cannot connect application bridge: target has no media peer"
+                );
+                return false;
+            };
+            let Some(target_pc) = Self::wait_for_peer_connection(&target_peer, 1).await else {
+                warn!(
+                    session_id = %self.id,
+                    %target_leg,
+                    "Cannot connect application bridge: target has no peer connection"
+                );
+                return false;
+            };
+
+            let bridge = self.media.media_bridge.as_ref().unwrap().clone();
+            match self.leg_bridge_endpoint(&caller_leg) {
+                BridgeEndpoint::Caller => bridge.replace_callee_pc(target_pc),
+                BridgeEndpoint::Callee => bridge.replace_caller_pc(target_pc),
+            }
+
+            let caller_answer = self.media.answer.clone();
+            let target_answer = self.legs.get_answer(&target_leg).map(str::to_string);
+            self.configure_media_bridge_transcoders(
+                caller_answer.as_deref(),
+                target_answer.as_deref(),
+            );
+            self.start_media_bridge_forwarding().await;
+        }
+
+        self.bridge = BridgeConfig::bridge(leg_a, leg_b);
+        true
     }
 
     async fn clear_bridge(&mut self) {
