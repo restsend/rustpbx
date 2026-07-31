@@ -10514,6 +10514,13 @@ impl SipSession {
 
             CallCommand::LegFailed { leg_id, reason } => {
                 warn!(%leg_id, %reason, "Leg failed async notification");
+                let connected_bridge_leg = self
+                    .legs
+                    .get(&leg_id)
+                    .is_some_and(|leg| leg.state == LegState::Connected)
+                    && self.bridge.active
+                    && self.bridge.contains_leg(&LegId::from("caller"))
+                    && self.bridge.contains_leg(&leg_id);
                 // Forward to running app before removing the leg (so we can get the URI)
                 let agent_uri = self
                     .legs
@@ -10542,6 +10549,17 @@ impl SipSession {
                 self.update_leg_state(&leg_id, LegState::Ended);
                 self.legs.remove(&leg_id);
                 self.update_media_path().await;
+                if connected_bridge_leg && !self.server_dialog.state().is_terminated() {
+                    self.meta
+                        .hangup_reason
+                        .get_or_insert(CallRecordHangupReason::ByCallee);
+                    self.pending_hangup.insert(self.server_dialog.id());
+                    info!(
+                        session_id = %self.id,
+                        %leg_id,
+                        "Connected dynamic leg ended; hanging up caller"
+                    );
+                }
                 CommandResult::failure(reason)
             }
 
