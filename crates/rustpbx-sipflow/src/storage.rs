@@ -12,6 +12,7 @@ use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -26,6 +27,12 @@ pub struct StorageManager {
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
     raw_file: Option<File>,
     current_offset: u64,
+    /// Whether the raw file cursor is known to equal `current_offset`.
+    ///
+    /// True after a successful write or a `rotate()` seek; set to false when a
+    /// write fails (a partial write leaves the cursor ahead of `current_offset`),
+    /// forcing the next write to re-seek before appending.
+    pos_known: bool,
     subdirs: SipFlowSubdirs,
     flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
@@ -221,6 +228,7 @@ impl StorageManager {
             current_hour: (0, 0, 0, 0),
             raw_file: None,
             current_offset: 0,
+            pos_known: true,
             subdirs,
             flusher_tx,
             dropped: dropped.unwrap_or_default(),
@@ -242,9 +250,15 @@ impl StorageManager {
             .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
         let offset = self.current_offset;
 
-        // Seek to the tracked offset so the write goes exactly where the
-        // database will say it is, regardless of O_APPEND being absent.
-        file.seek(SeekFrom::Start(offset)).await?;
+        // Only write_processed writes to this fd, and every successful write
+        // advances the cursor to exactly `current_offset`, so on the happy path
+        // the cursor already sits where the DB index says the record lives.
+        // Re-seek only when the cursor may have diverged (a prior write error
+        // can leave it mid-record).
+        let write_start = Instant::now();
+        if !self.pos_known {
+            file.seek(SeekFrom::Start(offset)).await?;
+        }
 
         let mut header = [0u8; RAW_RECORD_HEADER_LEN as usize];
         let mut header_buf = &mut header[..];
@@ -252,7 +266,13 @@ impl StorageManager {
         header_buf.put_u32(processed.orig_size as u32);
         header_buf.put_u32(processed.comp_size as u32);
         let mut record = Buf::chain(&header[..], processed.payload.as_ref());
-        file.write_all_buf(&mut record).await?;
+        if let Err(e) = file.write_all_buf(&mut record).await {
+            self.pos_known = false;
+            return Err(e.into());
+        }
+        self.pos_known = true;
+        metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
+            .record(write_start.elapsed().as_secs_f64());
 
         self.current_offset += RAW_RECORD_HEADER_LEN as u64 + processed.comp_size as u64;
 
@@ -282,7 +302,9 @@ impl StorageManager {
 
     pub async fn check_flush(&mut self) -> Result<()> {
         if let Some(ref tx) = self.flusher_tx {
-            let _ = tx.send(FlushCommand::Flush);
+            let _ = tx.send(FlushCommand::Flush {
+                enqueued_at: Instant::now(),
+            });
         }
         Ok(())
     }
@@ -291,7 +313,13 @@ impl StorageManager {
     pub async fn force_flush(&mut self) -> Result<()> {
         if let Some(ref tx) = self.flusher_tx {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            if tx.send(FlushCommand::FlushSync { done: done_tx }).is_ok() {
+            if tx
+                .send(FlushCommand::FlushSync {
+                    done: done_tx,
+                    enqueued_at: Instant::now(),
+                })
+                .is_ok()
+            {
                 let _ = done_rx.await;
             }
         }
@@ -341,8 +369,9 @@ impl StorageManager {
         // Read the current file length only ONCE here; after this,
         // write_processed tracks the offset in-memory.
         self.current_offset = file.metadata().await?.len();
-        // Seek to end so subsequent seek+write goes to the correct position.
+        // Seek to end so subsequent writes go to the correct position.
         file.seek(SeekFrom::Start(self.current_offset)).await?;
+        self.pos_known = true;
 
         self.raw_file = Some(file);
 
@@ -1335,5 +1364,172 @@ mod tests {
         // and directly contributes to the OOM crashes observed in
         // production (~3 GB RSS → kernel kill).
         // ─────────────────────────────────────────────────────────
+    }
+
+    /// Regression: the batched multi-row INSERT flush path must round-trip
+    /// everything. Writes > INSERT_CHUNK_ROWS (500) RTP packets plus mixed
+    /// calls' SIP so the count-trigger (flush_count=1000) and multi-chunk
+    /// inserts are exercised, then verifies all rows are queryable.
+    #[tokio::test]
+    async fn test_batched_flush_roundtrips_large_batch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        let n_rtp = 1_200usize;
+        let n_sip = 30usize;
+
+        let mut timestamps = Vec::with_capacity(n_rtp);
+        for i in 0..n_rtp {
+            let ts = base + i as u64 * 1000;
+            timestamps.push(ts);
+            let payload = format!("rtp-payload-{i:04}");
+            storage
+                .write_processed(make_rtp_processed(
+                    ts,
+                    "batch-call-0",
+                    (i % 2) as i32,
+                    "127.0.0.1:4000",
+                    payload.as_bytes(),
+                ))
+                .await
+                .expect("write rtp");
+        }
+        for i in 0..n_sip {
+            storage
+                .write_processed(make_sip_processed(
+                    base + 10_000_000 + i as u64 * 1000,
+                    &format!("batch-sip-call-{mod}", mod = i % 3),
+                ))
+                .await
+                .expect("write sip");
+        }
+
+        storage.force_flush().await.expect("flush");
+
+        let start = local_dt_from_micros(base as i64);
+        let end = local_dt_from_micros(base as i64 + n_rtp as i64 * 1000);
+
+        let media = storage
+            .query_media("batch-call-0", start, end)
+            .await
+            .expect("query media");
+        assert_eq!(media.len(), n_rtp, "all RTP packets must round-trip");
+        for (i, (leg, ts, payload)) in media.iter().enumerate() {
+            assert_eq!(*leg, (i % 2) as i32);
+            assert_eq!(*ts, timestamps[i]);
+            assert_eq!(
+                payload,
+                format!("rtp-payload-{i:04}").as_bytes(),
+                "payload for packet {i} must match"
+            );
+        }
+
+        let stats = storage
+            .query_media_stats("batch-call-0", start, end)
+            .await
+            .expect("query media stats");
+        let total: usize = stats.iter().map(|s| s.packet_count).sum();
+        assert_eq!(total, n_rtp, "stats must account for every RTP packet");
+
+        for k in 0..3usize {
+            let flow = storage
+                .query_flow(
+                    &format!("batch-sip-call-{k}"),
+                    local_dt_from_micros(base as i64 + 10_000_000),
+                    local_dt_from_micros(base as i64 + 10_000_000 + n_sip as i64 * 1000),
+                )
+                .await
+                .expect("query flow");
+            assert_eq!(
+                flow.len(),
+                n_sip / 3,
+                "each SIP message for call {k} must round-trip"
+            );
+        }
+    }
+
+    /// Regression guard for the seek-less write path: every offset the DB
+    /// records must point at exactly the right bytes in `data.raw`.
+    ///
+    /// The writer relies on the invariant that the raw-file cursor tracks
+    /// `current_offset` (only `write_processed` writes to the fd; a failed
+    /// write forces a re-seek via `pos_known`). If that ever breaks — e.g. the
+    /// historical wrong-offset bug this design replaced — the DB index would
+    /// point at the wrong physical bytes. This test reads `data.raw` *directly*
+    /// (not through the query path) and verifies byte-for-byte that the record
+    /// at each recorded offset matches what was written, using distinct
+    /// variable-length payloads so any drift aliases loudly.
+    #[tokio::test]
+    async fn test_db_offsets_match_physical_raw_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        let n = 300usize;
+        let mut expected: Vec<(i32, u64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let len = 40 + (i % 200);
+            let payload: Vec<u8> =
+                (0..len).map(|j| ((i * 31 + j * 7) & 0xff) as u8).collect();
+            let ts = base + i as u64 * 1000;
+            expected.push(((i % 2) as i32, ts, payload.clone()));
+            storage
+                .write_processed(make_rtp_processed(
+                    ts,
+                    "offset-check",
+                    (i % 2) as i32,
+                    "127.0.0.1:4000",
+                    &payload,
+                ))
+                .await
+                .expect("write rtp");
+        }
+        storage.force_flush().await.expect("flush");
+
+        let db_path = dir.path().join("sipflow.db");
+        let raw_path = dir.path().join("data.raw");
+        let mut conn = SqliteConnection::connect(&format!("sqlite:{}", db_path.display()))
+            .await
+            .expect("open sipflow.db");
+        let rows = sqlx::query_as::<_, (i32, i64, i64, i64)>(
+            "SELECT m.leg, m.timestamp, m.offset, m.size
+             FROM media_msgs m
+             JOIN call_meta c ON m.call_id = c.id
+             WHERE c.callid = ?
+             ORDER BY m.offset ASC",
+        )
+        .bind("offset-check")
+        .fetch_all(&mut conn)
+        .await
+        .expect("query media_msgs");
+
+        assert_eq!(rows.len(), n, "all rows must be flushed and indexed");
+
+        let raw = std::fs::read(&raw_path).expect("read data.raw");
+        let mut prev_end: i64 = 0;
+        for (idx, (leg, ts, offset, size)) in rows.iter().enumerate() {
+            let start = *offset as usize;
+            let end = start + RAW_RECORD_HEADER_LEN as usize + *size as usize;
+            assert_eq!(
+                &raw[start..start + 2],
+                &[0x53, 0x46],
+                "record magic for packet {idx}"
+            );
+            assert_eq!(
+                *offset as i64, prev_end,
+                "record {idx} offset must be exactly contiguous (no gap/overlap)"
+            );
+            let payload = &raw[start + RAW_RECORD_HEADER_LEN as usize..end];
+            let (eleg, ets, epayload) = &expected[idx];
+            assert_eq!(*leg, *eleg, "leg for packet {idx}");
+            assert_eq!(*ts as u64, *ets, "timestamp for packet {idx}");
+            assert_eq!(
+                payload, epayload.as_slice(),
+                "physical payload bytes at recorded offset for packet {idx}"
+            );
+            prev_end = end as i64;
+        }
+        assert_eq!(prev_end as usize, raw.len(), "no trailing bytes in data.raw");
     }
 }

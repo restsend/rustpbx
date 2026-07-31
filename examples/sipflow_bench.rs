@@ -14,6 +14,7 @@
 use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
+use metrics_util::debugging::{DebuggingRecorder, DebugValue, Snapshotter};
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{SipFlowItem, SipFlowMsgType};
 use std::path::PathBuf;
@@ -56,12 +57,28 @@ fn make_sip_item(ts_micros: u64, call_id: &str) -> SipFlowItem {
     }
 }
 
+/// Deterministic pseudo-random audio payload (xorshift64, seeded by `seq`).
+///
+/// Real G.711 audio is high-entropy; using all-`0x55` bytes would compress
+/// near-perfectly and unfairly exaggerate the disk-size gap between engines.
+fn random_audio(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0xBF58476D1CE4E5B9);
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push((state & 0xff) as u8);
+    }
+    out
+}
+
 fn make_rtp_item(ts_micros: u64, leg: i32, seq: u16) -> SipFlowItem {
     let mut payload = vec![0x80u8, 0x08]; // V=2, PT=8 (PCMA)
     payload.extend_from_slice(&seq.to_be_bytes());
     payload.extend_from_slice(&(160u32 * seq as u32).to_be_bytes());
     payload.extend_from_slice(&0x12345678u32.to_be_bytes());
-    payload.extend_from_slice(&vec![0x55u8; 160]);
+    payload.extend_from_slice(&random_audio(seq as u64, 160));
     SipFlowItem {
         timestamp: ts_micros,
         seq: 0,
@@ -93,6 +110,69 @@ fn dir_size(path: &PathBuf) -> u64 {
 
 fn local_dt_from_micros(ts: i64) -> DateTime<Local> {
     Local.timestamp_micros(ts).single().expect("valid ts")
+}
+
+/// Install an in-process `metrics` recorder so the sipflow flush metrics
+/// emitted by the SQLite flusher / local backend are observable in this bench.
+fn install_debug_recorder() -> Snapshotter {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    recorder
+        .install()
+        .unwrap_or_else(|_| eprintln!("metrics recorder already installed"));
+    snapshotter
+}
+
+/// Print a window of `sipflow_*` metrics accumulated since the last call.
+///
+/// `Snapshotter::snapshot()` consumes/resets the values, so each call reports
+/// only the metrics recorded since the previous dump.
+fn dump_flush_metrics(snapshotter: &Snapshotter, label: &str) {
+    let snapshot = snapshotter.snapshot().into_hashmap();
+    let mut hist: Vec<(String, u64, f64, f64, f64, f64, f64)> = Vec::new();
+    let mut scalar: Vec<(String, String)> = Vec::new();
+
+    for (ck, (_unit, _desc, value)) in snapshot {
+        let name = ck.key().name().to_string();
+        if !name.starts_with("sipflow_") {
+            continue;
+        }
+        match value {
+            DebugValue::Counter(c) if c > 0 => scalar.push((name, format!("count={c}"))),
+            DebugValue::Counter(_) => {}
+            DebugValue::Gauge(g) if g.into_inner() != 0.0 => scalar.push((name, format!("{g:.0}"))),
+            DebugValue::Gauge(_) => {}
+            DebugValue::Histogram(vals) => {
+                if vals.is_empty() {
+                    continue;
+                }
+                let mut vs: Vec<f64> = vals.iter().map(|v| v.into_inner()).collect();
+                vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let count = vs.len() as u64;
+                let sum: f64 = vs.iter().sum();
+                let p = |q: f64| {
+                    let idx = ((vs.len() as f64 - 1.0) * q).round() as usize;
+                    vs[idx.min(vs.len() - 1)]
+                };
+                hist.push((name, count, sum, p(0.5), p(0.95), p(0.99), p(0.999)));
+            }
+        }
+    }
+
+    if hist.is_empty() && scalar.is_empty() {
+        return;
+    }
+    println!("  [{label}] sipflow flush metrics:");
+    hist.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, count, sum, p50, p95, p99, p999) in hist {
+        println!(
+            "    {name:<40} n={count:>5}  sum={sum:8.3}s  p50={p50:.4}s  p95={p95:.4}s  p99={p99:.4}s  p99.9={p999:.4}s"
+        );
+    }
+    scalar.sort();
+    for (name, v) in scalar {
+        println!("    {name:<40} {v}");
+    }
 }
 
 struct BenchResult {
@@ -183,7 +263,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         for sip_idx in 0..args.sip_per_call {
             let ts = base_ts + (call_idx as u64 * 1_000_000) + (sip_idx as u64 * 100_000);
             backend
-                .record(&call_id, make_sip_item(ts, &call_id))
+                .record(std::borrow::Cow::Borrowed(&call_id), make_sip_item(ts, &call_id))
                 .unwrap();
         }
         for rtp_idx in 0..args.rtp_per_call {
@@ -193,7 +273,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
                 + (args.sip_per_call as u64 * 100_000)
                 + (rtp_idx as u64 * 20_000);
             backend
-                .record(&call_id, make_rtp_item(ts, leg, rtp_idx as u16))
+                .record(std::borrow::Cow::Borrowed(&call_id), make_rtp_item(ts, leg, rtp_idx as u16))
                 .unwrap();
         }
     }
@@ -312,6 +392,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
 
 fn main() {
     let args = Args::parse();
+    let metrics = install_debug_recorder();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);
@@ -329,7 +410,9 @@ fn main() {
         let mut results = Vec::new();
 
         results.push(run_bench(SipFlowEngine::Sqlite, &args).await);
+        dump_flush_metrics(&metrics, "SQLite");
         results.push(run_bench(SipFlowEngine::FlowDb, &args).await);
+        dump_flush_metrics(&metrics, "FlowDB");
 
         BenchResult::print_table(&results);
 

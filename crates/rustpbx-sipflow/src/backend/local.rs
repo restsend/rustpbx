@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -151,7 +152,13 @@ impl LocalBackend {
                                 let _ = storage.write_processed(processed).await;
                             }
                             Command::Flush { done } => {
+                                let wait_start = Instant::now();
                                 let _ = storage.force_flush().await;
+                                metrics::histogram!(
+                                    "sipflow_force_flush_wait_seconds",
+                                    "component" => "sipflow"
+                                )
+                                .record(wait_start.elapsed().as_secs_f64());
                                 perf.flushes.fetch_add(1, Ordering::Relaxed);
                                 perf.set_pending(storage.dropped() as i64);
                                 let _ = done.send(());
@@ -160,6 +167,8 @@ impl LocalBackend {
                     }
                     _ = interval.tick() => {
                         let _ = storage.check_flush().await;
+                        metrics::gauge!("sipflow_worker_queue_depth", "component" => "sipflow")
+                            .set(rx.len() as f64);
                         perf.set_pending(storage.dropped() as i64);
                         if let Some(msg) = dumper.try_dump() {
                             tracing::info!("{msg}");
@@ -189,14 +198,21 @@ impl SipFlowBackend for LocalBackend {
             warn!("SipFlowBackend flush: worker channel closed, skipping flush");
             return Ok(());
         }
+        let total = Instant::now();
         match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                metrics::histogram!("sipflow_flush_total_seconds", "component" => "sipflow")
+                    .record(total.elapsed().as_secs_f64());
+                Ok(())
+            }
             Ok(Err(_)) => {
                 warn!("SipFlowBackend flush: oneshot cancelled");
                 Ok(())
             }
             Err(_) => {
-                warn!("SipFlowBackend flush: timed out after 30s");
+                metrics::counter!("sipflow_flush_timeout_total", "component" => "sipflow")
+                    .increment(1);
+                tracing::error!("SipFlowBackend flush: timed out after 30s");
                 Ok(())
             }
         }
