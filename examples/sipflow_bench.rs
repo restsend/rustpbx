@@ -29,6 +29,8 @@ struct Args {
     rtp_per_call: usize,
     #[arg(long, default_value_t = 20)]
     sip_per_call: usize,
+    #[arg(long, default_value_t = 4)]
+    shards: usize,
 }
 
 fn make_sip_item(ts_micros: u64, call_id: &str) -> SipFlowItem {
@@ -239,6 +241,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         ttl_secs: None,
         memtable_size_mb: 64,
         block_cache_capacity_mb: 128,
+        shards: args.shards,
         upload: None,
     };
 
@@ -405,6 +408,7 @@ fn main() {
         println!("  Calls:         {}", args.calls);
         println!("  SIP/call:      {}", args.sip_per_call);
         println!("  RTP/call:      {}", args.rtp_per_call);
+        println!("  Shards:        {}", args.shards);
         println!("  Total records: {}", total_records);
 
         let mut results = Vec::new();

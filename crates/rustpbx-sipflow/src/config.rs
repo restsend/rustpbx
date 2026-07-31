@@ -58,6 +58,10 @@ fn default_flowdb_block_cache_mb() -> usize {
     128
 }
 
+fn default_sipflow_shards() -> usize {
+    4
+}
+
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SipFlowSubdirs {
@@ -143,6 +147,8 @@ pub enum SipFlowConfig {
         memtable_size_mb: usize,
         #[serde(default = "default_flowdb_block_cache_mb")]
         block_cache_capacity_mb: usize,
+        #[serde(default = "default_sipflow_shards")]
+        shards: usize,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },

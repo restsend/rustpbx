@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -121,6 +121,10 @@ struct Args {
     /// FlowDB block cache capacity in MB (default 128)
     #[arg(long, default_value_t = 128)]
     block_cache_capacity_mb: usize,
+
+    /// Number of parallel shard pipelines (1 = legacy single-file layout)
+    #[arg(long, default_value_t = 4)]
+    shards: usize,
 }
 
 #[derive(Clone)]
@@ -130,6 +134,9 @@ struct AppState {
     subdirs: SipFlowSubdirs,
     client: reqwest::Client,
     receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
+    /// Per-sender report tracking: client_id → (last_sent, last_recv), used to
+    /// derive per-interval loss on the collector when a report is received.
+    report_tracking: Arc<Mutex<HashMap<u32, (u64, u64)>>>,
 }
 
 /// Bind a UDP socket with a custom SO_RCVBUF (and SO_REUSEPORT when
@@ -249,6 +256,7 @@ async fn main() -> Result<()> {
         ttl_secs,
         memtable_size_mb: args.memtable_size_mb,
         block_cache_capacity_mb: args.block_cache_capacity_mb,
+        shards: args.shards,
         upload: None,
     };
 
@@ -271,6 +279,8 @@ async fn main() -> Result<()> {
     )?;
 
     let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
+    let report_tracking: Arc<Mutex<HashMap<u32, (u64, u64)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     let app_state = AppState {
         backend: backend.clone(),
@@ -278,6 +288,7 @@ async fn main() -> Result<()> {
         subdirs,
         client: http_client,
         receiver_counters: receiver_counters.clone(),
+        report_tracking,
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
@@ -436,7 +447,11 @@ async fn main() -> Result<()> {
     let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
     tracing::info!("HTTP server listening on {}", http_addr);
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -988,9 +1003,11 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 
 async fn report_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
     let client_id = body["client_id"].as_u64().unwrap_or(0) as u32;
+    let sent_count = body["sent_count"].as_u64().unwrap_or(0);
     let packets_received = state
         .receiver_counters
         .lock()
@@ -998,6 +1015,38 @@ async fn report_handler(
         .get(&client_id)
         .copied()
         .unwrap_or(0);
+
+    // Derive a per-interval loss rate from the sender's cumulative sent count
+    // vs. what this collector actually received, and log it per peer IP.
+    let mut tracking = state.report_tracking.lock().unwrap();
+    let (mut last_sent, mut last_recv) = tracking.get(&client_id).copied().unwrap_or((0, 0));
+    // Sender restarted (counter reset): reset the baseline so the first report
+    // after a restart reports the fresh interval rather than negative loss.
+    if sent_count < last_sent {
+        last_sent = 0;
+        last_recv = 0;
+    }
+    let sent_delta = sent_count.saturating_sub(last_sent);
+    let recv_delta = packets_received.saturating_sub(last_recv);
+    let loss = sent_delta.saturating_sub(recv_delta);
+    let loss_rate = if sent_delta > 0 {
+        loss as f64 / sent_delta as f64
+    } else {
+        0.0
+    };
+    tracking.insert(client_id, (sent_count, packets_received));
+    drop(tracking);
+
+    tracing::info!(
+        peer_ip = %peer.ip(),
+        client_id,
+        sent = sent_delta,
+        recv = recv_delta,
+        loss = loss,
+        loss_rate = loss_rate,
+        "sipflow collector report"
+    );
+
     axum::Json(serde_json::json!({
         "status": "success",
         "client_id": client_id,

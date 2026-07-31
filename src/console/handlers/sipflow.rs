@@ -82,6 +82,7 @@ async fn get_settings(
                     ttl_secs,
                     memtable_size_mb,
                     block_cache_capacity_mb,
+                    shards,
                     ..
                 } => (
                     "local",
@@ -96,7 +97,8 @@ async fn get_settings(
                         "compress_level": compress_level,
                         "ttl_secs": ttl_secs,
                         "memtable_size_mb": memtable_size_mb,
-                        "block_cache_capacity_mb": block_cache_capacity_mb
+                        "block_cache_capacity_mb": block_cache_capacity_mb,
+                        "shards": shards
                     }),
                 ),
                 SipFlowConfig::Remote {

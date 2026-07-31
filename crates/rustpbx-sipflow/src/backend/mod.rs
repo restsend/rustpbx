@@ -140,6 +140,7 @@ pub async fn create_backend(
             ttl_secs,
             memtable_size_mb,
             block_cache_capacity_mb,
+            shards,
             upload,
             ..
         } => {
@@ -175,6 +176,7 @@ pub async fn create_backend(
                 *ttl_secs,
                 *memtable_size_mb,
                 *block_cache_capacity_mb,
+                *shards,
                 force_pcm,
                 pcm_sample_rate,
             )

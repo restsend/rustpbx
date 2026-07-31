@@ -643,7 +643,12 @@ async fn report_loop(
             let node_addr = node.http_addr.clone();
             match client
                 .post(format!("{}/report", node_addr))
-                .json(&serde_json::json!({ "client_id": client_id }))
+                .json(&serde_json::json!({
+                    "client_id": client_id,
+                    // Cumulative sent count so the collector can also derive a
+                    // per-interval loss rate when it receives the report.
+                    "sent_count": current_sent,
+                }))
                 .timeout(Duration::from_secs(5))
                 .send()
                 .await
