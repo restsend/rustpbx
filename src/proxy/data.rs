@@ -697,7 +697,7 @@ impl ProxyDataContext {
             }
         }
 
-        routes.sort_by_key(|r| r.priority);
+        routes.sort_by_key(|route| Reverse(route.priority));
         let len = routes.len();
         *self.routes.write().unwrap() = routes;
         let finished_at = Utc::now();
@@ -1369,7 +1369,7 @@ pub(crate) async fn load_routes_from_db(
 ) -> Result<Vec<RouteRule>> {
     let models = routing::Entity::find()
         .filter(routing::Column::IsActive.eq(true))
-        .order_by_asc(routing::Column::Priority)
+        .order_by_desc(routing::Column::Priority)
         .all(db)
         .await?;
 
@@ -1877,6 +1877,47 @@ mod tests {
         );
         assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
         assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
+    }
+
+    #[tokio::test]
+    async fn routes_are_loaded_with_higher_priority_values_first() {
+        let mut config = ProxyConfig::default();
+        config.routes = Some(vec![
+            RouteRule {
+                name: "low".to_string(),
+                priority: 1,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "high-first".to_string(),
+                priority: 10,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "high-second".to_string(),
+                priority: 10,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "middle".to_string(),
+                priority: 5,
+                ..Default::default()
+            },
+        ]);
+
+        let context = ProxyDataContext::new(Arc::new(config), None)
+            .await
+            .expect("initialize proxy data");
+        let route_names: Vec<_> = context
+            .routes_snapshot()
+            .into_iter()
+            .map(|route| route.name)
+            .collect();
+
+        assert_eq!(
+            route_names,
+            vec!["high-first", "high-second", "middle", "low"]
+        );
     }
 
     #[tokio::test]

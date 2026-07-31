@@ -864,7 +864,7 @@ pub(crate) async fn query_routing(
 ) -> Response {
     let db = state.db();
     let mut selector = RoutingEntity::find()
-        .order_by_asc(RoutingColumn::Priority)
+        .order_by_desc(RoutingColumn::Priority)
         .order_by_asc(RoutingColumn::Name);
 
     if let Some(filters) = &payload.filters {
