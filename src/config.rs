@@ -663,6 +663,7 @@ pub struct ProxyConfig {
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
+    pub tls_ca_certificates: Option<String>,
     pub udp_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_ports: Option<Vec<u16>>,
@@ -1131,6 +1132,7 @@ impl Default for ProxyConfig {
             t1x64_timer: None,
             ssl_private_key: None,
             ssl_certificate: None,
+            tls_ca_certificates: None,
             udp_port: Some(5060),
             udp_ports: None,
             tcp_port: None,
@@ -1390,6 +1392,23 @@ mod tests {
         config.udp_ports = Some(vec![5060, 5062, 5064, 5062]);
 
         assert_eq!(config.all_udp_ports(), vec![5060, 5062, 5064]);
+    }
+
+    #[test]
+    fn test_proxy_tls_ca_certificates_path_is_parsed() {
+        let config: ProxyConfig = toml::from_str(
+            r#"
+            addr = "0.0.0.0"
+            tls_port = 5061
+            tls_ca_certificates = "/etc/ssl/certs/ca-certificates.crt"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.tls_ca_certificates.as_deref(),
+            Some("/etc/ssl/certs/ca-certificates.crt")
+        );
     }
 
     #[test]

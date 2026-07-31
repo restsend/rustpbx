@@ -513,6 +513,7 @@ mod tests {
     use super::*;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
     use chrono::{DateTime, Local};
+    use std::borrow::Cow;
 
     struct MockBackend {
         media: Vec<u8>,
