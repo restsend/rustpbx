@@ -679,4 +679,48 @@ mod tests {
         mb.replace_leg(LegSide::B, b).await;
         mb.close();
     }
+
+    #[tokio::test]
+    async fn rtp_legs_negotiate_and_bridge_fastpath() {
+        use rustrtc::SdpType;
+
+        // Two RTP legs negotiate UAC/UAS-style SDP with each other (no DTLS),
+        // then the bridge activates the same-codec fast-path relay.
+        let mut mb = MediaBridge::new("s6", BridgeOpts::default());
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+
+        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let b_answer = b
+            .apply_sdp(&a_offer, SdpType::Offer)
+            .await
+            .expect("b answers a");
+        a.apply_sdp(&b_answer, SdpType::Answer)
+            .await
+            .expect("a applies answer");
+
+        assert!(a.negotiated().is_some(), "leg A should be negotiated");
+        assert!(b.negotiated().is_some(), "leg B should be negotiated");
+
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+
+        assert!(mb.is_bridged(), "route should be active after both answer");
+
+        // Same codec (PCMU) → fast-path relay on both legs.
+        for side in [LegSide::A, LegSide::B] {
+            let leg = mb.leg(side).expect("leg");
+            assert!(
+                leg.egress_is_relay(),
+                "leg {side:?} should use fast-path relay"
+            );
+        }
+
+        // Re-bridging the same codec pair is a no-op (idempotent).
+        let _ = mb.bridge().await;
+        assert!(mb.is_bridged());
+        mb.close();
+    }
 }

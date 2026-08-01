@@ -331,6 +331,12 @@ impl LegInner {
 
     // ── Egress control ───────────────────────────────────────────────────
 
+    /// Whether the leg's egress source is the fast-path relay (vs the paced
+    /// egress pipeline: silence / media / transcode).
+    pub fn egress_is_relay(&self) -> bool {
+        self.was_relay.load(Ordering::SeqCst)
+    }
+
     /// Switch the egress source. [`EgressSource::RewriteRelay`] is routed to
     /// the PC's rewrite bridge (transport-level, ICE exclusively owned); all
     /// other sources go to the always-alive [`EgressPipeline`].
@@ -343,8 +349,7 @@ impl LegInner {
             EgressSource::RewriteRelay { peer_pc, params } => {
                 // The rewrite bridge needs both RTP transports ready (they are
                 // created during SDP negotiation); wait briefly for them.
-                let _ = self
-                    .pc
+                let _ = self                    .pc
                     .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
                     .await;
                 let _ = peer_pc
@@ -599,6 +604,50 @@ mod tests {
         assert!(a.negotiated().is_none());
         // Observer is installed: stats start at zero.
         assert_eq!(a.stats().ingress_packets, 0);
+        a.stop();
+    }
+
+    #[tokio::test]
+    async fn webrtc_leg_generates_dtls_offer() {
+        // A WebRTC (DTLS-SRTP) leg must produce a real WebRTC offer with a
+        // DTLS fingerprint, ICE creds and a UDP/TLS/RTP/SAVPF m-line — this is
+        // the proxy-side capability P6 real WebRTC e2e relies on.
+        let cfg = LegConfig {
+            transport: TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("webrtc-test".to_string()),
+        };
+        let a = LegInner::new("a", &cfg).expect("webrtc leg");
+        let offer = a.create_offer(vec![]).await.expect("create_offer");
+        assert!(
+            offer.contains("a=fingerprint"),
+            "offer lacks DTLS fingerprint:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("a=ice-ufrag"),
+            "offer lacks ICE credentials:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("UDP/TLS/RTP/SAVPF"),
+            "offer lacks DTLS-SRTP m-line:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("rtpmap:111 opus"),
+            "offer lacks opus rtpmap:\n{}",
+            offer
+        );
         a.stop();
     }
 }
