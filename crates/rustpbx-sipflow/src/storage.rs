@@ -35,7 +35,7 @@ pub struct StorageManager {
     /// forcing the next write to re-seek before appending.
     pos_known: bool,
     subdirs: SipFlowSubdirs,
-    flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+    flusher_tx: Option<mpsc::Sender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
     /// Shard this writer belongs to (0..shard_count). Used to pick the
     /// `shard-{i}` subdir when the active bucket is sharded.
@@ -122,25 +122,22 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
     process_packet_with(packet, Some(DEFAULT_COMPRESS_LEVEL))
 }
 
-/// Like [`process_packet`], with explicit compression control:
-/// `Some(level)` gzip-compresses large payloads at that level, `None`
-/// stores payloads uncompressed. Both forms are always readable — the read
-/// path auto-detects compression from magic bytes.
-pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPacket {
-    let Packet {
-        msg_type,
-        src,
-        dst,
-        timestamp,
-        call_id,
-        leg,
-        payload,
-        ..
-    } = packet;
+/// Like [`process_packet_with`], but takes pre-formatted `"ip:port"` address
+/// strings instead of a [`Packet`]. Use this on paths that already hold the
+/// address strings (e.g. [`SipFlowItem`]-based recording) to avoid the
+/// `String → IpAddr → String` round-trip.
+#[allow(clippy::too_many_arguments)]
+pub fn process_packet_with_addr(
+    msg_type: MsgType,
+    src_addr: String,
+    dst_addr: String,
+    timestamp: u64,
+    call_id: Option<String>,
+    leg: Option<i32>,
+    payload: Bytes,
+    compress: Option<u32>,
+) -> ProcessedPacket {
     let mut callid = call_id;
-    let src_addr = format!("{}:{}", src.0, src.1);
-    let dst_addr = format!("{}:{}", dst.0, dst.1);
-
     if matches!(msg_type, MsgType::Sip) && callid.is_none() {
         callid = extract_callid(&payload);
     }
@@ -164,6 +161,26 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
         orig_size,
         comp_size,
     }
+}
+
+/// Like [`process_packet`], with explicit compression control:
+/// `Some(level)` gzip-compresses large payloads at that level, `None`
+/// stores payloads uncompressed. Both forms are always readable — the read
+/// path auto-detects compression from magic bytes.
+pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPacket {
+    let Packet {
+        msg_type,
+        src,
+        dst,
+        timestamp,
+        call_id,
+        leg,
+        payload,
+        ..
+    } = packet;
+    let src_addr = format!("{}:{}", src.0, src.1);
+    let dst_addr = format!("{}:{}", dst.0, dst.1);
+    process_packet_with_addr(msg_type, src_addr, dst_addr, timestamp, call_id, leg, payload, compress)
 }
 
 async fn seek_or_read_through(
@@ -228,7 +245,7 @@ impl StorageManager {
     pub(crate) fn new(
         base_path: &Path,
         subdirs: SipFlowSubdirs,
-        flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+        flusher_tx: Option<mpsc::Sender<FlushCommand>>,
         dropped: Option<Arc<AtomicU64>>,
         shard_index: usize,
         shard_count: usize,
@@ -301,7 +318,9 @@ impl StorageManager {
                 offset,
                 size: processed.comp_size,
             };
-            if tx.send(FlushCommand::Meta(meta)).is_err() {
+            // Bounded channel: awaiting parks this worker until the flusher
+            // drains, so the flusher's backlog stays capped (backpressure).
+            if tx.send(FlushCommand::Meta(meta)).await.is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -309,7 +328,7 @@ impl StorageManager {
         Ok(())
     }
 
-    /// Number of items dropped due to flusher channel being full.
+    /// Number of items dropped due to flusher channel being closed.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
@@ -318,7 +337,7 @@ impl StorageManager {
         if let Some(ref tx) = self.flusher_tx {
             let _ = tx.send(FlushCommand::Flush {
                 enqueued_at: Instant::now(),
-            });
+            }).await;
         }
         Ok(())
     }
@@ -332,6 +351,7 @@ impl StorageManager {
                     done: done_tx,
                     enqueued_at: Instant::now(),
                 })
+                .await
                 .is_ok()
             {
                 let _ = done_rx.await;
@@ -408,7 +428,7 @@ impl StorageManager {
         self.raw_file = Some(file);
 
         if let Some(ref tx) = self.flusher_tx {
-            let _ = tx.send(FlushCommand::Rotate { db_path });
+            let _ = tx.send(FlushCommand::Rotate { db_path }).await;
         }
 
         Ok(())

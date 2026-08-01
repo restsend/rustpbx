@@ -62,6 +62,13 @@ fn default_sipflow_shards() -> usize {
     4
 }
 
+fn default_flowdb_sync_mode() -> flowdb::SyncMode {
+    // Coalesce WAL fsyncs (every 10ms) instead of per-batch `Always`; trade a
+    // ~10ms crash-loss window for ~15% higher write throughput. Deployments
+    // that must never drop a packet can set `flowdb_sync_mode = "always"`.
+    flowdb::SyncMode::IntervalMs(10)
+}
+
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SipFlowSubdirs {
@@ -149,6 +156,10 @@ pub enum SipFlowConfig {
         block_cache_capacity_mb: usize,
         #[serde(default = "default_sipflow_shards")]
         shards: usize,
+        /// FlowDB WAL sync mode: `"always"` (fsync per batch, max durability)
+        /// or `{ interval_ms = N }` (coalesced fsync, ~N ms crash-loss window).
+        #[serde(default = "default_flowdb_sync_mode")]
+        flowdb_sync_mode: flowdb::SyncMode,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },

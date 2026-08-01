@@ -1,13 +1,13 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
-use std::net::IpAddr;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -17,9 +17,51 @@ use crate::flusher::SipFlowFlusher;
 use crate::perf::{PerfCounters, PerfDumper};
 use crate::protocol::{MsgType, Packet};
 use crate::shard::{MODE_MULTI, RouterState};
-use crate::storage::{StorageManager, extract_callid, process_packet_with};
+use crate::storage::{StorageManager, extract_callid, process_packet_with, process_packet_with_addr};
 use crate::wav_utils::generate_wav_to_writer_with_rate;
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
+
+/// How long `record()` blocks on a full worker channel before dropping the
+/// record (bounded backpressure: never grow memory without limit, never drop
+/// under brief overload).
+const BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Capacity for the bounded record→worker channel per shard.
+fn command_capacity(flush_count: usize) -> usize {
+    flush_count.max(1024)
+}
+
+/// Send a command with bounded backpressure (policy A): block the calling
+/// thread with short parks while the worker channel is full, up to `timeout`;
+/// if it is still full after that, drop the record and count it rather than
+/// grow memory without limit.
+fn send_command(tx: &mpsc::Sender<Command>, cmd: Command, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut cmd = cmd;
+    loop {
+        match tx.try_send(cmd) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(c)) => {
+                if Instant::now() >= deadline {
+                    metrics::counter!(
+                        "sipflow_record_backpressure_dropped_total",
+                        "component" => "sipflow"
+                    )
+                    .increment(1);
+                    tracing::warn!(
+                        "sipflow record: worker channel full, dropped a record after {timeout:?}"
+                    );
+                    return Ok(());
+                }
+                std::thread::park_timeout(Duration::from_micros(100));
+                cmd = c;
+            }
+            Err(TrySendError::Closed(_)) => {
+                return Err(anyhow::anyhow!("worker channel closed"));
+            }
+        }
+    }
+}
 
 enum Command {
     RecordItem {
@@ -44,7 +86,7 @@ enum Command {
 /// sharded, legacy single-file buckets are written single-threaded until the
 /// next bucket rotation.
 pub struct LocalBackend {
-    senders: Vec<mpsc::UnboundedSender<Command>>,
+    senders: Vec<mpsc::Sender<Command>>,
     router: Arc<RouterState>,
     root: String,
     subdirs: SipFlowSubdirs,
@@ -91,7 +133,7 @@ impl LocalBackend {
             let flusher_tx = flusher.sender();
             let dropped = flusher.dropped_count();
 
-            let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
+            let (tx, mut rx) = mpsc::channel::<Command>(command_capacity(flush_count));
             let cancel_token_clone = cancel_token.clone();
             let root_clone = root.clone();
             let subdirs_clone = subdirs.clone();
@@ -130,25 +172,19 @@ impl LocalBackend {
                                     } else {
                                         0
                                     };
-                                    let parse_addr = |s: &str| -> (IpAddr, u16) {
-                                        let parts: Vec<&str> = s.split(':').collect();
-                                        let ip = parts[0].parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
-                                        let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(default_port);
-                                        (ip, port)
-                                    };
-
-                                    let (src_ip, src_port) = if !item.src_addr.is_empty() && item.src_addr != "synth" {
-                                        parse_addr(&item.src_addr)
+                                    // item already carries "ip:port" strings — reuse them
+                                    // directly instead of parsing to (IpAddr, u16) and
+                                    // reformatting (String → IpAddr → String round-trip).
+                                    let src_addr = if !item.src_addr.is_empty() && item.src_addr != "synth" {
+                                        item.src_addr
                                     } else {
-                                        (IpAddr::from([0, 0, 0, 0]), default_port)
+                                        format!("0.0.0.0:{default_port}")
                                     };
-
-                                    let (dst_ip, dst_port) = if !item.dst_addr.is_empty() && item.dst_addr != "synth" {
-                                        parse_addr(&item.dst_addr)
+                                    let dst_addr = if !item.dst_addr.is_empty() && item.dst_addr != "synth" {
+                                        item.dst_addr
                                     } else {
-                                        (IpAddr::from([0, 0, 0, 0]), default_port)
+                                        format!("0.0.0.0:{default_port}")
                                     };
-
                                     let msg_type = match item.msg_type {
                                         SipFlowMsgType::Sip => MsgType::Sip,
                                         SipFlowMsgType::Rtp => MsgType::Rtp,
@@ -164,18 +200,16 @@ impl LocalBackend {
                                         None
                                     };
 
-                                    let packet = Packet {
+                                    let processed = process_packet_with_addr(
                                         msg_type,
-                                        src: (src_ip, src_port),
-                                        dst: (dst_ip, dst_port),
-                                        timestamp: item.timestamp,
-                                        call_id: packet_call_id,
-                                        leg: packet_leg,
-                                        payload: item.payload,
-                                        client_id: 0,
-                                    };
-
-                                    let processed = process_packet_with(packet, compress);
+                                        src_addr,
+                                        dst_addr,
+                                        item.timestamp,
+                                        packet_call_id,
+                                        packet_leg,
+                                        item.payload,
+                                        compress,
+                                    );
                                     let _ = storage.write_processed(processed).await;
                                 }
                                 Command::RecordPacket { packet } => {
@@ -239,7 +273,7 @@ impl SipFlowBackend for LocalBackend {
         let mut pending = Vec::new();
         for (i, tx) in self.senders.iter().enumerate() {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            if tx.send(Command::Flush { done: done_tx }).is_err() {
+            if tx.send(Command::Flush { done: done_tx }).await.is_err() {
                 warn!("SipFlowBackend flush: worker {i} channel closed, skipping");
                 continue;
             }
@@ -280,13 +314,14 @@ impl SipFlowBackend for LocalBackend {
 
     fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         let idx = self.route(&call_id);
-        self.senders[idx]
-            .send(Command::RecordItem {
+        send_command(
+            &self.senders[idx],
+            Command::RecordItem {
                 call_id: call_id.into_owned(),
                 item,
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to send record command: {}", e))?;
-        Ok(())
+            },
+            BACKPRESSURE_TIMEOUT,
+        )
     }
 
     fn record_packet(&self, packet: Packet) -> Result<()> {
@@ -301,10 +336,11 @@ impl SipFlowBackend for LocalBackend {
             Some(cid) => self.route(cid),
             None => 0,
         };
-        self.senders[idx]
-            .send(Command::RecordPacket { packet })
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(())
+        send_command(
+            &self.senders[idx],
+            Command::RecordPacket { packet },
+            BACKPRESSURE_TIMEOUT,
+        )
     }
 
     async fn query_flow(
@@ -565,6 +601,7 @@ async fn build_payload_maps_filtered(
 mod tests {
     use super::*;
     use crate::shard::MODE_SINGLE;
+    use std::net::IpAddr;
     use crate::storage::DEFAULT_COMPRESS_LEVEL;
 
     fn local_dt_from_micros(ts_micros: i64) -> DateTime<Local> {
@@ -720,5 +757,61 @@ mod tests {
             .unwrap();
         let total: usize = stats.iter().map(|s| s.packet_count).sum();
         assert_eq!(total, 20, "single-threaded legacy write must round-trip");
+    }
+
+    fn dummy_packet() -> Packet {
+        use bytes::Bytes;
+        Packet {
+            msg_type: MsgType::Rtp,
+            src: (IpAddr::from([127, 0, 0, 1]), 5000),
+            dst: (IpAddr::from([127, 0, 0, 2]), 5002),
+            timestamp: 0,
+            call_id: Some("backpressure-test".to_string()),
+            leg: Some(0),
+            payload: Bytes::from(vec![0u8; 10]),
+            client_id: 0,
+        }
+    }
+
+    /// Bounded backpressure (policy A): when the worker channel is full and the
+    /// timeout has elapsed, `send_command` must drop + return Ok instead of
+    /// blocking forever or growing memory.
+    #[test]
+    fn test_send_command_drops_when_full() {
+        let (tx, _rx) = mpsc::channel::<Command>(2);
+        for _ in 0..2 {
+            tx.try_send(Command::RecordPacket {
+                packet: dummy_packet(),
+            })
+            .unwrap();
+        }
+        // A zero timeout means "never wait": the full channel must drop the
+        // record and return Ok (not block).
+        let result = send_command(
+            &tx,
+            Command::RecordPacket {
+                packet: dummy_packet(),
+            },
+            Duration::ZERO,
+        );
+        assert!(result.is_ok(), "full channel with zero timeout must drop, not block");
+    }
+
+    /// Backpressure must not lose records when the receiver drains promptly.
+    #[test]
+    fn test_send_command_succeeds_when_drained() {
+        let (tx, mut rx) = mpsc::channel::<Command>(1);
+        let result = send_command(
+            &tx,
+            Command::RecordPacket {
+                packet: dummy_packet(),
+            },
+            Duration::from_millis(100),
+        );
+        assert!(result.is_ok());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::RecordPacket { .. })
+        ));
     }
 }

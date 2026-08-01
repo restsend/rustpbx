@@ -141,6 +141,7 @@ pub async fn create_backend(
             memtable_size_mb,
             block_cache_capacity_mb,
             shards,
+            flowdb_sync_mode,
             upload,
             ..
         } => {
@@ -179,6 +180,7 @@ pub async fn create_backend(
                 *shards,
                 force_pcm,
                 pcm_sample_rate,
+                *flowdb_sync_mode,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }

@@ -34,6 +34,7 @@ pub(crate) struct EngineCache {
     ttl_secs: Option<u64>,
     memtable_size_mb: usize,
     block_cache_capacity_mb: usize,
+    wal_sync_mode: flowdb::SyncMode,
 }
 
 impl EngineCache {
@@ -42,6 +43,7 @@ impl EngineCache {
         ttl_secs: Option<u64>,
         memtable_size_mb: usize,
         block_cache_capacity_mb: usize,
+        wal_sync_mode: flowdb::SyncMode,
     ) -> Self {
         let max_open = (shards * 4).max(24);
         Self {
@@ -50,6 +52,7 @@ impl EngineCache {
             ttl_secs,
             memtable_size_mb,
             block_cache_capacity_mb,
+            wal_sync_mode,
         }
     }
 
@@ -66,7 +69,13 @@ impl EngineCache {
 
         // Slow path: open a new engine outside the lock to avoid blocking
         // other callers on directory creation / WAL replay.
-        let new_engine = Self::open_engine_at(path, self.ttl_secs, self.memtable_size_mb, self.block_cache_capacity_mb)?;
+        let new_engine = Self::open_engine_at(
+            path,
+            self.ttl_secs,
+            self.memtable_size_mb,
+            self.block_cache_capacity_mb,
+            self.wal_sync_mode,
+        )?;
 
         // Re-check: another thread may have raced us.
         if let Some(mut entry) = self.engines.get_mut(path) {
@@ -102,6 +111,7 @@ impl EngineCache {
         ttl_secs: Option<u64>,
         memtable_size_mb: usize,
         block_cache_capacity_mb: usize,
+        wal_sync_mode: flowdb::SyncMode,
     ) -> Result<Arc<Engine>> {
         std::fs::create_dir_all(path)?;
         let config = FlowDbConfig {
@@ -110,6 +120,7 @@ impl EngineCache {
             memtable_size_mb,
             block_cache_capacity_mb,
             auto_background: true,
+            wal_sync_mode,
             ..Default::default()
         };
         let engine = Engine::open(config)?;

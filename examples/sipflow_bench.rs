@@ -9,6 +9,8 @@
 //!   --calls N        Number of simulated calls (default 50)
 //!   --rtp-per-call N RTP packets per call (default 1000)
 //!   --sip-per-call N SIP messages per call (default 20)
+//!   --shards N       Shard pipelines per backend (default 4)
+//!   --threads N      Concurrent writer threads (default 1)
 //! ```
 
 use bytes::Bytes;
@@ -16,12 +18,13 @@ use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
 use metrics_util::debugging::{DebuggingRecorder, DebugValue, Snapshotter};
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
-use rustpbx::sipflow::{SipFlowItem, SipFlowMsgType};
+use rustpbx::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 struct Args {
     #[arg(long, default_value_t = 50)]
     calls: usize,
@@ -31,6 +34,12 @@ struct Args {
     sip_per_call: usize,
     #[arg(long, default_value_t = 4)]
     shards: usize,
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+    /// Concurrent WAV-export tasks run during the write loop to measure the
+    /// impact of per-call-end exports on write throughput (0 = disabled).
+    #[arg(long, default_value_t = 0)]
+    exporters: usize,
 }
 
 fn make_sip_item(ts_micros: u64, call_id: &str) -> SipFlowItem {
@@ -220,6 +229,32 @@ impl BenchResult {
     }
 }
 
+/// Write one call's SIP + RTP records via `backend`. Timestamps are derived
+/// deterministically from `call_idx`, so the stored data is identical no
+/// matter how many writer threads run.
+fn write_call(backend: &dyn SipFlowBackend, args: &Args, call_idx: usize, base_ts: u64) {
+    let call_id = format!("bench-call-{call_idx:06}");
+    for sip_idx in 0..args.sip_per_call {
+        let ts = base_ts + (call_idx as u64 * 1_000_000) + (sip_idx as u64 * 100_000);
+        backend
+            .record(std::borrow::Cow::Borrowed(&call_id), make_sip_item(ts, &call_id))
+            .unwrap();
+    }
+    for rtp_idx in 0..args.rtp_per_call {
+        let leg = (rtp_idx % 2) as i32;
+        let ts = base_ts
+            + (call_idx as u64 * 1_000_000)
+            + (args.sip_per_call as u64 * 100_000)
+            + (rtp_idx as u64 * 20_000);
+        backend
+            .record(
+                std::borrow::Cow::Borrowed(&call_id),
+                make_rtp_item(ts, leg, rtp_idx as u16),
+            )
+            .unwrap();
+    }
+}
+
 async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -242,43 +277,86 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         memtable_size_mb: 64,
         block_cache_capacity_mb: 128,
         shards: args.shards,
+        flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
     };
 
-    let backend = rustpbx::sipflow::create_backend(&config, CancellationToken::new())
-        .await
-        .unwrap();
+    let backend: std::sync::Arc<dyn SipFlowBackend> =
+        std::sync::Arc::from(rustpbx::sipflow::create_backend(&config, CancellationToken::new())
+            .await
+            .unwrap());
 
     let base_ts = chrono::Utc::now().timestamp_micros() as u64;
     let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);
 
     println!(
-        "\n[{engine_name}] Writing {total_records} records ({calls} calls × {sip} SIP + {rtp} RTP)…",
+        "\n[{engine_name}] Writing {total_records} records ({calls} calls × {sip} SIP + {rtp} RTP, {threads} threads)…",
         calls = args.calls,
         sip = args.sip_per_call,
-        rtp = args.rtp_per_call
+        rtp = args.rtp_per_call,
+        threads = args.threads.max(1)
     );
 
     let write_start = Instant::now();
 
-    for call_idx in 0..args.calls {
-        let call_id = format!("bench-call-{call_idx:06}");
-        for sip_idx in 0..args.sip_per_call {
-            let ts = base_ts + (call_idx as u64 * 1_000_000) + (sip_idx as u64 * 100_000);
-            backend
-                .record(std::borrow::Cow::Borrowed(&call_id), make_sip_item(ts, &call_id))
-                .unwrap();
+    let threads = args.threads.max(1);
+    let mut write_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    if threads > 1 {
+        for t in 0..threads {
+            let backend = backend.clone();
+            let args = args.clone();
+            write_handles.push(std::thread::spawn(move || {
+                for call_idx in (t..args.calls).step_by(threads) {
+                    write_call(backend.as_ref(), &args, call_idx, base_ts);
+                }
+            }));
         }
-        for rtp_idx in 0..args.rtp_per_call {
-            let leg = (rtp_idx % 2) as i32;
-            let ts = base_ts
-                + (call_idx as u64 * 1_000_000)
-                + (args.sip_per_call as u64 * 100_000)
-                + (rtp_idx as u64 * 20_000);
-            backend
-                .record(std::borrow::Cow::Borrowed(&call_id), make_rtp_item(ts, leg, rtp_idx as u16))
-                .unwrap();
+    }
+
+    // Concurrent WAV-export tasks: repeatedly export calls while the write
+    // loop runs, to measure the write-throughput impact of "every call end
+    // exports". Stops once the writes finish.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let mut export_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    for _ in 0..args.exporters {
+        let backend = backend.clone();
+        let stop = stop.clone();
+        let base_ts = base_ts;
+        let args = args.clone();
+        export_handles.push(tokio::spawn(async move {
+            let mut i = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                let call_idx = i % args.calls;
+                let call_id = format!("bench-call-{call_idx:06}");
+                let call_base = base_ts + (call_idx as u64 * 1_000_000);
+                let end_offset = (args.sip_per_call as u64 * 100_000)
+                    + (args.rtp_per_call as u64 * 20_000)
+                    + 1_000_000;
+                let _ = backend
+                    .query_media(
+                        &call_id,
+                        local_dt_from_micros(call_base as i64 - 1),
+                        local_dt_from_micros((call_base + end_offset) as i64),
+                    )
+                    .await;
+                i += 1;
+            }
+        }));
+    }
+
+    if threads <= 1 {
+        for call_idx in 0..args.calls {
+            write_call(backend.as_ref(), args, call_idx, base_ts);
         }
+    } else {
+        for h in write_handles {
+            h.join().unwrap();
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in export_handles {
+        let _ = h.await;
     }
 
     backend.flush().await.unwrap();
@@ -409,6 +487,8 @@ fn main() {
         println!("  SIP/call:      {}", args.sip_per_call);
         println!("  RTP/call:      {}", args.rtp_per_call);
         println!("  Shards:        {}", args.shards);
+        println!("  Threads:       {}", args.threads.max(1));
+        println!("  Exporters:     {}", args.exporters);
         println!("  Total records: {}", total_records);
 
         let mut results = Vec::new();

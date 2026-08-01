@@ -83,6 +83,7 @@ async fn get_settings(
                     memtable_size_mb,
                     block_cache_capacity_mb,
                     shards,
+                    flowdb_sync_mode,
                     ..
                 } => (
                     "local",
@@ -98,7 +99,8 @@ async fn get_settings(
                         "ttl_secs": ttl_secs,
                         "memtable_size_mb": memtable_size_mb,
                         "block_cache_capacity_mb": block_cache_capacity_mb,
-                        "shards": shards
+                        "shards": shards,
+                        "flowdb_sync_mode": flowdb_sync_mode
                     }),
                 ),
                 SipFlowConfig::Remote {

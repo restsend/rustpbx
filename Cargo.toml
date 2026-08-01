@@ -271,7 +271,7 @@ arc-swap = "1.9.2"
 iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
-flowdb = { version = "0.8.2", default-features = false }
+flowdb = { version = "0.8.3", default-features = false }
 
 # Workspace crates
 rustpbx-models = { path = "crates/rustpbx-models" }
@@ -303,6 +303,10 @@ path = "src/bin/sipflow.rs"
 [[bin]]
 name = "sipflow-diag"
 path = "src/bin/sipflow-diag.rs"
+
+# Use the local flowdb crate (block-index prefix query fix).
+[patch.crates-io]
+flowdb = { path = "../flowdb" }
 
 [profile.dev]
 opt-level = 1

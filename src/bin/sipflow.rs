@@ -6,8 +6,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use clap::Parser;
+use lru::LruCache;
 use rustpbx::callrecord::sipflow_upload::{
     SipFlowUploadRequest, SipFlowUploadResponse, build_s3_storage, join_root, upload_media,
     upload_signaling_flow,
@@ -25,9 +26,8 @@ use rustpbx::sipflow::{
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
-use lru::LruCache;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_appender::non_blocking;
@@ -246,6 +246,12 @@ async fn main() -> Result<()> {
     };
     let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
 
+
+    println!("Sipflow Start at {}", Utc::now());
+    println!("{}", rustpbx::version::get_version_info());
+    println!("root: {}", args.root);
+    println!("subdirs: {:?}", subdirs);
+    println!("shards: {}", args.shards);
     let config = SipFlowConfig::Local {
         root: args.root.clone(),
         subdirs: subdirs.clone(),
@@ -259,6 +265,7 @@ async fn main() -> Result<()> {
         memtable_size_mb: args.memtable_size_mb,
         block_cache_capacity_mb: args.block_cache_capacity_mb,
         shards: args.shards,
+        flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
     };
 
@@ -280,9 +287,12 @@ async fn main() -> Result<()> {
         Some(std::time::Duration::from_secs(10)),
     )?;
 
-    let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
-    let report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>> =
-        Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(65536).unwrap())));
+    let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    )));
+    let report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>> = Arc::new(Mutex::new(
+        LruCache::new(std::num::NonZeroUsize::new(65536).unwrap()),
+    ));
 
     let app_state = AppState {
         backend: backend.clone(),
@@ -347,10 +357,13 @@ async fn main() -> Result<()> {
                                             match packet.msg_type {
                                                 MsgType::Sip => {
                                                     if packet.call_id.is_none() {
-                                                        packet.call_id = extract_callid(&packet.payload);
+                                                        packet.call_id =
+                                                            extract_callid(&packet.payload);
                                                     }
-                                                    packet.payload =
-                                                        maybe_compress_payload(packet.payload, level);
+                                                    packet.payload = maybe_compress_payload(
+                                                        packet.payload,
+                                                        level,
+                                                    );
                                                 }
                                                 // RTP: 包小压缩比极低，跳过以节省 CPU
                                                 MsgType::Rtp => {}
@@ -771,17 +784,20 @@ async fn debug_flow_handler(
 
     match state.backend.query_flow(&callid, start_dt, end_dt).await {
         Ok(flow) => {
-            let items: Vec<serde_json::Value> = flow.iter().map(|item| {
-                serde_json::json!({
-                    "timestamp": item.timestamp,
-                    "seq": item.seq,
-                    "leg": item.leg,
-                    "msg_type": item.msg_type,
-                    "src_addr": item.src_addr,
-                    "dst_addr": item.dst_addr,
-                    "payload_debug": rustpbx::sipflow::diag::payload_analysis(&item.payload),
+            let items: Vec<serde_json::Value> = flow
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "timestamp": item.timestamp,
+                        "seq": item.seq,
+                        "leg": item.leg,
+                        "msg_type": item.msg_type,
+                        "src_addr": item.src_addr,
+                        "dst_addr": item.dst_addr,
+                        "payload_debug": rustpbx::sipflow::diag::payload_analysis(&item.payload),
+                    })
                 })
-            }).collect();
+                .collect();
 
             axum::Json(serde_json::json!({
                 "status": "success",
@@ -790,12 +806,10 @@ async fn debug_flow_handler(
                 "flow": items,
             }))
         }
-        Err(e) => {
-            axum::Json(serde_json::json!({
-                "status": "error",
-                "message": e.to_string(),
-            }))
-        }
+        Err(e) => axum::Json(serde_json::json!({
+            "status": "error",
+            "message": e.to_string(),
+        })),
     }
 }
 
@@ -805,40 +819,60 @@ async fn debug_raw_handler(
     let path = match params.get("path") {
         Some(p) => p,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing 'path' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing 'path' parameter".to_string(),
+            )
+                .into_response();
         }
     };
     let offset = match params.get("offset").and_then(|s| s.parse::<u64>().ok()) {
         Some(o) => o,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing or invalid 'offset' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing or invalid 'offset' parameter".to_string(),
+            )
+                .into_response();
         }
     };
     let size = match params.get("size").and_then(|s| s.parse::<usize>().ok()) {
         Some(s) => s,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing or invalid 'size' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing or invalid 'size' parameter".to_string(),
+            )
+                .into_response();
         }
     };
 
     let data = match rustpbx::sipflow::diag::raw_read_range(path, offset, size).await {
         Ok(d) => d,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {e}")).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Read error: {e}"),
+            )
+                .into_response();
         }
     };
 
     let analysis = rustpbx::sipflow::diag::payload_analysis(&data);
     let hex_dump = rustpbx::sipflow::diag::hex_dump(&data, 16);
 
-    (StatusCode::OK, format!(
-        "path: {}\noffset: {}\nsize: {}\n\nanalysis: {}\n\nhex dump:\n{}",
-        path,
-        offset,
-        data.len(),
-        serde_json::to_string_pretty(&analysis).unwrap_or_default(),
-        hex_dump,
-    )).into_response()
+    (
+        StatusCode::OK,
+        format!(
+            "path: {}\noffset: {}\nsize: {}\n\nanalysis: {}\n\nhex dump:\n{}",
+            path,
+            offset,
+            data.len(),
+            serde_json::to_string_pretty(&analysis).unwrap_or_default(),
+            hex_dump,
+        ),
+    )
+        .into_response()
 }
 
 async fn upload_handler(
