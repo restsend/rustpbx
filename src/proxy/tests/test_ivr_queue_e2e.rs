@@ -303,7 +303,7 @@ action = {{ type = "transfer", target = "support" }}
             && let Some(handle) = registry.get_handle(&entry.session_id)
         {
             let _ = handle.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
-                track_id: "greeting".to_string(),
+                track_id: "caller".to_string(),
                 interrupted: false,
             });
             info!("Injected AudioComplete for session {}", entry.session_id);

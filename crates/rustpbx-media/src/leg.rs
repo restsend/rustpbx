@@ -283,7 +283,26 @@ impl LegInner {
         // produced (as UAS), or the remote answer we applied (as UAC).
         let profile_sdp = if local_sdp.is_empty() { remote } else { local_sdp.as_str() };
         let profile = negotiate::MediaNegotiator::extract_leg_profile(profile_sdp);
+
+        // If the negotiated audio codec changed (e.g. re-INVITE switches
+        // codec), rebuild the egress encoder so subsequent playback/hold frames
+        // are encoded with the new codec.
         if let Some(audio) = &profile.audio {
+            let prev_codec = self
+                .negotiated
+                .lock()
+                .as_ref()
+                .and_then(|p| p.audio.as_ref())
+                .map(|c| c.codec);
+            if prev_codec != Some(audio.codec) {
+                self.egress
+                    .update_codec(EgressCodec {
+                        codec: audio.codec,
+                        payload_type: audio.payload_type,
+                        clock_rate: audio.clock_rate,
+                    })
+                    .await?;
+            }
             sync_sender_codec(&self.pc, audio.payload_type, audio.clock_rate, audio.channels);
         }
         self.apply_profile(&profile);
@@ -308,10 +327,6 @@ impl LegInner {
         if let Some(d) = &profile.dtmf {
             self.tap.set_dtmf_payload_types(vec![d.payload_type]);
         }
-        // NOTE: if a re-INVITE changes the audio codec, the egress pipeline's
-        // encoder (built at construction from LegConfig.codecs[0]) must be
-        // restarted with the new codec. This lands with the transcoder path;
-        // for now construction picks the negotiated codec for the common case.
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -352,8 +367,20 @@ impl LegInner {
     }
 
     /// Play a media source (IVR greeting / hold music / announcement).
-    pub async fn play(&self, audio: Box<dyn crate::audio_source::AudioSource>, loop_playback: bool) -> Result<()> {
-        self.set_egress_source(EgressSource::Media { audio, loop_playback, on_end: None }).await
+    /// `on_end` fires when playback stops: `false` on natural EOF, `true` when
+    /// interrupted (source switched away or leg stopped).
+    pub async fn play(
+        &self,
+        audio: Box<dyn crate::audio_source::AudioSource>,
+        loop_playback: bool,
+        on_end: Option<crate::egress::EgressEndCallback>,
+    ) -> Result<()> {
+        self.set_egress_source(EgressSource::Media {
+            audio,
+            loop_playback,
+            on_end,
+        })
+        .await
     }
 
     /// Put the leg on hold: play hold music (looping) or silence.
@@ -361,7 +388,7 @@ impl LegInner {
     /// bridge first so the remote peer hears only the hold source.
     pub async fn hold(&self, music: Option<Box<dyn crate::audio_source::AudioSource>>) -> Result<()> {
         match music {
-            Some(audio) => self.play(audio, true).await,
+            Some(audio) => self.play(audio, true, None).await,
             None => self.mute().await,
         }
     }

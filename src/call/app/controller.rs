@@ -13,7 +13,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-/// An audio playback session.
+/// An audio playback session. Playback completion is delivered to the app via
+/// [`ControllerEvent::AudioComplete`] (keyed by [`PlaybackHandle::track_id`]).
 #[derive(Debug, Clone)]
 pub struct PlaybackHandle {
     pub(crate) track_id: String,
@@ -176,10 +177,10 @@ impl CallController {
             .await
     }
 
-    /// Play an audio file with full control over track ID, looping, and
-    /// DTMF interruptibility.
+    /// Play an audio file with full control over loop and DTMF interruptibility.
     ///
     /// - `track_id` – caller-assigned unique ID; a UUID is generated when `None`.
+    ///   Kept for API compatibility; playback is tracked by leg for completion.
     /// - `loop_playback` – when `true`, the file loops until explicitly stopped.
     /// - `interruptible` – whether DTMF should stop playback (handled by the app).
     pub async fn play_audio_with_options(
@@ -544,7 +545,7 @@ mod tests {
                     // Send some other events first (simulating concurrent events)
                     let _ = event_tx_clone.send(ControllerEvent::DtmfReceived("1".to_string()));
                     let _ = event_tx_clone.send(ControllerEvent::AudioComplete {
-                        track_id: "test".to_string(),
+                        track_id: "caller".to_string(),
                         interrupted: false,
                     });
                     // Then send RecordingComplete

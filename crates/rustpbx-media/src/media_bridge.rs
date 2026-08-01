@@ -19,6 +19,7 @@
 //! needed. Hot-path state (taps, egress pipelines) lives inside each `Leg` and
 //! is lock-free.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -44,6 +45,37 @@ pub enum LegSide {
     B,
 }
 
+/// Outcome of a [`PlaybackHandle`]'s play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackResult {
+    /// `false` = natural EOF, `true` = interrupted (stop_play / source switch).
+    pub interrupted: bool,
+}
+
+impl PlaybackResult {
+    pub fn completed() -> Self {
+        Self { interrupted: false }
+    }
+
+    pub fn interrupted() -> Self {
+        Self { interrupted: true }
+    }
+}
+
+/// Handle to an in-progress [`MediaBridge::play`] / [`MediaBridge::play_file`]
+/// on a leg. `done` resolves when playback stops (natural EOF or interrupted).
+#[derive(Debug)]
+pub struct PlaybackHandle {
+    pub done: oneshot::Receiver<PlaybackResult>,
+}
+
+impl PlaybackHandle {
+    fn new() -> (Self, oneshot::Sender<PlaybackResult>) {
+        let (done, rx) = oneshot::channel();
+        (Self { done: rx }, done)
+    }
+}
+
 /// Optional global configuration passed at construction.
 #[derive(Default)]
 pub struct BridgeOpts {
@@ -61,6 +93,9 @@ pub struct MediaBridge {
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
+    /// Legs currently playing a Media source. `play` inserts; the egress
+    /// `on_end` callback removes.
+    active_play: Arc<parking_lot::Mutex<HashSet<LegSide>>>,
 }
 
 impl MediaBridge {
@@ -74,6 +109,7 @@ impl MediaBridge {
             recorder: None,
             dtmf_bus,
             root_cancel: CancellationToken::new(),
+            active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
         }
     }
 
@@ -334,20 +370,34 @@ impl MediaBridge {
     /// Play a media source on a leg (IVR / announcement). The route is broken
     /// first so the peer hears silence, not a mix of playback and relayed audio.
     /// Call [`Self::resume`] afterwards to restore the route.
+    ///
+    /// Returns a [`PlaybackHandle`]; `done` resolves when playback stops.
     pub async fn play(
         &mut self,
         side: LegSide,
         audio: Box<dyn crate::audio_source::AudioSource>,
         loop_playback: bool,
-    ) -> Result<()> {
+    ) -> Result<PlaybackHandle> {
         self.unbridge().await?;
         let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let (handle, done_tx) = PlaybackHandle::new();
+        self.active_play.lock().insert(side);
+        let active_registry = self.active_play.clone();
+        let done_tx = Arc::new(parking_lot::Mutex::new(Some(done_tx)));
+        let on_end = Arc::new(move |interrupted: bool| {
+            // Clear the active-play marker for this side on completion.
+            active_registry.lock().remove(&side);
+            if let Some(tx) = done_tx.lock().take() {
+                let _ = tx.send(PlaybackResult { interrupted });
+            }
+        });
         leg.set_egress_source(EgressSource::Media {
             audio,
             loop_playback,
-            on_end: None,
+            on_end: Some(on_end),
         })
-        .await
+        .await?;
+        Ok(handle)
     }
 
     /// Play a file (or http URL) on a leg. Reads the file async and pre-decodes
@@ -357,9 +407,26 @@ impl MediaBridge {
         side: LegSide,
         path: impl Into<String>,
         loop_playback: bool,
-    ) -> Result<()> {
+    ) -> Result<PlaybackHandle> {
         let source = crate::audio_source::FileAudioSource::new(path.into(), loop_playback).await?;
         self.play(side, Box::new(source), loop_playback).await
+    }
+
+    /// Whether a leg currently has an active Media playback.
+    pub fn is_playing(&self, side: LegSide) -> bool {
+        self.active_play.lock().contains(&side)
+    }
+
+    /// Stop a running playback on a leg. Fires the handle's `done` with
+    /// `interrupted: true`. No-op if the leg is not currently playing Media.
+    pub async fn stop_play(&mut self, side: LegSide) -> Result<()> {
+        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        // Switching away from an active Media source fires on_end(true) inside
+        // the egress task; stop_play just sends Silence to trigger it.
+        if self.active_play.lock().contains(&side) {
+            leg.set_egress_source(EgressSource::Silence).await?;
+        }
+        Ok(())
     }
 
     /// Put a leg on hold: break the route, then play hold music (looping) or

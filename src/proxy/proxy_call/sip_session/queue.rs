@@ -18,19 +18,19 @@ impl SipSession {
 
         self.meta.queue_name = Some(plan.queue_name.clone());
 
-        info!("Executing queue plan");
+        info!(session_id = %self.context.session_id, "Executing queue plan");
 
         let agents = match &plan.dial_strategy {
             Some(DialStrategy::Sequential(locations)) => locations.clone(),
             Some(DialStrategy::Parallel(locations)) => locations.clone(),
             None => {
-                warn!("No dial strategy in queue plan");
+                warn!(session_id = %self.context.session_id, "No dial strategy in queue plan");
                 return Ok(());
             }
         };
 
         if agents.is_empty() {
-            warn!("No agents configured in queue plan");
+            warn!(session_id = %self.context.session_id, "No agents configured in queue plan");
             return Ok(());
         }
 
@@ -64,7 +64,7 @@ impl SipSession {
             .and_then(|prompts| prompts.transfer_prompt.as_deref());
 
         if resolved_agents.is_empty() {
-            warn!("No agents available after resolving queue targets");
+            warn!(session_id = %self.context.session_id, "No agents available after resolving queue targets");
 
             self.play_queue_transfer_prompt_before_bridge(transfer_prompt)
                 .await;
@@ -73,9 +73,9 @@ impl SipSession {
         }
 
         if plan.accept_immediately {
-            info!("Queue: answering call immediately");
+            info!(session_id = %self.context.session_id, "Queue: answering call immediately");
             if let Err(e) = self.accept_call(None, None, None).await {
-                warn!(error = %e, "Failed to answer call in queue");
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to answer call in queue");
             }
         }
 
@@ -84,24 +84,19 @@ impl SipSession {
 
         let hold_handle = if let Some(ref hold) = plan.hold {
             if let Some(ref audio_file) = hold.audio_file {
-                info!(file = %audio_file, "Queue: starting hold music");
+                info!(session_id = %self.context.session_id, file = %audio_file, "Queue: starting hold music");
 
                 self.prepare_queue_playback_media().await;
                 match self
-                    .play_audio_file(
-                        audio_file,
-                        false,
-                        Self::QUEUE_HOLD_TRACK_ID,
-                        hold.loop_playback,
-                    )
+                    .play_audio_file(audio_file, false, hold.loop_playback)
                     .await
                 {
                     Ok(_) => {
-                        info!(track_id = %Self::QUEUE_HOLD_TRACK_ID, "Queue: hold music started");
+                        info!(session_id = %self.context.session_id, track_id = %Self::QUEUE_HOLD_TRACK_ID, "Queue: hold music started");
                         true
                     }
                     Err(error) => {
-                        warn!(
+                        warn!(session_id = %self.context.session_id,
                             error = %error,
                             track_id = %Self::QUEUE_HOLD_TRACK_ID,
                             "Queue: failed to start hold music"
@@ -135,18 +130,19 @@ impl SipSession {
         };
 
         if hold_handle {
-            info!("Queue: stopping hold music");
-            self.stop_playback_track(Self::QUEUE_HOLD_TRACK_ID, false)
-                .await;
+            info!(session_id = %self.context.session_id, "Queue: stopping hold music");
+            if let Some(mb) = self.bridge_mut() {
+                mb.stop_play(crate::media::media_bridge::LegSide::B).await.ok();
+            }
         }
 
         if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
-            info!("Queue: caller ended, stopping queue execution");
+            info!(session_id = %self.context.session_id, "Queue: caller ended, stopping queue execution");
             // If no agent ever connected, this is a queue abandon (caller gave
             // up while waiting). Mark it distinctly from a generic SIP cancel
             // so downstream consumers (RWI webhook, CDR) can tell the difference.
             if self.meta.connected_callee.is_none() {
-                info!(
+                info!(session_id = %self.context.session_id,
                     queue = ?self.meta.queue_name,
                     "Queue: caller abandoned before any agent connected"
                 );
@@ -159,11 +155,11 @@ impl SipSession {
 
         match result {
             Ok(()) => {
-                info!("Queue: agent connected successfully");
+                info!(session_id = %self.context.session_id, "Queue: agent connected successfully");
                 Ok(())
             }
             Err(e) => {
-                warn!(error = ?e, "Queue: all agents failed, executing fallback");
+                warn!(session_id = %self.context.session_id, error = ?e, "Queue: all agents failed, executing fallback");
                 self.execute_queue_fallback(plan, callee_state_rx).await
             }
         }
@@ -184,11 +180,11 @@ impl SipSession {
 
         for (idx, agent) in agents.iter().enumerate() {
             if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
-                info!("Queue: caller ended before next agent");
+                info!(session_id = %self.context.session_id, "Queue: caller ended before next agent");
                 return Ok(());
             }
 
-            info!(index = idx, agent = %agent.aor, "Queue: trying agent");
+            info!(session_id = %self.context.session_id, index = idx, agent = %agent.aor, "Queue: trying agent");
 
             match self
                 .try_single_target(
@@ -200,18 +196,18 @@ impl SipSession {
                 .await
             {
                 Ok(()) => {
-                    info!(index = idx, "Queue: agent connected");
+                    info!(session_id = %self.context.session_id, index = idx, "Queue: agent connected");
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(index = idx, error = ?e, "Queue: agent failed");
+                    warn!(session_id = %self.context.session_id, index = idx, error = ?e, "Queue: agent failed");
                     // When retry_codes is configured, only those codes trigger failover
                     // to the next agent; other failures abort the queue immediately.
                     // When retry_codes is None, preserve legacy behaviour (try all agents).
                     if let Some(codes) = retry_codes
                         && !codes.contains(&e.0)
                     {
-                        info!(
+                        info!(session_id = %self.context.session_id,
                             index = idx,
                             code = e.0,
                             "Queue: failure code not in retry_codes, aborting queue"
@@ -240,7 +236,7 @@ impl SipSession {
         }
 
         for agent in agents {
-            info!(agent = %agent.aor, "Queue: dialing agent in parallel");
+            info!(session_id = %self.context.session_id, agent = %agent.aor, "Queue: dialing agent in parallel");
         }
 
         // Uses the shared parallel forking method on SipSession.
@@ -258,21 +254,21 @@ impl SipSession {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            debug!("Queue: no transfer prompt configured");
+            debug!(session_id = %self.context.session_id, "Queue: no transfer prompt configured");
             return;
         };
 
-        info!(file = %audio_file, "Queue: playing transfer prompt before bridging agent audio");
+        info!(session_id = %self.context.session_id, file = %audio_file, "Queue: playing transfer prompt before bridging agent audio");
         self.prepare_queue_playback_media().await;
         match self
-            .play_audio_file(audio_file, true, "queue-transfer-prompt", false)
+            .play_audio_file(audio_file, true, false)
             .await
         {
             Ok(_) => {
-                info!(file = %audio_file, "Queue: transfer prompt completed");
+                info!(session_id = %self.context.session_id, file = %audio_file, "Queue: transfer prompt completed");
             }
             Err(error) => {
-                warn!(
+                warn!(session_id = %self.context.session_id,
                     error = %error,
                     file = %audio_file,
                     "Queue: failed to play transfer prompt before bridging agent audio"
@@ -296,13 +292,13 @@ impl SipSession {
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            info!(file = %final_prompt, "Queue fallback: playing final destination prompt");
+            info!(session_id = %self.context.session_id, file = %final_prompt, "Queue fallback: playing final destination prompt");
             self.prepare_queue_playback_media().await;
             if let Err(e) = self
-                .play_audio_file(final_prompt, true, "queue-final-prompt", false)
+                .play_audio_file(final_prompt, true, false)
                 .await
             {
-                warn!(error = %e, "Failed to play final destination prompt");
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to play final destination prompt");
             }
         }
 
@@ -319,19 +315,19 @@ impl SipSession {
         if let Some(ref audio_file) = pre_action_audio {
             self.prepare_queue_playback_media().await;
             match self
-                .play_audio_file(audio_file, wait_for_failure_audio, "caller", false)
+                .play_audio_file(audio_file, wait_for_failure_audio, false)
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!(error = %e, "Failed to play queue failure audio");
+                    warn!(session_id = %self.context.session_id, error = %e, "Failed to play queue failure audio");
                 }
             }
         }
 
         match &plan.fallback {
             Some(QueueFallbackAction::Failure(FailureAction::Hangup { code, reason })) => {
-                info!(?code, ?reason, "Queue fallback - hangup");
+                info!(session_id = %self.context.session_id, ?code, ?reason, "Queue fallback - hangup");
                 let s = code.clone().unwrap_or(StatusCode::TemporarilyUnavailable);
                 Err((s.code(), s.text().to_string(), reason.clone()))
             }
@@ -340,7 +336,7 @@ impl SipSession {
                 reason,
                 ..
             })) => {
-                info!("Queue fallback - play then hangup");
+                info!(session_id = %self.context.session_id, "Queue fallback - play then hangup");
                 Err((
                     status_code.code(),
                     status_code.text().to_string(),
@@ -348,7 +344,7 @@ impl SipSession {
                 ))
             }
             Some(QueueFallbackAction::Failure(FailureAction::Transfer(target))) => {
-                info!(target = ?target, "Queue fallback - transfer");
+                info!(session_id = %self.context.session_id, target = ?target, "Queue fallback - transfer");
 
                 match target {
                     TransferEndpoint::Uri(uri) => {
@@ -373,7 +369,7 @@ impl SipSession {
                     .await
                     .map_err(super::map_queue_xfer_err),
                     TransferEndpoint::Ivr(ivr_name) => {
-                        info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
+                        info!(session_id = %self.context.session_id, ivr = %ivr_name, "Queue fallback - transferring to IVR");
                         let mut ivr_params = std::collections::HashMap::new();
                         ivr_params.insert("transferred_from".into(), "queue".into());
                         ivr_params.insert("return_reason".into(), "queue_fallback".into());
@@ -388,7 +384,7 @@ impl SipSession {
                         Ok(())
                     }
                     TransferEndpoint::Voicemail(ext) => {
-                        info!(ext = %ext, "Queue fallback - transferring to voicemail");
+                        info!(session_id = %self.context.session_id, ext = %ext, "Queue fallback - transferring to voicemail");
                         self.start_voicemail_app(ext).await.map_err(|e| {
                             into_callee_err(
                                 &StatusCode::ServerInternalError,
@@ -398,7 +394,7 @@ impl SipSession {
                         Ok(())
                     }
                     TransferEndpoint::Conference(id) => {
-                        info!(conf_id = %id, "Queue fallback - transferring to conference");
+                        info!(session_id = %self.context.session_id, conf_id = %id, "Queue fallback - transferring to conference");
                         self.start_conference_app(id).await.map_err(|e| {
                             into_callee_err(
                                 &StatusCode::ServerInternalError,
@@ -410,7 +406,7 @@ impl SipSession {
                 }
             }
             Some(QueueFallbackAction::Redirect { target }) => {
-                info!(target = %target, "Queue fallback - redirecting call");
+                info!(session_id = %self.context.session_id, target = %target, "Queue fallback - redirecting call");
 
                 Box::pin(self.handle_blind_transfer(
                     LegId::from("caller"),
@@ -428,7 +424,7 @@ impl SipSession {
             Some(QueueFallbackAction::Queue { name }) => {
                 if name.starts_with("skill-group:") {
                     let skill_group_id = name.strip_prefix("skill-group:").unwrap_or(name).trim();
-                    info!(skill_group = %skill_group_id, "Queue fallback - transfer to skill group");
+                    info!(session_id = %self.context.session_id, skill_group = %skill_group_id, "Queue fallback - transfer to skill group");
 
                     if let Some(registry) = self.server.agent_registry.clone() {
                         let skill_group_uri = format!("skill-group:{}", skill_group_id);
@@ -438,7 +434,7 @@ impl SipSession {
                             .resolve_target_with_policy(&skill_group_uri, None, &self.id.0)
                             .await;
                         if !agents.is_empty() {
-                            info!(agents = ?agents, "Resolved skill group to agents");
+                            info!(session_id = %self.context.session_id, agents = ?agents, "Resolved skill group to agents");
                             let target = agents[0].clone();
                             Box::pin(self.handle_blind_transfer(
                                 LegId::from("caller"),
@@ -448,7 +444,7 @@ impl SipSession {
                             .await
                             .map_err(super::map_queue_xfer_err)
                         } else {
-                            warn!(skill_group = %skill_group_id, "No agents found for this skill group");
+                            warn!(session_id = %self.context.session_id, skill_group = %skill_group_id, "No agents found for this skill group");
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!(
@@ -458,14 +454,14 @@ impl SipSession {
                             ))
                         }
                     } else {
-                        warn!("No agent registry available for skill group resolution");
+                        warn!(session_id = %self.context.session_id, "No agent registry available for skill group resolution");
                         Err(into_callee_err(
                             &StatusCode::TemporarilyUnavailable,
                             Some("Agent registry not available".to_string()),
                         ))
                     }
                 } else {
-                    info!(queue = %name, "Queue fallback - transfer to another queue");
+                    info!(session_id = %self.context.session_id, queue = %name, "Queue fallback - transfer to another queue");
                     match Box::pin(self.handle_queue_transfer(
                         LegId::from("caller"),
                         name,
@@ -477,11 +473,11 @@ impl SipSession {
                     .await
                     {
                         Ok(_) => {
-                            info!(queue = %name, "Queue fallback - re-enqueue succeeded");
+                            info!(session_id = %self.context.session_id, queue = %name, "Queue fallback - re-enqueue succeeded");
                             Ok(())
                         }
                         Err(e) => {
-                            warn!(queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
+                            warn!(session_id = %self.context.session_id, queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!("Re-enqueue failed: {}", e)),
@@ -491,7 +487,7 @@ impl SipSession {
                 }
             }
             None => {
-                info!("Queue fallback - default hangup with busy tone");
+                info!(session_id = %self.context.session_id, "Queue fallback - default hangup with busy tone");
                 Err(into_callee_err(
                     &StatusCode::BusyHere,
                     Some("All agents unavailable".to_string()),
@@ -503,13 +499,13 @@ impl SipSession {
     pub(super) async fn prepare_queue_playback_media(&mut self) {
         if self.server_dialog.state().is_confirmed() {
             if !true {
-                warn!("Queue playback: caller leg is already answered without media bridge");
+                warn!(session_id = %self.context.session_id, "Queue playback: caller leg is already answered without media bridge");
             }
             return;
         }
 
         if let Err(error) = self.accept_call(None, None, None).await {
-            warn!(
+            warn!(session_id = %self.context.session_id,
                 error = %error,
                 "Queue playback: failed to prepare caller media before audio"
             );

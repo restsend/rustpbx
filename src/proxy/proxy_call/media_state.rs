@@ -1,6 +1,4 @@
-use crate::media::FileTrack;
 use crate::media::media_bridge::MediaBridge;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -76,9 +74,7 @@ pub struct MediaState {
     pub early_media_sent: bool,
     pub callee_answer_sdp: Option<String>,
     pub recording_state: RecordingPhase,
-    pub playback_tracks: HashMap<String, FileTrack>,
     pub bridge: Option<MediaBridge>,
-    pub playback_track_ids: HashMap<String, String>,
 }
 
 impl MediaState {
@@ -91,9 +87,7 @@ impl MediaState {
             early_media_sent: false,
             callee_answer_sdp: None,
             recording_state: RecordingPhase::Idle,
-            playback_tracks: HashMap::new(),
             bridge: None,
-            playback_track_ids: HashMap::new(),
         }
     }
 }

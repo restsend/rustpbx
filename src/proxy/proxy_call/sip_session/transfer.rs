@@ -273,7 +273,7 @@ impl SipSession {
         attended: bool,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        info!(%leg_id, %target, %attended, "Handling transfer");
+        info!(session_id = %self.id, %leg_id, %target, %attended, "Handling transfer");
 
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {
@@ -290,7 +290,7 @@ impl SipSession {
                     .await?;
             } else {
                 self.update_leg_state(&leg_id, LegState::Hold);
-                info!(
+                info!(session_id = %self.id,
                     "Attended transfer initiated - consultation call should be created externally"
                 );
             }
@@ -315,7 +315,7 @@ impl SipSession {
                 return_params,
                 target_overrides,
             } => {
-                info!(%leg_id, queue = %name, ?return_to_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
+                info!(session_id = %self.id, %leg_id, queue = %name, ?return_to_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
                 self.handle_queue_transfer(
                     leg_id,
                     &name,
@@ -327,15 +327,15 @@ impl SipSession {
                 .await
             }
             TransferTarget::Ivr { name, params } => {
-                info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
+                info!(session_id = %self.id, %leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
                 self.start_ivr_app(&name, params).await
             }
             TransferTarget::Voicemail { extension } => {
-                info!(%leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
+                info!(session_id = %self.id, %leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
                 self.start_voicemail_app(&extension).await
             }
             TransferTarget::Conference { id } => {
-                info!(%leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
+                info!(session_id = %self.id, %leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
                 self.start_conference_app(&id).await
             }
             TransferTarget::Bridge {
@@ -346,7 +346,7 @@ impl SipSession {
                 timeout_ms,
                 return_to_ivr,
             } => {
-                info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_to_ivr, "Handling Bridge transfer");
+                info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_to_ivr, "Handling Bridge transfer");
                 self.connect_bridge(
                     leg_id,
                     endpoint.clone(),
@@ -374,7 +374,7 @@ impl SipSession {
                     .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
                 if !self.server.proxy_config.blind_transfer_use_refer {
-                    info!(%leg_id, target = %uri, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Blind transfer via B-leg INVITE (B2BUA)");
+                    info!(session_id = %self.id, %leg_id, target = %uri, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Blind transfer via B-leg INVITE (B2BUA)");
                     let location = crate::call::Location {
                         aor: refer_to_uri,
                         ..Default::default()
@@ -394,7 +394,7 @@ impl SipSession {
                 }
 
                 if self.meta.transfer_return_to_ivr.is_some() {
-                    warn!(%leg_id, "return_to_ivr not supported with SIP REFER; use B2BUA or set blind_transfer_use_refer=false");
+                    warn!(session_id = %self.id, %leg_id, "return_to_ivr not supported with SIP REFER; use B2BUA or set blind_transfer_use_refer=false");
                     self.meta.transfer_return_to_ivr = None;
                 }
 
@@ -410,7 +410,7 @@ impl SipSession {
                     format!("<{}>", referred_by),
                 )];
 
-                info!(%leg_id, target = %uri, "Sending REFER for blind transfer");
+                info!(session_id = %self.id, %leg_id, target = %uri, "Sending REFER for blind transfer");
 
                 match self
                     .server_dialog
@@ -419,7 +419,7 @@ impl SipSession {
                 {
                     Ok(Some(response)) => {
                         let status = response.status_code.code();
-                        info!(status = %status, "REFER response received");
+                        info!(session_id = %self.id, status = %status, "REFER response received");
 
                         let reason = Self::refer_reason_for_status(status).map(String::from);
                         self.emit_refer_event(
@@ -431,31 +431,31 @@ impl SipSession {
 
                         match status {
                             202 => {
-                                info!("REFER accepted (202), transfer in progress");
+                                info!(session_id = %self.id, "REFER accepted (202), transfer in progress");
                                 self.update_leg_state(&leg_id, LegState::Ending);
                             }
                             100..=199 => {
-                                info!("REFER received provisional response {}", status);
+                                info!(session_id = %self.id, status = %status, "REFER received provisional response");
                             }
                             405 | 420 | 501 => {
-                                warn!(status = %status, "REFER not supported by peer, needs 3PCC fallback");
+                                warn!(session_id = %self.id, status = %status, "REFER not supported by peer, needs 3PCC fallback");
                                 return Err(anyhow!(
                                     "REFER not supported by peer ({}), needs 3PCC fallback",
                                     status
                                 ));
                             }
                             _ if status >= 400 => {
-                                warn!(status = %status, "REFER rejected");
+                                warn!(session_id = %self.id, status = %status, "REFER rejected");
                                 return Err(anyhow!("REFER rejected with status {}", status));
                             }
                             _ => {
-                                warn!(status = %status, "Unexpected REFER response");
+                                warn!(session_id = %self.id, status = %status, "Unexpected REFER response");
                                 return Err(anyhow!("Unexpected REFER response: {}", status));
                             }
                         }
                     }
                     Ok(None) => {
-                        warn!("REFER timed out, no response received");
+                        warn!(session_id = %self.id, "REFER timed out, no response received");
                         self.emit_refer_event(
                             408,
                             Some("timeout".to_string()),
@@ -465,7 +465,7 @@ impl SipSession {
                         return Err(anyhow!("REFER timed out"));
                     }
                     Err(e) => {
-                        warn!(error = %e, "Failed to send REFER");
+                        warn!(session_id = %self.id, error = %e, "Failed to send REFER");
                         self.emit_refer_event(
                             500,
                             Some(e.to_string()),
@@ -476,7 +476,7 @@ impl SipSession {
                     }
                 }
 
-                info!(
+                info!(session_id = %self.id,
                     "Blind transfer initiated — call will be transferred to {}",
                     uri
                 );
@@ -494,7 +494,7 @@ impl SipSession {
         target_overrides: Vec<String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        info!(%leg_id, queue = %queue_name, ?return_to_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
+        info!(session_id = %self.id, %leg_id, queue = %queue_name, ?return_to_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
 
         let queue_config = self
             .server
@@ -545,7 +545,7 @@ impl SipSession {
                 locations.push(location);
             }
             if !locations.is_empty() {
-                info!(
+                info!(session_id = %self.id,
                     overrides = %locations.len(),
                     "Queue transfer: overriding targets from query params"
                 );
@@ -571,7 +571,7 @@ impl SipSession {
             .as_ref()
             .and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
         if let Some(ivr_name) = ivr_name {
-            info!(
+            info!(session_id = %self.id,
                 queue = %queue_name,
                 ivr = %ivr_name,
                 "Queue transfer: will return to IVR on fallback"
@@ -595,11 +595,11 @@ impl SipSession {
                 if self.meta.transfer_return_to_ivr.is_some() {
                     self.meta.transfer_return_params = return_params;
                 }
-                info!(queue = %queue_name, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Queue transfer completed successfully");
+                info!(session_id = %self.id, queue = %queue_name, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Queue transfer completed successfully");
                 Ok(())
             }
             Err((code, text, reason)) => {
-                warn!(
+                warn!(session_id = %self.id,
                     queue = %queue_name,
                     code = %code,
                     text = %text,
@@ -614,7 +614,7 @@ impl SipSession {
                         .get_or_insert(CallRecordHangupReason::Failed);
                     self.pending_hangup.insert(self.server_dialog.id());
                     self.cancel_token.cancel();
-                    info!(
+                    info!(session_id = %self.id,
                         queue = %queue_name,
                         code = %code,
                         text = %text,
@@ -639,7 +639,7 @@ impl SipSession {
         query_params: HashMap<String, String>,
     ) -> Result<()> {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
-        info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
+        info!(session_id = %self.id, ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
         let mut app_params = serde_json::json!({"file": ivr_file});
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);
@@ -649,7 +649,7 @@ impl SipSession {
     }
 
     pub(crate) async fn start_voicemail_app(&self, extension: &str) -> Result<()> {
-        info!(extension = %extension, "Starting voicemail application");
+        info!(session_id = %self.id, extension = %extension, "Starting voicemail application");
         let params = Some(serde_json::json!({"extension": extension}));
         self.ensure_app_running(
             "voicemail",
@@ -661,7 +661,7 @@ impl SipSession {
 
     /// Start a conference app that joins the session into the given conference room.
     pub(crate) async fn start_conference_app(&self, conf_id: &str) -> Result<()> {
-        info!(conf_id = %conf_id, "Starting conference application");
+        info!(session_id = %self.id, conf_id = %conf_id, "Starting conference application");
         let params = Some(serde_json::json!({"id": conf_id}));
         self.ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
             .await
@@ -691,7 +691,10 @@ impl SipSession {
         timeout_ms: Option<u64>,
         return_to_ivr: Option<String>,
     ) -> Result<()> {
-        info!(%leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
+        info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
+
+        // Captured for the spawn'd forward/reverse loops (self is moved).
+        let session_id = self.id.to_string();
 
         // ── 1. Establish WebSocket connection ──────────────────────────
         let ws_connect = tokio_tungstenite::connect_async(&endpoint);
@@ -705,7 +708,7 @@ impl SipSession {
                 .await
                 .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
         };
-        info!("Bridge WebSocket connected to {}", endpoint);
+        info!(session_id = %self.id, endpoint = %endpoint, "Bridge WebSocket connected");
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
@@ -751,7 +754,7 @@ impl SipSession {
             "g722" => audio_codec::CodecType::G722,
             _ => {
                 let negotiated = self.leg_negotiated_codec(&leg_id);
-                info!(?negotiated, "Using negotiated codec");
+                info!(session_id = %self.id, ?negotiated, "Using negotiated codec");
                 negotiated
             }
         };
@@ -792,6 +795,7 @@ impl SipSession {
         let forward_cancel = cancel_token.child_token();
         let forward_handle = {
             let leg_id = leg_id.clone();
+            let session_id = session_id.clone();
             crate::utils::spawn(async move {
                 use audio_codec::create_encoder;
                 use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
@@ -811,7 +815,7 @@ impl SipSession {
                     tokio::select! {
                         biased;
                         _ = forward_cancel.cancelled() => {
-                            info!(%leg_id, "Bridge forward loop cancelled");
+                            info!(session_id = %session_id, %leg_id, "Bridge forward loop cancelled");
                             break;
                         }
                         msg = ws_read.next() => {
@@ -845,7 +849,7 @@ impl SipSession {
                                             source_addr: None,
                                         };
                                         if audio_sender.send(MediaSample::Audio(frame)).is_err() {
-                                            warn!(%leg_id, "Bridge forward: audio sender closed");
+                                            warn!(session_id = %session_id, %leg_id, "Bridge forward: audio sender closed");
                                             return;
                                         }
                                         rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
@@ -863,7 +867,7 @@ impl SipSession {
                                                         digits: digits.to_string(),
                                                     };
                                                     if tx.send(cmd).await.is_err() {
-                                                        warn!(%leg_id, "Bridge forward: cmd_tx closed");
+                                                        warn!(session_id = %session_id, %leg_id, "Bridge forward: cmd_tx closed");
                                                         break;
                                                     }
                                                 }
@@ -873,11 +877,11 @@ impl SipSession {
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) | None => {
-                                    info!(%leg_id, "Bridge WS closed remotely");
+                                    info!(session_id = %session_id, %leg_id, "Bridge WS closed remotely");
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    warn!(%leg_id, "Bridge WS read error: {}", e);
+                                    warn!(session_id = %session_id, %leg_id, "Bridge WS read error: {}", e);
                                     break;
                                 }
                                 _ => {}
@@ -894,6 +898,7 @@ impl SipSession {
         let reverse_cancel = cancel_token.child_token();
         let reverse_handle = {
             let leg_id = leg_id.clone();
+            let session_id = session_id.clone();
             crate::utils::spawn(async move {
                 use rustrtc::media::MediaSample;
 
@@ -914,14 +919,14 @@ impl SipSession {
                     tokio::select! {
                         biased;
                         _ = reverse_cancel.cancelled() => {
-                            info!(%leg_id, "Bridge reverse loop cancelled");
+                            info!(session_id = %session_id, %leg_id, "Bridge reverse loop cancelled");
                             break;
                         }
                         json = dtmf_json_rx.recv() => {
                             match json {
                                 Some(json) => {
                                     if ws_write.send(Message::Text(json.into())).await.is_err() {
-                                        warn!(%leg_id, "Bridge WS DTMF json write failed");
+                                        warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF json write failed");
                                         break;
                                     }
                                 }
@@ -942,9 +947,9 @@ impl SipSession {
                                                 "digit": digit.to_string(),
                                                 "leg_id": leg_id,
                                             });
-                                            info!(%leg_id, digit = %digit.to_string(), "Bridge reverse DTMF detected");
+                                            info!(session_id = %session_id, %leg_id, digit = %digit.to_string(), "Bridge reverse DTMF detected");
                                             if ws_write.send(Message::Text(json.to_string().into())).await.is_err() {
-                                                warn!(%leg_id, "Bridge WS DTMF write failed");
+                                                warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF write failed");
                                                 break;
                                             }
                                         }
@@ -963,14 +968,14 @@ impl SipSession {
                                             bytes.extend_from_slice(&s.to_ne_bytes());
                                         }
                                         if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
-                                            warn!(%leg_id, "Bridge reverse audio write failed");
+                                            warn!(session_id = %session_id, %leg_id, "Bridge reverse audio write failed");
                                             break;
                                         }
                                     }
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
-                                    warn!(%leg_id, "Bridge reverse track error: {}", e);
+                                    warn!(session_id = %session_id, %leg_id, "Bridge reverse track error: {}", e);
                                     break;
                                 }
                             }
@@ -1002,6 +1007,7 @@ impl SipSession {
                 );
                 let tx = cmd_tx.clone();
                 let mon_leg_id = leg_id.clone();
+                let mon_session_id = session_id.clone();
                 let mon = crate::utils::spawn(async move {
                     tokio::select! {
                         biased;
@@ -1011,7 +1017,7 @@ impl SipSession {
                             let _ = reverse_handle.await;
                         } => {
                             if !cancel.is_cancelled() {
-                                info!("Bridge disconnected; returning to IVR: {}", ivr_target);
+                                info!(session_id = %mon_session_id, ivr = %ivr_target, "Bridge disconnected; returning to IVR");
                                 let cmd = CallCommand::Transfer {
                                     leg_id: mon_leg_id,
                                     target: ivr_target,
@@ -1026,7 +1032,7 @@ impl SipSession {
             }
         }
 
-        info!(%leg_id, endpoint = %endpoint, "Bridge established");
+        info!(session_id = %self.id, %leg_id, endpoint = %endpoint, "Bridge established");
         Ok(())
     }
 
@@ -1087,7 +1093,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_transfer_complete(&mut self, consult_leg: LegId) -> Result<()> {
-        info!(%consult_leg, "Completing attended transfer");
+        info!(session_id = %self.id, %consult_leg, "Completing attended transfer");
 
         self.require_leg(&consult_leg)?;
 
@@ -1105,7 +1111,7 @@ impl SipSession {
                 self.update_leg_state(&original_leg, LegState::Connected);
                 self.update_leg_state(&consult_leg, LegState::Connected);
                 let _ = self.handle_unhold(original_leg.clone()).await;
-                info!("Attended transfer completed successfully");
+                info!(session_id = %self.id, "Attended transfer completed successfully");
             } else {
                 return Err(anyhow!("Failed to setup bridge for transfer completion"));
             }
@@ -1117,7 +1123,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_transfer_cancel(&mut self, consult_leg: LegId) -> Result<()> {
-        info!(%consult_leg, "Canceling attended transfer");
+        info!(session_id = %self.id, %consult_leg, "Canceling attended transfer");
 
         self.require_leg(&consult_leg)?;
         self.update_leg_state(&consult_leg, LegState::Ending);
@@ -1131,7 +1137,7 @@ impl SipSession {
         if let Some(original_leg) = original_leg {
             self.update_leg_state(&original_leg, LegState::Connected);
             let _ = self.handle_unhold(original_leg.clone()).await;
-            info!("Attended transfer canceled, original call resumed");
+            info!(session_id = %self.id, "Attended transfer canceled, original call resumed");
         }
 
         Ok(())
@@ -1143,7 +1149,7 @@ impl SipSession {
         leg_id: LegId,
         into_conference: String,
     ) -> Result<()> {
-        info!(
+        info!(session_id = %self.id,
             from_session = %from_session,
             leg_id = %leg_id,
             into_conference = %into_conference,
@@ -1168,7 +1174,7 @@ impl SipSession {
             .get(&leg_id)
             .ok_or_else(|| anyhow!("Leg {} not found in session {}", leg_id, from_session))?;
 
-        info!(
+        info!(session_id = %self.id,
             session_id = %self.id,
             leg_id = %leg_id,
             leg_state = ?leg.state,
@@ -1186,7 +1192,7 @@ impl SipSession {
             .await
             .map_err(|e| anyhow!("Failed to add leg to conference: {}", e))?;
 
-        info!(
+        info!(session_id = %self.id,
             session_id = %self.id,
             leg_id = %leg_id,
             conf_id = %into_conference,
@@ -1214,7 +1220,7 @@ impl SipSession {
     ) -> Result<()> {
         let current_session = self.id.to_string();
 
-        info!(
+        info!(session_id = %self.id,
             current_session = %current_session,
             session_a = %session_a,
             session_b = %session_b,
@@ -1253,7 +1259,7 @@ impl SipSession {
                         leg_b: leg_b.clone(),
                     })
                     .map_err(|e| anyhow!("Failed to forward BridgeCrossSession: {}", e))?;
-                info!(
+                info!(session_id = %self.id,
                     "Forwarded BridgeCrossSession to session_a {}",
                     session_a_clone
                 );
@@ -1276,7 +1282,7 @@ impl SipSession {
                     session_b: session_b.clone(),
                     leg_b: leg_b.clone(),
                 });
-                info!(
+                info!(session_id = %self.id,
                     session_a = %session_a,
                     session_b = %session_b,
                     "Notified session_b to join P2P conference"

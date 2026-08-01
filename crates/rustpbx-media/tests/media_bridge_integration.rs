@@ -5,11 +5,7 @@
 //! The full RTP end-to-end matrix (fast-path relay, transcoding, recording
 //! content, DTMF) lives in `rtp_transport_tests.rs` (TestMediaHarness).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use rustpbx_media::audio_source::FileAudioSource;
-use rustpbx_media::egress::{EgressEndCallback, EgressSource};
 use rustpbx_media::ingress_tap::PacketDirection;
 use rustpbx_media::leg::{LegConfig, LegInner};
 use rustpbx_media::media_bridge::{BridgeOpts, LegSide, MediaBridge};
@@ -179,29 +175,22 @@ async fn play_file_fires_on_end() {
 
     // Create a tiny WAV (10ms of silence @8kHz = 80 samples).
     let wav = tempfile_wav_silence(8000, 1, 80);
-    let fired = Arc::new(AtomicBool::new(false));
-    let fired_clone = fired.clone();
 
-    // Use on_end via EgressSource::Media directly.
-    let audio = FileAudioSource::new(wav, false).await.expect("source");
-    let on_end: EgressEndCallback = Arc::new(move || {
-        fired_clone.store(true, Ordering::SeqCst);
-    });
-    la.set_egress_source(EgressSource::Media {
-        audio: Box::new(audio),
-        loop_playback: false,
-        on_end: Some(on_end),
-    })
-    .await
-    .expect("set_source");
+    // play_file returns a handle whose done resolves on natural EOF.
+    let handle = mb
+        .play_file(LegSide::A, wav, false)
+        .await
+        .expect("play_file");
 
     // Wait for playback to finish (10ms file + margin).
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    if !fired.load(Ordering::SeqCst) {
-        // Give more time in CI.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
-    assert!(fired.load(Ordering::SeqCst), "on_end must fire after file playback ends");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.done,
+    )
+    .await
+    .expect("playback must finish")
+    .expect("done channel must resolve");
+    assert!(!result.interrupted, "natural EOF must not be interrupted");
 
     mb.close();
 }
@@ -551,6 +540,104 @@ async fn multi_cycle_bridge_play_hold_resume_unbridge() {
     let wav3 = tempfile_wav_silence(8000, 1, 80);
     mb.play_file(LegSide::A, wav3, false).await.unwrap();
     mb.mute(LegSide::A).await.unwrap();
+
+    mb.close();
+}
+
+/// P1: play_file returns a handle whose done resolves with `interrupted: false`
+/// on natural EOF (non-loop file that ends).
+#[tokio::test]
+async fn play_file_handle_completes_on_natural_eof() {
+    let mut mb = MediaBridge::new("it-p1-natural", BridgeOpts::default());
+    mb.replace_leg(LegSide::A, LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    mb.replace_leg(LegSide::B, LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer).await.expect("apply");
+
+    // 30ms silence @8kHz = 240 samples.
+    let wav = tempfile_wav_silence(8000, 1, 240);
+    let handle = mb.play_file(LegSide::A, wav, false).await.expect("play_file");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.done,
+    )
+    .await
+    .expect("must finish")
+    .expect("done channel must resolve");
+    assert!(!result.interrupted, "natural EOF must report interrupted=false");
+
+    mb.close();
+}
+
+/// P1: stop_play interrupts playback → done resolves with `interrupted: true`.
+#[tokio::test]
+async fn stop_play_interrupts_handle() {
+    let mut mb = MediaBridge::new("it-p1-interrupt", BridgeOpts::default());
+    mb.replace_leg(LegSide::A, LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    mb.replace_leg(LegSide::B, LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer).await.expect("apply");
+
+    // Long looping file so it keeps playing until we interrupt it.
+    let wav = tempfile_wav_silence(8000, 1, 8000);
+    let handle = mb.play_file(LegSide::A, wav, true).await.expect("play_file");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    mb.stop_play(LegSide::A).await.expect("stop_play");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.done,
+    )
+    .await
+    .expect("must finish")
+    .expect("done channel must resolve");
+    assert!(result.interrupted, "stop_play must report interrupted=true");
+
+    mb.close();
+}
+
+/// P1: a looping file does NOT resolve done on its own (keeps playing).
+#[tokio::test]
+async fn loop_playback_does_not_resolve_until_stopped() {
+    let mut mb = MediaBridge::new("it-p1-loop", BridgeOpts::default());
+    mb.replace_leg(LegSide::A, LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    mb.replace_leg(LegSide::B, LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap())
+        .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer).await.expect("apply");
+
+    let wav = tempfile_wav_silence(8000, 1, 80); // tiny file, loops forever
+    let mut handle = mb.play_file(LegSide::A, wav, true).await.expect("play_file");
+
+    // Give the pacing task plenty of time to exhaust the tiny file and loop.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        handle.done.try_recv().is_err(),
+        "looping playback must NOT resolve done before stop_play"
+    );
+
+    mb.stop_play(LegSide::A).await.expect("stop_play");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle.done)
+        .await
+        .expect("must finish")
+        .expect("done must resolve");
+    assert!(result.interrupted);
 
     mb.close();
 }

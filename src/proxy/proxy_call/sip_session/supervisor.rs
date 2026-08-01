@@ -23,8 +23,7 @@ impl SipSession {
         let resolved_target_leg = self.resolve_supervisor_target(&target_leg, false)?;
         self.start_supervisor_bridge_pair("listen", &supervisor_leg, &resolved_target_leg)
             .await?;
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             supervisor = %supervisor_leg,
             target = %resolved_target_leg,
             "Supervisor listen mode activated via conference bridge"
@@ -44,15 +43,13 @@ impl SipSession {
             return Ok(target_leg.clone());
         }
         if self.legs.contains_key(&LegId::new("callee")) {
-            warn!(
-                session_id = %self.id,
+            warn!(session_id = %self.id,
                 requested_leg = %target_leg,
                 "Supervisor target leg not found, falling back to callee"
             );
             Ok(LegId::new("callee"))
         } else if self.legs.contains_key(&LegId::new("caller")) {
-            warn!(
-                session_id = %self.id,
+            warn!(session_id = %self.id,
                 requested_leg = %target_leg,
                 "Supervisor target leg not found, falling back to caller"
             );
@@ -100,8 +97,7 @@ impl SipSession {
         self.require_leg(&target_leg)?;
         self.start_supervisor_bridge_pair("whisper", &supervisor_leg, &target_leg)
             .await?;
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             supervisor = %supervisor_leg,
             target = %target_leg,
             "Supervisor whisper mode activated via conference bridge"
@@ -129,7 +125,7 @@ impl SipSession {
                 .start_conference_media_bridge(&conf_id, &participant_leg)
                 .await
             {
-                warn!(%leg_id, error = %e, "Failed to bridge leg into barge conference");
+                warn!(session_id = %self.id, %leg_id, error = %e, "Failed to bridge leg into barge conference");
             }
         }
 
@@ -138,8 +134,7 @@ impl SipSession {
         self.conference_bridge.conf_id = Some(conf_id);
 
         self.update_leg_state(&supervisor_leg, LegState::Connected);
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             supervisor = %supervisor_leg,
             target = %target_leg,
             "Supervisor barge mode activated via conference bridge"
@@ -168,8 +163,7 @@ impl SipSession {
             .await
         {
             Ok(handle) => {
-                info!(
-                    session_id = %self.id,
+                info!(session_id = %self.id,
                     leg_id = %resolved_target_leg,
                     "Supervisor conference media bridge started for target"
                 );
@@ -192,8 +186,7 @@ impl SipSession {
             "notify supervisor session",
         )?;
 
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             supervisor_session = %supervisor_session_id,
             conf_id = %conf_id,
             "Cross-session supervisor listen activated via conference"
@@ -225,8 +218,7 @@ impl SipSession {
         self.update_leg_state(&target_leg, LegState::Ending);
         self.update_leg_state(&supervisor_leg, LegState::Connected);
 
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             supervisor = %supervisor_leg,
             target = %target_leg,
             other = %other_leg,
@@ -239,8 +231,7 @@ impl SipSession {
         self.require_leg(&supervisor_leg)?;
 
         if self.supervisor_mixer.is_some() {
-            info!(
-                session_id = %self.id,
+            info!(session_id = %self.id,
                 "Supervisor mixer stopped"
             );
         }
@@ -250,7 +241,7 @@ impl SipSession {
         }
 
         self.update_leg_state(&supervisor_leg, LegState::Ended);
-        info!("Supervisor mode stopped");
+        info!(session_id = %self.id, "Supervisor mode stopped");
         Ok(())
     }
 }

@@ -10,7 +10,7 @@ mod tests {
         EntryAction, IvrDefinition, IvrFileConfig, MenuEntry, MenuNode,
     };
     use crate::call::app::testing::MockCallStack;
-    use crate::call::domain::CallCommand;
+    use crate::call::domain::{CallCommand, LegId};
     use crate::call::domain::MediaSource;
     use crate::media::Track;
     use std::collections::HashMap;
@@ -1838,7 +1838,7 @@ action = { type = "transfer", target = "100" }
             .with_codec_preference(vec![CodecType::PCMU])
             .with_on_end(std::sync::Arc::new(move |reason| {
                 let _ = tx.send(ControllerEvent::AudioComplete {
-                    track_id: "default".to_string(),
+                    track_id: "caller".to_string(),
                     interrupted: matches!(reason, PlaybackEndReason::Interrupted),
                 });
             }));
@@ -1876,7 +1876,7 @@ action = { type = "transfer", target = "100" }
     // ── E2E: real FileTrack completion drives IVR AudioComplete ──────────────
 
     /// End-to-end integration test: a real `FileTrack` playing a real WAV file
-    /// fires on_end, which emits `MockCallStack::audio_complete()`
+    /// fires on_end, which emits `MockCallStack::audio_complete("default")`
     /// — verifying the full pipeline:
     ///
     ///   IVR emits PlayPrompt → FileTrack starts playback → WAV exhausted →

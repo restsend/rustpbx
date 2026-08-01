@@ -59,9 +59,10 @@ use crate::audio_source::AudioSource;
 /// Default ptime (packetization interval) in milliseconds.
 const DEFAULT_PTIME_MS: u32 = 20;
 
-/// Callback fired when a [`EgressSource::Media`] source reaches terminal EOF
-/// (non-loop). Use to signal playback completion to the app/IVR layer.
-pub type EgressEndCallback = Arc<dyn Fn() + Send + Sync>;
+/// Callback fired when a [`EgressSource::Media`] source stops producing audio:
+/// natural EOF (`false`) or interrupted by switching away from Media / stop
+/// (`true`). Use to signal playback completion to the app/IVR layer.
+pub type EgressEndCallback = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// What a leg sends to its remote peer. Variants are mutually exclusive —
 /// only one is active at a time.
@@ -78,7 +79,8 @@ pub enum EgressSource {
     /// Play an [`AudioSource`] (wav/mp3/http), decoding to PCM then encoding
     /// to the target codec. When `loop_playback` is false and the source
     /// reaches EOF the pipeline switches to [`EgressSource::Silence`] and
-    /// fires `on_end` (if set).
+    /// fires `on_end(false)`. When the source is replaced (switch to another
+    /// source or stop) while a Media source is active, `on_end(true)` is fired.
     Media {
         audio: Box<dyn AudioSource>,
         loop_playback: bool,
@@ -120,6 +122,7 @@ pub struct EgressPipeline {
 
 enum EgressCmd {
     SetSource(EgressSource),
+    UpdateCodec(EgressCodec),
 }
 
 impl EgressPipeline {
@@ -183,6 +186,17 @@ impl EgressPipeline {
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
 
+    /// Swap the encoding codec (e.g. after a re-INVITE changes the negotiated
+    /// audio codec). Rebuilds the encoder and re-sizes the PCM staging buffer.
+    /// Existing media source (if any) keeps playing; subsequent frames are
+    /// encoded with the new codec.
+    pub async fn update_codec(&self, codec: EgressCodec) -> Result<()> {
+        self.cmd_tx
+            .send(EgressCmd::UpdateCodec(codec))
+            .await
+            .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
+    }
+
     /// Stop the pacing task (idempotent). Also happens on Drop.
     pub fn stop(&self) {
         self.cancel.cancel();
@@ -238,6 +252,16 @@ impl EgressTask {
                 _ = cancel.cancelled() => break,
                 cmd = cmd_rx.recv() => match cmd {
                     Some(EgressCmd::SetSource(s)) => {
+                        // If we are switching AWAY from an active Media source,
+                        // fire its on_end as interrupted so the app knows the
+                        // playback was cut short (e.g. stop_play / DTMF barge).
+                        let prev_on_end = match &self.source {
+                            EgressSource::Media { on_end, .. } => on_end.clone(),
+                            _ => None,
+                        };
+                        if let Some(cb) = prev_on_end {
+                            cb(true);
+                        }
                         // Auto-configure the resampler for TranscodePeer based
                         // on src/dst sample rate mismatch.
                         if let EgressSource::TranscodePeer { src_sample_rate, .. } = &s {
@@ -253,6 +277,14 @@ impl EgressTask {
                             self.resampler = None;
                         }
                         self.source = s;
+                    }
+                    Some(EgressCmd::UpdateCodec(new_codec)) => {
+                        self.codec = new_codec;
+                        self.encoder = create_encoder(new_codec.codec);
+                        // Rebuild the PCM staging buffer for the new sample rate.
+                        self.pcm_buf = vec![0i16; pcm_samples_per_frame(new_codec.codec, self.ptime)];
+                        // Drop any resampler: TranscodePeer re-derives it on next SetSource.
+                        self.resampler = None;
                     }
                     None => break,
                 },
@@ -279,10 +311,10 @@ impl EgressTask {
         let mut source = std::mem::replace(&mut self.source, EgressSource::Silence);
 
         // Promote Media→Silence on terminal EOF; fire on_end callback.
-        if let EgressSource::Media { audio, loop_playback, on_end } = &mut source {
+        if let EgressSource::Media { audio, loop_playback, on_end, .. } = &mut source {
             if !audio.has_data() && !*loop_playback {
                 if let Some(cb) = on_end.take() {
-                    cb();
+                    cb(false);
                 }
                 source = EgressSource::Silence;
             }
@@ -315,7 +347,7 @@ impl EgressTask {
                 self.encode_silence().into()
             }
             EgressSource::Silence => self.encode_silence().into(),
-            EgressSource::Media { audio, loop_playback, on_end } => {
+            EgressSource::Media { audio, loop_playback, on_end, .. } => {
                 let n = audio.read_samples(&mut self.pcm_buf);
                 if n == 0 {
                     if *loop_playback {
@@ -328,7 +360,7 @@ impl EgressTask {
                         }
                     } else {
                         if let Some(cb) = on_end.take() {
-                            cb();
+                            cb(false);
                         }
                         source = EgressSource::Silence;
                         self.encode_silence().into()

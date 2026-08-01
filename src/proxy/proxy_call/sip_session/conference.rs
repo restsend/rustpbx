@@ -31,10 +31,10 @@ impl SipSession {
                 .create_conference(conf_id.clone(), None)
                 .await
             {
-                warn!("Failed to create conference: {}", e);
+                warn!(session_id = %self.id, error = %e, "Failed to create conference");
                 return;
             }
-            info!(conf_id = %conf_id_str, "Conference created");
+            info!(session_id = %self.id, conf_id = %conf_id_str, "Conference created");
         }
 
         let active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
@@ -56,11 +56,11 @@ impl SipSession {
                 .add_participant(&conf_id, participant_leg.clone())
                 .await
             {
-                warn!(%leg_id, "Failed to add participant: {}", e);
+                warn!(session_id = %self.id, %leg_id, "Failed to add participant: {}", e);
                 continue;
             }
 
-            info!(%leg_id, "Added participant to conference");
+            info!(session_id = %self.id, %leg_id, "Added participant to conference");
 
             if let Some(peer) = peer {
                 if let Err(e) = self
@@ -73,14 +73,14 @@ impl SipSession {
                     )
                     .await
                 {
-                    warn!(%leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
+                    warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
                 }
             } else {
                 if let Err(e) = self
                     .start_conference_media_bridge(&conf_id_str, &leg_id)
                     .await
                 {
-                    warn!(%leg_id, "Failed to start conference media bridge: {}", e);
+                    warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge: {}", e);
                 }
             }
         }
@@ -113,8 +113,7 @@ impl SipSession {
         let (tx, rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
 
         if let Some(sender) = audio_sender {
-            info!(
-                session_id = %self.id,
+            info!(session_id = %self.id,
                 conf_id = %conf_id,
                 leg_id = %leg_id,
                 "Using existing track sender for conference media bridge"
@@ -123,8 +122,7 @@ impl SipSession {
             let cancel = self.cancel_token.child_token();
             self.spawn_forwarder(leg_id, cancel, sender, rx);
         } else {
-            warn!(
-                session_id = %self.id,
+            warn!(session_id = %self.id,
                 conf_id = %conf_id,
                 leg_id = %leg_id,
                 "No track sender found, conference audio will not be sent to this leg"
@@ -244,8 +242,7 @@ impl SipSession {
         pc.add_track(track, params)
             .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
 
-        info!(
-            session_id = %self.id,
+        info!(session_id = %self.id,
             conf_id = %conf_id,
             leg_id = %leg_id,
             "Conference sample track added to existing peer connection"
@@ -311,8 +308,7 @@ impl SipSession {
 
         match sdp.and_then(|s| MediaNegotiator::extract_leg_profile(s).audio) {
             Some(audio) => {
-                info!(
-                    session_id = %self.id,
+                info!(session_id = %self.id,
                     leg_id = %leg_id,
                     codec = ?audio.codec,
                     "Resolved per-leg codec from SDP"
@@ -320,8 +316,7 @@ impl SipSession {
                 audio.codec
             }
             None => {
-                debug!(
-                    session_id = %self.id,
+                debug!(session_id = %self.id,
                     leg_id = %leg_id,
                     "No negotiated codec found, defaulting to PCMU"
                 );
@@ -337,8 +332,7 @@ impl SipSession {
         let codec = if let Some(ref answer_sdp) = self.media.answer {
             let profile = MediaNegotiator::extract_leg_profile(answer_sdp);
             if let Some(audio) = profile.audio {
-                info!(
-                    session_id = %self.id,
+                info!(session_id = %self.id,
                     codec = ?audio.codec,
                     payload_type = audio.payload_type,
                     "Using negotiated codec for conference decoder"
@@ -359,7 +353,7 @@ impl SipSession {
         conf_id: String,
         options: crate::call::domain::ConferenceOptions,
     ) -> Result<()> {
-        info!(%conf_id, "Creating conference");
+        info!(session_id = %self.id, %conf_id, "Creating conference");
 
         let max_participants = options.max_participants.map(|m| m as usize);
         self.server
@@ -375,7 +369,7 @@ impl SipSession {
         conf_id: String,
         leg_id: LegId,
     ) -> Result<()> {
-        info!(%conf_id, %leg_id, "Adding leg to conference");
+        info!(session_id = %self.id, %conf_id, %leg_id, "Adding leg to conference");
 
         self.require_leg(&leg_id)?;
 
@@ -389,13 +383,13 @@ impl SipSession {
 
         match bridge_result {
             Ok(handle) => {
-                info!(%conf_id, %leg_id, "Conference media bridge started for added leg");
+                info!(session_id = %self.id, %conf_id, %leg_id, "Conference media bridge started for added leg");
                 self.legs
                     .set_conference_bridge_handle(leg_id.clone(), handle);
                 Ok(())
             }
             Err(e) => {
-                warn!(%conf_id, %leg_id, error = %e, "Failed to start conference media bridge, cleaning up participant");
+                warn!(session_id = %self.id, %conf_id, %leg_id, error = %e, "Failed to start conference media bridge, cleaning up participant");
                 let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
                 let _ = self
                     .server
@@ -412,11 +406,11 @@ impl SipSession {
         conf_id: String,
         leg_id: LegId,
     ) -> Result<()> {
-        info!(%conf_id, %leg_id, "Removing leg from conference");
+        info!(session_id = %self.id, %conf_id, %leg_id, "Removing leg from conference");
 
         if let Some(handle) = self.legs.remove_conference_bridge_handle(&leg_id) {
             handle.stop();
-            info!(%leg_id, "Stopped conference media bridge for removed leg");
+            info!(session_id = %self.id, %leg_id, "Stopped conference media bridge for removed leg");
         }
 
         self.server
@@ -450,7 +444,7 @@ impl SipSession {
         mute: bool,
     ) -> Result<()> {
         let action = if mute { "Muting" } else { "Unmuting" };
-        info!(%conf_id, %leg_id, "{} leg in conference", action);
+        info!(session_id = %self.id, %conf_id, %leg_id, "{} leg in conference", action);
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
         if mute {
             self.server
@@ -467,7 +461,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_conference_destroy(&mut self, conf_id: String) -> Result<()> {
-        info!(%conf_id, "Destroying conference");
+        info!(session_id = %self.id, %conf_id, "Destroying conference");
 
         self.legs.stop_all_conference_bridge_handles();
 
@@ -484,7 +478,7 @@ impl SipSession {
         conf_id: String,
         host_leg_id: LegId,
     ) -> Result<()> {
-        info!(%conf_id, %host_leg_id, "Host ending conference");
+        info!(session_id = %self.id, %conf_id, %host_leg_id, "Host ending conference");
 
         self.legs.stop_all_conference_bridge_handles();
 
@@ -496,7 +490,7 @@ impl SipSession {
             .end_by_host(&conf_id_obj, &host_leg_id)
             .await?;
 
-        info!(
+        info!(session_id = %self.id,
             %conf_id,
             %host_leg_id,
             removed_count = removed.len(),
@@ -511,12 +505,12 @@ impl SipSession {
         conf_id: String,
         leg_id: LegId,
     ) -> Result<()> {
-        info!(%conf_id, %leg_id, "Kicking leg from conference");
+        info!(session_id = %self.id, %conf_id, %leg_id, "Kicking leg from conference");
         self.handle_conference_remove(conf_id, leg_id).await
     }
 
     pub(super) async fn handle_conference_mute_all(&mut self, conf_id: String) -> Result<()> {
-        info!(%conf_id, "Muting all participants in conference");
+        info!(session_id = %self.id, %conf_id, "Muting all participants in conference");
 
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
         let conf = self
@@ -557,7 +551,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_join_mixer(&mut self, mixer_id: String) -> Result<()> {
-        info!(%mixer_id, "Joining mixer/conference");
+        info!(session_id = %self.id, %mixer_id, "Joining mixer/conference");
 
         let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
 
@@ -583,7 +577,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_leave_mixer(&mut self) -> Result<()> {
-        info!("Leaving mixer/conference");
+        info!(session_id = %self.id, "Leaving mixer/conference");
 
         if let Some(conf_id) = self.conference_bridge.conf_id.take() {
             let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
