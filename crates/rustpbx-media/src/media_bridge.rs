@@ -769,4 +769,70 @@ mod tests {
         assert!(mb.is_bridged(), "route should be active after both answer");
         mb.close();
     }
+
+    #[tokio::test]
+    async fn webrtc_rtp_cross_transport_bridge_transcodes() {
+        use rustrtc::SdpType;
+
+        // Cross-transport proxy scenario: leg A (WebRTC/opus) negotiates with
+        // a WebRTC peer, leg B (RTP/PCMU) negotiates with an RTP peer, then the
+        // bridge connects them. Different codecs → transcode (non-relay) route.
+        let webrtc_cfg = LegConfig {
+            transport: rustrtc::TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: audio_codec::CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("x-transport".to_string()),
+        };
+
+        let a = LegInner::new("a", &webrtc_cfg).unwrap();
+        let a2 = LegInner::new("a2", &webrtc_cfg).unwrap();
+        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a2_answer = a2
+            .apply_sdp(&a_offer, SdpType::Offer)
+            .await
+            .expect("a2 answers a");
+        a.apply_sdp(&a2_answer, SdpType::Answer)
+            .await
+            .expect("a applies answer");
+
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+        let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap();
+        let b_offer = b.create_offer(vec![]).await.expect("b offer");
+        let b2_answer = b2
+            .apply_sdp(&b_offer, SdpType::Offer)
+            .await
+            .expect("b2 answers b");
+        b.apply_sdp(&b2_answer, SdpType::Answer)
+            .await
+            .expect("b applies answer");
+
+        assert!(a.negotiated().is_some());
+        assert!(b.negotiated().is_some());
+
+        let mut mb = MediaBridge::new("s8", BridgeOpts::default());
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+
+        assert!(mb.is_bridged(), "cross-transport route should be active");
+        // Different codecs (opus vs PCMU) → transcode path, not fast-path relay.
+        assert!(
+            !mb.leg(LegSide::A).unwrap().egress_is_relay(),
+            "leg A should use transcode (not relay)"
+        );
+        assert!(
+            !mb.leg(LegSide::B).unwrap().egress_is_relay(),
+            "leg B should use transcode (not relay)"
+        );
+        mb.close();
+    }
 }
