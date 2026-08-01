@@ -625,6 +625,7 @@ pub use crate::negotiate::NegotiatedLegProfile as LegProfile;
 mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
+    use crate::negotiate::CodecInfo;
 
     #[tokio::test]
     async fn set_legs_and_close() {
@@ -721,6 +722,51 @@ mod tests {
         // Re-bridging the same codec pair is a no-op (idempotent).
         let _ = mb.bridge().await;
         assert!(mb.is_bridged());
+        mb.close();
+    }
+
+    #[tokio::test]
+    async fn webrtc_legs_negotiate_and_bridge_fastpath() {
+        use rustrtc::SdpType;
+
+        // Two WebRtc (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
+        // other and the bridge activates the same-codec (opus) fast-path.
+        let cfg = LegConfig {
+            transport: rustrtc::TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: audio_codec::CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("webrtc-test".to_string()),
+        };
+        let mut mb = MediaBridge::new("s7", BridgeOpts::default());
+        let a = LegInner::new("a", &cfg).unwrap();
+        let b = LegInner::new("b", &cfg).unwrap();
+
+        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let b_answer = b
+            .apply_sdp(&a_offer, SdpType::Offer)
+            .await
+            .expect("b answers a (webrtc)");
+        a.apply_sdp(&b_answer, SdpType::Answer)
+            .await
+            .expect("a applies webrtc answer");
+
+        assert!(a.negotiated().is_some());
+        assert!(b.negotiated().is_some());
+
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+
+        assert!(mb.is_bridged(), "route should be active after both answer");
         mb.close();
     }
 }
