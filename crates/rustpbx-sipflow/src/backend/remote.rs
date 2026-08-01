@@ -635,13 +635,13 @@ async fn report_loop(
 
         for (i, (node, sent_count)) in nodes.iter().enumerate() {
             let current_sent = sent_count.load(Ordering::Relaxed);
-            let sent_delta = current_sent - last_sent[i];
+            let sent_delta = current_sent.saturating_sub(last_sent[i]);
             if sent_delta == 0 {
                 continue;
             }
 
             let node_addr = node.http_addr.clone();
-            match client
+            let response = client
                 .post(format!("{}/report", node_addr))
                 .json(&serde_json::json!({
                     "client_id": client_id,
@@ -651,48 +651,28 @@ async fn report_loop(
                 }))
                 .timeout(Duration::from_secs(5))
                 .send()
-                .await
-            {
+                .await;
+
+            let (recv_delta, loss, loss_rate, collector_ok) = match response {
                 Ok(resp) => match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
                         let current_recv = data["packets_received"].as_u64().unwrap_or(0);
-                        let recv_delta = current_recv - last_recv[i];
+                        // Collector restarted (its counters reset to 0): reset
+                        // the baseline so this interval reports the fresh
+                        // window instead of wrapping/negative loss.
+                        if current_recv < last_recv[i] {
+                            last_recv[i] = 0;
+                        }
+                        let recv_delta = current_recv.saturating_sub(last_recv[i]);
                         let loss = sent_delta.saturating_sub(recv_delta);
                         let loss_rate = if sent_delta > 0 {
                             loss as f64 / sent_delta as f64
                         } else {
                             0.0
                         };
-                        tracing::info!(
-                            node = %node_addr,
-                            client_id,
-                            interval_s = interval_secs,
-                            sent = sent_delta,
-                            recv = recv_delta,
-                            loss = loss,
-                            loss_rate = loss_rate,
-                            "sipflow report"
-                        );
-                        metrics::gauge!(
-                            "sipflow_loss_rate",
-                            "node" => node_addr.clone(),
-                            "client_id" => client_id.to_string(),
-                        )
-                        .set(loss_rate);
-                        metrics::counter!(
-                            "sipflow_report_sent_total",
-                            "node" => node_addr.clone(),
-                            "client_id" => client_id.to_string(),
-                        )
-                        .increment(sent_delta);
-                        metrics::counter!(
-                            "sipflow_report_lost_total",
-                            "node" => node_addr.clone(),
-                            "client_id" => client_id.to_string(),
-                        )
-                        .increment(loss);
                         last_sent[i] = current_sent;
                         last_recv[i] = current_recv;
+                        (recv_delta, loss, loss_rate, true)
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -700,6 +680,7 @@ async fn report_loop(
                             error = %e,
                             "sipflow report: failed to parse response"
                         );
+                        (0, 0, 0.0, false)
                     }
                 },
                 Err(e) => {
@@ -708,7 +689,43 @@ async fn report_loop(
                         error = %e,
                         "sipflow report failed"
                     );
+                    (0, 0, 0.0, false)
                 }
+            };
+
+            // Always print the client-side report line so the sender's report
+            // is logged even when the collector is unreachable or misbehaves.
+            tracing::info!(
+                node = %node_addr,
+                client_id,
+                interval_s = interval_secs,
+                sent = sent_delta,
+                recv = recv_delta,
+                loss = loss,
+                loss_rate = loss_rate,
+                collector_ok = collector_ok,
+                "sipflow report"
+            );
+
+            if collector_ok {
+                metrics::gauge!(
+                    "sipflow_loss_rate",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .set(loss_rate);
+                metrics::counter!(
+                    "sipflow_report_sent_total",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .increment(sent_delta);
+                metrics::counter!(
+                    "sipflow_report_lost_total",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .increment(loss);
             }
         }
     }
