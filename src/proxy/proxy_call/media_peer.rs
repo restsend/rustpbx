@@ -17,7 +17,6 @@ pub trait MediaPeer: Send + Sync {
         remote: &str,
         sdp_type: SdpType,
     ) -> Result<()>;
-    async fn remove_track(&self, track_id: &str, stop: bool);
     #[allow(dead_code)]
     async fn serve(&self) -> Result<()>;
     #[allow(dead_code)]
@@ -65,10 +64,6 @@ impl MediaPeer for VoiceEnginePeer {
         self.stream
             .update_remote_description(track_id, remote, sdp_type)
             .await
-    }
-
-    async fn remove_track(&self, track_id: &str, stop: bool) {
-        self.stream.remove_track(track_id, stop).await;
     }
 
     async fn serve(&self) -> Result<()> {

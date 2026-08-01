@@ -82,8 +82,6 @@ pub mod tests {
             Ok(())
         }
 
-        async fn remove_track(&self, _track_id: &str, _stop: bool) {}
-
         async fn serve(&self) -> Result<()> {
             Ok(())
         }

@@ -39,11 +39,9 @@ impl SipSession {
         let resolved_agents = if let Some(enricher) = &self.server.queue_location_enricher {
             let caller_headers: Vec<rsipstack::sip::Header> = self
                 .server_dialog
-                .initial_request()
-                .headers
-                .iter()
-                .cloned()
-                .collect();
+                .as_ref()
+                .map(|d| d.initial_request().headers.iter().cloned().collect())
+                .unwrap_or_default();
             enricher
                 .enrich(
                     resolved_agents,
@@ -136,7 +134,7 @@ impl SipSession {
             }
         }
 
-        if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
+        if self.cancel_token.is_cancelled() || self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
             info!(session_id = %self.context.session_id, "Queue: caller ended, stopping queue execution");
             // If no agent ever connected, this is a queue abandon (caller gave
             // up while waiting). Mark it distinctly from a generic SIP cancel
@@ -179,7 +177,7 @@ impl SipSession {
         );
 
         for (idx, agent) in agents.iter().enumerate() {
-            if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
+            if self.cancel_token.is_cancelled() || self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                 info!(session_id = %self.context.session_id, "Queue: caller ended before next agent");
                 return Ok(());
             }
@@ -497,7 +495,7 @@ impl SipSession {
     }
 
     pub(super) async fn prepare_queue_playback_media(&mut self) {
-        if self.server_dialog.state().is_confirmed() {
+        if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
             if !true {
                 warn!(session_id = %self.context.session_id, "Queue playback: caller leg is already answered without media bridge");
             }

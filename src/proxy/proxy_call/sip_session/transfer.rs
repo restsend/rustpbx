@@ -412,8 +412,13 @@ impl SipSession {
 
                 info!(session_id = %self.id, %leg_id, target = %uri, "Sending REFER for blind transfer");
 
-                match self
-                    .server_dialog
+                let Some(server_dialog) = self.server_dialog.as_ref() else {
+                    warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
+                    return Err(anyhow!(
+                        "REFER not supported without an inbound caller dialog; use B2BUA"
+                    ));
+                };
+                match server_dialog
                     .refer(refer_to_uri, Some(headers), None)
                     .await
                 {
@@ -606,13 +611,13 @@ impl SipSession {
                     ?reason,
                     "Queue transfer failed"
                 );
-                if self.server_dialog.state().is_confirmed() {
+                if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
                     self.meta.last_error =
                         Some((StatusCode::Other(code, text.clone()), reason.clone()));
                     self.meta
                         .hangup_reason
                         .get_or_insert(CallRecordHangupReason::Failed);
-                    self.pending_hangup.insert(self.server_dialog.id());
+                    self.pending_hangup.insert(self.caller_dialog_id());
                     self.cancel_token.cancel();
                     info!(session_id = %self.id,
                         queue = %queue_name,
@@ -1037,7 +1042,7 @@ impl SipSession {
     }
 
     pub(super) fn build_replaces_header(&self) -> Option<String> {
-        let dialog_id = self.server_dialog.id();
+        let dialog_id = self.caller_dialog_id();
 
         let call_id = &dialog_id.call_id;
         let local_tag = &dialog_id.local_tag;
