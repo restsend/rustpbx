@@ -92,7 +92,7 @@ impl Drop for ServerDialogGuard {
                 debug!(%self.id, state = %dlg.state(), "server dialog removed on drop");
                 self.dialog_layer.remove_dialog(&self.id);
                 match dlg {
-                    Dialog::ServerInvite(dlg) => dlg,
+                    Dialog::Invite(dlg) => dlg,
                     _ => return,
                 }
             }
@@ -108,7 +108,7 @@ impl Drop for ServerDialogGuard {
                 if state.can_cancel() {
                     dlg.reject(None, None).ok();
                 } else {
-                    dlg.bye().await.ok();
+                    dlg.bye_with_headers(None).await.ok();
                 }
             });
         }

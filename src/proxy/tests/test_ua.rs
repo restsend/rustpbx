@@ -322,7 +322,7 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ServerInvite(d) => {
+                Dialog::Invite(d) => {
                     // Store answer SDP for potential re-INVITE responses
                     if let Some(ref sdp) = sdp_answer {
                         let mut sdps = self.answer_sdps.lock().await;
@@ -367,7 +367,7 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ServerInvite(d) => {
+                Dialog::Invite(d) => {
                     let code = status_code.map(StatusCode::from);
                     d.reject(code, reason).map_err(|e| e.into_anyhow())?;
                     Ok(())
@@ -392,7 +392,7 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ServerInvite(d) => {
+                Dialog::Invite(d) => {
                     let contact = rsipstack::sip::typed::Contact {
                         display_name: None,
                         uri: self.contact_uri.clone().unwrap(),
@@ -473,11 +473,11 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             let resp = match dialog {
-                Dialog::ClientInvite(d) => d
+                Dialog::Invite(d) => d
                     .refer(refer_to_uri, None, None)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                Dialog::ServerInvite(d) => d
+                Dialog::Invite(d) => d
                     .refer(refer_to_uri, None, None)
                     .await
                     .map_err(|e| e.into_anyhow())?,
@@ -512,12 +512,12 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ClientInvite(d) => {
+                Dialog::Invite(d) => {
                     d.info(Some(headers), Some(body))
                         .await
                         .map_err(|e| e.into_anyhow())?;
                 }
-                Dialog::ServerInvite(d) => {
+                Dialog::Invite(d) => {
                     d.info(Some(headers), Some(body))
                         .await
                         .map_err(|e| e.into_anyhow())?;
@@ -547,12 +547,12 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ClientInvite(d) => {
+                Dialog::Invite(d) => {
                     d.info(Some(headers), Some(body))
                         .await
                         .map_err(|e| e.into_anyhow())?;
                 }
-                Dialog::ServerInvite(d) => {
+                Dialog::Invite(d) => {
                     d.info(Some(headers), Some(body))
                         .await
                         .map_err(|e| e.into_anyhow())?;
@@ -585,19 +585,19 @@ impl TestUa {
             };
 
             let resp = match (method, &mut dialog) {
-                (rsipstack::sip::Method::Update, Dialog::ClientInvite(d)) => d
+                (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
                     .update(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsipstack::sip::Method::Update, Dialog::ServerInvite(d)) => d
+                (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
                     .update(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsipstack::sip::Method::Invite, Dialog::ClientInvite(d)) => d
+                (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsipstack::sip::Method::Invite, Dialog::ServerInvite(d)) => d
+                (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,

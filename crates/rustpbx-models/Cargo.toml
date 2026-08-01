@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 async-trait = "0.1.88"
 chrono = { version = "0.4", features = ["serde"] }
-rsipstack = "0.5.24"
+rsipstack = "0.6"
 sea-orm = { version = "2", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",

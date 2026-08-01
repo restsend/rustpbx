@@ -26,11 +26,11 @@ use axum::{
 use chrono::Utc;
 use rand::random;
 use rsipstack::dialog::{
-    client_dialog::ClientInviteDialog,
     dialog::{Dialog, DialogState},
     invitation::InviteOption,
-    server_dialog::ServerInviteDialog,
+    invite_dialog::InviteDialog,
 };
+use rsipstack::transaction::key::TransactionRole;
 use rsipstack::sip::{Header as SipHeader, Method, Scheme, Transport, Uri, Version};
 use rsipstack::transport::SipAddr;
 use sea_orm::EntityTrait;
@@ -2309,65 +2309,45 @@ fn summarize_dialog(dialog: &Dialog) -> Option<DialogSummary> {
     let remote_contact = dialog.remote_contact().map(|uri| uri.to_string());
 
     match dialog {
-        Dialog::ServerInvite(server) => {
-            summarize_server_dialog(server, id, from_display, to_display, remote_contact)
-        }
-        Dialog::ClientInvite(client) => {
-            summarize_client_dialog(client, id, from_display, to_display, remote_contact)
+        Dialog::Invite(d) => {
+            summarize_invite_dialog(d, id, from_display, to_display, remote_contact)
         }
         _ => None,
     }
 }
 
-fn summarize_server_dialog(
-    server: &ServerInviteDialog,
+fn summarize_invite_dialog(
+    dialog: &InviteDialog,
     id: rsipstack::dialog::DialogId,
     from_display: String,
     to_display: String,
     remote_contact: Option<String>,
 ) -> Option<DialogSummary> {
-    let state = server.state();
+    let state = dialog.state();
     let snapshot = summarize_state(&state)?;
-    let offer = decode_body(server.initial_request().body.as_slice());
+    let role = if dialog.role() == TransactionRole::Server {
+        "server"
+    } else {
+        "client"
+    };
+    let offer = if dialog.role() == TransactionRole::Server {
+        decode_body(dialog.initial_request().body.as_slice())
+    } else {
+        None
+    };
 
     Some(DialogSummary {
         id: id.to_string(),
         call_id: id.call_id.clone(),
         from_tag: id.local_tag.clone(),
         to_tag: id.remote_tag.clone(),
-        role: "server".to_string(),
+        role: role.to_string(),
         state: snapshot.label,
         state_detail: snapshot.detail,
         from_display,
         to_display,
         remote_contact,
         offer,
-        answer: snapshot.answer,
-    })
-}
-
-fn summarize_client_dialog(
-    client: &ClientInviteDialog,
-    id: rsipstack::dialog::DialogId,
-    from_display: String,
-    to_display: String,
-    remote_contact: Option<String>,
-) -> Option<DialogSummary> {
-    let state = client.state();
-    let snapshot = summarize_state(&state)?;
-
-    Some(DialogSummary {
-        id: id.to_string(),
-        call_id: id.call_id.clone(),
-        from_tag: id.local_tag.clone(),
-        to_tag: id.remote_tag.clone(),
-        role: "client".to_string(),
-        state: snapshot.label,
-        state_detail: snapshot.detail,
-        from_display,
-        to_display,
-        remote_contact,
-        offer: None,
         answer: snapshot.answer,
     })
 }

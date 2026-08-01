@@ -2123,7 +2123,7 @@ impl CallModule {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::ServerInvite(d) => match d.notify_refer(status, sub_state).await {
+                Dialog::Invite(d) => match d.notify_refer(status, sub_state).await {
                     Ok(Some(response)) => {
                         info!(
                             status = %response.status_code(),

@@ -412,7 +412,7 @@ impl SipSession {
 
                 info!(session_id = %self.id, %leg_id, target = %uri, "Sending REFER for blind transfer");
 
-                let Some(server_dialog) = self.server_dialog.as_ref() else {
+                let Some(server_dialog) = self.caller_dialog.as_ref() else {
                     warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
                     return Err(anyhow!(
                         "REFER not supported without an inbound caller dialog; use B2BUA"
@@ -611,7 +611,7 @@ impl SipSession {
                     ?reason,
                     "Queue transfer failed"
                 );
-                if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
+                if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
                     self.meta.last_error =
                         Some((StatusCode::Other(code, text.clone()), reason.clone()));
                     self.meta

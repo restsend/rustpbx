@@ -1440,7 +1440,7 @@ impl RwiCommandProcessor {
                         if body_str.contains("v=0") { Some(body_str) } else { None }
                     };
 
-                    // Apply the callee's SDP answer to the caller track (virtual A leg).
+                    // Apply the first INVITE's SDP answer to the caller track (A leg).
                     if let Some(answer) = sdp_answer.as_ref() {
                         let tracks = caller_peer.get_tracks().await;
                         if let Some(first_track) = tracks.first() {
@@ -1452,10 +1452,10 @@ impl RwiCommandProcessor {
                         }
                     }
 
-                    // Attach the answered ClientInviteDialog (B leg) + SDP into
-                    // the session before starting its command loop.
+                    // Attach the answered first INVITE as the primary caller
+                    // (A leg, MediaBridge A side) before starting the loop.
                     let callee_evt_fwd = session.callee_event_tx.clone();
-                    session.attach_callee_dialog(dialog, sdp_answer).await;
+                    session.attach_caller_dialog(dialog, sdp_answer).await;
 
                     // Spawn the UAC command loop now that the callee is attached.
                     let session_cancel = cancel_token.clone();

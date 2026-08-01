@@ -58,7 +58,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use rsipstack::dialog::{
     DialogId, dialog::Dialog, dialog::DialogState, dialog::TerminatedReason,
-    dialog::TransactionHandle, server_dialog::ServerInviteDialog,
+    dialog::TransactionHandle, invite_dialog::InviteDialog,
 };
 use rsipstack::sip::StatusCode;
 use rsipstack::sip::Transport;
@@ -159,10 +159,10 @@ pub struct SipSession {
     pub snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
 
     pub server: SipServerRef,
-    /// The inbound caller dialog (UAS side). `None` in UAC/outbound mode
-    /// (e.g. RWI originate) where the caller leg is virtual and only the
-    /// callee (B leg) is a real SIP dialog.
-    pub server_dialog: Option<ServerInviteDialog>,
+    /// The primary caller dialog (A leg). `None` in UAC/outbound mode
+    /// (e.g. RWI originate) where the caller leg is virtual until the first
+    /// outbound INVITE is attached via `attach_caller_dialog`.
+    pub caller_dialog: Option<InviteDialog>,
     pub callee_dialogs: Arc<DashMap<DialogId, ()>>,
     pub supervisor_mixer: Option<Arc<SupervisorSession>>,
 
@@ -800,7 +800,7 @@ impl SipSession {
         cancel_token: CancellationToken,
         call_record_sender: Option<CallRecordSender>,
         context: CallContext,
-        server_dialog: ServerInviteDialog,
+        server_dialog: InviteDialog,
         use_media_proxy: bool,
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
@@ -942,15 +942,14 @@ impl SipSession {
             app_runtime,
             snapshot_cache: snapshot_cache.clone(),
             server,
-            server_dialog: Some(server_dialog.clone()),
+            caller_dialog: Some(server_dialog.clone()),
             callee_dialogs: Arc::new(DashMap::new()),
             supervisor_mixer: None,
             legs: {
                 use crate::proxy::proxy_call::leg_registry::LegRegistry;
                 let mut lr = LegRegistry::new();
                 let caller_id = LegId::from("caller");
-                let caller_dialog =
-                    rsipstack::dialog::dialog::Dialog::ServerInvite(server_dialog.clone());
+                let caller_dialog = rsipstack::dialog::dialog::Dialog::Invite(server_dialog.clone());
                 lr.add_leg(
                     caller_id.clone(),
                     Leg::new(caller_id),
@@ -1128,7 +1127,7 @@ impl SipSession {
             app_runtime,
             snapshot_cache: snapshot_cache.clone(),
             server,
-            server_dialog: None,
+            caller_dialog: None,
             callee_dialogs: Arc::new(DashMap::new()),
             supervisor_mixer: None,
             legs: {
@@ -1650,7 +1649,7 @@ impl SipSession {
             if cancelled
                 && hangup_futures.is_empty()
                 && self.pending_hangup.is_empty()
-                && self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated())
+                && self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated())
                 && self.callee_dialogs.is_empty()
             {
                 break;
@@ -1880,7 +1879,7 @@ impl SipSession {
     /// and the leg registry so the command loop and media bridge can drive it.
     pub async fn attach_callee_dialog(
         &mut self,
-        dialog: rsipstack::dialog::client_dialog::ClientInviteDialog,
+        dialog: InviteDialog,
         callee_sdp: Option<String>,
     ) {
         let dialog_id = dialog.id();
@@ -1890,14 +1889,106 @@ impl SipSession {
 
         // Register the callee leg with a real dialog.
         let callee_id = LegId::from("callee");
-        let dialog_enum = rsipstack::dialog::dialog::Dialog::ClientInvite(dialog);
+        let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
         self.legs.set_dialog(callee_id.clone(), dialog_enum);
 
-        // Apply the callee's answer SDP to the MediaBridge B leg.
-        if let Some(ref mb) = self.media.bridge {
-            if let (Some(answer), Some(leg)) = (callee_sdp, mb.leg(crate::media::media_bridge::LegSide::B)) {
-                if let Err(e) = leg.apply_sdp(&answer, rustrtc::SdpType::Answer).await {
-                    warn!(session_id = %self.id, error = %e, "Failed to apply callee SDP to MediaBridge B leg");
+        // Ensure the B leg exists and apply the callee's answer SDP.
+        if let Some(sdp) = callee_sdp {
+            if let Err(e) = self
+                .ensure_media_leg(
+                    crate::media::media_bridge::LegSide::B,
+                    &sdp,
+                    rustrtc::TransportMode::Rtp,
+                )
+                .await
+            {
+                warn!(session_id = %self.id, error = %e, "Failed to create callee MediaBridge leg");
+                return;
+            }
+            if let Some(mb) = self.bridge_mut() {
+                if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
+                    if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
+                        warn!(session_id = %self.id, error = %e, "Failed to apply callee SDP to MediaBridge B leg");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure the MediaBridge leg for `side` exists, creating it from the
+    /// codecs negotiated in `sdp` if needed. Idempotent.
+    async fn ensure_media_leg(
+        &mut self,
+        side: crate::media::media_bridge::LegSide,
+        sdp: &str,
+        transport: rustrtc::TransportMode,
+    ) -> Result<()> {
+        let codecs =
+            crate::media::negotiate::MediaNegotiator::extract_codec_params(sdp).audio;
+        let rtp_port_range = self
+            .context
+            .dialplan
+            .media
+            .rtp_start_port
+            .zip(self.context.dialplan.media.rtp_end_port);
+        let external_ip = self.context.dialplan.media.external_ip.clone();
+        let bind_ip = self.context.dialplan.media.bind_ip.clone();
+        let cname = Some(self.server.rtc_cname.clone());
+        let cfg = crate::media::leg::LegConfig {
+            transport,
+            codecs,
+            rtp_port_range,
+            external_ip,
+            bind_ip,
+            cname,
+        };
+
+        let Some(mb) = self.bridge_mut() else {
+            return Ok(());
+        };
+        if mb.leg(side).is_some() {
+            return Ok(());
+        }
+        let leg = crate::media::leg::LegInner::new("uac-leg", &cfg)?;
+        mb.replace_leg(side, leg).await;
+        Ok(())
+    }
+
+    /// Attach the primary caller (A leg) dialog to the session. Used in UAC
+    /// mode (RWI originate) after the first outbound INVITE is answered: the
+    /// virtual caller anchor becomes a real SIP peer on MediaBridge A side.
+    /// Accepts any `InviteDialog` (Server or Client role).
+    pub async fn attach_caller_dialog(
+        &mut self,
+        dialog: InviteDialog,
+        caller_sdp: Option<String>,
+    ) {
+        let dialog_id = dialog.id();
+        info!(session_id = %self.id, %dialog_id, "Attaching caller dialog to session");
+
+        self.caller_dialog = Some(dialog.clone());
+        let caller_id = LegId::from("caller");
+        let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
+        self.legs.set_dialog(caller_id.clone(), dialog_enum);
+
+        // Ensure the A leg exists and apply the caller's answer SDP.
+        if let Some(sdp) = caller_sdp {
+            if let Err(e) = self
+                .ensure_media_leg(
+                    crate::media::media_bridge::LegSide::A,
+                    &sdp,
+                    rustrtc::TransportMode::Rtp,
+                )
+                .await
+            {
+                warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge leg");
+                return;
+            }
+            if let Some(mb) = self.bridge_mut() {
+                if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
+                    if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
+                        warn!(session_id = %self.id, error = %e, "Failed to apply caller SDP to MediaBridge A leg");
+                    }
                 }
             }
         }
@@ -2012,7 +2103,7 @@ impl SipSession {
             .get_dialog(&dialog_id)
             .or_else(|| {
                 if side == DialogSide::Caller {
-                    self.server_dialog.clone().map(Dialog::ServerInvite)
+                    self.caller_dialog.clone().map(Dialog::Invite)
                 } else {
                     None
                 }
@@ -2020,19 +2111,11 @@ impl SipSession {
             .ok_or_else(|| anyhow!("No dialog found for {}", dialog_id))?;
 
         match (method, &mut dialog) {
-            (rsipstack::sip::Method::Invite, Dialog::ClientInvite(d)) => d
+            (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
                 .reinvite(Some(headers), body)
                 .await
                 .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
-            (rsipstack::sip::Method::Invite, Dialog::ServerInvite(d)) => d
-                .reinvite(Some(headers), body)
-                .await
-                .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
-            (rsipstack::sip::Method::Update, Dialog::ClientInvite(d)) => d
-                .update(Some(headers), body)
-                .await
-                .map_err(|e| anyhow!("UPDATE failed: {}", e)),
-            (rsipstack::sip::Method::Update, Dialog::ServerInvite(d)) => d
+            (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
                 .update(Some(headers), body)
                 .await
                 .map_err(|e| anyhow!("UPDATE failed: {}", e)),
@@ -3092,7 +3175,7 @@ impl SipSession {
                     self.meta.connected_callee_dialog_id = None;
 
                     // ── Return to IVR takes precedence over CSAT hook ──────────
-                    if !self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
+                    if !self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                         if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
                             let mut ivr_params =
                                 std::mem::take(&mut self.meta.transfer_return_params);
@@ -3116,7 +3199,7 @@ impl SipSession {
                         }
                     }
 
-                    let hook_handled = if !self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
+                    let hook_handled = if !self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                         // Give session hooks a chance to start a post-call
                         // app (e.g. CSAT survey) before hanging up the caller.
                         let ctx = self.session_hook_ctx();
@@ -3132,7 +3215,7 @@ impl SipSession {
                         false
                     };
 
-                    if !hook_handled && !self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
+                    if !hook_handled && !self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                         self.pending_hangup.insert(self.caller_dialog_id());
                     }
                     // If hook_handled == true, the survey app will hang up the caller
@@ -3182,7 +3265,7 @@ impl SipSession {
                         // voicemail instead of passing the rejection to the caller.
                         // This covers busy, no-answer, offline, decline, etc.
                         if self.context.dialplan.voicemail_enabled
-                            && !self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated())
+                            && !self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated())
                         {
                             if let Some(ext) = extract_sip_username(&self.context.original_callee) {
                                 info!(session_id = %self.id,
@@ -3258,7 +3341,7 @@ impl SipSession {
                         }
                     }
                     // Forward to caller
-                    if let Some(server_dialog) = self.server_dialog.as_ref() {
+                    if let Some(server_dialog) = self.caller_dialog.as_ref() {
                         let fwd_headers = vec![rsipstack::sip::Header::ContentType(
                             rsipstack::sip::headers::ContentType::from("application/dtmf-relay"),
                         )];
@@ -3344,7 +3427,7 @@ impl SipSession {
                     let resolved_agents =
                         if let Some(enricher) = &self.server.queue_location_enricher {
                             let caller_headers: Vec<rsipstack::sip::Header> = self
-                                .server_dialog
+                                .caller_dialog
                                 .as_ref()
                                 .map(|d| d.initial_request().headers.into())
                                 .unwrap_or_default();
@@ -3591,8 +3674,8 @@ impl SipSession {
         }
 
         // If the caller hasn't confirmed yet, send 180 Ringing before forking
-        if !self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
-            if let Some(dialog) = self.server_dialog.as_ref() {
+        if !self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
+            if let Some(dialog) = self.caller_dialog.as_ref() {
                 let _ = dialog.ringing(None, None);
             }
         }
@@ -3619,7 +3702,7 @@ impl SipSession {
         while !fork_set.is_empty() {
             let join_result = tokio::select! {
                 _ = caller_end_check.tick() => {
-                    if self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
+                    if self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                         info!(session_id = %self.id,
                             session_id = %self.context.session_id,
                             "Caller dialog terminated while parallel callee INVITEs were pending"
@@ -3788,7 +3871,7 @@ impl SipSession {
         self.media.early_media_sent = true;
 
         // Send 183 Session Progress with SDP
-        let ringing_result: anyhow::Result<()> = match self.server_dialog.as_ref() {
+        let ringing_result: anyhow::Result<()> = match self.caller_dialog.as_ref() {
             Some(dialog) => dialog
                 .ringing(Some(Self::sdp_headers()), Some(answer_sdp.into_bytes()))
                 .map_err(|e| anyhow!("{}", e)),
@@ -3908,7 +3991,7 @@ impl SipSession {
                 tokio::time::sleep(dur).await;
             }
         }
-        if let Some(dialog) = self.server_dialog.as_ref() {
+        if let Some(dialog) = self.caller_dialog.as_ref() {
             dialog.reject(Some(status), reason.clone())?;
         }
         Ok(())
@@ -4257,7 +4340,7 @@ impl SipSession {
         let result = loop {
             tokio::select! {
                 _ = caller_end_check.tick() => {
-                    if self.server_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
+                    if self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
                         info!(session_id = %self.id,
                             session_id = %self.context.session_id,
                             "Caller dialog terminated while callee INVITE was pending"
@@ -4412,7 +4495,7 @@ impl SipSession {
                                     }
                                 };
 
-                                if let Some(dialog) = self.server_dialog.as_ref() {
+                                if let Some(dialog) = self.caller_dialog.as_ref() {
                                 if let Err(e) = dialog.ringing(
                                     Some(Self::sdp_headers()),
                                     caller_sdp.map(|sdp| sdp.into_bytes()),
@@ -4425,7 +4508,7 @@ impl SipSession {
                                 }
                                 }
                             } else {
-                                if let Some(dialog) = self.server_dialog.as_ref() {
+                                if let Some(dialog) = self.caller_dialog.as_ref() {
                                 if let Err(e) = dialog.ringing(
                                     Some(Self::sdp_headers()),
                                     Some(callee_sdp.into_bytes()),
@@ -4442,7 +4525,7 @@ impl SipSession {
                             if !self.media.early_media_sent {
                                 self.update_leg_state(&LegId::from("callee"), LegState::Ringing);
                             }
-                            if let Some(dialog) = self.server_dialog.as_ref() {
+                            if let Some(dialog) = self.caller_dialog.as_ref() {
                             if let Err(e) = dialog.ringing(None, None) {
                                 warn!(session_id = %self.id,
                                     session_id = %self.context.session_id,
@@ -4736,7 +4819,7 @@ impl SipSession {
         let sdp_changed =
             self.media.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
 
-        if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed())
+        if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed())
             && self.media.answer.is_some()
             && !sdp_changed
             && !force_regenerate
@@ -4751,7 +4834,7 @@ impl SipSession {
             );
         }
 
-        if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed())
+        if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed())
             && self.media.answer.is_some()
             && self.media_profile.path == MediaPathMode::Anchored
             && self.media.bridge.is_none()
@@ -5325,9 +5408,9 @@ impl SipSession {
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
-            if let Some(dialog) = self.server_dialog.as_ref() {
+            if let Some(dialog) = self.caller_dialog.as_ref() {
                 if let Err(e) = dialog.accept(Some(headers), Some(answer_sdp.into_bytes())) {
-                    if self.server_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
+                    if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
                         debug!(session_id = %self.id,
                             session_id = %self.context.session_id,
                             error = %e,
@@ -5953,7 +6036,7 @@ impl SipSession {
         for callee_dialog_id in callee_ids {
             if let Some(mut dialog) = dialog_layer.get_dialog(&callee_dialog_id) {
                 let resp = match &mut dialog {
-                    rsipstack::dialog::dialog::Dialog::ClientInvite(d) => d
+                    rsipstack::dialog::dialog::Dialog::Invite(d) => d
                         .reinvite(Some(headers.clone()), Some(body.clone()))
                         .await
                         .map_err(|e| anyhow!("re-INVITE to callee failed: {}", e))?,
@@ -6013,7 +6096,7 @@ impl SipSession {
                 let headers = Self::sdp_headers();
 
                 let resp: Option<rsipstack::sip::Response> = match &mut dialog {
-                    Dialog::ClientInvite(d) => d
+                    Dialog::Invite(d) => d
                         .reinvite(Some(headers), Some(body))
                         .await
                         .map_err(|e| anyhow!("re-INVITE to callee failed: {}", e))?,
@@ -6048,7 +6131,7 @@ impl SipSession {
             {
                 headers.extend(timer_headers);
             }
-            if let Some(dialog) = self.server_dialog.as_ref() {
+            if let Some(dialog) = self.caller_dialog.as_ref() {
                 dialog
                     .accept(Some(headers), Some(answer_sdp.clone().into_bytes()))
                     .map_err(|e| anyhow!("Failed to send 200 OK for re-INVITE: {}", e))?;
@@ -6476,7 +6559,7 @@ impl SipSession {
     }
 
     pub fn init_server_timer(&mut self, default_expires: u64) -> Result<(), CalleeError> {
-        let Some(server_dialog) = self.server_dialog.as_ref() else {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
             // UAC mode: no inbound caller dialog, so no session timer negotiation
             // against a caller.
             return Ok(());
@@ -6564,7 +6647,7 @@ impl SipSession {
     fn caller_dialog_id(&self) -> DialogId {
         // In UAC mode there is no inbound caller dialog; the callee (B leg)
         // dialog is the only real dialog, so treat it as the primary.
-        if let Some(d) = self.server_dialog.as_ref() {
+        if let Some(d) = self.caller_dialog.as_ref() {
             return d.id();
         }
         if let Some(entry) = self.callee_dialogs.iter().next() {
@@ -6579,7 +6662,19 @@ impl SipSession {
     }
 
     fn is_uac_dialog(&self, dialog_id: &DialogId) -> bool {
-        *dialog_id != self.caller_dialog_id()
+        // Determine UAC role from the dialog's actual type: a Client dialog
+        // is UAC (we initiated), a Server dialog is UAS (we received).
+        self.server
+            .dialog_layer
+            .get_dialog(dialog_id)
+            .map(|d| {
+                matches!(
+                    d,
+                    rsipstack::dialog::dialog::Dialog::Invite(invite)
+                        if invite.role() == rsipstack::transaction::key::TransactionRole::Client
+                )
+            })
+            .unwrap_or(false)
     }
 
     fn schedule_timer(&mut self, dialog_id: DialogId) {
@@ -6716,7 +6811,7 @@ impl SipSession {
             };
 
             match &mut dialog {
-                Dialog::ClientInvite(invite_dialog) => invite_dialog
+                Dialog::Invite(invite_dialog) => invite_dialog
                     .update(Some(headers), None)
                     .await
                     .map_err(|e| anyhow!("UPDATE failed: {}", e)),
@@ -6725,7 +6820,7 @@ impl SipSession {
                     dialog_id
                 )),
             }
-        } else if let Some(dialog) = self.server_dialog.as_ref() {
+        } else if let Some(dialog) = self.caller_dialog.as_ref() {
             dialog
                 .update(Some(headers), None)
                 .await
@@ -6826,7 +6921,7 @@ impl SipSession {
             };
 
             match &mut dialog {
-                Dialog::ClientInvite(invite_dialog) => invite_dialog
+                Dialog::Invite(invite_dialog) => invite_dialog
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
@@ -6835,7 +6930,7 @@ impl SipSession {
                     dialog_id
                 )),
             }
-        } else if let Some(dialog) = self.server_dialog.as_ref() {
+        } else if let Some(dialog) = self.caller_dialog.as_ref() {
             dialog
                 .reinvite(Some(headers), body)
                 .await
@@ -7421,8 +7516,31 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_remove_leg(leg_id).await)
             }
 
-            CallCommand::LegConnected { leg_id, answer_sdp } => {
+            CallCommand::LegConnected {
+                leg_id,
+                answer_sdp,
+                dialog_id,
+            } => {
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
+
+                // In UAC mode, a leg added via `leg_add` with leg_id="callee"
+                // should attach its answered dialog + SDP onto the MediaBridge
+                // B side so it can be bridged with the A (caller) leg.
+                if leg_id == LegId::from("callee") {
+                    if let Some(call_id) = dialog_id {
+                        if let Some(invite) = self
+                            .server
+                            .dialog_layer
+                            .get_client_dialog_by_call_id(&call_id)
+                            .into_iter()
+                            .next()
+                        {
+                            self.attach_callee_dialog(invite, answer_sdp.clone())
+                                .await;
+                        }
+                    }
+                }
+
                 // Forward to running app before processing so the app can react
                 let agent_uri = self
                     .legs
@@ -7869,7 +7987,7 @@ impl SipSession {
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
-            let mut result: Result<rsipstack::dialog::client_dialog::ClientInviteDialog, String> =
+            let mut result: Result<InviteDialog, String> =
                 Err("not started".to_string());
             let mut state_rx_open = true;
 
@@ -7907,6 +8025,7 @@ impl SipSession {
                                         let _ = cmd_tx.send(CallCommand::LegConnected {
                                             leg_id: leg_id.clone(),
                                             answer_sdp,
+                                            dialog_id: Some(dialog.id().call_id.clone()),
                                         }).await;
 
                                         result = Ok(dialog);
@@ -8330,7 +8449,7 @@ impl SipSession {
             _ => (StatusCode::Decline, Some("Decline".to_string())),
         };
 
-        if let Some(dialog) = self.server_dialog.as_ref() {
+        if let Some(dialog) = self.caller_dialog.as_ref() {
             if let Err(e) = dialog.reject(Some(status_code), reason_phrase) {
                 warn!(session_id = %self.id, %leg_id, error = %e, "Failed to send reject response");
                 return Err(anyhow!("Failed to send reject response: {}", e));
@@ -8368,7 +8487,7 @@ impl SipSession {
             _ => None,
         });
 
-        if let Some(dialog) = self.server_dialog.as_ref() {
+        if let Some(dialog) = self.caller_dialog.as_ref() {
             if let Err(e) = dialog.ringing(None, sdp.map(|s| s.into_bytes())) {
                 warn!(session_id = %self.id, %leg_id, error = %e, "Failed to send ringing indication");
                 return Err(anyhow!("Failed to send ringing indication: {}", e));
@@ -8387,12 +8506,7 @@ impl SipSession {
         use rsipstack::dialog::dialog::Dialog;
 
         match dialog {
-            Dialog::ServerInvite(d) => {
-                d.info(Some(headers), Some(body))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-            }
-            Dialog::ClientInvite(d) => {
+            Dialog::Invite(d) => {
                 d.info(Some(headers), Some(body))
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -8425,7 +8539,7 @@ impl SipSession {
 
         // 1. Send via SIP INFO
         let info_result: Result<()> = if leg_id == LegId::from("caller") {
-            if let Some(dialog) = self.server_dialog.as_ref() {
+            if let Some(dialog) = self.caller_dialog.as_ref() {
                 dialog
                     .info(Some(headers), Some(dtmf_body.clone().into_bytes()))
                     .await
@@ -8540,7 +8654,7 @@ impl SipSession {
         let headers = vec![rsipstack::sip::Header::ContentType(content_type.into())];
         let body_bytes = body.into_bytes();
 
-        let Some(server_dialog) = self.server_dialog.as_ref() else {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
             warn!(session_id = %self.id, "Cannot send SIP MESSAGE: no inbound caller dialog (UAC mode)");
             return Err(anyhow!("SIP MESSAGE requires an inbound caller dialog"));
         };
@@ -8577,7 +8691,7 @@ impl SipSession {
         ];
         let body_bytes = body.into_bytes();
 
-        let Some(server_dialog) = self.server_dialog.as_ref() else {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
             warn!(session_id = %self.id, "Cannot send SIP NOTIFY: no inbound caller dialog (UAC mode)");
             return Err(anyhow!("SIP NOTIFY requires an inbound caller dialog"));
         };
@@ -8603,7 +8717,7 @@ impl SipSession {
     async fn handle_send_sip_options_ping(&mut self) -> Result<()> {
         info!(session_id = %self.id, "Sending SIP OPTIONS ping");
 
-        let Some(server_dialog) = self.server_dialog.as_ref() else {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
             debug!(session_id = %self.id, "Skipping caller OPTIONS ping (UAC mode)");
             return Ok(());
         };
@@ -8766,7 +8880,7 @@ impl SipSession {
     async fn send_reinvite_to_caller(&self, sdp: String) -> Result<()> {
         let headers = Self::sdp_headers();
 
-        let Some(server_dialog) = self.server_dialog.as_ref() else {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
             // UAC mode: no inbound caller to re-INVITE; media hold/unhold is
             // handled entirely on the MediaBridge.
             debug!(session_id = %self.id, "Skipping caller re-INVITE (UAC mode)");

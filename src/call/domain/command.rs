@@ -419,6 +419,9 @@ pub enum CallCommand {
         leg_id: LegId,
         /// Answer SDP from the leg (for codec resolution)
         answer_sdp: Option<String>,
+        /// Call-ID of the connected dialog (used to attach a real dialog to
+        /// the session's MediaBridge leg in UAC mode).
+        dialog_id: Option<String>,
     },
 
     /// Leg dial failed (async notification)
