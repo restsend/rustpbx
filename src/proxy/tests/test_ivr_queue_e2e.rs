@@ -296,19 +296,6 @@ action = {{ type = "transfer", target = "support" }}
         // Wait a bit for IVR app to start and auto-answer
         sleep(Duration::from_millis(300)).await;
 
-        // Inject AudioComplete to simulate greeting finishing
-        let registry = &server.server.active_call_registry;
-        let sessions = registry.list_recent(1);
-        if let Some(entry) = sessions.first()
-            && let Some(handle) = registry.get_handle(&entry.session_id)
-        {
-            let _ = handle.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
-                track_id: "caller".to_string(),
-                interrupted: false,
-            });
-            info!("Injected AudioComplete for session {}", entry.session_id);
-        }
-
         sleep(Duration::from_millis(200)).await;
 
         // Send DTMF '2' via SIP INFO
