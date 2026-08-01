@@ -30,7 +30,7 @@ use rustrtc::RtpRewriteBridgeParams;
 use rustrtc::{MediaKind, media::MediaStreamTrack};
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::egress::EgressSource;
 use crate::ingress_tap::{DtmfEvent, MediaRecorder};
@@ -96,6 +96,10 @@ pub struct MediaBridge {
     /// Legs currently playing a Media source. `play` inserts; the egress
     /// `on_end` callback removes.
     active_play: Arc<parking_lot::Mutex<HashSet<LegSide>>>,
+    /// Codecs of the last successful bridge activation. Used to make
+    /// `bridge()` idempotent: re-bridging the same codec pair on an already
+    /// active route is a no-op (avoids rebuilding decoders/relay).
+    last_bridged: Option<(audio_codec::CodecType, audio_codec::CodecType)>,
 }
 
 impl MediaBridge {
@@ -110,6 +114,7 @@ impl MediaBridge {
             dtmf_bus,
             root_cancel: CancellationToken::new(),
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            last_bridged: None,
         }
     }
 
@@ -259,9 +264,16 @@ impl MediaBridge {
             return Ok(());
         };
 
+        // Idempotent re-bridge: same codec pair on an already-active route is
+        // a no-op (avoid rebuilding decoders / re-arming the relay).
+        if self.route_active && self.last_bridged == Some((ca.codec, cb.codec)) {
+            return Ok(());
+        }
+        self.last_bridged = Some((ca.codec, cb.codec));
+
         if ca.codec == cb.codec {
             // ── fast-path: transport-level zero-copy relay ──
-            eprintln!("MBRIDGE fast-path: ca={:?} cb={:?}", ca.codec, cb.codec);            // Rewrite the forwarded packet's header to the destination leg's
+            debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay");            // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
             // destination is plain RTP.
             let a_transport = la.pc().config().transport_mode.clone();
@@ -269,10 +281,21 @@ impl MediaBridge {
             let a_ssrc = sender_ssrc(la.pc());
             let b_ssrc = sender_ssrc(lb.pc());
 
+            // RFC 4733 DTMF payload-type remap (only when the two legs
+            // negotiated different telephone-event payload types).
+            let dtmf_a_to_b = match (pa.dtmf.as_ref(), pb.dtmf.as_ref()) {
+                (Some(a), Some(b)) if a.payload_type != b.payload_type => {
+                    Some((a.payload_type, b.payload_type))
+                }
+                _ => None,
+            };
+            let dtmf_b_to_a = dtmf_a_to_b.map(|(a, b)| (b, a));
+
             let params_a_to_b = RtpRewriteBridgeParams {
                 ssrc_offset: 0,
                 fixed_out_ssrc: Some(b_ssrc),
                 payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
+                dtmf_payload_type: dtmf_a_to_b,
                 initial_sequence_number: None,
                 initial_timestamp_offset: None,
                 strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
@@ -281,6 +304,7 @@ impl MediaBridge {
                 ssrc_offset: 0,
                 fixed_out_ssrc: Some(a_ssrc),
                 payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
+                dtmf_payload_type: dtmf_b_to_a,
                 initial_sequence_number: None,
                 initial_timestamp_offset: None,
                 strip_extensions: a_transport == rustrtc::TransportMode::Rtp,
@@ -345,6 +369,7 @@ impl MediaBridge {
     /// rewrite bridge is torn down (handled inside `Leg::set_egress_source`).
     pub async fn unbridge(&mut self) -> Result<()> {
         self.route_active = false;
+        self.last_bridged = None;
         if let Some(la) = self.leg_a.as_ref() {
             la.set_egress_source(EgressSource::Silence).await?;
         }
@@ -380,6 +405,10 @@ impl MediaBridge {
     ) -> Result<PlaybackHandle> {
         self.unbridge().await?;
         let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        // Pause the RTP inactivity timeout while playing: during playback the
+        // peer may stay silent, so an armed timeout would fire spuriously.
+        leg.pause_rtp_timeout();
+        let leg_for_end = leg.clone();
         let (handle, done_tx) = PlaybackHandle::new();
         self.active_play.lock().insert(side);
         let active_registry = self.active_play.clone();
@@ -387,6 +416,8 @@ impl MediaBridge {
         let on_end = Arc::new(move |interrupted: bool| {
             // Clear the active-play marker for this side on completion.
             active_registry.lock().remove(&side);
+            // Resume the RTP inactivity timeout once playback ends.
+            leg_for_end.resume_rtp_timeout();
             if let Some(tx) = done_tx.lock().take() {
                 let _ = tx.send(PlaybackResult { interrupted });
             }

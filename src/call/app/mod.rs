@@ -108,7 +108,7 @@ pub use app_context::{
     AppSharedState, ApplicationContext, CallInfo, PendingQueuePlan, extract_sip_headers,
 };
 pub use controller::{
-    CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackHandle,
+    CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackToken,
     RecordingHandle, RecordingInfo,
 };
 pub use event_loop::AppEventLoop;

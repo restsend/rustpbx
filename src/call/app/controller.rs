@@ -14,15 +14,15 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 /// An audio playback session. Playback completion is delivered to the app via
-/// [`ControllerEvent::AudioComplete`] (keyed by [`PlaybackHandle::track_id`]).
+/// [`ControllerEvent::AudioComplete`] (keyed by [`PlaybackToken::track_id`]).
 #[derive(Debug, Clone)]
-pub struct PlaybackHandle {
+pub struct PlaybackToken {
     pub(crate) track_id: String,
     #[allow(unused)]
     pub(crate) file_path: String,
 }
 
-impl PlaybackHandle {
+impl PlaybackToken {
     pub fn track_id(&self) -> &str {
         &self.track_id
     }
@@ -172,7 +172,7 @@ impl CallController {
         &self,
         file: impl Into<String>,
         _interruptible: bool,
-    ) -> anyhow::Result<PlaybackHandle> {
+    ) -> anyhow::Result<PlaybackToken> {
         self.play_audio_with_options(file, None, false, _interruptible)
             .await
     }
@@ -189,7 +189,7 @@ impl CallController {
         track_id: Option<String>,
         loop_playback: bool,
         interruptible: bool,
-    ) -> anyhow::Result<PlaybackHandle> {
+    ) -> anyhow::Result<PlaybackToken> {
         let path = file.into();
         let track_id = track_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let source = if path.starts_with("http://") || path.starts_with("https://") {
@@ -209,7 +209,7 @@ impl CallController {
             }),
         })?;
 
-        Ok(PlaybackHandle {
+        Ok(PlaybackToken {
             track_id,
             file_path: path,
         })

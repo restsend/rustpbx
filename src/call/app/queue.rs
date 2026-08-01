@@ -20,7 +20,7 @@
 //! ```
 
 use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
-use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle};
+use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
     VoicePrompts,
@@ -316,7 +316,7 @@ pub struct QueueApp {
     /// Current state machine state.
     state: QueueState,
     /// Current hold music playback handle (if any).
-    hold_playback: Option<PlaybackHandle>,
+    hold_playback: Option<PlaybackToken>,
     /// Whether we've already answered the call.
     answered: bool,
     /// Current agent index for sequential dialing.

@@ -553,6 +553,47 @@ impl AppFactory for BuiltinAppFactory {
 }
 
 
+/// Fan a detected DTMF digit out to: the running app (`inject_event`), the
+/// RWI gateway (typed `Dtmf` event), and the bridge WebSocket (if connected).
+/// Shared by the SIP INFO path and the RTP RFC 2833 path (MediaBridge dtmf_bus).
+fn forward_dtmf_event(
+    digit: char,
+    leg_id: &str,
+    session_id: &str,
+    app_runtime: &Arc<dyn AppRuntime>,
+    rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
+    bridge_dtmf_tx: &Arc<
+        parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    >,
+) {
+    let digit_str = digit.to_string();
+    let event = serde_json::json!({
+        "type": "dtmf",
+        "leg_id": leg_id,
+        "digit": digit_str,
+    });
+    if let Err(e) = app_runtime.inject_event(event.clone()) {
+        warn!(session_id = %session_id, digit = %digit_str, error = %e, "Detected DTMF but failed to inject event");
+        return;
+    }
+    if let Some(gw) = rwi_gateway.as_ref() {
+        let g = gw.read();
+        g.send_to_owner(&crate::rwi::Dtmf {
+            call_id: session_id.to_string(),
+            digit: digit_str.clone(),
+            leg_id: Some(leg_id.to_string()),
+            extra: None,
+        });
+    }
+    if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
+        let _ = tx.send(serde_json::json!({
+            "type": "dtmf",
+            "digit": digit_str,
+            "leg_id": leg_id,
+        }).to_string());
+    }
+}
+
 /// Parse trunk dest to extract (host, port). Handles both SIP URIs and bare host:port.
 fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
     if dest.trim().is_empty() {
@@ -991,6 +1032,7 @@ impl SipSession {
                 session_id_str.clone(),
                 crate::media::media_bridge::BridgeOpts::default(),
             ));
+            session.spawn_dtmf_forwarder();
         }
 
         (session, sip_handle, cmd_rx)
@@ -1168,6 +1210,7 @@ impl SipSession {
                 session_id_str.clone(),
                 crate::media::media_bridge::BridgeOpts::default(),
             ));
+            session.spawn_dtmf_forwarder();
         }
 
         (session, sip_handle, cmd_rx)
@@ -1915,6 +1958,36 @@ impl SipSession {
         }
     }
 
+    /// Subscribe to the MediaBridge DTMF bus and forward RTP RFC 2833 digits
+    /// to the running app + RWI gateway + bridge WebSocket. Called once at
+    /// session construction when media is anchored.
+    fn spawn_dtmf_forwarder(&self) {
+        let Some(mb) = self.media.bridge.as_ref() else {
+            return;
+        };
+        let mut rx = mb.dtmf_bus();
+        let app_runtime = self.app_runtime.clone();
+        let rwi_gateway = self.server.rwi_gateway.clone();
+        let bridge_dtmf_tx = self.bridge_dtmf_tx.clone();
+        let session_id = self.context.session_id.clone();
+        crate::utils::spawn(async move {
+            while let Ok((side, ev)) = rx.recv().await {
+                let leg_id = match side {
+                    crate::media::media_bridge::LegSide::A => "caller",
+                    crate::media::media_bridge::LegSide::B => "callee",
+                };
+                forward_dtmf_event(
+                    ev.digit,
+                    leg_id,
+                    &session_id,
+                    &app_runtime,
+                    &rwi_gateway,
+                    &bridge_dtmf_tx,
+                );
+            }
+        });
+    }
+
     /// Ensure the MediaBridge leg for `side` exists, creating it from the
     /// codecs negotiated in `sdp` if needed. Idempotent.
     async fn ensure_media_leg(
@@ -2585,47 +2658,15 @@ impl SipSession {
                         .trim_start_matches("signal=")
                         .trim();
                     if !digit.is_empty() {
-                        let event = serde_json::json!({
-                            "type": "dtmf",
-                            "leg_id": "caller",
-                            "digit": digit.chars().next().unwrap_or_default().to_string(),
-                        });
-                        warn!(session_id = %self.id,
-                            session_id = %self.context.session_id,
-                            digit = %digit,
-                            "✓ Successfully detected DTMF digit from SIP INFO"
+                        let digit_char = digit.chars().next().unwrap_or_default();
+                        forward_dtmf_event(
+                            digit_char,
+                            "caller",
+                            &self.context.session_id,
+                            &self.app_runtime,
+                            &self.server.rwi_gateway,
+                            &self.bridge_dtmf_tx,
                         );
-                        if let Err(e) = self.app_runtime.inject_event(event.clone()) {
-                            warn!(session_id = %self.id,
-                                session_id = %self.context.session_id,
-                                digit = %digit,
-                                error = %e,
-                                "Detected DTMF via INFO but failed to inject event"
-                            );
-                        } else {
-                            info!(session_id = %self.id,
-                                session_id = %self.context.session_id,
-                                digit = %digit,
-                                "✓ Successfully injected DTMF event from SIP INFO"
-                            );
-                            // Emit typed RWI DTMF event
-                            self.emit_typed_rwi_event(&crate::rwi::Dtmf {
-                                call_id: self.context.session_id.clone(),
-                                digit: digit.chars().next().unwrap_or_default().to_string(),
-                                leg_id: Some("caller".to_string()),
-                                extra: None,
-                            });
-                        }
-
-                        // Forward digit to active bridge WS (if any)
-                        if let Some(tx) = self.bridge_dtmf_tx.read().as_ref() {
-                            let bridge_json = serde_json::json!({
-                                "type": "dtmf",
-                                "digit": digit.chars().next().unwrap_or_default().to_string(),
-                                "leg_id": "caller",
-                            });
-                            let _ = tx.send(bridge_json.to_string());
-                        }
                     }
                 }
             }
