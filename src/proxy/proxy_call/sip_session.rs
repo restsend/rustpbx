@@ -208,6 +208,10 @@ pub struct SipSession {
     #[allow(dead_code)]
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
+    /// This session's own handle (used to send commands back into the session
+    /// from spawned tasks, e.g. restore the media route after playback).
+    pub handle: SipSessionHandle,
+
 
 }
 
@@ -1021,6 +1025,7 @@ impl SipSession {
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
+            handle: sip_handle.clone(),
             dtmf_digits: Vec::new(),
         };
 
@@ -1202,6 +1207,7 @@ impl SipSession {
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
+            handle: sip_handle.clone(),
             dtmf_digits: Vec::new(),
         };
 
@@ -7245,6 +7251,19 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::ResumeMedia => {
+                if let Some(mb) = self.bridge_mut() {
+                    if let Err(e) = mb.resume(crate::media::media_bridge::LegSide::A).await {
+                        warn!(session_id = %self.id, error = %e, "Failed to resume media route after playback");
+                        CommandResult::failure(e.to_string())
+                    } else {
+                        CommandResult::success()
+                    }
+                } else {
+                    CommandResult::success()
+                }
+            }
+
             CallCommand::Hold { leg_id, music } => {
                 Self::ok_or_failure(self.handle_hold(leg_id, music).await)
             }
@@ -8367,8 +8386,10 @@ impl SipSession {
 
         if let Some(mb) = self.bridge_mut() {
             let handle = mb.play_file(target_side, &file_path, loop_playback).await?;
-            // Forward the playback completion to the app event loop.
+            // Forward the playback completion to the app event loop and restore
+            // the media route (both legs) once playback ends.
             let app_event_bridge = self.app_event_bridge.clone();
+            let handle_for_restore = self.handle.clone();
             crate::utils::spawn(async move {
                 let result = handle.done.await.ok();
                 let interrupted = result.map(|r| r.interrupted).unwrap_or(true);
@@ -8378,6 +8399,7 @@ impl SipSession {
                         interrupted,
                     });
                 }
+                let _ = handle_for_restore.send_command(CallCommand::ResumeMedia);
             });
         } else {
             return Err(anyhow!("Playback requires MediaBridge"));
@@ -8801,7 +8823,7 @@ impl SipSession {
 
         let hold_sdp = self.generate_hold_sdp().await?;
 
-        match self.send_reinvite_to_caller(hold_sdp).await {
+        match self.send_reinvite_to_leg(&leg_id, hold_sdp).await {
             Ok(_) => {
                 info!(session_id = %self.id, %leg_id, "Hold re-INVITE sent successfully");
 
@@ -8873,7 +8895,7 @@ impl SipSession {
 
         let unhold_sdp = self.generate_unhold_sdp().await?;
 
-        match self.send_reinvite_to_caller(unhold_sdp).await {
+        match self.send_reinvite_to_leg(&leg_id, unhold_sdp).await {
             Ok(_) => {
                 info!(session_id = %self.id, %leg_id, "Unhold re-INVITE sent successfully");
 
@@ -8916,6 +8938,43 @@ impl SipSession {
 
         let unhold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendrecv");
         Ok(unhold_sdp)
+    }
+
+    /// Send a re-INVITE (e.g. hold/unhold SDP) to the dialog of the target leg
+    /// ("caller" → the primary caller dialog; "callee" → the callee dialog).
+    async fn send_reinvite_to_leg(&self, leg_id: &LegId, sdp: String) -> Result<()> {
+        let headers = Self::sdp_headers();
+        let dialog = if leg_id.0 == "callee" {
+            self.legs
+                .dialogs
+                .get(&LegId::from("callee"))
+                .and_then(|d| match d {
+                    rsipstack::dialog::dialog::Dialog::Invite(inv) => Some(inv.clone()),
+                    _ => None,
+                })
+        } else {
+            self.caller_dialog.clone()
+        };
+        let Some(dialog) = dialog else {
+            debug!(session_id = %self.id, %leg_id, "No dialog to re-INVITE for leg");
+            return Ok(());
+        };
+        match dialog
+            .reinvite(Some(headers), Some(sdp.into_bytes()))
+            .await
+        {
+            Ok(Some(response)) => {
+                let status = response.status_code.code();
+                if StatusCode::from(status).kind() == rsipstack::sip::StatusCodeKind::Successful {
+                    info!(session_id = %self.id, status = %status, "re-INVITE accepted");
+                    Ok(())
+                } else {
+                    Err(anyhow!("re-INVITE rejected with status {}", status))
+                }
+            }
+            Ok(None) => Err(anyhow!("re-INVITE timed out")),
+            Err(e) => Err(anyhow!("re-INVITE failed: {}", e)),
+        }
     }
 
     async fn send_reinvite_to_caller(&self, sdp: String) -> Result<()> {

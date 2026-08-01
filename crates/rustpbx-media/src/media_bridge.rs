@@ -45,6 +45,15 @@ pub enum LegSide {
     B,
 }
 
+impl LegSide {
+    pub fn opposite(self) -> Self {
+        match self {
+            LegSide::A => LegSide::B,
+            LegSide::B => LegSide::A,
+        }
+    }
+}
+
 /// Outcome of a [`PlaybackHandle`]'s play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaybackResult {
@@ -433,14 +442,42 @@ impl MediaBridge {
 
     /// Play a file (or http URL) on a leg. Reads the file async and pre-decodes
     /// it into memory; the egress pacing task reads from the in-memory cache.
+    ///
+    /// **Dual-source announcement**: the same file is also played on the
+    /// opposite leg so both parties hear it (e.g. "call may be recorded").
+    /// Playback completion is delivered on `side`'s handle; the caller is
+    /// expected to restore the route (e.g. [`Self::resume`]) once done.
     pub async fn play_file(
         &mut self,
         side: LegSide,
         path: impl Into<String>,
         loop_playback: bool,
     ) -> Result<PlaybackHandle> {
-        let source = crate::audio_source::FileAudioSource::new(path.into(), loop_playback).await?;
-        self.play(side, Box::new(source), loop_playback).await
+        let path = path.into();
+        let handle = self
+            .play(
+                side,
+                Box::new(crate::audio_source::FileAudioSource::new(
+                    path.clone(),
+                    loop_playback,
+                )
+                .await?),
+                loop_playback,
+            )
+            .await?;
+        // Mirror onto the opposite leg so both parties hear the announcement.
+        let other = side.opposite();
+        if let Some(leg) = self.leg(other) {
+            leg.set_egress_source(EgressSource::Media {
+                audio: Box::new(
+                    crate::audio_source::FileAudioSource::new(path, loop_playback).await?,
+                ),
+                loop_playback,
+                on_end: None,
+            })
+            .await?;
+        }
+        Ok(handle)
     }
 
     /// Whether a leg currently has an active Media playback.
@@ -489,14 +526,15 @@ impl MediaBridge {
     }
 
     /// Resume a leg from hold / play: re-activate the route (auto-selects
-    /// fast-path or transcode).
+    /// fast-path or transcode). Clears any active-play markers for both legs.
     pub async fn resume(&mut self, _side: LegSide) -> Result<()> {
+        self.active_play.lock().clear();
         self.bridge().await
     }
 
-    /// Mute a leg's egress (send silence). Breaks the route on that leg.
+    /// Mute a leg's egress (send silence on that side only). The opposite leg
+    /// keeps its current route/egress untouched.
     pub async fn mute(&mut self, side: LegSide) -> Result<()> {
-        self.unbridge().await?;
         let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         leg.set_egress_source(EgressSource::Silence).await
     }

@@ -268,6 +268,7 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::InjectAppEvent { .. }
         | CallCommand::DtmfCollect { .. }
         | CallCommand::AppExited
+        | CallCommand::ResumeMedia
         | CallCommand::SendInfo { .. } => {
             Err(AdapterError::NotSupported(format!("{:?}", cmd)).into())
         }

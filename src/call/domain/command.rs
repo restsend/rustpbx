@@ -436,6 +436,11 @@ pub enum CallCommand {
     /// running CallApp event loop finishes, for any reason).
     AppExited,
 
+    /// Restore the MediaBridge route after an announcement/playback finished
+    /// (re-activates fast-path relay or transcode). Issued internally when a
+    /// playback handle's `done` resolves.
+    ResumeMedia,
+
     /// Send a SIP INFO request to a specific dialog with a custom body and
     /// content-type.  Used by the IVR-exec flow to deliver the result back
     /// to the cc-phone agent.
