@@ -36,6 +36,9 @@ pub struct TestUaConfig {
     pub realm: String,
     pub local_port: u16,
     pub proxy_addr: SocketAddr,
+    /// When true, the UA generates a real WebRTC (DTLS-SRTP) offer/answer via a
+    /// rustrtc PeerConnection instead of the fake SDP strings used elsewhere.
+    pub webrtc: bool,
 }
 
 /// Simplified TestUa structure with essential fields only
@@ -53,6 +56,8 @@ pub struct TestUa {
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// Real WebRTC PeerConnection used when `config.webrtc` is set.
+    webrtc_pc: Option<Arc<rustrtc::PeerConnection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +83,17 @@ pub enum TestUaEvent {
 
 impl TestUa {
     pub fn new(config: TestUaConfig) -> Self {
+        let webrtc_pc = if config.webrtc {
+            let pc = rustrtc::PeerConnection::new(rustrtc::RtcConfiguration::default());
+            // Add an audio transceiver so create_offer produces an m=audio line.
+            pc.add_transceiver(
+                rustrtc::MediaKind::Audio,
+                rustrtc::TransceiverDirection::SendRecv,
+            );
+            Some(Arc::new(pc))
+        } else {
+            None
+        };
         Self {
             config,
             cancel_token: CancellationToken::new(),
@@ -88,6 +104,7 @@ impl TestUa {
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            webrtc_pc,
         }
     }
 
@@ -260,6 +277,21 @@ impl TestUa {
 
         let (content_type, offer) = if let Some(sdp) = sdp_offer {
             (Some("application/sdp".to_string()), Some(sdp.into_bytes()))
+        } else if let Some(pc) = self.webrtc_pc.as_ref() {
+            // Real WebRTC (DTLS-SRTP) offer from the UA's PeerConnection.
+            let _ = pc
+                .create_offer()
+                .await
+                .map_err(|e| anyhow!("create_offer failed: {}", e))?;
+            pc.wait_for_gathering_complete().await;
+            let offer = pc
+                .create_offer()
+                .await
+                .map_err(|e| anyhow!("create_offer (gathered) failed: {}", e))?;
+            (
+                Some("application/sdp".to_string()),
+                Some(offer.to_sdp_string().into_bytes()),
+            )
         } else {
             (None, None)
         };
@@ -288,6 +320,15 @@ impl TestUa {
         if resp.status_code == rsipstack::sip::StatusCode::OK {
             if !resp.body().is_empty() {
                 let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
+                // Apply the remote answer to the WebRTC PeerConnection.
+                if let Some(pc) = self.webrtc_pc.as_ref() {
+                    let desc = rustrtc::SessionDescription::parse(
+                        rustrtc::SdpType::Answer,
+                        &answer_sdp,
+                    )
+                    .map_err(|e| anyhow!("parse answer SDP failed: {}", e))?;
+                    let _ = pc.set_remote_description(desc).await;
+                }
                 let mut sdps = self.negotiated_answer_sdps.lock().await;
                 sdps.insert(dialog.id(), answer_sdp);
             }
@@ -319,6 +360,41 @@ impl TestUa {
             .dialog_layer
             .as_ref()
             .ok_or_else(|| anyhow!("TestUa not started"))?;
+
+        // If this is a WebRTC UA and no explicit answer was supplied, derive
+        // one from the received offer via the PeerConnection (real DTLS-SRTP).
+        let sdp_answer = match sdp_answer {
+            Some(s) => Some(s),
+            None if self.webrtc_pc.is_some() => {
+                let offer = self
+                    .received_offer_sdps
+                    .lock()
+                    .await
+                    .get(dialog_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("No received offer for WebRTC answer"))?;
+                let pc = self.webrtc_pc.as_ref().expect("webrtc pc");
+                let desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer)
+                    .map_err(|e| anyhow!("parse offer failed: {}", e))?;
+                pc.set_remote_description(desc)
+                    .await
+                    .map_err(|e| anyhow!("set_remote_description failed: {}", e))?;
+                let _ = pc
+                    .create_answer()
+                    .await
+                    .map_err(|e| anyhow!("create_answer failed: {}", e))?;
+                pc.wait_for_gathering_complete().await;
+                let mut answer = pc
+                    .create_answer()
+                    .await
+                    .map_err(|e| anyhow!("create_answer (gathered) failed: {}", e))?;
+                answer.sdp_type = rustrtc::SdpType::Answer;
+                pc.set_local_description(answer)
+                    .map_err(|e| anyhow!("set_local_description failed: {}", e))?;
+                pc.local_description().map(|d| d.to_sdp_string())
+            }
+            None => None,
+        };
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
@@ -948,6 +1024,29 @@ mod tests {
         port: u16,
     ) -> Result<TestUa> {
         let config = TestUaConfig {
+        webrtc: false,
+            username: username.to_string(),
+            password: password.to_string(),
+            realm: proxy_addr.ip().to_string(),
+            local_port: port,
+            proxy_addr,
+        };
+
+        let mut ua = TestUa::new(config);
+        ua.start().await?;
+        Ok(ua)
+    }
+
+    /// Create a TestUa that uses a real rustrtc PeerConnection (WebRTC
+    /// DTLS-SRTP) for offer/answer generation instead of fake SDP strings.
+    pub async fn create_test_ua_webrtc(
+        username: &str,
+        password: &str,
+        proxy_addr: SocketAddr,
+        port: u16,
+    ) -> Result<TestUa> {
+        let config = TestUaConfig {
+            webrtc: true,
             username: username.to_string(),
             password: password.to_string(),
             realm: proxy_addr.ip().to_string(),
@@ -2687,6 +2786,75 @@ a=rtpmap:0 PCMU/8000"#;
         );
 
         alice.stop();
+        proxy.stop();
+    }
+
+    /// Real WebRTC (DTLS-SRTP) caller through the media proxy to an RTP callee.
+    /// Alice's PeerConnection generates a genuine WebRTC offer over SIP; the
+    /// proxy negotiates it on its WebRTC leg and bridges to Bob (RTP).
+    #[tokio::test]
+    async fn test_webrtc_rtp_real_media_proxy() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .try_init();
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
+            .await
+            .unwrap();
+        let proxy_addr = proxy.proxy_addr;
+
+        let alice_port = portpicker::pick_unused_port().unwrap_or(26040);
+        let alice =
+            create_test_ua_webrtc("alice", "password123", proxy_addr, alice_port)
+                .await
+                .unwrap();
+        let bob_port = portpicker::pick_unused_port().unwrap_or(26041);
+        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            .await
+            .unwrap();
+
+        alice.register().await.unwrap();
+        bob.register().await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+
+        // Alice (real WebRTC PeerConnection) calls Bob; the PC generates a
+        // genuine DTLS-SRTP offer.
+        let alice_clone = alice.clone();
+        let caller_task = crate::utils::spawn(async move {
+            alice_clone.make_call("bob", None).await
+        });
+
+        // Bob waits for the incoming call and answers it with an RTP answer
+        // (single loop so the IncomingCall event isn't consumed elsewhere).
+        let mut answered = false;
+        for _ in 0..400 {
+            let evs = bob.process_dialog_events().await.unwrap_or_default();
+            for ev in &evs {
+                if let TestUaEvent::IncomingCall(id, offer) = ev {
+                    let offer = offer.clone().unwrap_or_default();
+                    let rtp_answer =
+                        create_test_sdp_answer(&offer, "127.0.0.1", bob_port + 1);
+                    bob.answer_call(id, Some(rtp_answer)).await.unwrap();
+                    answered = true;
+                    break;
+                }
+            }
+            if answered {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        assert!(answered, "Bob should receive the incoming call");
+
+        // Alice's call should complete (200 OK + WebRTC answer applied to PC).
+        let dialog = tokio::time::timeout(Duration::from_secs(20), caller_task)
+            .await
+            .expect("caller task timeout")
+            .unwrap()
+            .expect("alice call should succeed");
+        println!("Alice established call with real WebRTC: {}", dialog);
+
+        alice.stop();
+        bob.stop();
         proxy.stop();
     }
 }

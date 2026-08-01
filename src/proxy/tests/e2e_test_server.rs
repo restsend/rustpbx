@@ -191,6 +191,7 @@ impl E2eTestServer {
         let local_port = portpicker::pick_unused_port().unwrap_or(25000);
 
         let config = TestUaConfig {
+        webrtc: false,
             username: username.to_string(),
             password: password.to_string(),
             realm: "127.0.0.1".to_string(),

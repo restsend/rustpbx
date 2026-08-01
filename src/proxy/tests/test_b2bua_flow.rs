@@ -23,6 +23,7 @@ async fn create_test_ua(
     port: u16,
 ) -> Result<TestUa> {
     let config = TestUaConfig {
+        webrtc: false,
         username: username.to_string(),
         password: password.to_string(),
         realm: "127.0.0.1".to_string(),

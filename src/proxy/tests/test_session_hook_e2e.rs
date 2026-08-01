@@ -175,6 +175,7 @@ async fn create_ua(port: u16, username: &str, password: &str) -> Result<TestUa> 
     let local_port = portpicker::pick_unused_port().unwrap_or(25100);
     let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
     let config = TestUaConfig {
+        webrtc: false,
         username: username.to_string(),
         password: password.to_string(),
         realm: "127.0.0.1".to_string(),
@@ -192,6 +193,7 @@ async fn create_unregistered_ua(port: u16, username: &str) -> Result<TestUa> {
     let local_port = portpicker::pick_unused_port().unwrap_or(25200);
     let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
     let config = TestUaConfig {
+        webrtc: false,
         username: username.to_string(),
         password: String::new(),
         realm: "127.0.0.1".to_string(),

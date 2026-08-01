@@ -191,6 +191,7 @@ async fn start_server_b(
 
 async fn create_ua(username: &str, proxy_addr: SocketAddr, port: u16) -> Result<TestUa> {
     let config = TestUaConfig {
+        webrtc: false,
         username: username.to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),

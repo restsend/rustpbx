@@ -16,6 +16,7 @@ async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
 
     // 2. Setup Alice (WebRTC Caller)
     let mut alice_ua = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "alice".to_string(),
         password: "password123".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -28,6 +29,7 @@ async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
 
     // 3. Setup Bob (RTP Callee)
     let mut bob = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "bob".to_string(),
         password: "password456".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -120,6 +122,7 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
 
     // 2. Setup Alice (WebRTC Caller) supporting both Opus and PCMU
     let mut alice_ua = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "alice".to_string(),
         password: "password123".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -132,6 +135,7 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
 
     // 3. Setup Bob (RTP Callee) supporting PCMU only
     let mut bob = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "bob".to_string(),
         password: "password456".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -236,6 +240,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
 
     // Setup Alice (WebRTC Caller)
     let mut alice_ua = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "alice".to_string(),
         password: "password123".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -248,6 +253,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
 
     // Setup Bob (RTP Callee)
     let mut bob = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "bob".to_string(),
         password: "password456".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -441,6 +447,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
 
     // Setup Alice (RTP Caller)
     let mut alice = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "alice".to_string(),
         password: "password123".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -453,6 +460,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
 
     // Setup Bob (WebRTC Callee)
     let mut bob = TestUa::new(TestUaConfig {
+        webrtc: false,
         username: "bob".to_string(),
         password: "password456".to_string(),
         realm: "127.0.0.1".to_string(),

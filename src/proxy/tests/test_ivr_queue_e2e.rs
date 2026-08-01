@@ -260,6 +260,7 @@ action = {{ type = "transfer", target = "support" }}
     // 2. Register agent
     let agent_port = portpicker::pick_unused_port().unwrap_or(26000);
     let agent_config = super::test_ua::TestUaConfig {
+        webrtc: false,
         username: "agent".to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -273,6 +274,7 @@ action = {{ type = "transfer", target = "support" }}
     // 3. Create Caller
     let caller_port = portpicker::pick_unused_port().unwrap_or(26001);
     let caller_config = super::test_ua::TestUaConfig {
+        webrtc: false,
         username: "caller".to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),

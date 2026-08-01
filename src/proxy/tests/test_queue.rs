@@ -153,6 +153,7 @@ async fn test_call_queue_routing() {
     // 2. Create and register Agent
     let agent_port = portpicker::pick_unused_port().unwrap_or(26000);
     let config = crate::proxy::tests::test_ua::TestUaConfig {
+        webrtc: false,
         username: "agent".to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),
@@ -166,6 +167,7 @@ async fn test_call_queue_routing() {
     // 3. Create Caller
     let caller_port = portpicker::pick_unused_port().unwrap_or(26001);
     let config = crate::proxy::tests::test_ua::TestUaConfig {
+        webrtc: false,
         username: "caller".to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),
