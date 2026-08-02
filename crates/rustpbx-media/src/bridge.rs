@@ -773,6 +773,13 @@ struct DirectionParams {
     drain_ingress: bool,
     /// The target side's MediaSender, used by the drain task to forward audio.
     drain_sender: Option<MediaSender>,
+    /// The target side's output mode (PEER / FILE / MUTED). The drain relay must
+    /// NOT write while the target is in FILE or MUTED mode — otherwise its
+    /// forwarded peer audio interleaves (on the same SSRC/sender channel) with
+    /// the file-output clock's greeting/music, producing two RTP timestamp/PT
+    /// domains on one stream (the IVR→bridge "PT 0↔96 + timestamp 切换" bug).
+    /// recv() is still polled so DTMF detection / stats keep working.
+    drain_target_output_mode: Arc<AtomicU8>,
 }
 
 enum DirectionEventResult {
@@ -2274,6 +2281,12 @@ impl BridgePeer {
             let drain_cancel = common.cancel_token.clone();
             let drain_bid = bridge_id.to_string();
             let drain_dir = dir.direction;
+            // Target side's output mode: the drain relay may only forward peer
+            // audio while the target is in PEER mode. In FILE mode the
+            // file-output clock owns the egress (greeting/music/position
+            // announcements); in MUTED mode nothing should egress. Forwarding
+            // here anyway interleaves two timestamp/PT domains on one SSRC.
+            let drain_target_mode = Arc::clone(&dir.drain_target_output_mode);
             let h = tokio::spawn(async move {
                 info!(
                     bridge_id = %drain_bid,
@@ -2287,6 +2300,13 @@ impl BridgePeer {
                         res = drain_track.recv() => {
                             match res {
                                 Ok(sample) => {
+                                    // Suppress peer audio while the target side
+                                    // is playing a file or muted. recv() was
+                                    // still polled above, so DTMF detection and
+                                    // stats remain active.
+                                    if drain_target_mode.load(Ordering::Acquire) != BRIDGE_OUTPUT_PEER {
+                                        continue;
+                                    }
                                     if let Err(e) = drain_sender.send(sample) {
                                         debug!(
                                             bridge_id = %drain_bid,
@@ -2478,6 +2498,7 @@ impl BridgePeer {
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
             drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Caller),
             drain_sender: self.callee.send.lock().as_ref().map(|t| t.inner_sender().clone()),
+            drain_target_output_mode: Arc::clone(&self.callee.output_mode),
         };
 
         let callee = DirectionParams {
@@ -2503,6 +2524,7 @@ impl BridgePeer {
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
             drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Callee),
             drain_sender: self.caller.send.lock().as_ref().map(|t| t.inner_sender().clone()),
+            drain_target_output_mode: Arc::clone(&self.caller.output_mode),
         };
 
         let caller_pc = self.caller.pc();

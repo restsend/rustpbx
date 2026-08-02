@@ -2436,4 +2436,136 @@ mod tests {
             other => panic!("Expected Audio, got {:?}", other),
         }
     }
+
+    /// Track that yields a sequence of pre-defined samples, then blocks.
+    struct SeqTrack {
+        samples: parking_lot::Mutex<std::collections::VecDeque<MediaSample>>,
+    }
+    impl SeqTrack {
+        fn new(samples: Vec<MediaSample>) -> Arc<Self> {
+            Arc::new(Self {
+                samples: parking_lot::Mutex::new(samples.into()),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl MediaStreamTrack for SeqTrack {
+        fn id(&self) -> &str { "seq" }
+        fn kind(&self) -> MediaKind { MediaKind::Audio }
+        fn state(&self) -> TrackState { TrackState::Live }
+        async fn recv(&self) -> MediaResult<MediaSample> {
+            loop {
+                let s = self.samples.lock().pop_front();
+                if let Some(s) = s {
+                    return Ok(s);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(999)).await;
+            }
+        }
+        async fn request_key_frame(&self) -> MediaResult<()> { Ok(()) }
+    }
+
+    /// Reproduce the IVR→bridge PT-toggle root cause.
+    ///
+    /// A `ForwardingTrack` is created during IVR (before the callee answers, so
+    /// `set_transcoder`/`configure_media_bridge_transcoders` has not run yet).
+    /// Until the egress profile is staged, `audio_mapping` is `None`, so
+    /// `recv()` returns the ingress frame UNCHANGED — leaking the ingress PT.
+    /// Once the real profiles are staged (callee answered), the same ingress is
+    /// remapped to the target PT. Across the IVR→bridge transition the egress
+    /// therefore alternates between the ingress PT and the target PT — the
+    /// customer-reported "PT 0 ↔ 96 来回切换".
+    #[tokio::test]
+    async fn ivr_bridge_pt_toggle_passthrough_vs_remap() {
+        use crate::negotiate::NegotiatedLegProfile;
+
+        // Two ingress frames carrying PT96 (the "agent" dynamic PT).
+        let track = SeqTrack::new(vec![
+            audio_sample_seq(96, 1, 1000, 160),
+            audio_sample_seq(96, 2, 1160, 160),
+        ]);
+
+        // Created during IVR: no profiles → audio_mapping starts as None.
+        let ft = ForwardingTrack::new(
+            "pt-toggle".to_string(),
+            track,
+            None,
+            None,
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+
+        // Phase 1 — BEFORE staging: ingress PT96 passes through unchanged.
+        let pt_before = match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            ft.recv(),
+        )
+        .await
+        .expect("recv timed out")
+        .expect("recv error")
+        {
+            MediaSample::Audio(f) => f.payload_type,
+            other => panic!("expected Audio, got {:?}", other),
+        };
+        assert_eq!(
+            pt_before,
+            Some(96),
+            "BEFORE staging: ingress PT96 must leak to egress (audio_mapping is None)"
+        );
+
+        // Callee answers → configure_media_bridge_transcoders stages the real
+        // profiles. Ingress=PT96 (agent), egress=PT0 (caller). Same codec on
+        // both sides so no real transcoder is needed — this exercises the pure
+        // PT-remap path (the same path that runs for Opus96→PCMU0 in prod, just
+        // without pulling a real Opus decoder into the unit test).
+        ft.stage_ingress_profile(NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMU,
+                payload_type: 96,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        });
+        ft.stage_egress_profile(NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMU,
+                payload_type: 0,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        });
+
+        // Phase 2 — AFTER staging: same ingress PT96 is now remapped to PT0.
+        let pt_after = match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            ft.recv(),
+        )
+        .await
+        .expect("recv timed out")
+        .expect("recv error")
+        {
+            MediaSample::Audio(f) => f.payload_type,
+            other => panic!("expected Audio, got {:?}", other),
+        };
+        assert_eq!(
+            pt_after,
+            Some(0),
+            "AFTER staging: egress must be remapped to target PT0"
+        );
+
+        // The egress stream switched from PT96 → PT0. In the live IVR→bridge
+        // window the staging races with forwarding, so both PTs interleave on
+        // the same SSRC — exactly the reported toggle.
+        assert_ne!(
+            pt_before, pt_after,
+            "PT toggled across the staging boundary — root cause reproduced"
+        );
+    }
 }

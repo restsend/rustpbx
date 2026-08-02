@@ -54,6 +54,68 @@ impl TestUa {
         Self::callee_with_options(sip_port, ring_secs, username, None).await
     }
 
+    /// Create and start a callee UA with a specific username AND codec list
+    /// (e.g. `["opus"]` to force an Opus-only leg over plain RTP).
+    pub async fn callee_with_username_codecs(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        codecs: Vec<String>,
+    ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let domain = format!("127.0.0.1:{}", sip_port);
+
+        let account = AccountConfig {
+            username: username.to_string(),
+            domain: domain.clone(),
+            password: None,
+            register: Some(false),
+            ring: Some(RingConfig {
+                duration_secs: ring_secs,
+                ringback: None,
+                local: None,
+            }),
+            answer: Some(AnswerConfig::Echo),
+            codecs: Some(codecs),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let global_config = SipBotConfig {
+            addr: Some(format!("127.0.0.1:{}", sip_port)),
+            external_ip: None,
+            recorders: None,
+            ws_url: None,
+            accounts: vec![account.clone()],
+        };
+
+        let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
+        let ct = cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                res = bot.run_wait() => {
+                    if let Err(e) = res { tracing::error!("sipbot run_wait error: {e:?}"); }
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            cancel_token,
+            domain,
+            stats,
+            record_path: None,
+        }
+    }
+
     /// Create and start a REGISTERED callee UA that registers with a proxy.
     /// This is used for web agents that need to be discoverable via registrar.
     pub async fn registered_callee(
@@ -106,6 +168,76 @@ impl TestUa {
         });
 
         // Give the UA a moment to bind its UDP socket and register.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        Self {
+            cancel_token,
+            domain: format!("{}:{}", domain, sip_port),
+            stats,
+            record_path: None,
+        }
+    }
+
+    /// Create and start a REGISTERED callee UA that answers by actively PLAYING
+    /// `wav_file` (sends audio in the negotiated codec). Unlike `Echo`, this
+    /// keeps sending audio even when it receives nothing — needed to drive
+    /// audio into a bridge whose forward leg is starved.
+    pub async fn registered_callee_play(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        password: &str,
+        domain: &str,
+        proxy_addr: &str,
+        wav_file: String,
+        codecs: Vec<String>,
+    ) -> Self {
+        let cancel_token = CancellationToken::new();
+
+        let account = AccountConfig {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            password: Some(password.to_string()),
+            proxy: Some(proxy_addr.to_string()),
+            register: Some(true),
+            ring: Some(RingConfig {
+                duration_secs: ring_secs,
+                ringback: None,
+                local: None,
+            }),
+            answer: Some(AnswerConfig::Play { wav_file }),
+            codecs: Some(codecs),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let global_config = SipBotConfig {
+            addr: Some(format!("127.0.0.1:{}", sip_port)),
+            external_ip: None,
+            recorders: None,
+            ws_url: None,
+            accounts: vec![account.clone()],
+        };
+
+        let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
+        let ct = cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                res = bot.run_wait() => {
+                    if let Err(e) = res {
+                        tracing::error!("sipbot run_wait error: {e:?}");
+                    }
+                }
+            }
+        });
+
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         Self {

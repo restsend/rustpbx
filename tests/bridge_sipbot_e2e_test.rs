@@ -632,3 +632,353 @@ file = "{}"
     let _ = std::fs::remove_dir_all(&temp_dir);
     info!("test_voip_bridge_via_ivr_app_flow PASSED");
 }
+
+/// Reproduce the customer-reported bug: after **IVR → bridge** to a SIP agent
+/// with a codec mismatch (caller PCMU / PT0  vs  agent Opus / dynamic PT), the
+/// server's egress to the caller alternates between two payload types (PT0 and
+/// the agent's dynamic PT) and the RTP timestamp switches back and forth
+/// between two clock origins on the same SSRC.
+///
+/// This test only drives the scenario; the PT/timestamp toggle is observed on
+/// the wire via tcpdump + analyze_rtp.py (capture all UDP on loopback while
+/// the test runs):
+///
+/// ```text
+/// sudo tcpdump -i lo -w /tmp/repro/ivr_pt.pcap udp &  \
+///   cargo test ... test_ivr_bridge_pt_toggle_repro -- --nocapture ; \
+///   sudo pkill -INT tcpdump ; python3 analyze_rtp.py /tmp/repro/ivr_pt.pcap
+/// ```
+#[tokio::test]
+async fn test_ivr_bridge_pt_toggle_repro() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new("rustpbx=info,rustpbx_media=info").unwrap(),
+        )
+        .try_init();
+
+    let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
+    let agent_port = portpicker::pick_unused_port().expect("no free agent port");
+    let alice_port = portpicker::pick_unused_port().expect("no free alice port");
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_pt_toggle_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // IVR greeting (PCMU/8k sine) — keeps the call up while we transfer.
+    let greeting_path = temp_dir.join("greeting.wav");
+    generate_sine_wav(&greeting_path, 440.0, 30.0, 8000, 0.2);
+
+    let ivr_toml = format!(
+        r#"[ivr]
+name = "pt-toggle-ivr"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{}"
+timeout_ms = 60000
+max_retries = 99
+"#,
+        greeting_path.display()
+    );
+    let ivr_path = temp_dir.join("ivr.toml");
+    std::fs::write(&ivr_path, &ivr_toml).unwrap();
+
+    let route_toml = format!(
+        r#"
+name = "pt-toggle-ivr-route"
+priority = 100
+app = "ivr"
+auto_answer = true
+[match]
+"to.user" = "ivr"
+[app_params]
+file = "{}"
+"#,
+        ivr_path.display()
+    );
+    let routes: Vec<RouteRule> = vec![toml::from_str(&route_toml).expect("route")];
+
+    let proxy_config = ProxyConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: Some(sip_port),
+        ensure_user: Some(false),
+        user_backends: vec![UserBackendConfig::Memory {
+            users: Some(vec![
+                SipUser {
+                    id: 0,
+                    enabled: true,
+                    username: "ivr".to_string(),
+                    password: None,
+                    realm: None,
+                    allow_guest_calls: true,
+                    ..Default::default()
+                },
+                SipUser {
+                    id: 1,
+                    enabled: true,
+                    username: "1001".to_string(),
+                    password: Some("pass".to_string()),
+                    realm: None,
+                    allow_guest_calls: true,
+                    ..Default::default()
+                },
+            ]),
+        }],
+        ..Default::default()
+    };
+    let pbx = TestPbx::start_with_inject(
+        sip_port,
+        TestPbxInject {
+            proxy_config: Some(proxy_config),
+            routes: Some(routes),
+            ..Default::default()
+        },
+    )
+    .await;
+    let domain = format!("127.0.0.1:{}", sip_port);
+
+    // Agent "1001": Opus-only and actively PLAYS a tone, so the bridge receives
+    // real Opus RTP to transcode (and potentially leak). Echo mode would stay
+    // silent because the starved forward leg sends it nothing.
+    let agent_tone = temp_dir.join("agent_tone.wav");
+    generate_sine_wav(&agent_tone, 300.0, 30.0, 8000, 0.3);
+    let agent = TestUa::registered_callee_play(
+        agent_port,
+        1,
+        "1001",
+        "pass",
+        &domain,
+        &domain,
+        agent_tone.to_string_lossy().to_string(),
+        vec!["opus".to_string()],
+    )
+    .await;
+    sleep(Duration::from_secs(1)).await; // registration settle
+
+    // Caller alice: PCMU-only, dials the IVR.
+    let target = format!("sip:ivr@{}", pbx.sip_host());
+    let alice = TestUa::caller_with_target_and_record(
+        alice_port,
+        "alice",
+        target.clone(),
+        temp_dir.join("alice.wav").to_string_lossy().to_string(),
+        vec!["pcmu".to_string()],
+    )
+    .await;
+    info!(%target, "alice (PCMU) calling IVR");
+
+    // Wait for IVR answer + media.
+    let mut alice_rx = false;
+    for _ in 0..80 {
+        if alice.has_rtp_rx() {
+            alice_rx = true;
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(alice_rx, "IVR should answer and alice should receive RTP");
+
+    let session_id = {
+        let mut sid = None;
+        for _ in 0..50 {
+            let sessions = pbx.registry.list_recent(10);
+            for entry in sessions {
+                if matches!(entry.status, ActiveProxyCallStatus::Talking) {
+                    sid = Some(entry.session_id.clone());
+                    break;
+                }
+            }
+            if sid.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        sid.expect("no active Talking session")
+    };
+    info!(%session_id, "IVR session established; bridging caller → Opus agent");
+
+    // IVR → bridge: transfer the caller leg to the Opus agent.
+    let handle = pbx
+        .registry
+        .get_handle(&session_id)
+        .expect("session handle must exist");
+    let agent_uri = format!("sip:1001@{}", pbx.sip_host());
+    info!(%agent_uri, "transferring caller leg to Opus agent (codec mismatch)");
+    handle
+        .send_command(CallCommand::Transfer {
+            leg_id: LegId::new("caller"),
+            target: agent_uri.clone(),
+            attended: false,
+        })
+        .expect("send Transfer command");
+
+    // Let the agent ring, answer, and audio flow through the transcoding bridge.
+    sleep(Duration::from_secs(8)).await;
+
+    info!("alice rtp: {}", alice.rtp_stats_summary());
+    info!("agent rtp: {}", agent.rtp_stats_summary());
+
+    alice.stop();
+    agent.stop();
+    sleep(Duration::from_millis(500)).await;
+    pbx.stop();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    info!("test_ivr_bridge_pt_toggle_repro DONE — inspect pcap for PT/timestamp toggle");
+}
+
+/// Reproduce the customer-reported **PT 0 ↔ 96/111 toggle** with a PLAIN RTP
+/// (PCMU) inbound caller.
+///
+/// Root cause (now confirmed in code): the voip_bridge forward loop encodes the
+/// injected WS audio with the **codec's default payload type**, not the caller's
+/// negotiated PT (`transfer.rs:865 payload_type = codec_type.payload_type()`).
+/// For a PCMU caller bridged with `codec=opus`, the forward loop emits Opus
+/// frames at PT 111 (Opus default) while the IVR greeting still plays at PT 0
+/// (the bridge: path never calls `replace_output_with_peer`, so the greeting
+/// file-output clock keeps running). The caller therefore receives interleaved
+/// PT 0 + PT 111 packets on the same SSRC — the "PT 0 ↔ 96 来回切换" symptom
+/// (96 vs 111 is just the negotiated-vs-default Opus dynamic PT).
+///
+/// Run under tcpdump on lo, then `python3 analyze_rtp.py <pcap>`:
+/// the server→caller flow will show BOTH PT0 and PT111.
+#[tokio::test]
+async fn test_ivr_bridge_pt_toggle_plain_rtp_opus() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new("rustpbx=info,rustpbx_media=info").unwrap(),
+        )
+        .try_init();
+
+    let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
+    let alice_port = portpicker::pick_unused_port().expect("no free alice port");
+    let temp_dir = std::env::temp_dir().join(format!("rustpbx_pt_opus_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let greeting_path = temp_dir.join("greeting.wav");
+    generate_sine_wav(&greeting_path, 440.0, 30.0, 8000, 0.2);
+
+    let ivr_toml = format!(
+        r#"[ivr]
+name = "pt-opus-ivr"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{}"
+timeout_ms = 60000
+max_retries = 99
+"#,
+        greeting_path.display()
+    );
+    let ivr_path = temp_dir.join("ivr.toml");
+    std::fs::write(&ivr_path, &ivr_toml).unwrap();
+    let route_toml = format!(
+        r#"
+name = "pt-opus-ivr-route"
+priority = 100
+app = "ivr"
+auto_answer = true
+[match]
+"to.user" = "ivr"
+[app_params]
+file = "{}"
+"#,
+        ivr_path.display()
+    );
+    let routes: Vec<RouteRule> = vec![toml::from_str(&route_toml).expect("route")];
+
+    let proxy_config = ProxyConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: Some(sip_port),
+        ensure_user: Some(false),
+        user_backends: vec![UserBackendConfig::Memory {
+            users: Some(vec![SipUser {
+                id: 0,
+                enabled: true,
+                username: "ivr".to_string(),
+                password: None,
+                realm: None,
+                allow_guest_calls: true,
+                ..Default::default()
+            }]),
+        }],
+        ..Default::default()
+    };
+    let pbx = TestPbx::start_with_inject(
+        sip_port,
+        TestPbxInject {
+            proxy_config: Some(proxy_config),
+            routes: Some(routes),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Plain RTP inbound caller, PCMU only.
+    let target = format!("sip:ivr@{}", pbx.sip_host());
+    let alice = TestUa::caller_with_target_and_record(
+        alice_port,
+        "alice",
+        target.clone(),
+        temp_dir.join("alice.wav").to_string_lossy().to_string(),
+        vec!["pcmu".to_string()],
+    )
+    .await;
+    info!(%target, "alice (PCMU, plain RTP) calling IVR");
+
+    for _ in 0..80 {
+        if alice.has_rtp_rx() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(alice.has_rtp_rx(), "IVR should answer alice");
+
+    let session_id = {
+        let mut sid = None;
+        for _ in 0..50 {
+            for entry in pbx.registry.list_recent(10) {
+                if matches!(entry.status, ActiveProxyCallStatus::Talking) {
+                    sid = Some(entry.session_id.clone());
+                    break;
+                }
+            }
+            if sid.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        sid.expect("no Talking session")
+    };
+    info!(%session_id, "IVR session up; bridging caller → WS endpoint with codec=opus");
+
+    // Bridge to a WS endpoint that injects PCM, encoded as Opus on the caller
+    // egress. The forward loop will use Opus's *default* PT (111), not the
+    // caller's negotiated PCMU PT (0).
+    let ws_server = ToneWsServer::start(440.0, 0.4).await;
+    let ws_url = format!("ws://127.0.0.1:{}", ws_server.addr.port());
+    let target_uri = format!("bridge:{ws_url}?samplerate=8000&codec=opus");
+
+    let handle = pbx
+        .registry
+        .get_handle(&session_id)
+        .expect("session handle must exist");
+    handle
+        .send_command(CallCommand::Transfer {
+            leg_id: LegId::new("caller"),
+            target: target_uri.clone(),
+            attended: false,
+        })
+        .expect("send Transfer");
+
+    // Wait for the WS bridge to connect + audio to flow.
+    for _ in 0..60 {
+        if ws_server.connection_count().await >= 1 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    sleep(Duration::from_secs(5)).await;
+
+    info!("alice rtp: {}", alice.rtp_stats_summary());
+    info!("frames received by WS (reverse): {}", ws_server.frames_received().await);
+    info!("DONE — inspect pcap: server→caller flow should show PT0 + PT111 interleaved");
+
+    alice.stop();
+    pbx.stop();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

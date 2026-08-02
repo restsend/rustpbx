@@ -765,6 +765,12 @@ impl SipSession {
                 !caller_is_webrtc
             };
             bridge.stop_forwarding();
+            let leg_endpoint = if sip_leg_is_webrtc {
+                crate::media::bridge::BridgeEndpoint::Caller
+            } else {
+                crate::media::bridge::BridgeEndpoint::Callee
+            };
+            bridge.replace_output_with_peer(leg_endpoint).await;
             if sip_leg_is_webrtc {
                 pc = Some(bridge.caller_pc().clone());
                 audio_sender = bridge.get_caller_sender().await;
@@ -806,17 +812,49 @@ impl SipSession {
             .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
         let dec_sample_rate = decoder.sample_rate();
 
-        // ── 4. Determine codec type for the forward encoder ───────────
-        let codec_type = match codec.as_str() {
-            "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
-            "pcma" | "g711" => audio_codec::CodecType::PCMA,
-            "opus" => audio_codec::CodecType::Opus,
-            "g722" => audio_codec::CodecType::G722,
-            _ => {
-                let negotiated = self.leg_negotiated_codec(&leg_id);
-                info!(?negotiated, "Using negotiated codec");
-                negotiated
-            }
+        // ── 4. Determine codec type + payload type for the forward encoder ──
+        // Prefer the caller-leg *negotiated* codec and PT (from the answer SDP)
+        // so the injected audio is decodable by the caller and carries the PT
+        // the caller actually offered. The bridge URL `codec` query param is
+        // only a fallback when no SDP is available.
+        //
+        // The forward loop used to encode the `codec` param and tag frames with
+        // `codec_type.payload_type()` — the codec's STATIC default PT (Opus=111,
+        // PCMU=0). When that differs from the caller's negotiated PT (e.g. Opus
+        // negotiated at 96, or a PCMU caller bridged with codec=opus), the
+        // forward frames carry a PT the caller never offered, which on the same
+        // SSRC as the IVR greeting shows up as a PT 0↔96/111 toggle.
+        let (codec_type, payload_type) = if let Some(audio) = self
+            .legs
+            .get_answer(&leg_id)
+            .or_else(|| {
+                if leg_id.as_str() == "caller" {
+                    self.media.answer.as_deref()
+                } else if leg_id.as_str() == "callee" {
+                    self.media.callee_answer_sdp.as_deref()
+                } else {
+                    None
+                }
+            })
+            .and_then(|s| MediaNegotiator::extract_leg_profile(s).audio)
+        {
+            info!(
+                %leg_id,
+                negotiated_codec = ?audio.codec,
+                negotiated_pt = audio.payload_type,
+                bridge_codec = %codec,
+                "voip_bridge forward loop using leg-negotiated codec/PT"
+            );
+            (audio.codec, audio.payload_type)
+        } else {
+            let fallback = match codec.as_str() {
+                "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
+                "pcma" | "g711" => audio_codec::CodecType::PCMA,
+                "opus" => audio_codec::CodecType::Opus,
+                "g722" => audio_codec::CodecType::G722,
+                _ => self.leg_negotiated_codec(&leg_id),
+            };
+            (fallback, fallback.payload_type())
         };
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
 
@@ -862,7 +900,7 @@ impl SipSession {
                 let mut encoder = create_encoder(codec_type);
                 let enc_sample_rate = encoder.sample_rate();
                 let clock_rate = codec_type.clock_rate() as u32;
-                let payload_type = codec_type.payload_type();
+                // `payload_type` is the caller-negotiated PT, resolved above.
                 let samples_per_frame = (enc_sample_rate * 20 / 1000) as usize;
                 let rtp_ticks_per_frame = clock_rate * 20 / 1000;
 
