@@ -305,8 +305,8 @@ name = "sipflow-diag"
 path = "src/bin/sipflow-diag.rs"
 
 # Use the local flowdb crate (block-index prefix query fix).
-[patch.crates-io]
-flowdb = { path = "../flowdb" }
+# [patch.crates-io]
+# flowdb = { path = "../flowdb" }
 
 [profile.dev]
 opt-level = 1
