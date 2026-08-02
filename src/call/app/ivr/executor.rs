@@ -3456,9 +3456,6 @@ mod tests {
     //
     // Validates the FULL IVR protocol chain:
     //   StepIvrApp → StepProvider (HTTP) → step_ivr_provider.py
-    //
-    // For a full E2E test with sipbot (SIP → PBX → IVR → HTTP → Provider),
-    // build with `--features addon-cc` and run test_full_e2e_via_sipbot.
 
     /// Start the Python step provider server and return the base URL.
     /// Panics if python3 is not on PATH or the server fails to start.
@@ -3586,94 +3583,4 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    #[ignore = "Requires running PBX infrastructure"]
-    #[cfg(feature = "addon-cc")]
-    async fn test_full_e2e_via_sipbot() {
-        use crate::addons::cc::tests::helpers::test_server::{TestPbx, TestPbxInject};
-        use crate::proxy::routing::{MatchConditions, RouteAction, RouteRule};
-        use portpicker::pick_unused_port;
-        use sipbot::{
-            config::{AccountConfig, Config as SipBotConfig},
-            sip::SipBot,
-            stats::CallStats,
-        };
-        use std::sync::Arc;
-        use tokio_util::sync::CancellationToken;
-
-        let sip_port = pick_unused_port().expect("no free port");
-        let provider_port = pick_unused_port().expect("no free port");
-
-        // 1. Start Python provider
-        let provider = start_python_provider(provider_port).await;
-
-        // 2. Create step-mode IVR route pointing to Python
-        let route = RouteRule {
-            name: "step_ivr_e2e".into(),
-            priority: 10,
-            match_conditions: MatchConditions {
-                to_user: Some("ivr-test".into()),
-                ..Default::default()
-            },
-            action: RouteAction {
-                app: Some("ivr".into()),
-                app_params: Some(serde_json::json!({
-                    "mode": "step",
-                    "url": provider.url.clone(),
-                })),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        // 3. Start PBX with step-mode routing
-        let pbx = TestPbx::start_with_inject(
-            sip_port,
-            TestPbxInject {
-                routes: Some(vec![route]),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        let cancel = CancellationToken::new();
-        let stats = Arc::new(CallStats::default());
-
-        // 4. sipbot caller → SIP INVITE → PBX → IVR → HTTP → Python
-        let mut caller = SipBot::new(
-            AccountConfig {
-                username: "caller".into(),
-                domain: format!("127.0.0.1:{}", sip_port),
-                register: Some(false),
-                target: Some(format!("sip:ivr-test@127.0.0.1:{}", sip_port)),
-                ..Default::default()
-            },
-            SipBotConfig {
-                addr: Some(format!(
-                    "127.0.0.1:{}",
-                    pick_unused_port().expect("no free port")
-                )),
-                external_ip: None,
-                recorders: None,
-                accounts: vec![],
-                ws_url: None,
-            },
-            stats.clone(),
-            false,
-            cancel.clone(),
-        );
-        let _ = caller.run_call(1, 1).await;
-
-        // 5. Wait for call to complete
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        // 6. Verify at least 1 call was placed
-        assert!(
-            stats.total_calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
-            "sipbot should have sent a call"
-        );
-
-        cancel.cancel();
-        pbx.cancel_token.cancel();
-    }
 }

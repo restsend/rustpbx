@@ -4,8 +4,7 @@
 //   * a real SipServer bound to a random UDP port
 //   * an Axum HTTP server with the `/rwi` WebSocket endpoint
 //
-// This is used by E2E tests that need a real SIP stack (so that sipbot UAs can
-// actually exchange SIP/SDP with the PBX).
+// This is used by E2E tests that need a real SIP stack to exchange SIP/SDP.
 
 use std::collections::HashMap;
 use std::sync::Arc;

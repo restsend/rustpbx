@@ -15,8 +15,4 @@ fn init_rustls_crypto_provider() {
         .expect("Failed to install rustls crypto provider for integration tests");
 }
 
-pub mod audio_verifier;
-pub mod cdr_verifier;
-pub mod rwi_collector;
-pub mod sipbot_helper;
 pub mod test_server;
