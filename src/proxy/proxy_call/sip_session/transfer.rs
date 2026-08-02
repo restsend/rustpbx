@@ -375,6 +375,13 @@ impl SipSession {
 
                 if !self.server.proxy_config.blind_transfer_use_refer {
                     info!(session_id = %self.id, %leg_id, target = %uri, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Blind transfer via B-leg INVITE (B2BUA)");
+                    // The transfer target is a NEW peer — invalidate the cached
+                    // callee offer so `prepare_callee_media_offer` creates a
+                    // fresh B leg (with its own local offer) instead of reusing
+                    // the previous callee's offer/leg, which would break
+                    // apply_sdp(answer) for the transferred-to endpoint.
+                    self.media.callee_offer = None;
+                    self.media.callee_offer_cached_webrtc = None;
                     let location = crate::call::Location {
                         aor: refer_to_uri,
                         ..Default::default()

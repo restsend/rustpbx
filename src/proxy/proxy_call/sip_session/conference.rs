@@ -174,88 +174,140 @@ impl SipSession {
             )
         };
 
-        let (audio_sender, track, _feedback_rx) = sample_track(
-            MediaKind::Audio,
-            100,
-        );
+        // ── Output side: how mixed conference audio reaches this leg ──────
+        // Preferred (P2.4): the MediaBridge leg itself, via its Inject egress
+        // source. This is the same leg that carries the call's media, so the
+        // conference output and the leg's other egress (playback/hold) share
+        // one transport. Fall back to the legacy "sample track on the
+        // independent VoiceEnginePeer PC" path when no bridge side exists.
+        let side = if is_callee {
+            crate::media::media_bridge::LegSide::B
+        } else {
+            crate::media::media_bridge::LegSide::A
+        };
+        let injected: Option<tokio::sync::mpsc::Sender<MediaSample>> =
+            match self.bridge().and_then(|mb| mb.leg(side).is_some().then(|| mb)) {
+                Some(mb) => match mb.inject(side) {
+                    Ok(tx) => {
+                        info!(session_id = %self.id,
+                            conf_id = %conf_id,
+                            leg_id = %leg_id,
+                            side = ?side,
+                            "Conference output via MediaBridge leg Inject (P2.4)"
+                        );
+                        Some(tx)
+                    }
+                    Err(e) => {
+                        warn!(session_id = %self.id,
+                            conf_id = %conf_id,
+                            leg_id = %leg_id,
+                            error = %e,
+                            "MediaBridge inject unavailable; falling back to legacy track"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
 
-        let mut pc = None;
-        for attempt in 0..150 {
-            let tracks = peer.get_tracks().await;
-            for t in &tracks {
-                let guard = t.lock().await;
-                if guard.id() == track_id {
+        let tx = if let Some(tx) = injected {
+            tx
+        } else {
+            // Legacy output: add a sample track to the independent peer PC.
+            let (audio_sender, track, _feedback_rx) =
+                sample_track(MediaKind::Audio, 100);
+
+            let mut pc = None;
+            for attempt in 0..150 {
+                let tracks = peer.get_tracks().await;
+                for t in &tracks {
+                    let guard = t.lock().await;
+                    if guard.id() == track_id {
+                        if let Some(found_pc) = guard.get_peer_connection().await {
+                            pc = Some(found_pc);
+                            break;
+                        }
+                    }
+                }
+                if pc.is_some() {
+                    break;
+                }
+                for t in &tracks {
+                    let guard = t.lock().await;
                     if let Some(found_pc) = guard.get_peer_connection().await {
                         pc = Some(found_pc);
                         break;
                     }
                 }
-            }
-            if pc.is_some() {
-                break;
-            }
-            for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(found_pc) = guard.get_peer_connection().await {
-                    pc = Some(found_pc);
+                if pc.is_some() {
                     break;
                 }
+                if attempt % 25 == 0 {
+                    let track_ids: Vec<_> = {
+                        let mut ids = Vec::new();
+                        for t in &tracks {
+                            ids.push(t.lock().await.id().to_string());
+                        }
+                        ids
+                    };
+                    tracing::debug!(
+                        session_id = %self.id,
+                        leg_id = %leg_id,
+                        wanted_track_id = %track_id,
+                        available_tracks = ?track_ids,
+                        attempt = attempt,
+                        "Waiting for peer connection on conference media bridge"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            if pc.is_some() {
-                break;
-            }
-            if attempt % 25 == 0 {
-                let track_ids: Vec<_> = {
-                    let mut ids = Vec::new();
-                    for t in &tracks {
-                        ids.push(t.lock().await.id().to_string());
-                    }
-                    ids
-                };
-                tracing::debug!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    wanted_track_id = %track_id,
-                    available_tracks = ?track_ids,
-                    attempt = attempt,
-                    "Waiting for peer connection on conference media bridge"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
 
-        let pc = pc.ok_or_else(|| {
-            anyhow!(
-                "No peer connection found for conference audio injection (leg={}, track={}, session={})",
-                leg_id,
-                track_id,
-                self.id
-            )
-        })?;
+            let pc = pc.ok_or_else(|| {
+                anyhow!(
+                    "No peer connection found for conference audio injection (leg={}, track={}, session={})",
+                    leg_id,
+                    track_id,
+                    self.id
+                )
+            })?;
 
-        let params = RtpCodecParameters {
-            payload_type: 0,
-            clock_rate: 8000,
-            channels: 1,
+            let params = RtpCodecParameters {
+                payload_type: 0,
+                clock_rate: 8000,
+                channels: 1,
+            };
+
+            pc.add_track(track, params).map_err(|e| {
+                anyhow!("Failed to add conference track to peer connection: {}", e)
+            })?;
+
+            info!(session_id = %self.id,
+                conf_id = %conf_id,
+                leg_id = %leg_id,
+                "Conference sample track added to existing peer connection"
+            );
+
+            let (tx, rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
+            let cancel = self.cancel_token.child_token();
+            self.spawn_forwarder(leg_id, cancel, audio_sender, rx);
+            tx
         };
 
-        pc.add_track(track, params)
-            .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
-
-        info!(session_id = %self.id,
-            conf_id = %conf_id,
-            leg_id = %leg_id,
-            "Conference sample track added to existing peer connection"
-        );
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
-        let cancel = self.cancel_token.child_token();
-        self.spawn_forwarder(leg_id, cancel, audio_sender, rx);
-
-        let audio_receiver = if is_callee {
-            self.create_audio_receiver_from_peer(&peer, None).await
-        } else {
-            self.create_audio_receiver().await
+        // Prefer the MediaBridge leg as the conference data source (P2.4); fall
+        // back to the independent peer PC for legs without a bridge side.
+        let audio_receiver = match self.create_audio_receiver(leg_id).await {
+            Ok(rx) => Ok(rx),
+            Err(_) if is_callee => self.create_audio_receiver_from_peer(&peer, None).await,
+            Err(_) => {
+                // Non-callee fallback: read from the caller peer PC directly.
+                let Some(caller_peer) = self.caller_peer().cloned() else {
+                    return Err(anyhow!("No caller peer for conference input"));
+                };
+                let pc = Self::wait_for_peer_connection(&caller_peer, 100)
+                    .await
+                    .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
+                self.build_audio_receiver(pc)
+            }
         }
         .map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
 
@@ -270,15 +322,49 @@ impl SipSession {
     }
 
     pub(super) async fn create_audio_receiver(
-        &self,
+        &mut self,
+        leg_id: &LegId,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        let Some(peer) = self.caller_peer() else {
+        // Prefer the MediaBridge leg that actually carries media. The requested
+        // leg (e.g. a virtual caller in UAC mode) may not have a negotiated
+        // profile; try both sides and use whichever has one.
+        let preferred = if leg_id.0.ends_with("-callee") || leg_id.0 == "callee" {
+            crate::media::media_bridge::LegSide::B
+        } else {
+            crate::media::media_bridge::LegSide::A
+        };
+        let mut candidates = vec![preferred, preferred.opposite()];
+        candidates.dedup();
+
+        if let Some(mb) = self.bridge() {
+            for side in candidates {
+                match mb.leg_pcm_stream(side) {
+                    Ok(stream) => {
+                        info!(session_id = %self.id,
+                            leg_id = %leg_id,
+                            side = ?side,
+                            "Conference audio receiver from MediaBridge leg (P2.4)"
+                        );
+                        return Ok(Box::new(MediaBridgeLegAudioReceiver::new(stream)));
+                    }
+                    Err(e) => {
+                        warn!(session_id = %self.id,
+                            leg_id = %leg_id,
+                            side = ?side,
+                            has_leg = mb.leg(side).is_some(),
+                            error = %e,
+                            "MediaBridge leg PCM stream unavailable; trying next side"
+                        );
+                    }
+                }
+            }
+        }
+        // Fallback: read from the independent peer PC (legacy path) when no
+        // MediaBridge leg has a negotiated profile.
+        let Some(peer) = self.caller_peer().cloned() else {
             return Err(anyhow!("No caller peer for conference input"));
         };
-        let pc = Self::wait_for_peer_connection(peer, 100)
-            .await
-            .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
-        self.build_audio_receiver(pc)
+        self.create_audio_receiver_from_peer(&peer, None).await
     }
 
     pub(super) async fn create_audio_receiver_from_peer(
@@ -597,5 +683,46 @@ impl SipSession {
         }
 
         Ok(())
+    }
+}
+
+/// `AudioReceiver` backed by a MediaBridge leg's decoded PCM stream (P2.4).
+///
+/// This replaces the legacy `PeerConnectionAudioReceiver` (which read RTP from
+/// an independent VoiceEnginePeer PC) so the conference / supervisor mixer's
+/// data source is the same MediaBridge leg that carries the call's media.
+struct MediaBridgeLegAudioReceiver {
+    stream: crate::media::app_ingress::LegPcmStream,
+}
+
+impl MediaBridgeLegAudioReceiver {
+    fn new(stream: crate::media::app_ingress::LegPcmStream) -> Self {
+        Self { stream }
+    }
+}
+
+impl crate::call::runtime::conference_media_bridge::AudioReceiver for MediaBridgeLegAudioReceiver {
+    fn recv(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<crate::call::runtime::conference_media_bridge::PcmAudioFrame>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            loop {
+                let frame = self.stream.recv().await?;
+                if frame.silence {
+                    continue;
+                }
+                return Some(crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
+                    frame.samples,
+                    frame.sample_rate,
+                ));
+            }
+        })
     }
 }

@@ -394,7 +394,12 @@ impl TransferController {
             .await
             .ok_or_else(|| ReferTransferResult::InternalError("Call not found".to_string()))?;
 
-        let leg_id = LegId::new(&tx.call_id);
+        // The transfer command targets the session's caller leg. RWI identifies
+        // calls by their session id (`tx.call_id`), but SipSession legs are
+        // named "caller"/"callee" — passing the call_id as the leg_id would make
+        // `handle_transfer` fail at `require_leg`. The transferee in a blind
+        // transfer is the caller leg.
+        let leg_id = LegId::new("caller");
         handle
             .send_command(CallCommand::Transfer {
                 leg_id,
@@ -1497,7 +1502,10 @@ mod tests {
                 target: t,
                 attended,
             } => {
-                assert_eq!(leg_id.as_str(), call_id);
+                // The transfer command targets the session's caller leg (the
+                // transferee); RWI identifies calls by session id but legs are
+                // named "caller"/"callee".
+                assert_eq!(leg_id.as_str(), "caller");
                 assert_eq!(t, target);
                 assert!(!attended, "blind transfer must have attended=false");
             }

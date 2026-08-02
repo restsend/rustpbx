@@ -138,6 +138,36 @@ impl MediaBridge {
         }
     }
 
+    /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
+    /// have the leg's negotiated profile ready (i.e. SDP already applied).
+    /// Used as the conference / supervisor mixer data source: each leg's PCM
+    /// flows into the mixer instead of being read from an independent PC.
+    pub fn leg_pcm_stream(
+        &self,
+        side: LegSide,
+    ) -> Result<crate::app_ingress::LegPcmStream> {
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on side {:?}", side))?;
+        let profile = leg
+            .negotiated()
+            .ok_or_else(|| anyhow!("leg on side {:?} has no negotiated profile", side))?;
+        let leg_id = crate::leg_id::LegId::from(format!(
+            "{}-{}",
+            self.session_id,
+            match side {
+                LegSide::A => "a",
+                LegSide::B => "b",
+            }
+        ));
+        crate::app_ingress::LegPcmStream::attach(
+            leg.pc(),
+            profile,
+            leg_id,
+            self.root_cancel.child_token(),
+        )
+    }
+
     /// True when a P2P route is currently active between A and B.
     pub fn is_bridged(&self) -> bool {
         self.route_active
@@ -210,6 +240,11 @@ impl MediaBridge {
             LegSide::B => self.leg_b = Some(new_leg),
         }
         if self.route_active {
+            // The leg instance changed (e.g. transfer swaps the B leg to a new
+            // peer). Clear the idempotency cache so `bridge()` rebuilds the
+            // relay even when the negotiated codec pair is unchanged — otherwise
+            // the fast-path rewrite still targets the replaced leg's transport.
+            self.last_bridged = None;
             if let Err(e) = self.bridge().await {
                 warn!(session = %self.session_id, error = %e, "re-bridge after leg replacement failed");
             }
@@ -539,6 +574,39 @@ impl MediaBridge {
         leg.set_egress_source(EgressSource::Silence).await
     }
 
+    /// Send RFC 2833 telephone-event DTMF digits to a leg's remote peer.
+    /// The digits ride the leg's own egress transport (SRTP-protected), on the
+    /// negotiated telephone-event payload type, regardless of the active route
+    /// (fast-path relay / transcode / hold all coexist with injected DTMF).
+    pub async fn send_dtmf(&self, side: LegSide, digits: &str) -> Result<()> {
+        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        leg.send_dtmf(digits).await
+    }
+
+    /// Route a leg's egress to an external injection channel (MCU / conference
+    /// mixer output). The returned sender pushes pre-encoded [`MediaSample`]s
+    /// at the negotiated ptime cadence; when the channel is empty the pipeline
+    /// emits silence so the outgoing stream never gaps.
+    ///
+    /// This replaces the legacy "add a sample track to the independent
+    /// VoiceEnginePeer PC" conference output path: the mixer's mixed audio now
+    /// rides the same MediaBridge leg that carries the call's media.
+    pub fn inject(
+        &self,
+        side: LegSide,
+    ) -> Result<tokio::sync::mpsc::Sender<rustrtc::media::MediaSample>> {
+        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        // Spawn the switch so we don't block the session loop on the egress
+        // command channel.
+        tokio::spawn(async move {
+            let _ = leg.set_egress_source(EgressSource::Inject {
+                rx: parking_lot::Mutex::new(rx),
+            });
+        });
+        Ok(tx)
+    }
+
     // ── Timeout / lifecycle ──────────────────────────────────────────────
 
     /// Arm an RTP inactivity timeout for a leg. Returns a `oneshot::Receiver`
@@ -833,6 +901,115 @@ mod tests {
             !mb.leg(LegSide::B).unwrap().egress_is_relay(),
             "leg B should use transcode (not relay)"
         );
+        mb.close();
+    }
+
+    /// Minimal sine-wave AudioSource for exercising leg→PCM data flow.
+    struct SineSource {
+        pcm: Vec<i16>,
+        pos: usize,
+        sample_rate: u32,
+        channels: u16,
+    }
+
+    impl SineSource {
+        fn new(freq: f64, sample_rate: u32, duration_ms: u64) -> Self {
+            let n = (sample_rate as u64 * duration_ms / 1000) as usize;
+            let mut pcm = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = i as f64 / sample_rate as f64;
+                pcm.push(((freq * 2.0 * std::f64::consts::PI * t).sin() * 8000.0) as i16);
+            }
+            Self {
+                pcm,
+                pos: 0,
+                sample_rate,
+                channels: 1,
+            }
+        }
+    }
+
+    impl crate::audio_source::AudioSource for SineSource {
+        fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+            let n = buffer.len().min(self.pcm.len() - self.pos);
+            buffer[..n].copy_from_slice(&self.pcm[self.pos..self.pos + n]);
+            self.pos += n;
+            n
+        }
+        fn sample_rate(&self) -> u32 {
+            self.sample_rate
+        }
+        fn channels(&self) -> u16 {
+            self.channels
+        }
+        fn has_data(&self) -> bool {
+            self.pos < self.pcm.len()
+        }
+        fn reset(&mut self) -> Result<()> {
+            self.pos = 0;
+            Ok(())
+        }
+    }
+
+    /// P2.4 data-source migration: `leg_pcm_stream` decodes a leg's ingress
+    /// RTP into PCM frames. Two RTP legs negotiate + bridge; leg A plays a
+    /// sine tone; the stream on leg B must emit non-silence PCM.
+    #[tokio::test]
+    async fn leg_pcm_stream_decodes_bridged_audio() {
+        use rustrtc::SdpType;
+
+        let mut mb = MediaBridge::new("pcm-stream", BridgeOpts::default());
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+
+        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let b_answer = b
+            .apply_sdp(&a_offer, SdpType::Offer)
+            .await
+            .expect("b answers a");
+        a.apply_sdp(&b_answer, SdpType::Answer)
+            .await
+            .expect("a applies answer");
+
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+        assert!(mb.is_bridged(), "route should be active after both answer");
+
+        // Subscribe to leg B's PCM before playing, so we catch frames early.
+        let mut stream = mb
+            .leg_pcm_stream(LegSide::B)
+            .expect("leg B PCM stream");
+
+        // Play a 440 Hz tone on leg A (egress → RTP → B ingress).
+        let handle = mb
+            .play(LegSide::A, Box::new(SineSource::new(440.0, 8000, 1000)), false)
+            .await
+            .expect("play tone on A");
+        let _ = handle;
+
+        // Drain leg B PCM until we see a non-silence frame.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_audio = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(frame) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                stream.recv(),
+            )
+            .await
+            .ok()
+            .flatten()
+            {
+                assert_eq!(frame.sample_rate, 8000, "PCMU leg decodes at 8 kHz");
+                if !frame.silence && frame.samples.iter().any(|&s| s != 0) {
+                    saw_audio = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(saw_audio, "leg B PCM stream must decode the tone played on A");
         mb.close();
     }
 }

@@ -28,6 +28,15 @@ impl PlaybackToken {
     }
 }
 
+/// Outcome of [`CallController::wait_playback`].
+#[derive(Debug, Clone)]
+pub struct PlaybackOutcome {
+    /// `true` if playback was cut short (DTMF / stop) rather than EOF.
+    pub interrupted: bool,
+    /// DTMF digits received while waiting (empty unless a digit barged).
+    pub dtmf: String,
+}
+
 /// A recording session controller.
 #[derive(Debug, Clone)]
 pub struct RecordingHandle {
@@ -413,6 +422,150 @@ impl CallController {
         self.session.send_command(CallCommand::InjectAppEvent {
             event: crate::call::domain::AppEvent::Custom { name, data },
         })?;
+        Ok(())
+    }
+
+    /// Wait for a playback to finish (natural EOF or interruption).
+    ///
+    /// Resolves with the `AudioComplete` event whose `track_id` matches the
+    /// token returned by [`play_audio`](Self::play_audio). DTMF and hangup
+    /// events observed while waiting are returned so the app can act on them
+    /// (e.g. a barge digit during an IVR menu). Returns the number of digits
+    /// collected (may be zero) and whether the call is still alive.
+    ///
+    /// This is the app-side analogue of the media layer's `PlaybackHandle`:
+    /// instead of awaiting a oneshot inside the app, the completion is
+    /// delivered via [`ControllerEvent::AudioComplete`] and this helper turns
+    /// it into an awaitable future, cancelling cleanly on hangup.
+    pub async fn wait_playback(
+        &mut self,
+        token: &PlaybackToken,
+    ) -> anyhow::Result<PlaybackOutcome> {
+        let track_id = token.track_id.clone();
+        loop {
+            match self.wait_event().await {
+                Some(ControllerEvent::AudioComplete {
+                    track_id: completed,
+                    interrupted,
+                }) if completed == track_id => {
+                    return Ok(PlaybackOutcome {
+                        interrupted,
+                        dtmf: String::new(),
+                    });
+                }
+                Some(ControllerEvent::DtmfReceived(d)) => {
+                    return Ok(PlaybackOutcome {
+                        interrupted: true,
+                        dtmf: d,
+                    });
+                }
+                Some(ControllerEvent::Hangup(reason)) => {
+                    return Err(anyhow::anyhow!("call hung up during playback: {reason:?}"));
+                }
+                Some(ControllerEvent::Timeout(_))
+                | Some(ControllerEvent::RecordingComplete(_))
+                | Some(ControllerEvent::Custom(..))
+                | Some(ControllerEvent::AudioComplete { .. }) => continue,
+                None => return Err(anyhow::anyhow!("event channel closed during playback")),
+            }
+        }
+    }
+
+    /// Place the caller (or a specific leg) on hold, optionally with hold music.
+    pub async fn hold(
+        &self,
+        leg_id: impl Into<String>,
+        music: Option<String>,
+    ) -> anyhow::Result<()> {
+        let source = music.map(|path| {
+            if path.starts_with("http://") || path.starts_with("https://") {
+                MediaSource::Url { url: path }
+            } else {
+                MediaSource::File { path }
+            }
+        });
+        self.session.send_command(CallCommand::Hold {
+            leg_id: LegId::from(leg_id.into()),
+            music: source,
+        })?;
+        Ok(())
+    }
+
+    /// Release a leg from hold.
+    pub async fn unhold(&self, leg_id: impl Into<String>) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::Unhold {
+                leg_id: LegId::from(leg_id.into()),
+            })?;
+        Ok(())
+    }
+
+    /// Supervisor listen mode: the supervisor's leg monitors the target leg.
+    pub async fn supervisor_listen(
+        &self,
+        supervisor_leg: impl Into<String>,
+        target_leg: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::SupervisorListen {
+                supervisor_leg: LegId::from(supervisor_leg.into()),
+                target_leg: LegId::from(target_leg.into()),
+                supervisor_session_id: None,
+            })?;
+        Ok(())
+    }
+
+    /// Supervisor whisper mode: the supervisor can talk to the agent only.
+    pub async fn supervisor_whisper(
+        &self,
+        supervisor_leg: impl Into<String>,
+        target_leg: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::SupervisorWhisper {
+                supervisor_leg: LegId::from(supervisor_leg.into()),
+                target_leg: LegId::from(target_leg.into()),
+                supervisor_session_id: None,
+            })?;
+        Ok(())
+    }
+
+    /// Supervisor barge mode: the supervisor joins the conversation.
+    pub async fn supervisor_barge(
+        &self,
+        supervisor_leg: impl Into<String>,
+        target_leg: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::SupervisorBarge {
+                supervisor_leg: LegId::from(supervisor_leg.into()),
+                target_leg: LegId::from(target_leg.into()),
+                supervisor_session_id: None,
+            })?;
+        Ok(())
+    }
+
+    /// Supervisor takeover mode: the supervisor replaces the agent.
+    pub async fn supervisor_takeover(
+        &self,
+        supervisor_leg: impl Into<String>,
+        target_leg: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::SupervisorTakeover {
+                supervisor_leg: LegId::from(supervisor_leg.into()),
+                target_leg: LegId::from(target_leg.into()),
+                supervisor_session_id: None,
+            })?;
+        Ok(())
+    }
+
+    /// Stop supervisor mode for a leg.
+    pub async fn supervisor_stop(&self, supervisor_leg: impl Into<String>) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::SupervisorStop {
+                supervisor_leg: LegId::from(supervisor_leg.into()),
+            })?;
         Ok(())
     }
 

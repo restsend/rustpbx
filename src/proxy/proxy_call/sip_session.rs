@@ -1956,6 +1956,17 @@ impl SipSession {
             }
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
+                    // UAC mode: the leg has no local offer yet (the INVITE SDP
+                    // was generated before this attach). Generate an offer with
+                    // the answer's codecs so set_remote_description(answer) has
+                    // a matching local offer and the negotiated profile lands.
+                    if leg.negotiated().is_none() {
+                        if let Ok(offer) = leg.create_offer(vec![]).await {
+                            debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for callee MediaBridge leg");
+                        } else {
+                            warn!(session_id = %self.id, "Failed to generate UAC offer for callee leg");
+                        }
+                    }
                     if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
                         warn!(session_id = %self.id, error = %e, "Failed to apply callee SDP to MediaBridge B leg");
                     }
@@ -2065,6 +2076,16 @@ impl SipSession {
             }
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
+                    // UAC mode: no local offer yet → generate one with the
+                    // answer's codecs so set_remote_description(answer) works
+                    // and the negotiated profile is set.
+                    if leg.negotiated().is_none() {
+                        if let Ok(offer) = leg.create_offer(vec![]).await {
+                            debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for caller MediaBridge leg");
+                        } else {
+                            warn!(session_id = %self.id, "Failed to generate UAC offer for caller leg");
+                        }
+                    }
                     if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
                         warn!(session_id = %self.id, error = %e, "Failed to apply caller SDP to MediaBridge A leg");
                     }
@@ -4323,6 +4344,7 @@ impl SipSession {
         no_trying_timeout: Option<Duration>,
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
+
 
         if self.context.dialplan.caller.is_none() {
             return Err(into_callee_err(
@@ -8610,7 +8632,41 @@ impl SipSession {
         if valid_digits.is_empty() {
             return Err(anyhow!("No valid DTMF digits provided: {}", digits));
         }
+        let digit_str: String = valid_digits.iter().collect();
 
+        // 1. Preferred: RFC 2833 RTP telephone-events via the media bridge.
+        //    The leg emits the DTMF on its own egress transport (SRTP-protected,
+        //    negotiated telephone-event PT), regardless of the active route.
+        let side = match leg_id.as_str() {
+            "caller" => Some(crate::media::media_bridge::LegSide::A),
+            "callee" => Some(crate::media::media_bridge::LegSide::B),
+            _ => None,
+        };
+        if let Some(side) = side {
+            let rtp_sent = match self.media.bridge.as_ref() {
+                Some(mb) if mb.leg(side).is_some() => {
+                    match mb.send_dtmf(side, &digit_str).await {
+                        Ok(()) => {
+                            for digit in &valid_digits {
+                                self.dtmf_digits.push(*digit);
+                            }
+                            info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via RTP RFC 2833 telephone-events");
+                            true
+                        }
+                        Err(e) => {
+                            warn!(session_id = %self.id, error = %e, "RTP DTMF failed; falling back to SIP INFO");
+                            false
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if rtp_sent {
+                return Ok(());
+            }
+        }
+
+        // 2. Fallback: SIP INFO (application/dtmf-relay).
         let dtmf_body = valid_digits
             .iter()
             .map(|d| format!("Signal={}\nDuration=160", d))
@@ -8620,7 +8676,6 @@ impl SipSession {
             rsipstack::sip::headers::ContentType::from("application/dtmf-relay"),
         )];
 
-        // 1. Send via SIP INFO
         let info_result: Result<()> = if leg_id == LegId::from("caller") {
             if let Some(dialog) = self.caller_dialog.as_ref() {
                 dialog
@@ -8666,17 +8721,12 @@ impl SipSession {
                 for digit in &valid_digits {
                     self.dtmf_digits.push(*digit);
                 }
-                info!(session_id = %self.id, %leg_id, digits = %valid_digits.iter().collect::<String>(), "DTMF sent via SIP INFO");
+                info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via SIP INFO");
             }
             Err(e) => {
-                warn!(session_id = %self.id, error = %e, "Failed to send DTMF via SIP INFO");
                 return Err(anyhow!("Failed to send DTMF: {}", e));
             }
         }
-
-        // RFC 2833 (RTP telephone-event) DTMF is generated by the leg's egress
-        // pipeline when the egress source is switched; SIP INFO is the primary
-        // signaling path here.
 
         Ok(())
     }

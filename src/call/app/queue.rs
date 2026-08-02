@@ -529,9 +529,12 @@ impl QueueApp {
     }
 
     /// Stop hold music.
-    async fn _stop_hold_music(&mut self) {
+    async fn _stop_hold_music(&mut self, ctrl: &mut CallController) {
         if self.hold_playback.take().is_some() {
             debug!("Queue: stopping hold music");
+            if let Err(e) = ctrl.stop_audio().await {
+                warn!(error = %e, "Queue: failed to stop hold music");
+            }
         }
     }
 
@@ -1219,7 +1222,7 @@ impl CallApp for QueueApp {
             "Queue: callback requested via DTMF"
         );
         self.callback_requested = true;
-        self._stop_hold_music().await;
+        self._stop_hold_music(ctrl).await;
 
         let prompts = self
             .plan
@@ -1330,7 +1333,7 @@ impl CallApp for QueueApp {
                 "agent_connected" => {
                     if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
                         info!(agent = %agent_uri, "Queue: agent connected");
-                        self._stop_hold_music().await;
+                        self._stop_hold_music(ctrl).await;
 
                         // In parallel mode, cancel all remaining pending agent legs
                         // EXCEPT the one that just answered.

@@ -666,6 +666,13 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent3@example.com"}),
         );
 
+        // Hold music is stopped first.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+
         // Should cancel agent2 leg then connect to agent 3
         stack
             .assert_cmd(200, "LegRemove-agent2", |c| {
@@ -1019,6 +1026,13 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
 
+        // Hold music stops when the agent answers.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+
         stack
             .assert_cmd(200, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
@@ -1164,6 +1178,13 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+
+        // Hold music stops when the agent answers.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
 
         stack
             .assert_cmd(200, "PlayPrompt-en-transfer", |c| {
@@ -1429,6 +1450,13 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
         );
 
+        // Hold music stops when the agent answers.
+        let stop = stack.next_cmd(200).await.expect("StopHold");
+        assert!(
+            matches!(stop, CallCommand::StopPlayback { .. }),
+            "expected StopPlayback after agent connected, got {stop:?}"
+        );
+
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
         let remove = stack.next_cmd(200).await.expect("LegRemove");
         match &remove {
@@ -1521,6 +1549,13 @@ mod tests {
 
         // Send DTMF "2"
         stack.dtmf("2");
+
+        // Hold music is stopped before playing the callback confirmation prompt.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
 
         // Should play callback confirmation prompt
         stack
@@ -1661,6 +1696,13 @@ mod tests {
             .await;
 
         stack.dtmf("2");
+
+        // Hold music is stopped before the immediate hangup.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
 
         // Without a confirm prompt, the hangup should come immediately
         stack

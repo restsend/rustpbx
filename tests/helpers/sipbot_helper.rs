@@ -389,6 +389,71 @@ impl TestUa {
         Self::caller_with_options(sip_port, username, target_uri, None, Some(after_secs)).await
     }
 
+    /// Create and start an outbound caller UA that plays a WAV file (looped)
+    /// after answering. Combined with an echo callee this exercises real
+    /// bidirectional audio: caller TX = WAV audio, caller RX = callee's echo.
+    pub async fn caller_with_play(
+        sip_port: u16,
+        username: &str,
+        target_uri: String,
+        wav_file: String,
+        hangup_after_secs: Option<u64>,
+    ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let domain = format!("127.0.0.1:{}", sip_port);
+
+        let account = AccountConfig {
+            username: username.to_string(),
+            domain: domain.clone(),
+            password: None,
+            register: Some(false),
+            target: Some(target_uri),
+            answer: Some(AnswerConfig::Play { wav_file }),
+            hangup: hangup_after_secs.map(|after| HangupConfig {
+                code: 200,
+                after_secs: Some(after),
+            }),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let global_config = SipBotConfig {
+            addr: Some(format!("127.0.0.1:{}", sip_port)),
+            external_ip: None,
+            recorders: None,
+            ws_url: None,
+            accounts: vec![account.clone()],
+        };
+
+        let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
+        let ct = cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                res = bot.run_call(1, 1) => {
+                    if let Err(e) = res {
+                        tracing::error!("sipbot run_call error: {e:?}");
+                    }
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            cancel_token,
+            domain,
+            stats,
+            record_path: None,
+        }
+    }
+
     /// Create and start an outbound caller UA that sends DTMF after answer.
     /// `dtmf_flows` format: "1s:2,1.5s:#" (delay:digit pairs)
     pub async fn caller_with_dtmf(
@@ -473,8 +538,7 @@ impl TestUa {
         sip_port: u16,
         ring_secs: u64,
         refer_reject_code: u16,
-    ) -> Self {
-        Self::callee_with_options(sip_port, ring_secs, "bob", Some(refer_reject_code)).await
+    ) -> Self {        Self::callee_with_options(sip_port, ring_secs, "bob", Some(refer_reject_code)).await
     }
 
     /// Create and start a callee UA with configurable options.
@@ -497,6 +561,90 @@ impl TestUa {
     ) -> Self {
         Self::callee_with_options_and_record(sip_port, ring_secs, username, None, Some(record_path))
             .await
+    }
+
+    /// Create and start a callee UA that sends DTMF digits (RTP RFC 2833) after
+    /// the call is established. `dtmf_flows` format: "1s:2,1.5s:#" (delay:digit).
+    /// Used to exercise the proxy's inbound-DTMF path (`dtmf.collect`, IVR keys).
+    pub async fn callee_with_dtmf_flows(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        dtmf_flows: &str,
+    ) -> Self {
+        Self::callee_with_dtmf_flows_and_record(
+            sip_port,
+            ring_secs,
+            username,
+            dtmf_flows,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::callee_with_dtmf_flows`] with an optional WAV recording.
+    pub async fn callee_with_dtmf_flows_and_record(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        dtmf_flows: &str,
+        record_path: Option<String>,
+    ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let domain = format!("127.0.0.1:{}", sip_port);
+
+        let account = AccountConfig {
+            username: username.to_string(),
+            domain: domain.clone(),
+            password: None,
+            register: Some(false),
+            dtmf_flows: Some(dtmf_flows.to_string()),
+            ring: Some(RingConfig {
+                duration_secs: ring_secs,
+                ringback: None,
+                local: None,
+            }),
+            answer: Some(AnswerConfig::Echo),
+            record: record_path.clone(),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let global_config = SipBotConfig {
+            addr: Some(format!("127.0.0.1:{}", sip_port)),
+            external_ip: None,
+            recorders: None,
+            ws_url: None,
+            accounts: vec![account.clone()],
+        };
+
+        let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
+        let ct = cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                res = bot.run_wait() => {
+                    if let Err(e) = res {
+                        tracing::error!("sipbot run_wait error: {e:?}");
+                    }
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            cancel_token,
+            domain,
+            stats,
+            record_path,
+        }
     }
 
     async fn callee_with_options_and_record(

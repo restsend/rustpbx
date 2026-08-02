@@ -27,6 +27,7 @@ use rustrtc::config::{BufferDropStrategy, SdpCompatibilityMode};
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::sample_track;
 use rustrtc::media::MediaStreamTrack;
+use rustrtc::peer_connection::RtpObserver;
 use rustrtc::{PeerConnection, RtcConfiguration, SessionDescription, SdpType, TransportMode};
 
 /// A standalone peer that faces one leg of the MediaBridge. Sends audio via a
@@ -40,6 +41,17 @@ struct TestPeer {
 impl TestPeer {
     fn new(transport: TransportMode, codec: CodecInfo) -> Self {
         let cfg = rtc_config(transport, &codec);
+        let pc = PeerConnection::new(cfg);
+        let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
+        pc.add_track(track, codec.to_params()).unwrap();
+        Self { pc, tx, codec }
+    }
+
+    /// Build a peer with an explicit media capability list (e.g. to also offer
+    /// telephone-event so a DTMF payload type can be negotiated).
+    fn with_caps(transport: TransportMode, codec: CodecInfo, caps: rustrtc::config::MediaCapabilities) -> Self {
+        let mut cfg = rtc_config(transport, &codec);
+        cfg.media_capabilities = Some(caps);
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
         pc.add_track(track, codec.to_params()).unwrap();
@@ -74,6 +86,38 @@ impl TestPeer {
                 MediaSample::Audio(f) => Some(f),
                 _ => None,
             })
+    }
+}
+
+/// Observer that records inbound RTP packets (post-SRTP-unprotect) — used to
+/// assert RFC 2833 telephone-event packets arrive from a leg's `send_dtmf`.
+#[derive(Default)]
+struct DtmfCapture {
+    /// (payload_type, digit_code, end_flag) of each inbound telephone-event.
+    events: std::sync::Mutex<Vec<(u8, u8, bool)>>,
+}
+
+impl RtpObserver for DtmfCapture {
+    fn on_ingress(&self, packet: &rustrtc::rtp::RtpPacket, _src: std::net::SocketAddr) {
+        let payload = packet.payload.as_ref();
+        if payload.len() == 4 && matches!(payload[0], 0..=15) {
+            let end = payload[1] & 0x80 != 0;
+            self.events
+                .lock()
+                .unwrap()
+                .push((packet.header.payload_type, payload[0], end));
+        }
+    }
+
+    fn on_egress(&self, packet: &rustrtc::rtp::RtpPacket, _dst: std::net::SocketAddr) {
+        let payload = packet.payload.as_ref();
+        if payload.len() == 4 && matches!(payload[0], 0..=15) {
+            let end = payload[1] & 0x80 != 0;
+            self.events
+                .lock()
+                .unwrap()
+                .push((packet.header.payload_type, payload[0], end));
+        }
     }
 }
 
@@ -528,6 +572,124 @@ async fn fast_path_rtp_pcmu_rtp_pcmu_ssrc_rewrite() {
     h.close();
 }
 
+/// Outbound RFC 2833 telephone-event (DTMF) from a leg must reach the facing
+/// peer on the negotiated telephone-event payload type, with start (E=0) and
+/// end (E=1) packets per digit.
+#[tokio::test]
+async fn leg_send_dtmf_emits_telephone_events_to_peer() {
+    // Build a PCMU + telephone-event(101) codec list so both sides negotiate a
+    // DTMF payload type.
+    let mut pcmu = MediaNegotiator::codec_info_for_type(CodecType::PCMU);
+    pcmu.payload_type = 0;
+    let te = CodecInfo {
+        payload_type: 101,
+        codec: CodecType::TelephoneEvent,
+        clock_rate: 8000,
+        channels: 1,
+        fmtp: None,
+    };
+    let codecs = vec![pcmu.clone(), te.clone()];
+
+    let leg_caps = {
+        let mut c = rustrtc::config::MediaCapabilities::default();
+        c.audio = vec![
+            rustrtc::config::AudioCapability {
+                payload_type: 0,
+                codec_name: "PCMU".into(),
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+                rtcp_fbs: vec![],
+            },
+            rustrtc::config::AudioCapability {
+                payload_type: 101,
+                codec_name: "telephone-event".into(),
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+                rtcp_fbs: vec![],
+            },
+        ];
+        c
+    };
+    let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
+    leg_cfg.media_capabilities = Some(leg_caps);
+    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone()).unwrap();
+
+    // Peer: offer PCMU + telephone-event so the leg's DTMF PT gets negotiated.
+    let mut caps = rustrtc::config::MediaCapabilities::default();
+    caps.audio = vec![
+        rustrtc::config::AudioCapability {
+            payload_type: 0,
+            codec_name: "PCMU".into(),
+            clock_rate: 8000,
+            channels: 1,
+            fmtp: None,
+            rtcp_fbs: vec![],
+        },
+        rustrtc::config::AudioCapability {
+            payload_type: 101,
+            codec_name: "telephone-event".into(),
+            clock_rate: 8000,
+            channels: 1,
+            fmtp: None,
+            rtcp_fbs: vec![],
+        },
+    ];
+    let test_a = TestPeer::with_caps(TransportMode::Rtp, pcmu.clone(), caps);
+    negotiate(&test_a, &leg).await;
+
+    // Wait for the leg's RTP transport + SRTP session to be ready so the raw
+    // DTMF send does not error on "transport not ready".
+    leg.pc()
+        .wait_for_rtp_transport_ready(Duration::from_secs(10))
+        .await
+        .expect("leg transport ready");
+    assert!(
+        leg.negotiated().is_some_and(|p| p.dtmf.is_some()),
+        "leg must negotiate a telephone-event codec"
+    );
+
+    // Capture what arrives at the peer.
+    let cap = std::sync::Arc::new(DtmfCapture::default());
+    test_a.pc.add_observer(cap.clone());
+
+    leg.send_dtmf("12").await.expect("send_dtmf must succeed");
+
+    // Give the packets time to traverse the loopback transport.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let events = cap.events.lock().unwrap();
+        if events.len() >= 4 {
+            break;
+        }
+        drop(events);
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let events = cap.events.lock().unwrap();
+    // 2 digits × (start + end) = 4 telephone-event packets, all on PT 101.
+    assert!(
+        events.len() >= 4,
+        "expected >=4 DTMF packets, got {:?}",
+        *events
+    );
+    for &(pt, code, _end) in events.iter() {
+        assert_eq!(pt, 101, "telephone-event must use negotiated PT 101");
+        assert!(code == 1 || code == 2, "digit code must be 1 or 2");
+    }
+    let starts: Vec<_> = events.iter().filter(|(_, _, e)| !e).collect();
+    let ends: Vec<_> = events.iter().filter(|(_, _, e)| *e).collect();
+    assert_eq!(starts.len(), 2, "2 start packets expected");
+    assert_eq!(ends.len(), 2, "2 end packets expected");
+
+    leg.stop();
+    test_a.pc.close();
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Parse an SDP string for sending to a TestPeer.
@@ -535,6 +697,5 @@ async fn fast_path_rtp_pcmu_rtp_pcmu_ssrc_rewrite() {
 fn parse_sdp(sdp: &str) -> SessionDescription {
     SessionDescription::parse(SdpType::Answer, sdp).unwrap()
 }
-
 
 

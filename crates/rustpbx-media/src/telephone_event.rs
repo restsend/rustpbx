@@ -37,3 +37,18 @@ pub fn looks_like_dtmf_payload(payload: &[u8]) -> bool {
     }
     matches!(payload[0], 0..=15) && (payload[1] & 0x40) == 0
 }
+
+/// Build an RFC 4733 telephone-event payload for one DTMF digit.
+///
+/// Format: `[event_code, end|volume, duration_hi, duration_lo]` (4 bytes).
+/// The start packet carries the digit code with the E bit clear; the end
+/// packet sets the E bit and records the total event duration in 8 kHz
+/// timestamp units (160 = 20 ms).
+pub fn telephone_event_payload(code: u8, end: bool, duration: u16) -> Vec<u8> {
+    vec![
+        code & 0x0F,
+        (if end { 0x80 } else { 0x00 }) | 10,
+        (duration >> 8) as u8,
+        (duration & 0xFF) as u8,
+    ]
+}

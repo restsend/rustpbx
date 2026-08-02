@@ -28,6 +28,7 @@ use rustrtc::{
     config::BufferDropStrategy,
     media::MediaKind,
     media::track::sample_track,
+    rtp::{RtpHeader, RtpPacket},
 };
 use tokio::sync::{broadcast, oneshot};
 use tracing::debug;
@@ -36,6 +37,9 @@ use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
 use crate::ingress_tap::{DtmfEvent, IngressTap, MediaRecorder, TapStats};
 use crate::leg_id::LegId;
 use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
+
+/// Duration of a generated DTMF event in 8 kHz timestamp units (20 ms).
+const DTMF_EVENT_DURATION: u16 = 160;
 
 
 /// Configuration for creating a [`Leg`]'s PeerConnection.
@@ -93,6 +97,24 @@ pub struct LegInner {
     /// transport. The transport does not exist at construction, so the tap is
     /// (re)attached after the first SDP application.
     observer_attached: AtomicBool,
+    /// Outbound DTMF (RFC 2833) send state: the RTP payload type used for
+    /// telephone-events and the next sequence number / timestamp. Only valid
+    /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
+    /// is a no-op.
+    dtmf_send: parking_lot::Mutex<DtmfSendState>,
+}
+
+/// Outbound RFC 2833 telephone-event send state.
+#[derive(Clone, Copy, Default)]
+struct DtmfSendState {
+    /// Negotiated telephone-event payload type (e.g. 101), or `None` if the
+    /// leg did not negotiate one (or has no profile yet).
+    dtmf_pt: Option<u8>,
+    /// Next sequence number for outbound telephone-event packets.
+    sequence: u16,
+    /// Timestamp base (8 kHz clock, per RFC 4733). Advanced by the event
+    /// duration for each digit so successive digits do not collide.
+    timestamp: u32,
 }
 
 /// Shared RTP inactivity timeout state. The monitor task reads these atomics
@@ -187,6 +209,7 @@ impl LegInner {
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: AtomicBool::new(false),
+            dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
         }))
     }
 
@@ -355,6 +378,9 @@ impl LegInner {
         if let Some(d) = &profile.dtmf {
             self.tap.set_dtmf_payload_types(vec![d.payload_type]);
         }
+        // Sync the outbound DTMF send state so RFC 2833 packets use the
+        // negotiated telephone-event payload type.
+        self.dtmf_send.lock().dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -456,12 +482,56 @@ impl LegInner {
         self.egress.try_set_source(source)
     }
 
-    /// Send RTP DTMF digits (RFC 2833) via the egress sender.
+    /// Send RTP DTMF digits (RFC 2833 / RFC 4733 telephone-event) to the leg's
+    /// remote peer via the egress sender.
     ///
-    /// NOTE: full RFC 2833 generation needs a telephone-event encoder; this is
-    /// a placeholder that logs until the telephone-event sender path lands.
+    /// Each digit is sent as a start packet (E bit clear, duration 0) followed
+    /// by an end packet (E bit set, duration 160 = 20 ms @ 8 kHz). The packets
+    /// are stamped with the negotiated telephone-event payload type (not the
+    /// audio codec PT) and use the leg's audio sender SSRC so the remote maps
+    /// them onto the correct stream.
+    ///
+    /// The send state (sequence / timestamp) is per-leg and advances per digit,
+    /// so consecutive `send_dtmf` calls produce coherent RTP. Digits that are
+    /// not valid DTMF characters are skipped. A no-op (Ok) before the leg has
+    /// negotiated a telephone-event codec.
     pub async fn send_dtmf(&self, digits: &str) -> Result<()> {
-        debug!(leg = %self.id, digits, "send_dtmf: RFC 2833 telephone-event generation pending");
+        let ssrc = sender_ssrc(&self.pc);
+        if ssrc == 0 {
+            return Err(anyhow!("leg {} has no audio sender SSRC yet", self.id));
+        }
+        let Some(dtmf_pt) = self.dtmf_send.lock().dtmf_pt else {
+            return Ok(()); // no negotiated telephone-event codec
+        };
+
+        let mut digits_sent = 0usize;
+        for c in digits.chars() {
+            let Some(code) = crate::telephone_event::dtmf_char_to_code(c) else {
+                continue;
+            };
+            let (seq, ts) = {
+                let mut st = self.dtmf_send.lock();
+                let (seq, ts) = (st.sequence, st.timestamp);
+                st.sequence = st.sequence.wrapping_add(2);
+                st.timestamp = st.timestamp.wrapping_add(DTMF_EVENT_DURATION as u32);
+                (seq, ts)
+            };
+
+            // Start packet: E=0, duration=0.
+            let start = RtpPacket::new(
+                RtpHeader::new(dtmf_pt, seq, ts, ssrc),
+                crate::telephone_event::telephone_event_payload(code, false, 0),
+            );
+            self.pc.send_raw_rtp(start).await?;
+            // End packet: E=1, duration = total event length (160 units).
+            let end = RtpPacket::new(
+                RtpHeader::new(dtmf_pt, seq.wrapping_add(1), ts, ssrc),
+                crate::telephone_event::telephone_event_payload(code, true, DTMF_EVENT_DURATION),
+            );
+            self.pc.send_raw_rtp(end).await?;
+            digits_sent += 1;
+        }
+        debug!(leg = %self.id, digits_sent, "send_dtmf: RFC 2833 telephone-events sent");
         Ok(())
     }
 
@@ -609,6 +679,17 @@ fn check_dtls_compatible(prev: Option<NegotiatedLegProfile>, _new_sdp: &str) -> 
     Ok(())
 }
 
+/// The audio sender SSRC of a PC — the SSRC the remote peer expects in RTP
+/// packets from this leg (advertised in the local SDP `a=ssrc` attribute).
+fn sender_ssrc(pc: &PeerConnection) -> u32 {
+    pc.get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.sender())
+        .map(|s| s.ssrc())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,5 +758,35 @@ mod tests {
             offer
         );
         a.stop();
+    }
+}
+
+
+#[cfg(test)]
+mod p24_uac_test {
+    use super::*;
+
+    #[tokio::test]
+    async fn uac_leg_apply_answer_after_own_offer() {
+        // A leg generates its own offer (UAC), then applies a remote answer with
+        // a codec it offered. This mirrors RWI originate's callee leg.
+        let cfg = LegConfig::rtp_pcmu();
+        let leg = LegInner::new("uac", &cfg).unwrap();
+        let offer = leg.create_offer(vec![]).await.expect("offer");
+        assert!(!offer.is_empty());
+
+        // Build a PCMU answer like the remote peer would produce.
+        let answer = format!("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n");
+        let local = leg.apply_sdp(&answer, SdpType::Answer).await.expect("apply answer");
+        assert!(local.is_empty());
+        let p = leg.negotiated().expect("negotiated profile");
+        assert!(p.audio.is_some(), "audio profile must be set after apply answer");
+        assert_eq!(p.audio.as_ref().map(|a| a.codec), Some(audio_codec::CodecType::PCMU));
+        // The outbound DTMF payload type must be synced from the negotiated
+        // profile (RFC 4733 telephone-event on PT 101).
+        let send_state = leg.dtmf_send.lock();
+        assert_eq!(send_state.dtmf_pt, Some(101));
+        assert_eq!(send_state.sequence, 0);
+        assert_eq!(send_state.timestamp, 0);
     }
 }
