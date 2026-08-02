@@ -89,6 +89,10 @@ pub struct LegInner {
     /// RTP inactivity timeout state — armed by the session, monitored by the
     /// per-leg DTMF forward task (no dedicated spawn).
     rtp_timeout: Arc<RtpTimeoutState>,
+    /// True once the ingress tap has been attached to the (now-created) RTP
+    /// transport. The transport does not exist at construction, so the tap is
+    /// (re)attached after the first SDP application.
+    observer_attached: AtomicBool,
 }
 
 /// Shared RTP inactivity timeout state. The monitor task reads these atomics
@@ -182,7 +186,27 @@ impl LegInner {
             negotiated: Mutex::new(None),
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
+            observer_attached: AtomicBool::new(false),
         }))
+    }
+
+    /// Attach the ingress tap observer to the RTP transport(s). The transport
+    /// is created lazily (async, after ICE connects) following the first
+    /// `set_remote_description`, so the observer registered in
+    /// `from_rtc_config` is a no-op until then. Call this after SDP is applied.
+    /// Spawns a background task so it never blocks SDP negotiation.
+    fn ensure_observer(&self) {
+        if self.observer_attached.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let pc = self.pc.clone();
+        let tap = self.tap.clone();
+        tokio::spawn(async move {
+            let _ = pc
+                .wait_for_rtp_transport_ready(std::time::Duration::from_secs(5))
+                .await;
+            pc.add_observer(tap);
+        });
     }
 
     /// Create a leg from a simplified [`LegConfig`] (builds the
@@ -263,6 +287,10 @@ impl LegInner {
             .set_remote_description(desc)
             .await
             .map_err(|e| anyhow!("set_remote_description failed: {}", e))?;
+        // The RTP transport is created inside set_remote_description; the tap
+        // observer registered at construction is a no-op until then, so attach
+        // it now that the transport exists.
+        self.ensure_observer();
 
         let local_sdp = if sdp_type == SdpType::Offer {
             // rustrtc gathering pattern: the first create_answer primes ICE

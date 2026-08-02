@@ -341,6 +341,55 @@ impl RtpSender {
     }
 }
 
+/// RFC 4733 telephone-event payload for a DTMF digit.
+///
+/// Format: `[event_code, end|volume, duration_hi, duration_lo]` (4 bytes).
+/// The start packet carries the digit code; the end packet sets the E bit.
+pub fn telephone_event_payload(code: u8, end: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4);
+    buf.push(code & 0x0F);
+    buf.push(if end { 0x80 } else { 0x00 } | 10); // E bit + volume 10
+    buf.push(0x00);
+    buf.push(0xA0); // 160 duration blocks
+    buf
+}
+
+/// Send a single RFC 2833 telephone-event DTMF digit (start + end packets) to
+/// `target`. `pt` is the negotiated telephone-event payload type (typically 101).
+pub async fn send_rtp_dtmf(
+    target: SocketAddr,
+    pt: u8,
+    digit: char,
+    ssrc: u32,
+    seq: u16,
+    timestamp: u32,
+) -> Result<()> {
+    let code = match digit {
+        '0'..='9' => digit as u8 - b'0',
+        '*' => 10,
+        '#' => 11,
+        'A'..='D' | 'a'..='d' => 12 + (digit.to_ascii_uppercase() as u8 - b'A'),
+        _ => return Err(anyhow!("Invalid DTMF digit: {}", digit)),
+    };
+    let start = RtpPacket::new(
+        pt,
+        seq,
+        timestamp,
+        ssrc,
+        telephone_event_payload(code, false),
+    );
+    let end = RtpPacket::new(
+        pt,
+        seq.wrapping_add(1),
+        timestamp,
+        ssrc,
+        telephone_event_payload(code, true),
+    );
+    let sender = RtpSender::bind().await?;
+    sender.send_sequence(target, vec![start, end], 40).await?;
+    Ok(())
+}
+
 /// Extract media endpoint from SDP
 pub fn extract_media_endpoint(sdp: &str) -> Option<SocketAddr> {
     let mut connection_ip: Option<String> = None;

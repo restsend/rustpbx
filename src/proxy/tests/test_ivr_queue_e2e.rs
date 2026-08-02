@@ -1,3 +1,4 @@
+use super::rtp_utils::{RtpReceiver, extract_media_endpoint, send_rtp_dtmf};
 use super::test_helpers;
 use super::test_ua::{TestUa, TestUaEvent};
 use crate::call::user::SipUser;
@@ -206,7 +207,6 @@ fn pcmu_offer(origin: &str, media_port: u16) -> String {
 }
 
 #[tokio::test]
-#[ignore = "Requires running PBX infrastructure"]
 async fn test_ivr_queue_e2e() {
     tracing_subscriber::fmt()
         .with_file(true)
@@ -286,7 +286,12 @@ action = {{ type = "transfer", target = "support" }}
 
     let caller_task = crate::utils::spawn(async move {
         info!("Caller dialing ivr...");
-        let sdp_offer = pcmu_offer("caller", caller_port + 100);
+        // Bind a real media socket on the caller's advertised RTP port so the
+        // IVR greeting actually reaches the caller (real media, not fake SDP).
+        let caller_rtp_port = caller_port + 100;
+        let greeting_rx = RtpReceiver::bind(caller_rtp_port).await?;
+        greeting_rx.start_receiving();
+        let sdp_offer = pcmu_offer("caller", caller_rtp_port);
         let dialog_id = tokio::time::timeout(
             Duration::from_secs(5),
             caller.make_call("ivr", Some(sdp_offer)),
@@ -295,14 +300,38 @@ action = {{ type = "transfer", target = "support" }}
         .map_err(|_| anyhow::anyhow!("Caller IVR call timed out"))??;
         info!("Caller connected to IVR, dialog_id: {}", dialog_id);
 
-        // Wait a bit for IVR app to start and auto-answer
+        // Wait for the IVR app to start, auto-answer and play its greeting.
+        // The greeting is a real RTP stream from the proxy MediaBridge A leg to
+        // the caller's advertised media port.
         sleep(Duration::from_millis(300)).await;
 
-        sleep(Duration::from_millis(200)).await;
+        // Verify the greeting actually played: the caller must have received
+        // real RTP audio packets from the proxy.
+        let greeting_stats = greeting_rx.get_stats().await;
+        assert!(
+            greeting_stats.packets_received > 0,
+            "IVR greeting should play real RTP audio to the caller (got 0 packets)"
+        );
+        info!(
+            greeting_packets = greeting_stats.packets_received,
+            "IVR greeting RTP received by caller"
+        );
 
-        // Send DTMF '2' via SIP INFO
-        caller.send_dtmf_info(&dialog_id, "2").await?;
-        info!("Caller sent DTMF 2");
+        // Extract the proxy's negotiated media endpoint for the caller leg from
+        // the answer SDP, then press '2' via RTP RFC 2833 telephone-event.
+        let answer_sdp = caller
+            .get_negotiated_answer_sdp(&dialog_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No answer SDP for RTP DTMF"))?;
+        let proxy_media = extract_media_endpoint(&answer_sdp)
+            .ok_or_else(|| anyhow::anyhow!("No proxy media endpoint in answer SDP"))?;
+        info!(
+            caller_rtp_port,
+            proxy_media = %proxy_media,
+            "Sending RTP RFC 2833 DTMF '2' to proxy media endpoint"
+        );
+        send_rtp_dtmf(proxy_media, 101, '2', 0xC0FFEE42, 5000, 0).await?;
+        info!("Caller sent RTP DTMF 2");
 
         // Wait for REFER and follow it to support
         let mut new_dialog = None;
@@ -356,6 +385,11 @@ action = {{ type = "transfer", target = "support" }}
 
     // Agent waits for incoming call from queue
     let answer_task = crate::utils::spawn(async move {
+        // Bind a real media socket so we can verify the proxy actually streams
+        // hold music / bridged audio to the agent after the queue connects it.
+        let agent_rtp_port = agent_port + 100;
+        let agent_rx = RtpReceiver::bind(agent_rtp_port).await?;
+        agent_rx.start_receiving();
         for _ in 0..60 {
             let events = agent.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -375,13 +409,33 @@ action = {{ type = "transfer", target = "support" }}
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs(),
-                        agent_port + 100
+                        agent_rtp_port
                     );
                     agent
                         .answer_call(&dialog_id, Some(sdp_answer))
                         .await
                         .unwrap();
-                    sleep(Duration::from_millis(1500)).await;
+                    // After the caller follows the REFER into the support queue
+                    // and the queue bridges, real RTP audio should flow to the
+                    // agent's advertised media port.
+                    let deadline =
+                        tokio::time::Instant::now() + Duration::from_secs(5);
+                    while tokio::time::Instant::now() < deadline {
+                        let stats = agent_rx.get_stats().await;
+                        if stats.packets_received > 0 {
+                            info!(
+                                agent_rtp_packets = stats.packets_received,
+                                "Agent received real RTP audio from the queue bridge"
+                            );
+                            break;
+                        }
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    let agent_stats = agent_rx.get_stats().await;
+                    assert!(
+                        agent_stats.packets_received > 0,
+                        "Agent should receive real RTP audio from the queue bridge (got 0)"
+                    );
                     return Ok(());
                 }
             }

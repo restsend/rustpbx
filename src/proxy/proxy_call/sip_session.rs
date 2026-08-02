@@ -6253,27 +6253,47 @@ impl SipSession {
             return Err(anyhow!("Recording already active"));
         }
 
-        // Resolve leg profiles from the MediaBridge legs.
+        // Resolve leg profiles from the MediaBridge legs. A single-leg session
+        // (e.g. voicemail: only the caller/A leg) records just the legs that
+        // have negotiated media; the FileRecorder tolerates an absent leg.
+        let mut profiles = Vec::with_capacity(2);
         {
             let mb = self
                 .bridge_mut()
                 .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
-            let caller_profile = mb
+            if let Some(p) = mb
                 .leg(crate::media::media_bridge::LegSide::A)
                 .and_then(|l| l.negotiated())
-                .ok_or_else(|| anyhow!("caller leg has no negotiated profile"))?;
-            let callee_profile = mb
+            {
+                profiles.push((crate::media::recorder::Leg::A, p));
+            }
+            if let Some(p) = mb
                 .leg(crate::media::media_bridge::LegSide::B)
                 .and_then(|l| l.negotiated())
-                .ok_or_else(|| anyhow!("callee leg has no negotiated profile"))?;
+            {
+                profiles.push((crate::media::recorder::Leg::B, p));
+            }
+            if profiles.is_empty() {
+                return Err(anyhow!(
+                    "no leg has a negotiated profile to record"
+                ));
+            }
 
+            let profiles_arr: [(crate::media::recorder::Leg, crate::media::negotiate::NegotiatedLegProfile); 2] =
+                [
+                    profiles.get(0).cloned().unwrap_or((
+                        crate::media::recorder::Leg::A,
+                        crate::media::negotiate::NegotiatedLegProfile::default(),
+                    )),
+                    profiles.get(1).cloned().unwrap_or((
+                        crate::media::recorder::Leg::B,
+                        crate::media::negotiate::NegotiatedLegProfile::default(),
+                    )),
+                ];
             // FileRecorder runs on its own OS thread; hot path is try_send.
             let recorder = crate::media::media_recorder::FileRecorder::start(
                 path.to_string(),
-                [
-                    (crate::media::recorder::Leg::A, caller_profile),
-                    (crate::media::recorder::Leg::B, callee_profile),
-                ],
+                profiles_arr,
             )
             .await?;
             mb.set_recorder(recorder);
