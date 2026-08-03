@@ -1053,8 +1053,15 @@ impl SipSession {
                     caller_peer.clone(),
                     Some(caller_dialog),
                 );
-                // callee peer registered without a dialog until it answers
-                lr.set_peer(LegId::from("callee"), callee_peer.clone());
+                // callee leg: add with state (so REST commands like Hold/Mute
+                // that call require_leg("callee") can find it). Dialog is None
+                // until the callee answers; it is set via set_dialog later.
+                lr.add_leg(
+                    LegId::from("callee"),
+                    Leg::new(LegId::from("callee")),
+                    callee_peer.clone(),
+                    None,
+                );
                 lr
             },
             pending_hangup: HashSet::new(),

@@ -547,30 +547,36 @@ impl ProxyDataContext {
                     }
                 }
             }
-        } else {
-            if !config.queues_files.is_empty() {
-                match queue_utils::load_queues_from_files(&config.queues_files).await {
-                    Ok((file_queues, file_paths)) => {
-                        file_count = file_queues.len();
-                        if !file_paths.is_empty() {
-                            files.extend(file_paths.clone());
-                        }
-                        for (key, mut queue) in file_queues {
-                            let path = file_paths
-                                .iter()
-                                .find(|p| p.contains(&key))
-                                .cloned()
-                                .unwrap_or_else(|| config.queues_files.join(", "));
-                            queue.origin = ConfigOrigin::from_file(path);
-                            queues.insert(key, queue);
-                        }
+        }
+        // Always also load from files (mirrors reload_routes behavior) — file
+        // queues are MERGED into the set, with DB entries taking precedence via
+        // the .extend above. Without this, file-based queue configs (including
+        // skill-group→queue mappings) are invisible when a DB is configured.
+        if !config.queues_files.is_empty() {
+            match queue_utils::load_queues_from_files(&config.queues_files).await {
+                Ok((file_queues, file_paths)) => {
+                    file_count = file_queues.len();
+                    if !file_paths.is_empty() {
+                        files.extend(file_paths.clone());
                     }
-                    Err(e) => {
-                        tracing::error!("failed to load queues from files: {}", e);
+                    for (key, mut queue) in file_queues {
+                        let path = file_paths
+                            .iter()
+                            .find(|p| p.contains(&key))
+                            .cloned()
+                            .unwrap_or_else(|| config.queues_files.join(", "));
+                        queue.origin = ConfigOrigin::from_file(path);
+                        queues.entry(key).or_insert(queue);
                     }
                 }
+                Err(e) => {
+                    tracing::error!("failed to load queues from files: {}", e);
+                }
             }
+        }
 
+        // Load generated file if it exists (file-based export, for non-DB setups)
+        {
             let generated_file = config.generated_queue_dir().join("queues.generated.toml");
             if tokio::fs::try_exists(&generated_file)
                 .await
