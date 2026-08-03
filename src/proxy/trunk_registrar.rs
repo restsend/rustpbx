@@ -195,7 +195,9 @@ async fn registration_loop(
     endpoint: EndpointInnerRef,
 ) {
     let expires = config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES);
-    let refresh_interval = if expires > REFRESH_MARGIN_SECS {
+    // Initial guess from the requested expires; recomputed from the
+    // server-granted lifetime after every successful REGISTER.
+    let mut refresh_after = if expires > REFRESH_MARGIN_SECS {
         Duration::from_secs((expires - REFRESH_MARGIN_SECS) as u64)
     } else {
         Duration::from_secs(expires as u64 / 2)
@@ -250,7 +252,17 @@ async fn registration_loop(
                     None,
                     Some(remote_str.clone()),
                 );
-                info!(trunk = %name, expires = actual_expires, "trunk registration successful");
+                refresh_after = if actual_expires > REFRESH_MARGIN_SECS {
+                    Duration::from_secs((actual_expires - REFRESH_MARGIN_SECS) as u64)
+                } else {
+                    Duration::from_secs((actual_expires.max(2) / 2) as u64)
+                };
+                info!(
+                    trunk = %name,
+                    expires = actual_expires,
+                    refresh_secs = refresh_after.as_secs(),
+                    "trunk registration successful"
+                );
             }
             Err(err) => {
                 update_status(
@@ -273,8 +285,8 @@ async fn registration_loop(
                 update_status(&statuses, &name, false, None, Some("cancelled".to_string()), None);
                 return;
             }
-            _ = sleep(refresh_interval) => {
-                debug!(trunk = %name, "refreshing trunk registration");
+            _ = sleep(refresh_after) => {
+                debug!(trunk = %name, refresh_secs = refresh_after.as_secs(), "refreshing trunk registration");
             }
         }
     }
