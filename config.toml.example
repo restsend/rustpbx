@@ -281,11 +281,13 @@ engine = "flowdb"
 # udp_addr = "192.168.1.100:3000"
 # http_addr = "http://192.168.1.100:3001"
 # timeout_secs = 10
+# mtu = 1500  # Maximum IP packet size; set to 0 to disable UDP batch splitting
 
 # Remote cluster (multi-node, consistent hashing by call_id):
 # [sipflow]
 # type = "remote"
 # timeout_secs = 10
+# mtu = 1500  # Maximum IP packet size; set to 0 to disable UDP batch splitting
 # nodes = [
 #     { udp = "192.168.1.1:3000", http = "http://192.168.1.1:3001" },
 #     { udp = "192.168.1.2:3000", http = "http://192.168.1.2:3001" },

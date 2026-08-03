@@ -23,7 +23,7 @@ fn default_remote_channel_capacity() -> usize {
 }
 
 fn default_mtu() -> usize {
-    0
+    1500
 }
 
 fn default_report_interval_secs() -> u64 {
@@ -185,4 +185,38 @@ pub enum SipFlowConfig {
         #[serde(default)]
         delegate_upload: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SipFlowConfig;
+
+    #[test]
+    fn remote_config_defaults_mtu_to_standard_ethernet() {
+        let config: SipFlowConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote",
+            "udp_addr": "127.0.0.1:3000",
+            "http_addr": "http://127.0.0.1:3001"
+        }))
+        .expect("remote SipFlow config should deserialize");
+
+        let SipFlowConfig::Remote { mtu, .. } = config else {
+            panic!("expected remote SipFlow config");
+        };
+        assert_eq!(mtu, 1500);
+    }
+
+    #[test]
+    fn remote_config_allows_disabling_mtu_splitting() {
+        let config: SipFlowConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote",
+            "mtu": 0
+        }))
+        .expect("remote SipFlow config should deserialize");
+
+        let SipFlowConfig::Remote { mtu, .. } = config else {
+            panic!("expected remote SipFlow config");
+        };
+        assert_eq!(mtu, 0);
+    }
 }
