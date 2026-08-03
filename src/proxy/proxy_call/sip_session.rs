@@ -2186,6 +2186,7 @@ impl SipSession {
             // Store error so cleanup/CDR can report the failure reason
             self.meta.last_error =
                 Some((StatusCode::Other(status_code, text.clone()), reason.clone()));
+            self.meta.invite_final_status.get_or_insert(status_code);
             self.meta.hangup_reason = Some(sip_status_to_hangup_reason(status_code));
             // Ensure cleanup runs (generates CDR) even on early failure
             self.cleanup().await;
@@ -3569,6 +3570,7 @@ impl SipSession {
                             "Callee rejected the call"
                         );
                         self.meta.last_error = Some((code.clone(), reason_str.clone()));
+                        self.meta.invite_final_status.get_or_insert(code.code());
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason =
                                 Some(sip_status_to_hangup_reason(code.code()));
@@ -8127,6 +8129,10 @@ impl SipSession {
         }
 
         self.meta.answer_time = Some(Instant::now());
+        // The INVITE final status for an answered call is the 2xx that
+        // established it (200 in practice). Lock it so later signaling (BYE,
+        // re-INVITE failures, transfer failures) cannot change the CDR status.
+        self.meta.invite_final_status.get_or_insert(200);
 
         let elapsed = self.context.start_time.elapsed().as_secs_f64();
         crate::metrics::sip::invite_latency_seconds(elapsed, "inbound");
@@ -10070,6 +10076,7 @@ impl SipSession {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
             last_error: self.meta.last_error.clone(),
+            invite_final_status: self.meta.invite_final_status,
             hangup_reason: self.meta.hangup_reason.clone(),
             hangup_messages: self.recorded_hangup_messages(),
             original_caller: Some(self.context.original_caller.clone()),

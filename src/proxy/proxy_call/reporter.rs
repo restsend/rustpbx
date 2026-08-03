@@ -38,10 +38,18 @@ impl CallReporter {
         });
         let call_was_accepted = snapshot.answer_time.is_some();
 
+        // The CDR status must reflect the INVITE transaction's final status and
+        // never be changed by later signaling (BYE, re-INVITE failures, transfer
+        // failures). `invite_final_status` is locked once at call setup; fall
+        // back to `last_error`/200 for sessions where it was never recorded.
         let status_code = snapshot
-            .last_error
-            .as_ref()
-            .map(|(code, _)| u16::from(code.clone()))
+            .invite_final_status
+            .or_else(|| {
+                snapshot
+                    .last_error
+                    .as_ref()
+                    .map(|(code, _)| u16::from(code.clone()))
+            })
             .unwrap_or(200);
 
         let hangup_reason = snapshot.hangup_reason.clone().or_else(|| {
@@ -468,6 +476,7 @@ mod tests {
             ring_time: None,
             answer_time: None,
             last_error: None,
+            invite_final_status: None,
             hangup_reason: None,
             hangup_messages: vec![],
             original_caller: None,

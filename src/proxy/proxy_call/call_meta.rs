@@ -14,6 +14,11 @@ pub struct CallMeta {
     pub hangup_reason: Option<CallRecordHangupReason>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
+    /// The SIP status of the INVITE transaction's final response, captured once
+    /// when call setup finalizes. Later signaling (BYE, transfer failures,
+    /// re-INVITE, ...) must never change it — the CDR/CallEnded status is locked
+    /// to this value.
+    pub invite_final_status: Option<u16>,
     pub routed_caller: Option<String>,
     pub routed_callee: Option<String>,
     pub routed_contact: Option<String>,
@@ -43,6 +48,7 @@ impl CallMeta {
             hangup_reason: None,
             hangup_messages: Vec::new(),
             last_error: None,
+            invite_final_status: None,
             routed_caller: None,
             routed_callee: None,
             routed_contact: None,

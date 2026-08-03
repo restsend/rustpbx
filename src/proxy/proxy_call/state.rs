@@ -21,6 +21,9 @@ pub struct CallSessionRecordSnapshot {
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub last_error: Option<(StatusCode, Option<String>)>,
+    /// The INVITE transaction's final status, locked at call setup. Later
+    /// signaling must not change the CDR/CallEnded status.
+    pub invite_final_status: Option<u16>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     pub hangup_messages: Vec<CallRecordHangupMessage>,
     pub original_caller: Option<String>,
