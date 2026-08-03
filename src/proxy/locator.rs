@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use serde::Serialize;
 use rsipstack::{
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
@@ -26,6 +27,21 @@ pub enum LocatorEvent {
     Registered(Location),
     Unregistered(Location),
     Offline(Vec<Location>),
+}
+
+/// Snapshot of currently online (registered, non-expired) locations.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LocatorStats {
+    /// Total number of online location bindings.
+    pub online_locations: usize,
+    /// Number of distinct online users (identifiers).
+    pub online_users: usize,
+    /// Online bindings broken down by transport type (e.g. "UDP", "WS", "WSS").
+    pub by_transport: HashMap<String, usize>,
+    /// Online bindings that support WebRTC.
+    pub webrtc_locations: usize,
+    /// Online bindings that do not support WebRTC.
+    pub non_webrtc_locations: usize,
 }
 
 pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
@@ -67,6 +83,11 @@ pub trait Locator: Send + Sync {
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
     async fn sweep_expired(&self) -> Result<Vec<Location>> {
         Ok(Vec::new())
+    }
+    /// Snapshot of currently online (registered, non-expired) locations.
+    /// Defaults to all-zero stats; backends override to report real counts.
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        Ok(LocatorStats::default())
     }
 }
 
@@ -748,6 +769,32 @@ impl Locator for MemoryLocator {
         });
 
         Ok(removed)
+    }
+
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        let now = Instant::now();
+        let mut stats = LocatorStats::default();
+        for map_ref in self.locations.iter() {
+            let mut user_online = false;
+            for (_, loc) in map_ref.value().iter() {
+                if loc.is_expired_at(now) {
+                    continue;
+                }
+                stats.online_locations += 1;
+                user_online = true;
+                if let Some(transport) = &loc.transport {
+                    *stats.by_transport.entry(transport.to_string()).or_insert(0) += 1;
+                }
+                if loc.supports_webrtc {
+                    stats.webrtc_locations += 1;
+                }
+            }
+            if user_online {
+                stats.online_users += 1;
+            }
+        }
+        stats.non_webrtc_locations = stats.online_locations - stats.webrtc_locations;
+        Ok(stats)
     }
 }
 
