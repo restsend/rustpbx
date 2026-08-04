@@ -186,9 +186,7 @@ async fn test_media_track_handshake() {
     let offer = track1.local_description().await.unwrap();
 
     // Track2 responds with answer
-    let answer = track2
-        .handshake(offer, rustrtc::SdpType::Answer)
-        .await;
+    let answer = track2.handshake(offer, rustrtc::SdpType::Answer).await;
     assert!(answer.is_ok(), "Handshake failed: {:?}", answer.err());
 
     let answer_sdp = answer.unwrap();
@@ -206,8 +204,7 @@ async fn test_media_track_pranswer_then_answer_reuses_rtp_transport() {
         .build();
 
     let offer = offerer.local_description().await.unwrap();
-    let offer_desc =
-        rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
+    let offer_desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
     let offerer_port = offer_desc.first_audio_section().unwrap().port;
 
     let pranswer = answerer
@@ -287,6 +284,20 @@ async fn test_media_track_get_peer_connection() {
 }
 
 #[tokio::test]
+async fn test_rtp_track_builder_installs_one_recorder_sender_both_ways() {
+    let (_recorder, sender) = crate::recorder_tap::RecorderHandle::new(None, Vec::new());
+    let track = RtpTrackBuilder::new("test-track-recorder".to_string())
+        .with_recorder_sender(sender)
+        .build();
+
+    let pc = track.get_peer_connection().await.unwrap();
+    assert_eq!(pc.config().recorder_interceptors.receivers.len(), 1);
+    assert_eq!(pc.config().recorder_interceptors.senders.len(), 1);
+
+    track.stop().await;
+}
+
+#[tokio::test]
 async fn test_file_track_basic() {
     let track = FileTrack::new("file-track-test".to_string());
 
@@ -342,9 +353,7 @@ async fn test_file_track_handshake() {
     let offer = offerer.local_description().await.unwrap();
 
     // FileTrack should be able to respond
-    let answer = track
-        .handshake(offer, rustrtc::SdpType::Answer)
-        .await;
+    let answer = track.handshake(offer, rustrtc::SdpType::Answer).await;
     assert!(
         answer.is_ok(),
         "FileTrack handshake failed: {:?}",

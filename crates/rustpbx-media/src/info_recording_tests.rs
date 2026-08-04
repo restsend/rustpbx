@@ -1,24 +1,16 @@
 //! Layer 4: Recording content verification.
 //!
-//! Tests that recorded WAV files contain correct audio content when audio
-//! is injected via `replace_output_with_file` through a real BridgePeer.
-//! verifies codec format tag, sample rate, stereo layout, and decoded PCM
+//! Tests that caller-facing RTP captured by `RecorderSender` produces WAV files
+//! with the correct codec format, sample rate, stereo layout, and decoded PCM
 //! content via cross-correlation against a known sine-wave source.
 
-use crate::bridge::{BridgeEndpoint, BridgePeerBuilder};
-use crate::file_track::FileTrack;
-use crate::negotiate::{CodecInfo, NegotiatedCodec, NegotiatedLegProfile};
-use crate::recorder::Recorder;
-use crate::recorder_tap::RecorderTap;
+use crate::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
 use crate::wav_reader::WavReader;
 use audio_codec::CodecType;
-use parking_lot::RwLock;
 use rustrtc::RtpReceiverInterceptor;
 use rustrtc::rtp::{RtpHeader, RtpPacket as RtpPkt};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 // ---- helpers ---------------------------------------------------------
 
@@ -94,19 +86,9 @@ fn make_rtp(pt: u8, seq: u16, ts: u32, payload: Vec<u8>) -> RtpPkt {
     RtpPkt::new(hdr, payload)
 }
 
-fn codec_info_pcmu() -> CodecInfo {
-    CodecInfo {
-        payload_type: 0,
-        codec: CodecType::PCMU,
-        clock_rate: 8000,
-        channels: 1,
-        fmtp: None,
-    }
-}
-
 // ---- tests -----------------------------------------------------------
 
-/// RecorderTap + file_recorder captures a sine WAV with correct content.
+/// RecorderSender + file_recorder captures a sine WAV with correct content.
 #[tokio::test]
 async fn test_recorder_tap_pcmu_content() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,7 +96,6 @@ async fn test_recorder_tap_pcmu_content() {
     let sine_path = dir.path().join("source_440.wav");
     generate_sine_wav(&sine_path, 440.0, 0.5, 8000);
 
-    let mut rec = Recorder::new(wav_path.to_str().unwrap(), CodecType::PCMU).unwrap();
     let profile = NegotiatedLegProfile {
         audio: Some(NegotiatedCodec {
             payload_type: 0,
@@ -126,18 +107,15 @@ async fn test_recorder_tap_pcmu_content() {
         dtmf: None,
         transport: rustrtc::TransportMode::Rtp,
     };
-    rec.set_leg_profile(crate::recorder::Leg::A, profile.clone());
-    rec.set_leg_profile(crate::recorder::Leg::B, profile);
-
-    let recorder_arc: Arc<RwLock<Option<Recorder>>> = Arc::new(RwLock::new(Some(rec)));
-    let paused = Arc::new(AtomicBool::new(false));
-    let tap = RecorderTap::for_recv(
-        Some(recorder_arc.clone()),
-        None,
-        "recv-test".into(),
-        paused,
-        vec![],
-    );
+    let (recorder, tap) = crate::recorder_tap::RecorderHandle::new(None, vec![]);
+    recorder
+        .start(
+            wav_path.to_string_lossy().into_owned(),
+            Some(profile),
+            false,
+        )
+        .await
+        .unwrap();
 
     let src_pcm: Vec<i16> = WavReader::open(&sine_path)
         .unwrap()
@@ -156,12 +134,8 @@ async fn test_recorder_tap_pcmu_content() {
         tap.on_packet_received(&rtp, a, b).await;
     }
 
-    {
-        let mut g = recorder_arc.write();
-        if let Some(r) = g.as_mut() {
-            r.finalize().unwrap();
-        }
-    }
+    let result = recorder.stop().await.unwrap().unwrap();
+    assert_eq!(result.path, wav_path.to_string_lossy());
 
     let meta = std::fs::metadata(&wav_path).unwrap();
     assert!(
@@ -184,104 +158,4 @@ async fn test_recorder_tap_pcmu_content() {
         "recorded content should match source, corr={:.4}",
         corr
     );
-}
-
-/// BridgePeer + recorder captures audio played to the caller leg.
-#[tokio::test]
-async fn test_bridge_recording_captures_played_audio() {
-    let dir = tempfile::tempdir().unwrap();
-    let wav_path = dir.path().join("bridge_rec_test.wav");
-    let sine_path = dir.path().join("src_440.wav");
-    generate_sine_wav(&sine_path, 440.0, 0.5, 8000);
-
-    let mut rec = Recorder::new(wav_path.to_str().unwrap(), CodecType::PCMU).unwrap();
-    let profile = NegotiatedLegProfile {
-        audio: Some(NegotiatedCodec {
-            payload_type: 0,
-            codec: CodecType::PCMU,
-            clock_rate: 8000,
-            channels: 1,
-        }),
-        video: None,
-        dtmf: None,
-        transport: rustrtc::TransportMode::Rtp,
-    };
-    rec.set_leg_profile(crate::recorder::Leg::A, profile.clone());
-    rec.set_leg_profile(crate::recorder::Leg::B, profile);
-
-    let recorder_arc: Arc<RwLock<Option<Recorder>>> = Arc::new(RwLock::new(Some(rec)));
-    let paused = Arc::new(AtomicBool::new(false));
-
-    let bridge = BridgePeerBuilder::new("test-rec-bridge".into())
-        .with_recorder(recorder_arc.clone(), paused.clone())
-        .build();
-    bridge.setup_bridge().await.unwrap();
-
-    let file_track = FileTrack::new("test-playback".into())
-        .with_path(sine_path.to_str().unwrap().to_string())
-        .with_loop(false)
-        .with_codec_info(codec_info_pcmu());
-
-    bridge
-        .replace_output_with_file(BridgeEndpoint::Caller, &file_track)
-        .await
-        .unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    {
-        let mut g = recorder_arc.write();
-        if let Some(r) = g.as_mut() {
-            r.finalize().unwrap();
-        }
-    }
-
-    let meta = std::fs::metadata(&wav_path).unwrap();
-    assert!(
-        meta.len() > 100,
-        "WAV should have meaningful data, got {} bytes",
-        meta.len()
-    );
-
-    let mut reader = WavReader::open(&wav_path).unwrap();
-    let spec = reader.spec();
-    assert_eq!(spec.sample_rate, 8000, "sample_rate");
-    assert_eq!(spec.channels, 2, "recorder forces stereo");
-
-    let pcm: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
-    let leg_b: Vec<i16> = pcm.iter().skip(1).step_by(2).copied().collect();
-
-    let rms_b: f64 = {
-        let sum_sq: f64 = leg_b
-            .iter()
-            .map(|&s| {
-                let v = s as f64 / 32768.0;
-                v * v
-            })
-            .sum();
-        if leg_b.is_empty() {
-            0.0
-        } else {
-            (sum_sq / leg_b.len() as f64).sqrt()
-        }
-    };
-    assert!(
-        rms_b > 0.01,
-        "caller egress should have audible content, rms={:.4}",
-        rms_b
-    );
-
-    let src_pcm: Vec<i16> = WavReader::open(&sine_path)
-        .unwrap()
-        .samples()
-        .map(|s| s.unwrap())
-        .collect();
-    let corr = cross_correlate(&leg_b, &src_pcm);
-    assert!(
-        corr > 0.30,
-        "caller egress content should correlate with source, corr={:.4}",
-        corr
-    );
-
-    bridge.stop().await;
 }

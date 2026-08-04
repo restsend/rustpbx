@@ -154,6 +154,28 @@ impl Recorder {
         })
     }
 
+    /// Create a recorder for RTP captured at the caller boundary.
+    /// Both captured directions use the caller-facing negotiated profile:
+    /// Leg A is caller ingress and Leg B is caller egress.
+    pub fn new_caller_facing(
+        path: &str,
+        profile: Option<NegotiatedLegProfile>,
+        stereo_swap: bool,
+    ) -> Result<Self> {
+        let codec = profile
+            .as_ref()
+            .and_then(|profile| profile.audio.as_ref())
+            .map(|codec| codec.codec)
+            .unwrap_or(CodecType::PCMU);
+        let mut recorder = Self::new(path, codec)?;
+        recorder.stereo_swap = stereo_swap;
+        if let Some(profile) = profile {
+            recorder.set_leg_profile(Leg::A, profile.clone());
+            recorder.set_leg_profile(Leg::B, profile);
+        }
+        Ok(recorder)
+    }
+
     pub fn set_leg_profile(&mut self, leg: Leg, profile: NegotiatedLegProfile) {
         match leg {
             Leg::A => self.profile_a = profile,
@@ -697,6 +719,14 @@ impl Recorder {
         Ok(())
     }
 
+    /// Duration of media written to the recording, excluding paused time.
+    pub fn duration_secs(&self) -> f64 {
+        if self.sample_rate == 0 {
+            return 0.0;
+        }
+        self.written_samples as f64 / self.sample_rate as f64
+    }
+
     /// Flush everything remaining — used by finalize() to write trailing data.
     fn flush_final(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
@@ -967,6 +997,31 @@ impl DtmfGenerator {
 mod tests {
     use super::*;
     use audio_codec::{CodecType, create_decoder, create_encoder};
+
+    #[test]
+    fn caller_facing_recorder_shares_one_profile_between_legs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("caller-facing.wav");
+        let profile = NegotiatedLegProfile {
+            audio: Some(crate::negotiate::NegotiatedCodec {
+                payload_type: 8,
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        };
+
+        let recorder =
+            Recorder::new_caller_facing(&path.to_string_lossy(), Some(profile.clone()), true)
+                .unwrap();
+
+        assert_eq!(recorder.profile_a, profile);
+        assert_eq!(recorder.profile_b, profile);
+        assert!(recorder.stereo_swap);
+    }
 
     #[test]
     fn test_mix_pcmu_both_silent() {

@@ -4,28 +4,10 @@
 //! Commands are sent via `mpsc::Sender<MediaCommand>` to the engine's command loop.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use audio_codec::CodecType;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-
-// ---------------------------------------------------------------------------
-// SipFlowCapture channels — shared types for SipFlow RTP sample forwarding
-// ---------------------------------------------------------------------------
-
-/// Reference-counted media sample used on hot capture paths.
-///
-/// `MediaSample` carries `AudioFrame`/`VideoFrame` whose `raw_packet` field
-/// deep-clones its `Vec<u8>` payload. On the RTP forwarding hot path the same
-/// sample is teed to both the recorder and SipFlow capture channels, so we
-/// share it via `Arc` to make the second `try_send` essentially free.
-pub type SharedMediaSample = Arc<rustrtc::media::frame::MediaSample>;
-
-/// Channel type used to forward raw RTP bytes to the SipFlow capture backend.
-pub type SipFlowCaptureTx = mpsc::Sender<(crate::recorder::Leg, SharedMediaSample, u64)>;
-pub type SipFlowCaptureRx = mpsc::Receiver<(crate::recorder::Leg, SharedMediaSample, u64)>;
 
 // ---------------------------------------------------------------------------
 // PcmFrame (used by PcmStream transport)
@@ -219,22 +201,20 @@ pub enum MediaCommand {
         leg_id: Option<String>,
     },
 
-    // ── Recording ────────────────────────────────────────────────────────
+    // ── Recording ───────────────────────────────────────────────────────
     StartRecording {
         session_id: String,
         config: RecordConfig,
-        /// Leg profiles from negotiated SDP — needed so the recorder can
-        /// write each leg's audio in the correct codec/sample-rate.
+        /// The caller-facing profile is used for both captured directions.
         caller_profile: Option<crate::negotiate::NegotiatedLegProfile>,
+        /// Retained for API compatibility; caller-facing recording does not use it.
         callee_profile: Option<crate::negotiate::NegotiatedLegProfile>,
-        /// Optional oneshot to confirm the recorder has been created inside
-        /// the shared Arc, so the caller knows the bridge will start writing.
+        /// Confirms that the recording task accepted and created the recorder.
         reply: Option<tokio::sync::oneshot::Sender<()>>,
     },
     StopRecording {
         session_id: String,
-        /// Optional oneshot channel to return the recording result
-        /// (path, duration, file_size) to the caller.
+        /// Returns after the file recorder has been finalized.
         reply: Option<tokio::sync::oneshot::Sender<crate::engine::event::RecordResult>>,
     },
     PauseRecording {
@@ -243,6 +223,7 @@ pub enum MediaCommand {
     ResumeRecording {
         session_id: String,
     },
+
     SendDtmf {
         session_id: String,
         leg_id: String,
@@ -322,17 +303,6 @@ pub enum MediaCommand {
     DetachBridge {
         session_id: String,
     },
-
-    /// Attach a shared recorder handle to a session.
-    ///
-    /// The engine uses this recorder for `StartRecording` / `StopRecording`
-    /// operations. The same `Arc` is shared with the `BridgePeer` so samples
-    /// written by the bridge are captured without an extra copy.
-    AttachRecorder {
-        session_id: String,
-        recorder: Arc<RwLock<Option<crate::recorder::Recorder>>>,
-        paused: Arc<AtomicBool>,
-    },
 }
 
 impl MediaCommand {
@@ -348,9 +318,9 @@ impl MediaCommand {
                 Some(session_id)
             }
             Self::StartRecording { session_id, .. }
-            | Self::StopRecording { session_id, .. }
             | Self::PauseRecording { session_id }
-            | Self::ResumeRecording { session_id } => Some(session_id),
+            | Self::ResumeRecording { session_id }
+            | Self::StopRecording { session_id, .. } => Some(session_id),
             Self::SendDtmf { session_id, .. } | Self::CollectDtmf { session_id, .. } => {
                 Some(session_id)
             }
@@ -362,9 +332,9 @@ impl MediaCommand {
             Self::MuteLeg { session_id, .. } | Self::UnmuteLeg { session_id, .. } => {
                 Some(session_id)
             }
-            Self::AttachBridge { session_id, .. }
-            | Self::DetachBridge { session_id }
-            | Self::AttachRecorder { session_id, .. } => Some(session_id),
+            Self::AttachBridge { session_id, .. } | Self::DetachBridge { session_id } => {
+                Some(session_id)
+            }
             // Commands that don't target a single session
             Self::SetRouteGain { .. } => None,
         }
@@ -381,9 +351,9 @@ impl MediaCommand {
             Self::Play { .. } => "play",
             Self::StopPlayback { .. } => "stop_playback",
             Self::StartRecording { .. } => "start_recording",
-            Self::StopRecording { .. } => "stop_recording",
             Self::PauseRecording { .. } => "pause_recording",
             Self::ResumeRecording { .. } => "resume_recording",
+            Self::StopRecording { .. } => "stop_recording",
             Self::SendDtmf { .. } => "send_dtmf",
             Self::CollectDtmf { .. } => "collect_dtmf",
             Self::JoinMixer { .. } => "join_mixer",
@@ -396,7 +366,6 @@ impl MediaCommand {
             Self::UnmuteLeg { .. } => "unmute_leg",
             Self::AttachBridge { .. } => "attach_bridge",
             Self::DetachBridge { .. } => "detach_bridge",
-            Self::AttachRecorder { .. } => "attach_recorder",
         }
     }
 }

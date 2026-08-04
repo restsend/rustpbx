@@ -34,7 +34,6 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
-use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
 use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::media_state::AnchoredMediaMode;
@@ -189,8 +188,6 @@ pub struct SipSession {
 
     pub reporter: Option<CallReporter>,
     cdr_sent: Arc<std::sync::atomic::AtomicBool>,
-    pub recorder: Arc<RwLock<Option<Recorder>>>,
-    pub recording_paused: Arc<std::sync::atomic::AtomicBool>,
 
     pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
 
@@ -213,8 +210,8 @@ pub struct SipSession {
     /// RAII guard that ties the `MediaSession` lifecycle in the `MediaEngine`
     /// to this `SipSession`.  When the session is dropped, the guard's `Drop`
     /// synchronously removes the `MediaSession` from the engine's session map
-    /// and finalizes its resources (playback tracks, MCU mixer, recorder,
-    /// bridge).  No command-channel communication is involved, so the
+    /// and finalizes its resources (playback tracks, MCU mixer, bridge, and
+    /// recorder control). No command-channel communication is involved, so the
     /// leak-by-lost-command failure mode cannot occur.
     media_session_guard: Option<crate::media::engine::session::MediaSessionGuard>,
 }
@@ -786,84 +783,68 @@ impl SipSession {
         }
     }
 
-    fn setup_sipflow_capture(
-        &self,
-        _session_id: &str,
-        call_id: &str,
-    ) -> Option<crate::media::engine::SipFlowCaptureTx> {
-        let backend = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())?;
-        let call_id = call_id.to_string();
-
-        let (tx, mut rx): (crate::media::engine::SipFlowCaptureTx, _) = tokio::sync::mpsc::channel(
-            crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY,
-        );
-
-        // Spawn the drain task locally — no engine involvement needed.
-        // The task exits automatically when all senders (in ForwardingTrack) are dropped.
-        crate::utils::media_spawn(async move {
-                use crate::sipflow::{SipFlowItem, SipFlowMsgType};
-                use std::borrow::Cow;
-            while let Some((leg, sample, received_at_micros)) = rx.recv().await {
-                if let rustrtc::media::frame::MediaSample::Audio(frame) = &*sample
-                    && let Some(rtp_packet) = &frame.raw_packet
-                    && let Ok(rtp_bytes) = rtp_packet.marshal()
-                {
-                    let leg_id = match leg {
-                        crate::media::recorder::Leg::A => 0,
-                        crate::media::recorder::Leg::B => 1,
-                    };
-                    let item = SipFlowItem {
-                        timestamp: received_at_micros,
-                        seq: frame.sequence_number.unwrap_or(0) as u64,
-                        leg: Some(leg_id),
-                        msg_type: SipFlowMsgType::Rtp,
-                        src_addr: frame
-                            .source_addr
-                            .map(|addr| addr.to_string())
-                            .unwrap_or_else(|| "synth".to_string()),
-                        dst_addr: String::new(),
-                        payload: bytes::Bytes::from(rtp_bytes),
-                    };
-                    let _ = backend.record(Cow::Borrowed(call_id.as_str()), item);
-                }
-            }
-        });
-
-        Some(tx)
-    }
-
-    /// Build RecorderTap interceptors for the caller PC.
-    ///
-    /// Returns `(recv_tap, send_tap)` suitable for injection into
-    /// `BridgePeerBuilder::with_caller_receiver_interceptor` /
-    /// `with_caller_sender_interceptor`. The taps write directly to the file
-    /// recorder + sipflow backend — no channel, no drain task.
-    ///
-    /// Returns `None` when recording is disabled.
-    fn build_recorder_taps(
-        &self,
-    ) -> Option<(
-        std::sync::Arc<crate::media::recorder_tap::RecorderTap>,
-        std::sync::Arc<crate::media::recorder_tap::RecorderTap>,
-    )> {
+    /// Create the call-scoped recorder while constructing caller media.
+    fn create_caller_recording(&self) -> Option<crate::media::recorder_tap::RecorderSender> {
         if !self.context.dialplan.recording.enabled {
             return None;
         }
 
-        let call_id = self.context.session_id.clone();
-        let sipflow = if !self.context.dialplan.recording.force_file {
-            self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
-        } else {
+        let sipflow = if self.context.dialplan.recording.force_file {
             None
+        } else {
+            self.server
+                .sip_flow
+                .as_ref()
+                .and_then(|flow| flow.backend())
         };
-
-        Some(crate::media::recorder_tap::build_caller_interceptors(
-            Some(self.recorder.clone()),
+        let allowed_pts = self
+            .media
+            .caller_offer
+            .as_deref()
+            .and_then(|offer| {
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer)
+                    .ok()
+                    .and_then(|description| {
+                        description
+                            .media_sections
+                            .into_iter()
+                            .find(|section| section.kind == rustrtc::MediaKind::Audio)
+                    })
+            })
+            .map(|section| {
+                section
+                    .formats
+                    .into_iter()
+                    .filter_map(|format| format.parse::<u8>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let uses_sipflow = sipflow.is_some();
+        let sipflow = sipflow.map(|backend| (backend, self.context.session_id.clone()));
+        match self.server.media_engine.create_caller_recorder(
+            &self.context.session_id,
             sipflow,
-            call_id,
-            self.recording_paused.clone(),
-            vec![],
-        ))
+            allowed_pts,
+            uses_sipflow && self.context.dialplan.recording.auto_start,
+        ) {
+            Ok(sender) => Some(sender),
+            Err(error) => {
+                warn!(session_id = %self.context.session_id, %error, "Failed to initialize caller recording");
+                None
+            }
+        }
+    }
+
+    /// Give the sender to the physical caller endpoint builder.
+    fn with_caller_capture_sender(
+        &self,
+        builder: BridgePeerBuilder,
+        endpoint: BridgeEndpoint,
+    ) -> BridgePeerBuilder {
+        match self.create_caller_recording() {
+            Some(sender) => builder.with_recorder_sender(endpoint, sender),
+            None => builder,
+        }
     }
 
     #[inline]
@@ -1028,6 +1009,9 @@ impl SipSession {
 
         let initial = server_dialog.initial_request();
         let caller_offer = Self::extract_sdp(initial.body());
+        let media_session_guard = server
+            .media_engine
+            .create_session_guarded(session_id_str.clone());
 
         let mut session = Self {
             id: session_id.clone(),
@@ -1079,15 +1063,13 @@ impl SipSession {
             callee_guards: Vec::new(),
             reporter: None,
             cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            recorder: Arc::new(RwLock::new(None)),
-            recording_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
-            media_session_guard: None,
+            media_session_guard: Some(media_session_guard),
         };
 
         // Create the rtp-timeout channel at construction time so the sender is
@@ -1215,25 +1197,6 @@ impl SipSession {
         }
 
         let mut server_dialog_clone = server_dialog.clone();
-
-        // Register a session in the media engine via RAII guard and attach
-        // the recorder so recording / playback commands route correctly.
-        {
-            let engine = &server.media_engine;
-            let sid = session_id.clone();
-            let guard = engine.create_session_guarded(sid.clone());
-            session.media_session_guard = Some(guard);
-
-            let recorder = session.recorder.clone();
-            let recording_paused = session.recording_paused.clone();
-            if let Err(e) = engine.send(crate::media::engine::MediaCommand::AttachRecorder {
-                session_id: sid,
-                recorder,
-                paused: recording_paused,
-            }) {
-                warn!(session_id = %session_id, error = %e, "Failed to attach recorder to engine");
-            }
-        }
 
         crate::utils::spawn(async move {
             session
@@ -2514,9 +2477,7 @@ impl SipSession {
             );
             into_callee_err(
                 &StatusCode::ServerInternalError,
-                Some(
-                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
-                ),
+                Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string()),
             )
         })?;
         let content_type = offer.as_ref().map(|_| "application/sdp".to_string());
@@ -2565,6 +2526,7 @@ impl SipSession {
         cancel_token: tokio_util::sync::CancellationToken,
         mode: rustrtc::TransportMode,
     ) -> crate::media::RtpTrackBuilder {
+        let is_caller_track = track_id == Self::CALLER_TRACK_ID;
         let is_webrtc = mode == rustrtc::TransportMode::WebRtc;
         let mut builder = crate::media::RtpTrackBuilder::new(track_id)
             .with_mode(mode)
@@ -2596,6 +2558,10 @@ impl SipSession {
 
         if let (Some(start), Some(end)) = (start_port, end_port) {
             builder = builder.with_rtp_range(start, end);
+        }
+
+        if is_caller_track && let Some(sender) = self.create_caller_recording() {
+            builder = builder.with_recorder_sender(sender);
         }
 
         builder
@@ -4522,32 +4488,6 @@ impl SipSession {
             bridge_builder = bridge_builder.with_sender_codecs(caller_sender, callee_sender);
         }
 
-        // Install interceptor-based recording on the SIP caller's bridge PC.
-        // Use `leg_bridge_endpoint` to determine which bridge side the SIP
-        // caller is on — avoids duplicating the webrtc/rtp mapping logic.
-        if let Some((recv_tap, send_tap)) = self.build_recorder_taps() {
-            match self.leg_bridge_endpoint(&LegId::from("caller")) {
-                BridgeEndpoint::Caller => {
-                    bridge_builder = bridge_builder
-                        .with_caller_receiver_interceptor(
-                            recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>,
-                        )
-                        .with_caller_sender_interceptor(
-                            send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>,
-                        );
-                }
-                BridgeEndpoint::Callee => {
-                    bridge_builder = bridge_builder
-                        .with_callee_receiver_interceptor(
-                            recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>,
-                        )
-                        .with_callee_sender_interceptor(
-                            send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>,
-                        );
-                }
-            }
-        }
-
         let rtp_timeout = self.context.dialplan.rtp_timeout.or_else(|| {
             self.server
                 .proxy_config
@@ -4562,6 +4502,8 @@ impl SipSession {
             bridge_builder = bridge_builder.with_rtp_timeout_notify(tx, timeout);
         }
 
+        let caller_endpoint = self.leg_bridge_endpoint(&LegId::from("caller"));
+        bridge_builder = self.with_caller_capture_sender(bridge_builder, caller_endpoint);
         let bridge = bridge_builder.build();
         // The app/IVR peer PC has no real transport (the application is
         // in-process), so its RtpSender never polls the ForwardingTrack carrying
@@ -4571,7 +4513,7 @@ impl SipSession {
         bridge.setup_bridge().await?;
         self.media.media_bridge = Some(bridge);
 
-        // Notify the media engine so it can route Play/Record commands to this bridge.
+        // Give the media engine the bridge used by playback and DTMF commands.
         if let Some(bridge) = self.media.media_bridge.clone() {
             use crate::media::engine::MediaCommand;
             let caller_ci = self
@@ -5290,11 +5232,7 @@ impl SipSession {
         let callee_guard =
             ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog_id.clone());
         let caller_answer = self
-            .prepare_caller_answer_from_callee_sdp(
-                callee_sdp,
-                false,
-                rustrtc::SdpType::Answer,
-            )
+            .prepare_caller_answer_from_callee_sdp(callee_sdp, false, rustrtc::SdpType::Answer)
             .await
             .map_err(|e| {
                 warn!(
@@ -5304,9 +5242,7 @@ impl SipSession {
                 );
                 into_callee_err(
                     &StatusCode::ServerInternalError,
-                    Some(
-                        r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
-                    ),
+                    Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string()),
                 )
             })?;
 
@@ -5505,15 +5441,10 @@ impl SipSession {
             .media
             .callee_answer_sdp
             .as_deref()
-            .and_then(|sdp| {
-                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, sdp).ok()
-            })
+            .and_then(|sdp| rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, sdp).ok())
             .zip(
-                rustrtc::SessionDescription::parse(
-                    rustrtc::SdpType::Answer,
-                    &callee_sdp_value,
-                )
-                .ok(),
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &callee_sdp_value)
+                    .ok(),
             ) {
             Some((previous, current)) => {
                 previous.session.connection != current.session.connection
@@ -5664,10 +5595,7 @@ impl SipSession {
 
                 if let Some(track) = existing_caller_track {
                     let guard = track.lock().await;
-                    match guard
-                        .handshake(caller_offer.clone(), callee_sdp_type)
-                        .await
-                    {
+                    match guard.handshake(caller_offer.clone(), callee_sdp_type).await {
                         Ok(answer_sdp) => {
                             let answer_sdp = self.rewrite_answer_to_selected_codecs(
                                 &answer_sdp,
@@ -5723,10 +5651,7 @@ impl SipSession {
                     }
 
                     let track = track_builder.build();
-                    match track
-                        .handshake(caller_offer.clone(), callee_sdp_type)
-                        .await
-                    {
+                    match track.handshake(caller_offer.clone(), callee_sdp_type).await {
                         Ok(answer_sdp) => {
                             let answer_sdp = self.rewrite_answer_to_selected_codecs(
                                 &answer_sdp,
@@ -5952,8 +5877,7 @@ impl SipSession {
                                                 desc.media_sections
                                                     .iter()
                                                     .filter(|section| {
-                                                        section.kind
-                                                            == rustrtc::MediaKind::Video
+                                                        section.kind == rustrtc::MediaKind::Video
                                                             && section.port != 0
                                                             && section.direction
                                                                 != rustrtc::Direction::Inactive
@@ -6248,13 +6172,10 @@ impl SipSession {
 
         let session_id = &self.context.session_id;
 
-        // When a media bridge (app bridge OR transport bridge) is active,
-        // it handles all forwarding and recording via its own bidirectional
-        // forwarder + EgressTap. Skip the entire ForwardingTrack slow path
-        // to avoid recv() contention on the bridge's PeerConnection and
-        // duplicate sipflow capture (the bridge already created its own
-        // sipflow channel in create_app_caller_media_bridge or
-        // create_callee_track).
+        // When a media bridge (app bridge OR transport bridge) is active, it
+        // handles forwarding through its own bidirectional forwarder. The
+        // caller PC interceptors handle recording, so a second ForwardingTrack
+        // would contend on recv() and duplicate capture.
         if self.media.media_bridge.is_some() {
             info!(
                 session_id = %session_id,
@@ -6300,15 +6221,6 @@ impl SipSession {
             );
         }
 
-        let shared_recorder = self.recorder.clone();
-
-        let sipflow_tx = if self.context.dialplan.recording.enabled
-            && !self.context.dialplan.recording.force_file
-        {
-            self.setup_sipflow_capture(session_id, session_id)
-        } else {
-            None
-        };
         // ── Fast-path: transport-level RTP bridge ───────────────────────
         // When no recording / sipflow / transcoding is needed, wire a direct
         // RtpTransport→RtpTransport bridge. This short-circuits the entire
@@ -6319,8 +6231,7 @@ impl SipSession {
             (Some(ca), Some(ce)) => ca.codec == ce.codec,
             _ => false,
         };
-        let bridge_eligible =
-            sipflow_tx.is_none() && !self.context.dialplan.recording.enabled && same_codec;
+        let bridge_eligible = !self.context.dialplan.recording.enabled && same_codec;
 
         if bridge_eligible {
             // The RtpTransport is created asynchronously during ICE candidate
@@ -6377,15 +6288,8 @@ impl SipSession {
         caller_pc.clear_rtp_rewrite_bridge();
         callee_pc.clear_rtp_rewrite_bridge();
 
-        self.wire_both_forwarding_tracks(
-            &caller_pc,
-            &callee_pc,
-            caller_profile,
-            callee_profile,
-            shared_recorder,
-            sipflow_tx,
-        )
-        .await;
+        self.wire_both_forwarding_tracks(&caller_pc, &callee_pc, caller_profile, callee_profile)
+            .await;
         self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
         // Arm the rtp-inactivity watchdog for the ForwardingTrack slow path.
         self.start_anchored_rtp_timeout_monitor().await;
@@ -6395,7 +6299,7 @@ impl SipSession {
     /// (caller→callee and callee→caller) and install the resulting
     /// [`ForwardingTrackHandle`]s on each leg's MediaPeer.
     ///
-    /// This is the per-packet depacketize → (transcode/record) → re-packetize
+    /// This is the per-packet depacketize → transcode → re-packetize
     /// chain, used when the RTP fast-path is ineligible OR has been downgraded
     /// on demand by [`Self::ensure_media_anchored`]. Extracted from
     /// `start_anchored_media_forwarding` so the downgrade path reuses the exact
@@ -6406,17 +6310,8 @@ impl SipSession {
         callee_pc: &rustrtc::PeerConnection,
         caller_profile: crate::media::negotiate::NegotiatedLegProfile,
         callee_profile: crate::media::negotiate::NegotiatedLegProfile,
-        shared_recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
-        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
     ) {
-        use crate::media::recorder::Leg;
         let session_id = self.context.session_id.clone();
-        // Only capture the caller→callee ingress (Leg::A = caller's mic) for
-        // the sipflow file channel. The callee→caller direction captures its
-        // egress (post-transcode output = what caller hears) as Leg::B instead
-        // of the callee's raw ingress. This matches the BridgePeer semantics
-        // where Leg::A = caller input, Leg::B = caller output.
-        let egress_sipflow_tx = sipflow_tx.clone();
 
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
@@ -6424,9 +6319,6 @@ impl SipSession {
             callee_pc,
             caller_profile.clone(),
             callee_profile.clone(),
-            shared_recorder.clone(),
-            Leg::A,
-            sipflow_tx,
             &session_id,
             "caller→callee",
         ) {
@@ -6447,17 +6339,12 @@ impl SipSession {
             }
         }
 
-        match Self::wire_with_forwarding_track_egress(
+        match Self::wire_with_forwarding_track(
             Self::CALLEE_FORWARDING_TRACK_ID,
             callee_pc,
             caller_pc,
             callee_profile,
             caller_profile,
-            shared_recorder,
-            Leg::B,
-            None, // No ingress sipflow capture for callee→caller
-            egress_sipflow_tx,
-            Some(Leg::B),
             &session_id,
             "callee→caller",
         ) {
@@ -6558,19 +6445,8 @@ impl SipSession {
             .map(MediaNegotiator::extract_leg_profile)
             .unwrap_or_default();
 
-        // Recording / sipflow are never enabled together with the fast-path
-        // (fast-path eligibility requires !recording.enabled), so we pass None
-        // here — no recording is lost by the downgrade.
-        let recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>> = self.recorder.clone();
-        self.wire_both_forwarding_tracks(
-            &caller_pc,
-            &callee_pc,
-            caller_profile,
-            callee_profile,
-            recorder,
-            None,
-        )
-        .await;
+        self.wire_both_forwarding_tracks(&caller_pc, &callee_pc, caller_profile, callee_profile)
+            .await;
         self.media.anchored_mode = AnchoredMediaMode::ForwardingTrack;
 
         info!(
@@ -7147,53 +7023,12 @@ impl SipSession {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn wire_with_forwarding_track(
         track_id: &str,
         source_pc: &rustrtc::PeerConnection,
         target_pc: &rustrtc::PeerConnection,
         ingress_profile: crate::media::negotiate::NegotiatedLegProfile,
         egress_profile: crate::media::negotiate::NegotiatedLegProfile,
-        recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
-        leg: crate::media::recorder::Leg,
-        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
-        session_id: &str,
-        direction: &str,
-    ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
-        Self::wire_with_forwarding_track_egress(
-            track_id,
-            source_pc,
-            target_pc,
-            ingress_profile,
-            egress_profile,
-            recorder,
-            leg,
-            sipflow_tx,
-            None,
-            None,
-            session_id,
-            direction,
-        )
-    }
-
-    /// Extended variant that also wires an egress sipflow capture channel.
-    ///
-    /// When `egress_sipflow_tx` is `Some`, the post-transcode/remap sample
-    /// (what the target side hears) is captured to that channel tagged with
-    /// `egress_leg`. This is used for the callee→caller direction to capture
-    /// the caller's egress (Leg::B) instead of the callee's raw ingress.
-    #[allow(clippy::too_many_arguments)]
-    fn wire_with_forwarding_track_egress(
-        track_id: &str,
-        source_pc: &rustrtc::PeerConnection,
-        target_pc: &rustrtc::PeerConnection,
-        ingress_profile: crate::media::negotiate::NegotiatedLegProfile,
-        egress_profile: crate::media::negotiate::NegotiatedLegProfile,
-        recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
-        leg: crate::media::recorder::Leg,
-        sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
-        egress_sipflow_tx: Option<crate::media::engine::command::SipFlowCaptureTx>,
-        egress_leg: Option<crate::media::recorder::Leg>,
         session_id: &str,
         direction: &str,
     ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
@@ -7220,65 +7055,13 @@ impl SipSession {
         let existing_sender = target_transceiver
             .sender()
             .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
-        {
-            let mut guard = recorder.write();
-            if let Some(recorder) = guard.as_mut() {
-                recorder.set_leg_profile(leg, ingress_profile.clone());
-            }
-        }
 
-        // Issue #171: spin up a dedicated recorder drain task so that
-        // write_sample (codec decode + disk I/O) never blocks the RTP recv loop.
-        // The task borrows the shared recorder lock and calls write_sample
-        // asynchronously; the ForwardingTrack just does a non-blocking
-        // try_send per sample — if the channel is full the sample is dropped
-        // rather than allowing unbounded memory growth under disk pressure.
-        let recorder_tx = {
-            use tokio::sync::mpsc;
-            // 256 slots ≈ 5 seconds of 20 ms packets at 8 kHz — enough to
-            // absorb transient disk stalls without unbounded heap growth.
-            const RECORDER_CHANNEL_CAPACITY: usize = 256;
-            let (tx, mut rx) = mpsc::channel::<(
-                crate::media::recorder::Leg,
-                crate::media::engine::command::SharedMediaSample,
-            )>(RECORDER_CHANNEL_CAPACITY);
-            let recorder_arc = recorder.clone();
-            crate::utils::spawn(async move {
-                while let Some((sample_leg, sample)) = rx.recv().await {
-                    let mut guard = recorder_arc.write();
-                    if let Some(rec) = guard.as_mut()
-                        && let Err(err) = rec.write_sample(sample_leg, &sample, None, None, None)
-                    {
-                        tracing::warn!("recorder write_sample failed: {err}");
-                    }
-                }
-            });
-            tx
-        };
-
-        let forwarding = if egress_sipflow_tx.is_some() {
-            Arc::new(ForwardingTrack::with_egress(
-                track_id.to_string(),
-                receiver_track,
-                Some(recorder_tx),
-                sipflow_tx,
-                egress_sipflow_tx,
-                egress_leg,
-                leg,
-                ingress_profile,
-                egress_profile,
-            ))
-        } else {
-            Arc::new(ForwardingTrack::new(
-                track_id.to_string(),
-                receiver_track,
-                Some(recorder_tx),
-                sipflow_tx,
-                leg,
-                ingress_profile,
-                egress_profile,
-            ))
-        };
+        let forwarding = Arc::new(ForwardingTrack::new(
+            track_id.to_string(),
+            receiver_track,
+            ingress_profile,
+            egress_profile,
+        ));
 
         let mut sender_builder = rustrtc::RtpSender::builder(
             forwarding.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
@@ -7289,6 +7072,9 @@ impl SipSession {
         if !existing_sender.cname().starts_with("rustrtc-cname-") {
             sender_builder = sender_builder.cname(existing_sender.cname().to_string());
         }
+        for interceptor in existing_sender.interceptors() {
+            sender_builder = sender_builder.interceptor(interceptor.clone());
+        }
         let sender = sender_builder.build();
 
         target_transceiver.set_sender(Some(sender));
@@ -7296,7 +7082,7 @@ impl SipSession {
         debug!(
             session_id = %session_id,
             direction = %direction,
-            "Wired ForwardingTrack (async recorder task, zero-blocking forwarding)"
+            "Wired ForwardingTrack"
         );
 
         Ok(forwarding)
@@ -7435,7 +7221,7 @@ impl SipSession {
         // When an app/IVR bridge is already active and the callee is also WebRTC,
         // the bridge's default RTP callee PC cannot serve a WebRTC callee. Replace
         // it with a freshly-built WebRTC PC so the callee connects through the
-        // bridge (and therefore through the CaptureSink → recorder).
+        // bridge; caller-facing recording remains on the caller PC interceptors.
         if !need_transport_bridge
             && caller_is_webrtc
             && callee_is_webrtc
@@ -7536,7 +7322,9 @@ impl SipSession {
                 return pc
                     .local_description()
                     .map(|desc| desc.to_sdp_string())
-                    .ok_or_else(|| anyhow!("Bridge caller PC has no local offer after RTP replacement"));
+                    .ok_or_else(|| {
+                        anyhow!("Bridge caller PC has no local offer after RTP replacement")
+                    });
             }
 
             return Self::bridge_callee_offer_sdp(bridge, callee_is_webrtc, false).await;
@@ -7734,30 +7522,6 @@ impl SipSession {
                 );
             }
 
-            // Install interceptor-based recording on the SIP caller's bridge PC.
-            if let Some((recv_tap, send_tap)) = self.build_recorder_taps() {
-                match self.leg_bridge_endpoint(&LegId::from("caller")) {
-                    BridgeEndpoint::Caller => {
-                        bridge_builder = bridge_builder
-                            .with_caller_receiver_interceptor(
-                                recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>,
-                            )
-                            .with_caller_sender_interceptor(
-                                send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>,
-                            );
-                    }
-                    BridgeEndpoint::Callee => {
-                        bridge_builder = bridge_builder
-                            .with_callee_receiver_interceptor(
-                                recv_tap as std::sync::Arc<dyn rustrtc::RtpReceiverInterceptor>,
-                            )
-                            .with_callee_sender_interceptor(
-                                send_tap as std::sync::Arc<dyn rustrtc::RtpSenderInterceptor>,
-                            );
-                    }
-                }
-            }
-
             let rtp_timeout = self.context.dialplan.rtp_timeout.or_else(|| {
                 self.server
                     .proxy_config
@@ -7768,6 +7532,8 @@ impl SipSession {
                 bridge_builder = bridge_builder.with_rtp_timeout_notify(tx, timeout);
             }
 
+            let caller_endpoint = self.leg_bridge_endpoint(&LegId::from("caller"));
+            bridge_builder = self.with_caller_capture_sender(bridge_builder, caller_endpoint);
             let bridge = bridge_builder.build();
 
             bridge.setup_bridge().await?;
@@ -7808,7 +7574,7 @@ impl SipSession {
 
             self.media.media_bridge = Some(bridge.clone());
 
-            // Notify the media engine so Play/Record commands route to this bridge.
+            // Give the media engine the bridge used by playback and DTMF commands.
             {
                 use crate::media::engine::MediaCommand;
                 let caller_ci = self
@@ -8166,7 +7932,6 @@ impl SipSession {
         // Auto-start recording when the call is answered if configured.
         if self.context.dialplan.recording.enabled
             && self.context.dialplan.recording.auto_start
-            && !self.media.recording_state.is_active()
             && let Some(ref option) = self.context.dialplan.recording.option
         {
             let path = option.recorder_file.clone();
@@ -9168,15 +8933,8 @@ impl SipSession {
         max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        if self.server.sip_flow.is_some() && !self.context.dialplan.recording.enabled {
-            return Err(anyhow!(
-                "Live recording is disabled when SipFlow is enabled"
-            ));
-        }
-        // Guard: check if already recording (RecordingPhase tracks this).
-        if self.media.recording_state.is_active() {
-            return Err(anyhow!("Recording already active"));
+        if !self.context.dialplan.recording.enabled {
+            return Err(anyhow!("Recording is not enabled for this call"));
         }
 
         // Resolve leg profiles from forwarding tracks (preferred) or raw SDP.
@@ -9197,55 +8955,26 @@ impl SipSession {
                 .as_deref()
                 .map(MediaNegotiator::extract_leg_profile),
         };
-        let callee_profile = match self.callee_peer() {
-            Some(peer) => {
-                match Self::get_forwarding_track(peer, Self::CALLEE_FORWARDING_TRACK_ID).await {
-                    Some(forwarding) => forwarding.ingress_profile(),
-                    None => self
-                        .media
-                        .callee_answer_sdp
-                        .as_deref()
-                        .map(MediaNegotiator::extract_leg_profile),
-                }
-            }
-            None => self
-                .media
-                .callee_answer_sdp
-                .as_deref()
-                .map(MediaNegotiator::extract_leg_profile),
-        };
-
-        // Delegate recorder creation (with leg profiles) to the engine.
-        // Use a oneshot to wait until the Recorder is visible inside the
-        // shared Arc so the bridge's forwarding loop won't skip the first
-        // few packets.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) =
-            self.server
-                .media_engine
-                .send(crate::media::engine::MediaCommand::StartRecording {
-                    session_id: self.context.session_id.clone(),
-                    config: crate::media::engine::command::RecordConfig {
-                        path: path.to_string(),
-                        max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
-                        beep: false,
-                        format: None,
-                        stereo_swap: false,
-                    },
-                    caller_profile,
-                    callee_profile,
-                    reply: Some(reply_tx),
-                })
-        {
-            warn!(session_id = %self.context.session_id, error = %e, "Failed to send StartRecording to engine");
-        }
-        let _ = reply_rx.await;
-
-        self.media.recording_state = RecordingPhase::Recording {
-            path: path.to_string(),
-            started_at: Instant::now(),
-            max_duration,
-        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.server
+            .media_engine
+            .send_async(crate::media::engine::MediaCommand::StartRecording {
+                session_id: self.context.session_id.clone(),
+                config: crate::media::engine::RecordConfig {
+                    path: path.to_string(),
+                    max_duration_secs: max_duration.map(|duration| duration.as_secs() as u32),
+                    beep,
+                    format: None,
+                    stereo_swap: self.context.dialplan.recording.stereo_swap,
+                },
+                caller_profile,
+                callee_profile: None,
+                reply: Some(reply),
+            })
+            .await?;
+        response
+            .await
+            .map_err(|_| anyhow!("recorder start reply dropped"))?;
 
         if beep {
             info!(session_id = %self.context.session_id, "Playing recording beep");
@@ -9260,92 +8989,40 @@ impl SipSession {
     }
 
     pub async fn pause_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let next = match &self.media.recording_state {
-            RecordingPhase::Recording {
-                path,
-                started_at,
-                max_duration,
-            } => {
-                info!(path = %path, "Recording paused");
-                RecordingPhase::Paused {
-                    path: path.clone(),
-                    started_at: *started_at,
-                    max_duration: *max_duration,
-                }
-            }
-            RecordingPhase::Paused { path, .. } => {
-                return Err(anyhow!("Recording already paused: {}", path));
-            }
-            RecordingPhase::Idle => {
-                return Err(anyhow!("Recording not active"));
-            }
-        };
-        self.media.recording_state = next;
-        self.engine_send(crate::media::engine::MediaCommand::PauseRecording {
-            session_id: self.context.session_id.clone(),
-        });
+        self.server
+            .media_engine
+            .send(crate::media::engine::MediaCommand::PauseRecording {
+                session_id: self.context.session_id.clone(),
+            })?;
         Ok(())
     }
 
     pub async fn resume_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let next = match &self.media.recording_state {
-            RecordingPhase::Paused {
-                path,
-                started_at,
-                max_duration,
-            } => {
-                info!(path = %path, "Recording resumed");
-                RecordingPhase::Recording {
-                    path: path.clone(),
-                    started_at: *started_at,
-                    max_duration: *max_duration,
-                }
-            }
-            RecordingPhase::Recording { path, .. } => {
-                return Err(anyhow!("Recording already active: {}", path));
-            }
-            RecordingPhase::Idle => {
-                return Err(anyhow!("Recording not active"));
-            }
-        };
-        self.media.recording_state = next;
-        self.engine_send(crate::media::engine::MediaCommand::ResumeRecording {
-            session_id: self.context.session_id.clone(),
-        });
+        self.server
+            .media_engine
+            .send(crate::media::engine::MediaCommand::ResumeRecording {
+                session_id: self.context.session_id.clone(),
+            })?;
         Ok(())
     }
 
     pub async fn stop_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let prev = std::mem::replace(&mut self.media.recording_state, RecordingPhase::Idle);
-        let path = match &prev {
-            RecordingPhase::Recording { path, .. } | RecordingPhase::Paused { path, .. } => {
-                path.clone()
-            }
-            RecordingPhase::Idle => return Ok(()),
-        };
-        // Duration is tracked locally (RecordingPhase.started_at).
-        let duration = prev.elapsed().unwrap_or_default();
-
-        // Delegate recorder finalization to the engine (it owns the Recorder).
-        // Use a oneshot channel to get the actual file_size after finalize.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) =
-            self.server
-                .media_engine
-                .send(crate::media::engine::MediaCommand::StopRecording {
-                    session_id: self.context.session_id.clone(),
-                    reply: Some(reply_tx),
-                })
-        {
-            warn!(session_id = %self.context.session_id, error = %e, "Failed to send StopRecording to engine");
-        }
-        let file_size = match reply_rx.await {
-            Ok(result) => result.file_size,
-            Err(_) => std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-        };
+        // Stop is ordered with RTP, disables capture, finalizes the optional
+        // file recorder, and replies only after finalization has completed.
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.server
+            .media_engine
+            .send_async(crate::media::engine::MediaCommand::StopRecording {
+                session_id: self.context.session_id.clone(),
+                reply: Some(reply),
+            })
+            .await?;
+        let result = response
+            .await
+            .map_err(|_| anyhow!("recorder stop reply dropped"))?;
+        let path = result.path;
+        let duration = Duration::from_secs_f64(result.duration_secs);
+        let file_size = result.file_size;
         info!(path = %path, duration = ?duration, file_size, "Recording stopped");
 
         let bridge = self.app_event_bridge.read();
@@ -9374,10 +9051,6 @@ impl SipSession {
         // Ensure the running app (IVR/voicemail/queue) is notified of session end.
         if self.app_runtime.is_running() {
             let _ = self.app_runtime.stop_app(None).await;
-        }
-
-        if self.media.recording_state.is_active() {
-            let _ = self.stop_recording().await;
         }
 
         // Release any concurrency slots acquired by routing policy checks so
@@ -9506,9 +9179,10 @@ impl SipSession {
             }
         }
 
-        // Destroy the engine session last — after all recording/bridge cleanup.
-        // The RAII guard's Drop synchronously removes the MediaSession from
-        // the engine's map and finalizes resources.
+        // Destroy the engine session last — after all bridge cleanup.
+        // This drops the engine's sole recorder-control handle, so the worker
+        // exits and finalizes. The RAII guard's Drop synchronously removes the
+        // MediaSession from the engine's map and finalizes its other resources.
         drop(self.media_session_guard.take());
     }
 
@@ -10231,9 +9905,9 @@ impl SipSession {
                 source,
                 options,
             } => {
-                let plays_to_caller = leg_id.as_ref().is_none_or(|leg| {
-                    leg == &LegId::from("caller") || leg == &LegId::from("both")
-                });
+                let plays_to_caller = leg_id
+                    .as_ref()
+                    .is_none_or(|leg| leg == &LegId::from("caller") || leg == &LegId::from("both"));
                 let caller_dialog_ready = {
                     let state = self.server_dialog.state();
                     state.is_confirmed() || state.waiting_ack()
@@ -10863,15 +10537,12 @@ impl SipSession {
         }
 
         if self.app_runtime.current_app().as_deref() == Some("queue")
-            && (!self.media.caller_answer_uses_media_bridge
-                || self.media.media_bridge.is_none())
+            && (!self.media.caller_answer_uses_media_bridge || self.media.media_bridge.is_none())
         {
             self.prepare_app_caller_media_bridge()
                 .await
                 .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
-            if !self.media.caller_answer_uses_media_bridge
-                || self.media.media_bridge.is_none()
-            {
+            if !self.media.caller_answer_uses_media_bridge || self.media.media_bridge.is_none() {
                 return Err(anyhow!(
                     "Queue caller media is not backed by a playback-capable bridge"
                 ));
@@ -11009,7 +10680,9 @@ impl SipSession {
             let sdp_offer = String::from_utf8(
                 self.prepare_callee_media_offer(&location)
                     .await?
-                    .ok_or_else(|| anyhow!("Queue media path did not produce an agent SDP offer"))?,
+                    .ok_or_else(|| {
+                        anyhow!("Queue media path did not produce an agent SDP offer")
+                    })?,
             )
             .map_err(|error| anyhow!("Queue agent SDP offer is not UTF-8: {}", error))?;
             if !self.media.callee_offer_uses_media_bridge {
@@ -11025,9 +10698,8 @@ impl SipSession {
             );
             (None, sdp_offer)
         } else {
-            let (peer, _track, sdp_offer) = self
-                .create_leg_peer(leg_id, transport_mode.clone())
-                .await?;
+            let (peer, _track, sdp_offer) =
+                self.create_leg_peer(leg_id, transport_mode.clone()).await?;
             self.legs.set_peer(leg_id.clone(), peer.clone());
             (Some(peer), sdp_offer)
         };
@@ -11366,10 +11038,7 @@ impl SipSession {
                 return false;
             }
             self.media.callee_answer_sdp = Some(target_answer.clone());
-            self.configure_media_bridge_transcoders(
-                caller_answer.as_deref(),
-                Some(&target_answer),
-            );
+            self.configure_media_bridge_transcoders(caller_answer.as_deref(), Some(&target_answer));
             self.start_media_bridge_forwarding().await;
         } else if self.media.caller_answer_uses_media_bridge
             && !self.media.callee_offer_uses_media_bridge
@@ -11481,9 +11150,7 @@ impl SipSession {
             .or_else(|| leg_id.as_ref().map(|l| l.to_string()))
             .unwrap_or_else(|| "playback".to_string());
         let file_path = match source {
-            crate::call::domain::MediaSource::File { path } => {
-                Self::resolve_audio_file_path(&path)
-            }
+            crate::call::domain::MediaSource::File { path } => Self::resolve_audio_file_path(&path),
             crate::call::domain::MediaSource::Url { url } => url,
             _ => return Err(anyhow!("Only file/URL playback supported")),
         };
@@ -15465,9 +15132,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             (
                 500,
                 "Server Internal Error".to_string(),
-                Some(
-                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
-                ),
+                Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),),
             ),
             "unexpected callee offer error"
         );
@@ -15494,8 +15159,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             .step_by(2)
             .find_map(|port| {
                 let occupied_socket = std::net::UdpSocket::bind(("127.0.0.1", port)).ok()?;
-                let released_socket =
-                    std::net::UdpSocket::bind(("127.0.0.1", port + 2)).ok()?;
+                let released_socket = std::net::UdpSocket::bind(("127.0.0.1", port + 2)).ok()?;
                 Some((port, occupied_socket, released_socket))
             })
             .expect("failed to reserve an RTP port pair for the test");
@@ -15628,9 +15292,7 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             (
                 500,
                 "Server Internal Error".to_string(),
-                Some(
-                    r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
-                ),
+                Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),),
             ),
             "unexpected caller answer error"
         );

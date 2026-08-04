@@ -1,6 +1,6 @@
 //! MediaEngine — protocol-agnostic media orchestration
 //!
-//! The MediaEngine owns all media operations (bridge, playback, recording,
+//! The MediaEngine owns media operations (bridge, playback,
 //! MCU mixing, DTMF, TTS injection) and exposes them through a single
 //! command/event channel interface.  Signaling adapters (SIP, WebSocket,
 //! HTTP, IVR apps) translate their domain operations into [`MediaCommand`]
@@ -13,7 +13,7 @@
 //!  ───────────────          ───────────               ──────────
 //!  sip_session.rs    ──►   command_loop()      ──►   BridgePeer
 //!  rwi/processor.rs  ──►   match cmd { … }     ──►   ForwardingTrack
-//!  call/app/*        ──►   emit(event)         ──►   Recorder
+//!  call/app/*        ──►   emit(event)         ──►   media tracks
 //!  console/          ──►                        ──►   FileTrack
 //!                                                          ConferenceAudioMixer
 //! ```
@@ -27,7 +27,7 @@ pub mod transport;
 
 pub use command::{
     CodecProfile, InjectTarget, LegTransport, MediaCommand, PcmFrame, PlayOptions, PlaySource,
-    RecordConfig, SharedMediaSample, SipFlowCaptureTx,
+    RecordConfig,
 };
 pub use event::{MediaEvent, RecordResult};
 pub use transport::resolve_audio_path;
@@ -91,8 +91,7 @@ impl MediaEngine {
     pub fn new(config: MediaEngineConfig) -> (Self, MediaEngineHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(config.command_channel_capacity);
         let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
-        let sessions: Arc<DashMap<String, session::MediaSession>> =
-            Arc::new(DashMap::new());
+        let sessions: Arc<DashMap<String, session::MediaSession>> = Arc::new(DashMap::new());
 
         let engine = Self {
             cmd_tx,
@@ -163,14 +162,37 @@ impl MediaEngine {
             session_id.clone(),
             session::MediaSession::new(session_id.clone()),
         );
-        let _ = self
-            .event_tx
-            .send(MediaEvent::SessionCreated { session_id: session_id.clone() });
+        let _ = self.event_tx.send(MediaEvent::SessionCreated {
+            session_id: session_id.clone(),
+        });
         session::MediaSessionGuard::new(
             Arc::downgrade(&self.sessions),
             self.event_tx.clone(),
             session_id,
         )
+    }
+
+    /// Create a recorder task while constructing caller media. The control
+    /// handle stays in MediaEngine and the RTP sender moves into the caller's
+    /// receiver/sender interceptor.
+    pub fn create_caller_recorder(
+        &self,
+        session_id: &str,
+        sipflow: Option<(Arc<dyn rustpbx_sipflow::SipFlowBackend>, String)>,
+        allowed_pts: Vec<u8>,
+        auto_start: bool,
+    ) -> Result<crate::recorder_tap::RecorderSender> {
+        let mut session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("Media session {} not found", session_id))?;
+
+        let (control, sender) = crate::recorder_tap::RecorderHandle::new(sipflow, allowed_pts);
+        if auto_start {
+            control.resume()?;
+        }
+        session.recorder_control = Some(control);
+        Ok(sender)
     }
 
     /// Synchronously remove a session from the map and finalize its resources.
@@ -182,11 +204,9 @@ impl MediaEngine {
     pub fn destroy_session(&self, session_id: &str) -> bool {
         if let Some((_, mut sess)) = self.sessions.remove(session_id) {
             sess.finalize();
-            let _ = self
-                .event_tx
-                .send(MediaEvent::SessionDestroyed {
-                    session_id: session_id.to_string(),
-                });
+            let _ = self.event_tx.send(MediaEvent::SessionDestroyed {
+                session_id: session_id.to_string(),
+            });
             true
         } else {
             false
@@ -302,24 +322,88 @@ impl EngineCore {
             }
 
             MediaCommand::DetachBridge { session_id } => {
-                let bridge = self.sessions.get_mut(&session_id).and_then(|mut s| s.bridge.take());
+                let bridge = self
+                    .sessions
+                    .get_mut(&session_id)
+                    .and_then(|mut s| s.bridge.take());
                 if let Some(bridge) = bridge {
                     bridge.stop().await;
                 }
                 info!(session_id = %session_id, "Bridge detached from engine session");
             }
 
-            MediaCommand::AttachRecorder {
+            MediaCommand::StartRecording {
                 session_id,
-                recorder,
-                paused,
+                config,
+                caller_profile,
+                callee_profile: _,
+                reply,
             } => {
-                let mut sess = self.sessions.get_mut(&session_id).ok_or_else(|| {
-                    anyhow!("Session {} not found for AttachRecorder", session_id)
-                })?;
-                sess.recorder = recorder;
-                sess.recording_paused = paused;
-                debug!(session_id = %session_id, "Recorder attached to engine session");
+                let control = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.recorder_control.clone())
+                    .ok_or_else(|| anyhow!("Recorder control not attached for {}", session_id))?;
+                control
+                    .start(config.path.clone(), caller_profile, config.stereo_swap)
+                    .await?;
+                if let Some(reply) = reply {
+                    let _ = reply.send(());
+                }
+                let _ = self
+                    .event_tx
+                    .send(MediaEvent::RecordingStarted { session_id });
+            }
+
+            MediaCommand::PauseRecording { session_id } => {
+                let control = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.recorder_control.clone())
+                    .ok_or_else(|| anyhow!("Recorder control not attached for {}", session_id))?;
+                control.pause()?;
+                let _ = self
+                    .event_tx
+                    .send(MediaEvent::RecordingPaused { session_id });
+            }
+
+            MediaCommand::ResumeRecording { session_id } => {
+                let control = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.recorder_control.clone())
+                    .ok_or_else(|| anyhow!("Recorder control not attached for {}", session_id))?;
+                control.resume()?;
+                let _ = self
+                    .event_tx
+                    .send(MediaEvent::RecordingResumed { session_id });
+            }
+
+            MediaCommand::StopRecording { session_id, reply } => {
+                let control = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.recorder_control.clone())
+                    .ok_or_else(|| anyhow!("Recorder control not attached for {}", session_id))?;
+                let finalized = control.stop().await?;
+                let result = match finalized {
+                    Some(finalized) => RecordResult {
+                        path: finalized.path,
+                        duration_secs: finalized.duration_secs,
+                        file_size: finalized.file_size,
+                    },
+                    None => RecordResult {
+                        path: String::new(),
+                        duration_secs: 0.0,
+                        file_size: 0,
+                    },
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result.clone());
+                }
+                let _ = self
+                    .event_tx
+                    .send(MediaEvent::RecordingStopped { session_id, result });
             }
 
             MediaCommand::BridgeLegs {
@@ -364,7 +448,8 @@ impl EngineCore {
                 };
 
                 let (bridge, endpoint, codec_info) = {
-                    let sess = self.sessions
+                    let sess = self
+                        .sessions
                         .get(&session_id)
                         .ok_or_else(|| anyhow!("Session {} not found for Play", session_id))?;
                     let bridge = sess
@@ -446,125 +531,6 @@ impl EngineCore {
                 if let (Some(bridge), Some(endpoint)) = (bridge_opt, endpoint_opt) {
                     bridge.replace_output_with_peer(endpoint).await;
                 }
-            }
-
-            MediaCommand::StartRecording {
-                session_id,
-                config,
-                caller_profile,
-                callee_profile,
-                reply,
-            } => {
-                let mut sess = self.sessions.get_mut(&session_id).ok_or_else(|| {
-                    anyhow!("Session {} not found for StartRecording", session_id)
-                })?;
-
-                let mut guard = sess.recorder.write();
-                if guard.is_some() {
-                    return Err(anyhow!(
-                        "Recording already active for session {}",
-                        session_id
-                    ));
-                }
-                // Pick the recorder codec from the first available leg profile,
-                // falling back to PCMU.  Only PCMU/PCMA/G729 are supported as
-                // WAV recording formats — Opus/G722 would be forced to PCMU
-                // inside Recorder::new() anyway, so we resolve that here.
-                let recorder_codec = caller_profile
-                    .as_ref()
-                    .or(callee_profile.as_ref())
-                    .and_then(|p| p.audio.as_ref())
-                    .map(|c| c.codec)
-                    .unwrap_or(audio_codec::CodecType::PCMU);
-                let mut recorder =
-                    crate::recorder::Recorder::new(&config.path, recorder_codec)?;
-                recorder.stereo_swap = config.stereo_swap;
-                if let Some(profile) = caller_profile {
-                    recorder.set_leg_profile(crate::recorder::Leg::A, profile.clone());
-                    // Leg B = caller egress (what caller hears) — use caller profile
-                    // so the recorder can detect DTMF and audio codec correctly on
-                    // the egress side (samples are encoded in the caller's codec).
-                    recorder.set_leg_profile(crate::recorder::Leg::B, profile);
-                } else if let Some(profile) = callee_profile {
-                    recorder.set_leg_profile(crate::recorder::Leg::A, profile.clone());
-                    recorder.set_leg_profile(crate::recorder::Leg::B, profile);
-                }
-                *guard = Some(recorder);
-                drop(guard);
-                use std::sync::atomic::Ordering;
-                sess.recording_paused.store(false, Ordering::Relaxed);
-                sess.recording_started_at = Some(std::time::Instant::now());
-                info!(session_id = %session_id, path = %config.path, "Recording started");
-                drop(sess);
-
-                // Signal the caller that the recorder is now visible to the
-                // bridge's forwarding loop, so no audio gap exists.
-                if let Some(reply_tx) = reply {
-                    let _ = reply_tx.send(());
-                }
-
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::RecordingStarted { session_id });
-            }
-
-            MediaCommand::StopRecording { session_id, reply } => {
-                let result = {
-                    if let Some(mut sess) = self.sessions.get_mut(&session_id) {
-                        let started_at = sess.recording_started_at.take();
-                        let mut guard = sess.recorder.write();
-                        if let Some(ref mut rec) = *guard {
-                            let path = rec.path.clone();
-                            let _ = rec.finalize();
-                            let file_size =
-                                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                            let duration_secs = started_at
-                                .map(|t| t.elapsed().as_secs_f64())
-                                .unwrap_or(0.0);
-                            *guard = None;
-                            Some(RecordResult {
-                                path,
-                                duration_secs,
-                                file_size,
-                            })
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-                if let Some(result) = result {
-                    info!(session_id = %session_id, path = %result.path, "Recording stopped");
-                    if let Some(reply_tx) = reply {
-                        let _ = reply_tx.send(result.clone());
-                    }
-                    let _ = self
-                        .event_tx
-                        .send(MediaEvent::RecordingStopped { session_id, result });
-                }
-            }
-
-            MediaCommand::PauseRecording { session_id } => {
-                if let Some(sess) = self.sessions.get(&session_id) {
-                    use std::sync::atomic::Ordering;
-                    // Release ensures the bridge forwarding thread sees the flag
-                    // before the RecordingPaused event reaches subscribers.
-                    sess.recording_paused.store(true, Ordering::Release);
-                }
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::RecordingPaused { session_id });
-            }
-
-            MediaCommand::ResumeRecording { session_id } => {
-                if let Some(sess) = self.sessions.get(&session_id) {
-                    use std::sync::atomic::Ordering;
-                    sess.recording_paused.store(false, Ordering::Release);
-                }
-                let _ = self
-                    .event_tx
-                    .send(MediaEvent::RecordingResumed { session_id });
             }
 
             MediaCommand::SendDtmf {
@@ -676,7 +642,8 @@ impl EngineCore {
                 };
 
                 let (bridge, caller_codec, callee_codec) = {
-                    let sess = self.sessions
+                    let sess = self
+                        .sessions
                         .get(&session_id)
                         .ok_or_else(|| anyhow!("Session {} not found", session_id))?;
                     let bridge = sess.bridge.clone().ok_or_else(|| {
@@ -707,13 +674,8 @@ impl EngineCore {
                 // AudioSourceManager (they run concurrently).
                 // Use the codec that matches the target endpoint so the
                 // receiver can actually decode the audio.
-                let caller_ep = {
-                    self.sessions.get(&session_id).map(|s| s.caller_endpoint())
-                };
-                let mut tracks: Vec<(
-                    crate::bridge::BridgeEndpoint,
-                    crate::FileTrack,
-                )> = Vec::new();
+                let caller_ep = { self.sessions.get(&session_id).map(|s| s.caller_endpoint()) };
+                let mut tracks: Vec<(crate::bridge::BridgeEndpoint, crate::FileTrack)> = Vec::new();
                 for ep in &endpoints {
                     let codec = if Some(*ep) == caller_ep {
                         caller_codec.clone()
@@ -808,8 +770,6 @@ impl EngineCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::RwLock as PRwLock;
-    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     /// Build a minimal RIFF/WAVE header for raw PCM.
@@ -906,33 +866,31 @@ mod tests {
     // ── Recording tests ──────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_recording_start_stop_with_reply() {
+    async fn test_recording_commands_use_session_control_handle() {
         let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "rec1").await;
-        let _ = event_rx.recv().await; // SessionCreated
-
-        // AttachRecorder so the session has a recorder slot.
-        let recorder: Arc<PRwLock<Option<crate::recorder::Recorder>>> =
-            Arc::new(PRwLock::new(None));
-        let paused = Arc::new(AtomicBool::new(false));
-        engine
-            .send(MediaCommand::AttachRecorder {
-                session_id: "rec1".into(),
-                recorder: recorder.clone(),
-                paused,
-            })
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine-control.wav");
+        let _guard = engine.create_session_guarded("record-control".into());
+        let _ = event_rx.recv().await;
+        assert!(
+            engine
+                .sessions
+                .get("record-control")
+                .unwrap()
+                .recorder_control
+                .is_none(),
+            "creating a media session must not create a recorder task"
+        );
+        let _rtp_sender = engine
+            .create_caller_recorder("record-control", None, Vec::new(), false)
             .unwrap();
 
-        let tmp = std::env::temp_dir().join("test_engine_recording.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        // StartRecording with reply
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (start_reply, start_response) = tokio::sync::oneshot::channel();
         engine
             .send(MediaCommand::StartRecording {
-                session_id: "rec1".into(),
+                session_id: "record-control".into(),
                 config: RecordConfig {
-                    path: path.clone(),
+                    path: path.to_string_lossy().into_owned(),
                     max_duration_secs: None,
                     beep: false,
                     format: None,
@@ -940,166 +898,22 @@ mod tests {
                 },
                 caller_profile: None,
                 callee_profile: None,
-                reply: Some(reply_tx),
+                reply: Some(start_reply),
             })
             .unwrap();
+        start_response.await.unwrap();
 
-        // Wait for the reply (engine confirms recorder is created)
-        reply_rx.await.expect("StartRecording reply not received");
-
-        let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("channel closed");
-        assert!(matches!(ev, MediaEvent::RecordingStarted { .. }));
-
-        // StopRecording with reply
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (stop_reply, stop_response) = tokio::sync::oneshot::channel();
         engine
             .send(MediaCommand::StopRecording {
-                session_id: "rec1".into(),
-                reply: Some(reply_tx),
+                session_id: "record-control".into(),
+                reply: Some(stop_reply),
             })
             .unwrap();
-
-        let result = reply_rx.await.expect("StopRecording reply not received");
-        assert_eq!(result.path, path);
-        assert!(result.duration_secs >= 0.0);
-        assert_eq!(result.file_size, 44); // just the WAV header, no audio written
-
-        let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("channel closed");
-        assert!(matches!(ev, MediaEvent::RecordingStopped { .. }));
-
-        // Cleanup temp file
-        let _ = std::fs::remove_file(&tmp);
+        let result = stop_response.await.unwrap();
+        assert_eq!(result.path, path.to_string_lossy());
+        assert_eq!(result.file_size, 44);
     }
-
-    #[tokio::test]
-    async fn test_recording_pause_resume() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "rec2").await;
-        let _ = event_rx.recv().await;
-
-        // AttachRecorder
-        let recorder: Arc<PRwLock<Option<crate::recorder::Recorder>>> =
-            Arc::new(PRwLock::new(None));
-        let paused = Arc::new(AtomicBool::new(false));
-        engine
-            .send(MediaCommand::AttachRecorder {
-                session_id: "rec2".into(),
-                recorder,
-                paused,
-            })
-            .unwrap();
-
-        let tmp = std::env::temp_dir().join("test_engine_pause.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        // Start
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "rec2".into(),
-                config: RecordConfig {
-                    path,
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await; // RecordingStarted
-
-        // Pause
-        engine
-            .send(MediaCommand::PauseRecording {
-                session_id: "rec2".into(),
-            })
-            .unwrap();
-        let ev = event_rx.recv().await.unwrap();
-        assert!(matches!(ev, MediaEvent::RecordingPaused { .. }));
-
-        // Resume
-        engine
-            .send(MediaCommand::ResumeRecording {
-                session_id: "rec2".into(),
-            })
-            .unwrap();
-        let ev = event_rx.recv().await.unwrap();
-        assert!(matches!(ev, MediaEvent::RecordingResumed { .. }));
-
-        // Cleanup
-        assert!(engine.destroy_session("rec2"));
-        let _ = event_rx.recv().await; // SessionDestroyed
-    }
-
-    #[tokio::test]
-    async fn test_recording_double_start_fails() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "rec3").await;
-        let _ = event_rx.recv().await;
-
-        let tmp = std::env::temp_dir().join("test_engine_double.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "rec3".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await; // RecordingStarted
-
-        // Second StartRecording must fail — check via error event
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "rec3".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: None,
-            })
-            .unwrap();
-
-        let ev = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("channel closed");
-        assert!(
-            matches!(&ev, MediaEvent::Error { command, .. } if command == "start_recording"),
-            "expected Error for double start, got {:?}",
-            ev
-        );
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    // ── AttachBridge / InjectAudio tests ────────────────────────────────
 
     #[tokio::test]
     async fn test_attach_detach_bridge() {
@@ -1236,49 +1050,6 @@ mod tests {
     // ── Session cleanup ─────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_destroy_session_cleans_up_recorder() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "cln1").await;
-        let _ = event_rx.recv().await;
-
-        let tmp = std::env::temp_dir().join("test_engine_cleanup.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        // Start recording
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "cln1".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await;
-
-        // Destroy session — should finalize the recorder
-        assert!(engine.destroy_session("cln1"));
-        let _ = event_rx.recv().await; // SessionDestroyed
-
-        // The WAV file should have been finalized (header with data_size)
-        let meta = std::fs::metadata(&tmp).unwrap();
-        assert!(
-            meta.len() >= 44,
-            "WAV file should have header after cleanup"
-        );
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[tokio::test]
     async fn test_command_name() {
         assert_eq!(
             MediaCommand::CreateSession {
@@ -1296,14 +1067,6 @@ mod tests {
             }
             .name(),
             "play"
-        );
-        assert_eq!(
-            MediaCommand::StopRecording {
-                session_id: "x".into(),
-                reply: None,
-            }
-            .name(),
-            "stop_recording"
         );
     }
 
@@ -1331,20 +1094,15 @@ mod tests {
     async fn test_command_on_nonexistent_session() {
         let (engine, mut event_rx) = setup_engine();
 
-        // StartRecording requires a session — should fail.
+        // File playback requires a session and should fail before opening it.
         engine
-            .send(MediaCommand::StartRecording {
+            .send(MediaCommand::Play {
                 session_id: "nonexistent".into(),
-                config: RecordConfig {
+                leg_id: None,
+                source: PlaySource::File {
                     path: "/tmp/no.wav".into(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
                 },
-                caller_profile: None,
-                callee_profile: None,
-                reply: None,
+                options: PlayOptions::default(),
             })
             .unwrap();
 
@@ -1671,106 +1429,6 @@ mod tests {
     // ── Recorder codec selection from leg profiles ──────────────────────
 
     #[tokio::test]
-    async fn test_recording_codec_from_leg_profile() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "rcc1").await;
-        let _ = event_rx.recv().await;
-
-        let tmp = std::env::temp_dir().join("test_codec_sel.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        // Create a leg profile with PCMA codec
-        let caller_profile = crate::negotiate::NegotiatedLegProfile {
-            audio: Some(crate::negotiate::NegotiatedCodec {
-                codec: audio_codec::CodecType::PCMA,
-                payload_type: 8,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            video: None,
-            dtmf: None,
-            transport: rustrtc::TransportMode::Rtp,
-        };
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "rcc1".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: Some(caller_profile),
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await; // RecordingStarted
-
-        // Verify the recorder was created with PCMA by checking the WAV header
-        let data = std::fs::read(&tmp).unwrap();
-        assert!(data.len() >= 44);
-        // WAV format tag is at offset 20 (2 bytes), PCMA = 6
-        let format_tag = u16::from_le_bytes([data[20], data[21]]);
-        assert_eq!(
-            format_tag, 6,
-            "expected PCMA format tag (6), got {}",
-            format_tag
-        );
-
-        engine.destroy_session("rcc1");
-        let _ = event_rx.recv().await;
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    // ── Recording codec falls back to PCMU ──────────────────────────────
-
-    #[tokio::test]
-    async fn test_recording_codec_fallback_pcmu() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "rcf1").await;
-        let _ = event_rx.recv().await;
-
-        let tmp = std::env::temp_dir().join("test_codec_fallback.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "rcf1".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await;
-
-        let data = std::fs::read(&tmp).unwrap();
-        let format_tag = u16::from_le_bytes([data[20], data[21]]);
-        assert_eq!(
-            format_tag, 7,
-            "expected PCMU format tag (7), got {}",
-            format_tag
-        );
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    // ── Play with unsupported sources ───────────────────────────────────
-
-    #[tokio::test]
     async fn test_play_silence_no_event() {
         let (engine, mut event_rx) = setup_engine();
         create_session(&engine, "ps1").await;
@@ -1834,7 +1492,7 @@ mod tests {
             Some("s1")
         );
         assert_eq!(
-            MediaEvent::RecordingStarted {
+            MediaEvent::SipFlowStarted {
                 session_id: "r1".into()
             }
             .session_id(),
@@ -2075,78 +1733,6 @@ mod tests {
         let _ = std::fs::remove_file(&wav_path);
     }
 
-    /// PauseRecording with Ordering::Release — verify the flag is immediately
-    /// visible via Acquire load after the RecordingPaused event arrives.
-    #[tokio::test]
-    async fn test_pause_recording_flag_visible_after_event() {
-        let (engine, mut event_rx) = setup_engine();
-        create_session(&engine, "pr_flag").await;
-        let _ = event_rx.recv().await;
-
-        let tmp = std::env::temp_dir().join("test_pr_flag.wav");
-        let path = tmp.to_string_lossy().to_string();
-
-        // Attach a shared paused flag so the test can inspect it directly.
-        let paused_flag = Arc::new(AtomicBool::new(false));
-        let recorder: Arc<PRwLock<Option<crate::recorder::Recorder>>> =
-            Arc::new(PRwLock::new(None));
-        engine
-            .send(MediaCommand::AttachRecorder {
-                session_id: "pr_flag".into(),
-                recorder,
-                paused: paused_flag.clone(),
-            })
-            .unwrap();
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        engine
-            .send(MediaCommand::StartRecording {
-                session_id: "pr_flag".into(),
-                config: RecordConfig {
-                    path: path.clone(),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    stereo_swap: false,
-                },
-                caller_profile: None,
-                callee_profile: None,
-                reply: Some(reply_tx),
-            })
-            .unwrap();
-        reply_rx.await.unwrap();
-        let _ = event_rx.recv().await; // RecordingStarted
-
-        engine
-            .send(MediaCommand::PauseRecording {
-                session_id: "pr_flag".into(),
-            })
-            .unwrap();
-        let _ = event_rx.recv().await; // RecordingPaused
-
-        // After the event the flag must already be set (Release/Acquire pair).
-        assert!(
-            paused_flag.load(std::sync::atomic::Ordering::Acquire),
-            "paused flag must be true after RecordingPaused event"
-        );
-
-        engine
-            .send(MediaCommand::ResumeRecording {
-                session_id: "pr_flag".into(),
-            })
-            .unwrap();
-        let _ = event_rx.recv().await; // RecordingResumed
-
-        assert!(
-            !paused_flag.load(std::sync::atomic::Ordering::Acquire),
-            "paused flag must be false after RecordingResumed event"
-        );
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    /// MuteLeg with a bridge attached must actually put the bridge output in
-    /// muted state (BRIDGE_OUTPUT_MUTED = 2).
     #[tokio::test]
     async fn test_mute_unmute_leg_bridge_output_mode() {
         let (engine, mut event_rx) = setup_engine();

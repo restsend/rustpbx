@@ -4,216 +4,376 @@
 //! - Receiver interceptor fires on every incoming RTP (caller mic) → Leg::A
 //! - Sender interceptor fires on every outgoing RTP (caller egress) → Leg::B
 //!
-//! Both write directly to their sinks (file recorder + sipflow backend) —
-//! **no broadcast channel, no drain task, no intermediate buffer.**
-//! The hot path does:
-//!   1. `AtomicBool::load` (1 ns when inactive)
-//!   2. `recorder.try_write()` (non-blocking, skip if locked)
-//!   3. `Bytes::clone()` for payload (Arc refcount bump — 0 byte copy)
-//!   4. `packet.marshal()` for sipflow (1 alloc, unavoidable for raw storage)
+//! Both enqueue already packetized RTP into one bounded call-scoped RTP queue.
+//! A separate control channel drives the same worker's recording lifecycle,
+//! keeping control traffic independent from RTP queue pressure.
 
 use crate::ReceiveTimestampClock;
+use crate::negotiate::NegotiatedLegProfile;
 use crate::recorder::{Leg, Recorder};
-use rustpbx_sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use parking_lot::RwLock;
+use rustpbx_sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use rustrtc::media::MediaSample;
 use rustrtc::media::frame::AudioFrame;
 use rustrtc::rtp::{RtcpPacket, RtpPacket};
 use rustrtc::transports::rtp::RtpTransport;
 use rustrtc::{RtpReceiverInterceptor, RtpSenderInterceptor};
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{trace, warn};
 
-/// Recording tap that directly writes incoming/outgoing RTP to file + sipflow.
-///
-/// Clone-cheap (Arc bumps). Install one per direction (recv → Leg::A,
-/// send → Leg::B) on the **caller's** PeerConnection via
-/// `RtcConfigurationBuilder::receiver_interceptor / sender_interceptor`.
-pub struct RecorderTap {
-    /// File recorder (shared with the session). `None` = file recording disabled.
-    recorder: Option<Arc<RwLock<Option<Recorder>>>>,
-    /// Sipflow backend. `None` = sipflow disabled.
-    sipflow: Option<Arc<dyn SipFlowBackend>>,
-    /// Call-ID for sipflow storage.
-    call_id: String,
-    /// Leg tag: `Leg::A` for recv (caller mic), `Leg::B` for send (caller egress).
+const DEFAULT_CAPTURE_QUEUE_CAPACITY: usize = 2048;
+
+struct CapturedRtp {
     leg: Leg,
-    /// Shared pause flag (same Arc as `SipSession::recording_paused`).
-    /// When `true`, the tap is a no-op (1 atomic read + return).
-    paused: Arc<AtomicBool>,
-    allowed_pts: Vec<u8>,
-    clock: ReceiveTimestampClock,
-    /// Diagnostic: total packets captured (for debugging empty-WAV issues).
-    pkt_count: AtomicU64,
+    packet: RtpPacket,
+    src_addr: SocketAddr,
+    dst_addr: SocketAddr,
+    timestamp_us: u64,
 }
 
-impl RecorderTap {
-    /// Create a recv-side tap (Leg::A = caller mic).
-    pub fn for_recv(
-        recorder: Option<Arc<RwLock<Option<Recorder>>>>,
-        sipflow: Option<Arc<dyn SipFlowBackend>>,
-        call_id: String,
-        paused: Arc<AtomicBool>,
+/// File result returned only after the worker has finalized the recorder.
+#[derive(Debug, Clone)]
+pub struct RecordingResult {
+    pub path: String,
+    pub duration_secs: f64,
+    pub file_size: u64,
+}
+
+enum RecorderCommand {
+    Start {
+        path: String,
+        caller_profile: Option<NegotiatedLegProfile>,
+        stereo_swap: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Pause,
+    Resume,
+    Stop {
+        reply: oneshot::Sender<Result<Option<RecordingResult>>>,
+    },
+}
+
+/// Cloneable sender for one caller-facing RTP capture queue and recording task.
+///
+/// Track builders turn this sender into one shared interceptor and install it
+/// on both directions (recv → Leg::A, send → Leg::B) of the **caller's**
+/// PeerConnection. Callers carry only this sender; they do not build or store
+/// RTC interceptor trait objects.
+#[derive(Clone)]
+pub struct RecorderSender {
+    tx: mpsc::Sender<CapturedRtp>,
+    clock: ReceiveTimestampClock,
+    allowed_pts: Vec<u8>,
+    dropped: Arc<AtomicU64>,
+}
+
+/// Control-plane owner for one caller-facing recorder task.
+///
+/// It exposes lifecycle commands. Control and RTP have separate channels into
+/// one worker.
+#[derive(Clone)]
+pub struct RecorderHandle {
+    tx: mpsc::UnboundedSender<RecorderCommand>,
+    uses_sipflow: bool,
+}
+
+impl RecorderHandle {
+    /// Create the one call-scoped recording task, its control handle, and its RTP sender.
+    /// `sipflow = None` selects the file recorder, which is created lazily by `Start`.
+    /// The task always starts dormant; lifecycle commands sent through the
+    /// returned handle are the only way to activate capture.
+    pub fn new(
+        sipflow: Option<(Arc<dyn SipFlowBackend>, String)>,
         allowed_pts: Vec<u8>,
-    ) -> Self {
-        Self {
-            recorder,
-            sipflow,
-            call_id,
-            leg: Leg::A,
-            paused,
-            allowed_pts,
+    ) -> (Self, RecorderSender) {
+        let uses_sipflow = sipflow.is_some();
+        let (rtp_tx, rtp_rx) = mpsc::channel::<CapturedRtp>(DEFAULT_CAPTURE_QUEUE_CAPACITY);
+        let (command_tx, command_rx) = mpsc::unbounded_channel::<RecorderCommand>();
+
+        tokio::spawn(async move {
+            run_capture_worker(rtp_rx, command_rx, sipflow).await;
+        });
+
+        let rtp_sender = RecorderSender {
+            tx: rtp_tx,
             clock: ReceiveTimestampClock::new(),
-            pkt_count: AtomicU64::new(0),
-        }
-    }
-
-    /// Create a send-side tap (Leg::B = caller egress).
-    pub fn for_send(
-        recorder: Option<Arc<RwLock<Option<Recorder>>>>,
-        sipflow: Option<Arc<dyn SipFlowBackend>>,
-        call_id: String,
-        paused: Arc<AtomicBool>,
-        allowed_pts: Vec<u8>,
-    ) -> Self {
-        Self {
-            recorder,
-            sipflow,
-            call_id,
-            leg: Leg::B,
-            paused,
             allowed_pts,
-            clock: ReceiveTimestampClock::new(),
-            pkt_count: AtomicU64::new(0),
-        }
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        (
+            Self {
+                tx: command_tx,
+                uses_sipflow,
+            },
+            rtp_sender,
+        )
     }
 
-    /// Clone-cheap: all fields are Arc or String.
-    pub fn clone_arc(&self) -> Self {
-        Self {
-            recorder: self.recorder.clone(),
-            sipflow: self.sipflow.clone(),
-            call_id: self.call_id.clone(),
-            leg: self.leg,
-            paused: self.paused.clone(),
-            allowed_pts: self.allowed_pts.clone(),
-            clock: self.clock.clone(),
-            pkt_count: AtomicU64::new(0),
-        }
-    }
-
-    /// Total packets captured (for diagnostics).
-    pub fn pkt_count(&self) -> u64 {
-        self.pkt_count.load(Ordering::Relaxed)
-    }
-
-    /// Core capture — called from both interceptor trait impls.
-    #[inline]
-    fn capture(
+    pub async fn start(
         &self,
-        packet: &RtpPacket,
-        peer_addr: std::net::SocketAddr,
-        local_addr: std::net::SocketAddr,
-    ) {
-        // 1. Pause guard — when paused, hot path is 1 relaxed load + return.
-        if self.paused.load(Ordering::Relaxed) {
-            return;
+        path: String,
+        caller_profile: Option<NegotiatedLegProfile>,
+        stereo_swap: bool,
+    ) -> Result<()> {
+        if self.uses_sipflow {
+            return self.resume();
         }
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(RecorderCommand::Start {
+                path,
+                caller_profile,
+                stereo_swap,
+                reply,
+            })
+            .map_err(|_| anyhow!("recorder task stopped"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("recorder task stopped"))?
+    }
 
+    pub fn pause(&self) -> Result<()> {
+        self.tx
+            .send(RecorderCommand::Pause)
+            .map_err(|_| anyhow!("recorder task stopped"))
+    }
+
+    pub fn resume(&self) -> Result<()> {
+        self.tx
+            .send(RecorderCommand::Resume)
+            .map_err(|_| anyhow!("recorder task stopped"))
+    }
+
+    pub async fn stop(&self) -> Result<Option<RecordingResult>> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(RecorderCommand::Stop { reply })
+            .map_err(|_| anyhow!("recorder task stopped"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("recorder task stopped"))?
+    }
+}
+
+impl RecorderSender {
+    /// Capture one audio/DTMF RTP packet without blocking the media path.
+    #[inline]
+    fn capture(&self, leg: Leg, packet: &RtpPacket, src_addr: SocketAddr, dst_addr: SocketAddr) {
         let pt = packet.header.payload_type;
-
-        // 2. PT filter: only capture audio + DTMF, skip video.
         if !self.allowed_pts.is_empty() && !self.allowed_pts.contains(&pt) {
             return;
         }
-        let timestamp_us = self.clock.now_micros();
-        let count = self.pkt_count.fetch_add(1, Ordering::Relaxed);
-        if count == 0 {
-            tracing::info!(
-                leg = ?self.leg,
-                pt = pt,
-                ssrc = packet.header.ssrc,
-                peer_addr = %peer_addr,
-                local_addr = %local_addr,
-                has_recorder = self.recorder.is_some(),
-                has_sipflow = self.sipflow.is_some(),
-                call_id = %self.call_id,
-                "RecorderTap first packet captured"
-            );
-        }
 
-        // 2. File recorder: try_write (non-blocking). If the lock is held
-        //    (another thread is writing), skip this packet — same semantics
-        //    as the previous try_send-on-full-channel approach.
-        if let Some(rec) = &self.recorder {
-            if let Some(mut guard) = rec.try_write() {
-                if let Some(r) = guard.as_mut() {
-                    // Construct a minimal AudioFrame from the raw RTP packet.
-                    // raw_packet = None so write_sample uses frame.data.clone()
-                    // (Bytes Arc-bump) instead of Bytes::copy_from_slice.
-                    let frame = AudioFrame {
-                        rtp_timestamp: packet.header.timestamp,
-                        clock_rate: 8000, // write_sample determines actual rate from profile
-                        data: packet.payload.clone(), // Bytes Arc-bump — 0 byte copy
-                        sequence_number: Some(packet.header.sequence_number),
-                        payload_type: Some(pt),
-                        marker: packet.header.marker,
-                        header_extension: None,
-                        source_addr: None,
-                        raw_packet: None,
-                    };
-                    let sample = MediaSample::Audio(frame);
-                    let wr = r.write_sample(self.leg, &sample, None, None, None);
-                    if let Err(e) = &wr {
-                        warn!(leg=?self.leg, pt=pt, "recorder write_sample error: {e}");
-                    }
-                }
-            }
-        }
-
-        // 3. Sipflow: marshal once + send to unbounded channel.
-        //    marshal() allocates a Vec<u8> (header + payload) — unavoidable
-        //    for raw RTP storage. The channel send is non-blocking.
-        //
-        //    Address semantics per leg:
-        //      Leg::A (recv): src = remote peer (caller), dst = local server
-        //      Leg::B (send): src = local server, dst = remote peer (caller egress)
-        if let Some(backend) = &self.sipflow {
-            if let Ok(rtp_bytes) = packet.marshal() {
-                let (src_addr, dst_addr) = match self.leg {
-                    Leg::A => (peer_addr.to_string(), local_addr.to_string()),
-                    Leg::B => (local_addr.to_string(), peer_addr.to_string()),
-                };
-                let item = SipFlowItem {
-                    timestamp: timestamp_us,
-                    seq: packet.header.sequence_number as u64,
-                    leg: Some(self.leg as i32),
-                    msg_type: SipFlowMsgType::Rtp,
-                    src_addr,
-                    dst_addr,
-                    payload: Bytes::from(rtp_bytes),
-                };
-                if let Err(e) = backend.record(Cow::Borrowed(self.call_id.as_str()), item) {
-                    trace!("sipflow record error: {e}");
+        let captured = CapturedRtp {
+            leg,
+            packet: packet.clone(),
+            src_addr,
+            dst_addr,
+            timestamp_us: self.clock.now_micros(),
+        };
+        if let Err(error) = self.tx.try_send(captured) {
+            if matches!(error, mpsc::error::TrySendError::Full(_)) {
+                let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped == 1 || dropped % 1000 == 0 {
+                    warn!(dropped, "caller RTP capture queue full; packet dropped");
                 }
             }
         }
     }
 }
 
+async fn run_capture_worker(
+    mut rtp_rx: mpsc::Receiver<CapturedRtp>,
+    mut command_rx: mpsc::UnboundedReceiver<RecorderCommand>,
+    sipflow: Option<(Arc<dyn SipFlowBackend>, String)>,
+) {
+    let mut recorder: Option<Recorder> = None;
+    let mut active = false;
+    let mut rtp_open = true;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    rtp_rx.close();
+                    drain_queued_rtp(
+                        &mut rtp_rx,
+                        active,
+                        &mut recorder,
+                        &sipflow,
+                    );
+                    if let Err(error) = finalize_recorder(&mut recorder) {
+                        warn!(%error, "failed to finalize recorder after control handles dropped");
+                    }
+                    return;
+                };
+
+                match command {
+                    RecorderCommand::Start {
+                        path,
+                        caller_profile,
+                        stereo_swap,
+                        reply,
+                    } => {
+                        drain_queued_rtp(
+                            &mut rtp_rx,
+                            active,
+                            &mut recorder,
+                            &sipflow,
+                        );
+                        match Recorder::new_caller_facing(&path, caller_profile, stereo_swap) {
+                            Ok(created) => recorder = Some(created),
+                            Err(error) => {
+                                warn!(%path, %error, "failed to start recording");
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        }
+
+                        active = true;
+                        let _ = reply.send(Ok(()));
+                    }
+                    RecorderCommand::Pause => {
+                        drain_queued_rtp(
+                            &mut rtp_rx,
+                            active,
+                            &mut recorder,
+                            &sipflow,
+                        );
+                        active = false;
+                    }
+                    RecorderCommand::Resume => {
+                        drain_queued_rtp(
+                            &mut rtp_rx,
+                            active,
+                            &mut recorder,
+                            &sipflow,
+                        );
+                        active = true;
+                    }
+                    RecorderCommand::Stop { reply } => {
+                        drain_queued_rtp(
+                            &mut rtp_rx,
+                            active,
+                            &mut recorder,
+                            &sipflow,
+                        );
+                        active = false;
+                        let _ = reply.send(finalize_recorder(&mut recorder));
+                    }
+                }
+            }
+            captured = rtp_rx.recv(), if rtp_open => {
+                match captured {
+                    Some(captured) => {
+                        process_captured_rtp(captured, active, &mut recorder, &sipflow)
+                    }
+                    None => rtp_open = false,
+                }
+            }
+        }
+    }
+}
+
+fn drain_queued_rtp(
+    rtp_rx: &mut mpsc::Receiver<CapturedRtp>,
+    active: bool,
+    recorder: &mut Option<Recorder>,
+    sipflow: &Option<(Arc<dyn SipFlowBackend>, String)>,
+) {
+    let queued = rtp_rx.len();
+    for _ in 0..queued {
+        let Ok(captured) = rtp_rx.try_recv() else {
+            break;
+        };
+        process_captured_rtp(captured, active, recorder, sipflow);
+    }
+}
+
+fn process_captured_rtp(
+    captured: CapturedRtp,
+    active: bool,
+    recorder: &mut Option<Recorder>,
+    sipflow: &Option<(Arc<dyn SipFlowBackend>, String)>,
+) {
+    if !active {
+        return;
+    }
+
+    if let Some(recorder) = recorder.as_mut() {
+        let packet = &captured.packet;
+        let frame = AudioFrame {
+            rtp_timestamp: packet.header.timestamp,
+            clock_rate: 8000,
+            data: packet.payload.clone(),
+            sequence_number: Some(packet.header.sequence_number),
+            payload_type: Some(packet.header.payload_type),
+            marker: packet.header.marker,
+            header_extension: packet.header.extension.clone(),
+            source_addr: None,
+            raw_packet: Some(packet.clone()),
+        };
+        if let Err(error) =
+            recorder.write_sample(captured.leg, &MediaSample::Audio(frame), None, None, None)
+        {
+            trace!(leg = ?captured.leg, %error, "file recorder write error");
+        }
+    }
+
+    if let Some((sipflow, call_id)) = sipflow.as_ref() {
+        let result: Result<()> = (|| {
+            let item = SipFlowItem {
+                timestamp: captured.timestamp_us,
+                seq: captured.packet.header.sequence_number as u64,
+                leg: Some(captured.leg as i32),
+                msg_type: SipFlowMsgType::Rtp,
+                src_addr: captured.src_addr.to_string(),
+                dst_addr: captured.dst_addr.to_string(),
+                payload: Bytes::from(captured.packet.marshal()?),
+            };
+            sipflow.record(Cow::Borrowed(call_id.as_str()), item)
+        })();
+        if let Err(error) = result {
+            trace!(leg = ?captured.leg, %error, "SipFlow recorder write error");
+        }
+    }
+}
+
+fn finalize_recorder(recorder: &mut Option<Recorder>) -> Result<Option<RecordingResult>> {
+    let Some(mut recorder) = recorder.take() else {
+        return Ok(None);
+    };
+    recorder.finalize()?;
+    let path = recorder.path.clone();
+    let duration_secs = recorder.duration_secs();
+    let file_size = std::fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    Ok(Some(RecordingResult {
+        path,
+        duration_secs,
+        file_size,
+    }))
+}
+
 #[async_trait]
-impl RtpReceiverInterceptor for RecorderTap {
+impl RtpReceiverInterceptor for RecorderSender {
     async fn on_packet_received(
         &self,
         packet: &RtpPacket,
-        src_addr: std::net::SocketAddr,
-        local_addr: std::net::SocketAddr,
+        src_addr: SocketAddr,
+        local_addr: SocketAddr,
     ) -> Option<RtcpPacket> {
-        self.capture(packet, src_addr, local_addr);
+        self.capture(Leg::A, packet, src_addr, local_addr);
         None
     }
 
@@ -221,54 +381,25 @@ impl RtpReceiverInterceptor for RecorderTap {
 }
 
 #[async_trait]
-impl RtpSenderInterceptor for RecorderTap {
+impl RtpSenderInterceptor for RecorderSender {
     async fn on_packet_sent(
         &self,
         packet: &RtpPacket,
-        dst_addr: std::net::SocketAddr,
-        local_addr: std::net::SocketAddr,
+        dst_addr: SocketAddr,
+        local_addr: SocketAddr,
     ) {
-        self.capture(packet, dst_addr, local_addr);
+        self.capture(Leg::B, packet, local_addr, dst_addr);
     }
 
     async fn on_rtcp_received(&self, _packet: &RtcpPacket, _transport: Arc<RtpTransport>) {}
 }
 
-/// Convenience: build `RecorderInterceptors` for a caller PC's `RtcConfiguration`.
-///
-/// Returns a list suitable for `RtcConfigurationBuilder::receiver_interceptor`
-/// and `sender_interceptor`. The `active` flag is shared — flip it to start/stop
-/// recording without rebuilding the PC.
-pub fn build_caller_interceptors(
-    recorder: Option<Arc<RwLock<Option<Recorder>>>>,
-    sipflow: Option<Arc<dyn SipFlowBackend>>,
-    call_id: String,
-    paused: Arc<AtomicBool>,
-    allowed_pts: Vec<u8>,
-) -> (Arc<RecorderTap>, Arc<RecorderTap>) {
-    let recv_tap = Arc::new(RecorderTap::for_recv(
-        recorder.clone(),
-        sipflow.clone(),
-        call_id.clone(),
-        paused.clone(),
-        allowed_pts.clone(),
-    ));
-    let send_tap = Arc::new(RecorderTap::for_send(
-        recorder,
-        sipflow,
-        call_id,
-        paused,
-        allowed_pts,
-    ));
-    (recv_tap, send_tap)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recorder::Recorder;
-    use rustpbx_sipflow::SipFlowItem;
+    use crate::negotiate::NegotiatedLegProfile;
     use audio_codec::CodecType;
+    use rustpbx_sipflow::SipFlowItem;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::sync::atomic::AtomicUsize;
 
@@ -277,23 +408,89 @@ mod tests {
         RtpPacket::new(header, payload)
     }
 
+    async fn file_recorder(allowed_pts: Vec<u8>) -> (RecorderSender, RecorderHandle) {
+        let (handle, sender) = RecorderHandle::new(None, allowed_pts);
+        handle.resume().unwrap();
+        tokio::task::yield_now().await;
+        (sender, handle)
+    }
+
+    async fn sipflow_recorder(
+        sipflow: Arc<dyn SipFlowBackend>,
+        call_id: &str,
+        allowed_pts: Vec<u8>,
+    ) -> (RecorderSender, RecorderHandle) {
+        let (handle, sender) =
+            RecorderHandle::new(Some((sipflow, call_id.to_string())), allowed_pts);
+        handle.resume().unwrap();
+        tokio::task::yield_now().await;
+        (sender, handle)
+    }
+
+    fn pcmu_profile() -> NegotiatedLegProfile {
+        use crate::negotiate::NegotiatedCodec;
+        NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        }
+    }
+
+    async fn start_file(handle: &RecorderHandle, path: &std::path::Path) {
+        handle
+            .start(
+                path.to_string_lossy().into_owned(),
+                Some(pcmu_profile()),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
     /// Stand-in backend that counts recorded items.
     struct CountingBackend {
         count: AtomicUsize,
+        legs: parking_lot::Mutex<Vec<Option<i32>>>,
+        flows: parking_lot::Mutex<Vec<(String, String)>>,
     }
     impl CountingBackend {
         fn new() -> Self {
             Self {
                 count: AtomicUsize::new(0),
+                legs: parking_lot::Mutex::new(Vec::new()),
+                flows: parking_lot::Mutex::new(Vec::new()),
             }
         }
         fn count(&self) -> usize {
             self.count.load(Ordering::SeqCst)
         }
+
+        fn legs(&self) -> Vec<Option<i32>> {
+            self.legs.lock().clone()
+        }
+
+        fn flows(&self) -> Vec<(String, String)> {
+            self.flows.lock().clone()
+        }
     }
     #[async_trait]
     impl SipFlowBackend for CountingBackend {
-        fn record(&self, _call_id: Cow<'_, str>, _item: SipFlowItem) -> anyhow::Result<()> {
+        fn record(&self, _call_id: Cow<'_, str>, item: SipFlowItem) -> anyhow::Result<()> {
+            let mut legs = self.legs.lock();
+            if legs.len() < 16 {
+                legs.push(item.leg);
+            }
+            drop(legs);
+            let mut flows = self.flows.lock();
+            if flows.len() < 16 {
+                flows.push((item.src_addr.clone(), item.dst_addr.clone()));
+            }
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -326,12 +523,26 @@ mod tests {
     #[tokio::test]
     async fn inactive_tap_does_nothing() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(true)); // paused → skip
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "call-1".into(),
-            paused,
+        let (tap, handle) = sipflow_recorder(backend.clone(), "call-1", vec![]).await;
+        handle.pause().unwrap();
+        tokio::task::yield_now().await;
+
+        let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
+        tap.on_packet_received(
+            &pkt,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+        handle.stop().await.unwrap();
+        assert_eq!(backend.count(), 0, "inactive tap should not record");
+    }
+
+    #[tokio::test]
+    async fn sipflow_target_does_not_activate_dormant_recording() {
+        let backend = Arc::new(CountingBackend::new());
+        let (handle, tap) = RecorderHandle::new(
+            Some((backend.clone(), "dormant-sipflow".to_string())),
             vec![],
         );
 
@@ -342,20 +553,40 @@ mod tests {
             std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
         )
         .await;
-        assert_eq!(backend.count(), 0, "inactive tap should not record");
+
+        handle.stop().await.unwrap();
+        assert_eq!(
+            backend.count(),
+            0,
+            "configured SipFlow target must not activate recording"
+        );
+    }
+
+    #[tokio::test]
+    async fn dormant_tap_activates_when_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live_tap.wav");
+        let (handle, tap) = RecorderHandle::new(None, vec![0]);
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 5060));
+        let local = std::net::SocketAddr::from(([127, 0, 0, 1], 10000));
+
+        tap.on_packet_received(&make_rtp_packet(0, 1, 160, vec![0x55; 160]), peer, local)
+            .await;
+
+        start_file(&handle, &path).await;
+
+        tap.on_packet_received(&make_rtp_packet(0, 2, 320, vec![0x55; 160]), peer, local)
+            .await;
+
+        let result = handle.stop().await.unwrap().unwrap();
+        assert_eq!(result.path, path.to_string_lossy());
+        assert!(result.file_size > 44);
     }
 
     #[tokio::test]
     async fn active_tap_records_to_sipflow() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false)); // not paused → record
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "call-2".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "call-2", vec![]).await;
 
         for i in 0..5u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
@@ -366,54 +597,30 @@ mod tests {
             )
             .await;
         }
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 5, "should record 5 packets");
     }
 
     #[tokio::test]
     async fn send_tap_uses_leg_b() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_send(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "call-3".into(),
-            paused,
-            vec![],
-        );
-        assert_eq!(tap.leg, Leg::B);
+        let (tap, handle) = sipflow_recorder(backend.clone(), "call-3", vec![]).await;
+        tap.on_packet_sent(
+            &make_rtp_packet(0, 1, 160, vec![0x55; 160]),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        )
+        .await;
+        handle.stop().await.unwrap();
+        assert_eq!(backend.legs(), vec![Some(Leg::B as i32)]);
     }
 
     #[tokio::test]
     async fn file_recorder_writes_audio() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tap_test.wav");
-        let mut rec = Recorder::new(path.to_str().unwrap(), CodecType::PCMU).unwrap();
-
-        // Set up PCMU profile for leg A
-        use crate::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
-        let profile = NegotiatedLegProfile {
-            audio: Some(NegotiatedCodec {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            video: None,
-            dtmf: None,
-            transport: rustrtc::TransportMode::Rtp,
-        };
-        rec.set_leg_profile(Leg::A, profile.clone());
-        rec.set_leg_profile(Leg::B, profile);
-
-        let recorder_arc = Arc::new(RwLock::new(Some(rec)));
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            Some(recorder_arc.clone()),
-            None,
-            "call-4".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = file_recorder(vec![]).await;
+        start_file(&handle, &path).await;
 
         // Send 10 PCMU packets (200ms of audio)
         for i in 0..10u16 {
@@ -426,33 +633,88 @@ mod tests {
             .await;
         }
 
-        // Finalize recorder
-        {
-            let mut g = recorder_arc.write();
-            if let Some(r) = g.as_mut() {
-                r.finalize().unwrap();
+        let result = handle.stop().await.unwrap().unwrap();
+        assert!(
+            result.file_size > 44,
+            "WAV should have header + data, got {} bytes",
+            result.file_size
+        );
+        assert!(
+            (result.duration_secs - 0.2).abs() < 0.000_001,
+            "duration should come from 1600 written samples at 8 kHz, got {}",
+            result.duration_secs
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_finalizes_and_same_worker_can_start_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.wav");
+        let second_path = dir.path().join("second.wav");
+        let (tap, handle) = file_recorder(vec![0]).await;
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 5060));
+        let local = std::net::SocketAddr::from(([127, 0, 0, 1], 10000));
+
+        for (path, sequence_base) in [(&first_path, 0), (&second_path, 100)] {
+            start_file(&handle, path).await;
+            for offset in 0..10 {
+                let sequence = sequence_base + offset;
+                tap.on_packet_received(
+                    &make_rtp_packet(0, sequence, sequence as u32 * 160, vec![0x55; 160]),
+                    peer,
+                    local,
+                )
+                .await;
             }
+            let result = handle.stop().await.unwrap().unwrap();
+            assert_eq!(result.path, path.to_string_lossy());
+            assert!(result.file_size > 44);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_last_control_handle_finalizes_and_stops_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop-finalize.wav");
+        let (tap, handle) = file_recorder(vec![0]).await;
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 5060));
+        let local = std::net::SocketAddr::from(([127, 0, 0, 1], 10000));
+
+        start_file(&handle, &path).await;
+        for sequence in 0..10 {
+            tap.on_packet_received(
+                &make_rtp_packet(0, sequence, sequence as u32 * 160, vec![0x55; 160]),
+                peer,
+                local,
+            )
+            .await;
         }
 
-        let metadata = std::fs::metadata(&path).unwrap();
-        assert!(
-            metadata.len() > 44,
-            "WAV should have header + data, got {} bytes",
-            metadata.len()
+        drop(handle);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !tap.tx.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recorder worker did not stop after its last control handle dropped");
+
+        let wav = std::fs::read(&path).unwrap();
+        assert!(wav.len() > 44);
+        assert_eq!(
+            u32::from_le_bytes(wav[4..8].try_into().unwrap()),
+            wav.len() as u32 - 8
+        );
+        assert_eq!(
+            u32::from_le_bytes(wav[40..44].try_into().unwrap()),
+            wav.len() as u32 - 44
         );
     }
 
     #[tokio::test]
     async fn dtmf_packet_captured() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "call-dtmf".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "call-dtmf", vec![]).await;
 
         // DTMF digit '5' end event (PT 101, 4-byte payload)
         let dtmf_payload = vec![5u8, 0x80, 0x00, 0xA0];
@@ -464,6 +726,7 @@ mod tests {
         )
         .await;
 
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 1, "DTMF packet should be captured");
     }
 
@@ -473,46 +736,25 @@ mod tests {
         assert_eq!(Leg::B as i32, 1);
     }
 
-    // ── Dual recording: file + sipflow simultaneously ───────────────────
+    // ── Exactly one recording target per worker ─────────────────────────
 
     #[tokio::test]
-    async fn dual_file_and_sipflow_capture() {
+    async fn sipflow_start_does_not_create_a_file_recorder() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dual.wav");
-        let mut rec = Recorder::new(path.to_str().unwrap(), CodecType::PCMU).unwrap();
-
-        use crate::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
-        let profile = NegotiatedLegProfile {
-            audio: Some(NegotiatedCodec {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            video: None,
-            dtmf: Some(NegotiatedCodec {
-                payload_type: 101,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            transport: rustrtc::TransportMode::Rtp,
-        };
-        rec.set_leg_profile(Leg::A, profile.clone());
-        rec.set_leg_profile(Leg::B, profile);
-        let recorder_arc = Arc::new(RwLock::new(Some(rec)));
-
+        let path = dir.path().join("must-not-exist.wav");
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            Some(recorder_arc.clone()),
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "dual-call".into(),
-            paused,
-            vec![],
-        );
+        let (handle, tap) =
+            RecorderHandle::new(Some((backend.clone(), "sipflow-only".to_string())), vec![]);
+        handle
+            .start(
+                path.to_string_lossy().into_owned(),
+                Some(pcmu_profile()),
+                false,
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
 
-        // Send 10 audio + 2 DTMF packets
         for i in 0..10u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
             tap.on_packet_received(
@@ -522,28 +764,11 @@ mod tests {
             )
             .await;
         }
-        for i in 10..12u16 {
-            let pkt = make_rtp_packet(101, i, 1600, vec![5u8, 0x80, 0x00, 0xA0]);
-            tap.on_packet_received(
-                &pkt,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
-                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-            )
-            .await;
-        }
 
-        // Sipflow should have all 12 packets
-        assert_eq!(backend.count(), 12, "sipflow should receive all 12 packets");
-
-        // File recorder should have audio + DTMF rendered
-        {
-            let mut g = recorder_arc.write();
-            if let Some(r) = g.as_mut() {
-                r.finalize().unwrap();
-            }
-        }
-        let metadata = std::fs::metadata(&path).unwrap();
-        assert!(metadata.len() > 44, "WAV should have data");
+        let result = handle.stop().await.unwrap();
+        assert!(result.is_none(), "SipFlow backend has no file result");
+        assert_eq!(backend.count(), 10);
+        assert!(!path.exists(), "SipFlow backend must not create a WAV file");
     }
 
     // ── Pause/resume ───────────────────────────────────────────────────
@@ -551,14 +776,7 @@ mod tests {
     #[tokio::test]
     async fn pause_stops_capture_resume_continues() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "pause-call".into(),
-            paused.clone(),
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "pause-call", vec![]).await;
 
         // 3 packets while active
         for i in 0..3u16 {
@@ -570,10 +788,9 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(backend.count(), 3);
-
         // Pause
-        paused.store(true, Ordering::SeqCst);
+        handle.pause().unwrap();
+        tokio::task::yield_now().await;
 
         // 3 packets while paused — should be skipped
         for i in 3..6u16 {
@@ -585,10 +802,9 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(backend.count(), 3, "paused tap should not capture");
-
         // Resume
-        paused.store(false, Ordering::SeqCst);
+        handle.resume().unwrap();
+        tokio::task::yield_now().await;
 
         for i in 6..9u16 {
             let pkt = make_rtp_packet(0, i, i as u32 * 160, vec![0x55u8; 160]);
@@ -599,6 +815,7 @@ mod tests {
             )
             .await;
         }
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 6, "resumed tap should capture again");
     }
 
@@ -606,17 +823,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_memory_leak_high_packet_count() {
-        // The RecorderTap should not accumulate any per-packet state.
+        // The RecorderSender should not accumulate any per-packet state.
         // After N packets, the tap struct size should remain constant.
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "leak-test".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "leak-test", vec![]).await;
 
         // Send 1000 packets
         for i in 0..1000u16 {
@@ -629,55 +839,39 @@ mod tests {
             .await;
         }
 
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 1000);
-        // The tap itself holds no Vec/buffer — it's stateless beyond the
-        // shared Arc references. The CountingBackend's count is just an
-        // AtomicUsize, which doesn't grow.
+        // The tap keeps no packet collection; the test backend retains only
+        // capped diagnostic metadata and an AtomicUsize count.
     }
 
     // ── Leg isolation: recv=Leg::A, send=Leg::B ────────────────────────
 
     #[tokio::test]
     async fn recv_tap_tags_leg_a_send_tap_tags_leg_b() {
-        let backend_a = Arc::new(CountingBackend::new());
-        let backend_b = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(CountingBackend::new());
 
-        let recv_tap = RecorderTap::for_recv(
-            None,
-            Some(backend_a.clone() as Arc<dyn SipFlowBackend>),
-            "leg-test".into(),
-            paused.clone(),
-            vec![],
-        );
-        let send_tap = RecorderTap::for_send(
-            None,
-            Some(backend_b.clone() as Arc<dyn SipFlowBackend>),
-            "leg-test".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "leg-test", vec![]).await;
+        let caller = std::net::SocketAddr::from(([10, 0, 0, 1], 10000));
+        let rustpbx = std::net::SocketAddr::from(([10, 0, 0, 2], 20000));
 
         let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
-        recv_tap
-            .on_packet_received(
-                &pkt,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
-                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-            )
-            .await;
-        send_tap
-            .on_packet_sent(
-                &pkt,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
-                std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-            )
-            .await;
+        tap.on_packet_received(&pkt, caller, rustpbx).await;
+        tap.on_packet_sent(&pkt, caller, rustpbx).await;
 
-        assert_eq!(backend_a.count(), 1);
-        assert_eq!(backend_b.count(), 1);
-        assert_eq!(recv_tap.leg, Leg::A);
-        assert_eq!(send_tap.leg, Leg::B);
+        handle.stop().await.unwrap();
+        assert_eq!(backend.count(), 2);
+        assert_eq!(
+            backend.legs(),
+            vec![Some(Leg::A as i32), Some(Leg::B as i32)]
+        );
+        assert_eq!(
+            backend.flows(),
+            vec![
+                (caller.to_string(), rustpbx.to_string()),
+                (rustpbx.to_string(), caller.to_string()),
+            ]
+        );
     }
 
     // ── Video PT is captured (not filtered) ────────────────────────────
@@ -685,14 +879,7 @@ mod tests {
     #[tokio::test]
     async fn video_packet_captured_when_no_filter() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "video-call".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "video-call", vec![]).await;
 
         // H264 packet (PT 96, dynamic)
         let pkt = make_rtp_packet(96, 1, 9000, vec![0x80u8; 1200]);
@@ -703,6 +890,7 @@ mod tests {
         )
         .await;
 
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 1, "video captured when no filter");
     }
 
@@ -711,14 +899,7 @@ mod tests {
     #[tokio::test]
     async fn audio_dtmf_audio_sequence_captured_in_order() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "seq-call".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "seq-call", vec![]).await;
 
         let mut seq = 0u16;
         // 3 audio packets
@@ -760,6 +941,7 @@ mod tests {
             seq += 1;
         }
 
+        handle.stop().await.unwrap();
         assert_eq!(
             backend.count(),
             7,
@@ -776,14 +958,7 @@ mod tests {
         // handle is still valid after the interceptor processes it
         // (proving it was cloned via Arc, not moved).
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "zerocopy-call".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "zerocopy-call", vec![]).await;
 
         let payload = vec![0xABu8; 160];
         let payload_ptr = payload.as_ptr();
@@ -798,6 +973,7 @@ mod tests {
         )
         .await;
 
+        handle.stop().await.unwrap();
         // Original packet's payload should still be accessible
         assert_eq!(
             pkt.payload.as_ptr(),
@@ -815,14 +991,7 @@ mod tests {
         // Simulate IVR: the caller PC's sender sends file audio (silence/prompts).
         // The send interceptor should capture it as Leg::B.
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
-        let send_tap = RecorderTap::for_send(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "ivr-call".into(),
-            paused,
-            vec![],
-        );
+        let (send_tap, handle) = sipflow_recorder(backend.clone(), "ivr-call", vec![]).await;
 
         // Simulate 5 IVR prompt packets (Opus PT=111)
         for i in 0..5u16 {
@@ -836,6 +1005,7 @@ mod tests {
                 .await;
         }
 
+        handle.stop().await.unwrap();
         assert_eq!(
             backend.count(),
             5,
@@ -855,18 +1025,11 @@ mod tests {
     #[tokio::test]
     async fn video_packet_filtered_by_allowed_pts() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
         // allowed_pts = [0, 101] simulates an SDP where PCMU(PT=0) and
         // telephone-event(PT=101) are the only audio codecs. Any packet
         // with a different PT (e.g. H264/VP8 at dynamic PT 96-127) is
         // filtered out, regardless of what codec it carries.
-        let tap = RecorderTap::for_recv(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "video-filter".into(),
-            paused,
-            vec![0, 101],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "video-filter", vec![0, 101]).await;
 
         tap.on_packet_received(
             &make_rtp_packet(96, 1, 9000, vec![0x80u8; 1200]),
@@ -887,6 +1050,7 @@ mod tests {
         )
         .await;
 
+        handle.stop().await.unwrap();
         assert_eq!(
             backend.count(),
             2,
@@ -894,38 +1058,32 @@ mod tests {
         );
     }
 
-    // ── build_caller_interceptors returns matching taps ────────────────
+    // ── one caller tap serves both directions ──────────────────────────
 
     #[tokio::test]
-    async fn build_caller_interceptors_produces_matched_pair() {
+    async fn recorder_sender_serves_both_directions() {
         let backend = Arc::new(CountingBackend::new());
-        let paused = Arc::new(AtomicBool::new(false));
 
-        let (recv, send) = build_caller_interceptors(
-            None,
-            Some(backend.clone() as Arc<dyn SipFlowBackend>),
-            "build-test".into(),
-            paused,
-            vec![],
-        );
+        let (tap, handle) = sipflow_recorder(backend.clone(), "build-test", vec![]).await;
 
-        assert_eq!(recv.leg, Leg::A, "recv tap should be Leg::A");
-        assert_eq!(send.leg, Leg::B, "send tap should be Leg::B");
-
-        // Both should capture to the same backend
         let pkt = make_rtp_packet(0, 1, 160, vec![0x55u8; 160]);
-        recv.on_packet_received(
+        tap.on_packet_received(
             &pkt,
             std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
             std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
         )
         .await;
-        send.on_packet_sent(
+        tap.on_packet_sent(
             &pkt,
             std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
             std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
         )
         .await;
+        handle.stop().await.unwrap();
         assert_eq!(backend.count(), 2);
+        assert_eq!(
+            backend.legs(),
+            vec![Some(Leg::A as i32), Some(Leg::B as i32)]
+        );
     }
 }

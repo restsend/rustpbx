@@ -3,7 +3,6 @@
 //! [`MediaSession`] is the engine's per-session state container.  It owns:
 //!
 //! * the negotiated [`BridgePeer`] (WebRTC↔RTP bridge or plain RTP bridge)
-//! * a shared [`Recorder`] handle (same `Arc` the bridge writes into)
 //! * active playback tracks keyed by `track_id`
 //! * a [`McuSwitch`] for dynamic Bridge↔MCU transitions
 //!
@@ -13,18 +12,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::DashMap;
-use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
+use crate::FileTrack;
+use crate::bridge::{BridgeEndpoint, BridgePeer};
 use crate::engine::event::MediaEvent;
 use crate::engine::mcu_switch::McuSwitch;
-use crate::bridge::{BridgeEndpoint, BridgePeer};
-use crate::recorder::Recorder;
-use crate::FileTrack;
 
 /// Per-session media state owned by the engine.
 pub struct MediaSession {
@@ -48,17 +45,9 @@ pub struct MediaSession {
     /// callee=G.729).
     pub callee_codec_info: Vec<crate::negotiate::CodecInfo>,
 
-    // ── Recording ───────────────────────────────────────────────────────
-    /// Shared recorder — the same `Arc` is passed to `BridgePeer::with_recorder`
-    /// so the bridge's forwarding loop writes samples into it directly.
-    pub recorder: Arc<RwLock<Option<Recorder>>>,
-
-    /// Atomic flag that the recorder bridge task checks before writing samples.
-    pub recording_paused: Arc<AtomicBool>,
-
-    /// Wall-clock instant when the current recording started.  Used to
-    /// compute duration in `StopRecording` (fixes the previous duration=0 bug).
-    pub recording_started_at: Option<std::time::Instant>,
+    // ── Recording ──────────────────────────────────────────────────────
+    /// Control handle for the lazily-created caller-facing recorder worker.
+    pub recorder_control: Option<crate::recorder_tap::RecorderHandle>,
 
     // ── Playback ────────────────────────────────────────────────────────
     /// Active playback tracks keyed by caller-supplied `track_id`.
@@ -84,9 +73,7 @@ impl MediaSession {
             caller_is_webrtc: false,
             caller_codec_info: vec![],
             callee_codec_info: vec![],
-            recorder: Arc::new(RwLock::new(None)),
-            recording_paused: Arc::new(AtomicBool::new(false)),
-            recording_started_at: None,
+            recorder_control: None,
             playback_tracks: HashMap::new(),
             bridge_playback_track_ids: Vec::new(),
             mcu,
@@ -98,8 +85,8 @@ impl MediaSession {
     /// Called by [`MediaSessionGuard::drop`] — drains playback tracks (each
     /// `FileTrack::Drop` cancels + closes its PC), switches MCU back to bridge
     /// mode (drops the mixer, `ConferenceAudioMixer::Drop` aborts the mixing
-    /// task), finalizes the recorder, and drops the bridge (`BridgePeer::Drop`
-    /// calls `close_sync()`).
+    /// task), drops the bridge (`BridgePeer::Drop` calls `close_sync()`), and
+    /// drops the recorder control handle so its worker drains and finalizes.
     pub fn finalize(&mut self) {
         self.playback_tracks.drain();
         self.bridge_playback_track_ids.clear();
@@ -108,15 +95,8 @@ impl MediaSession {
             self.mcu.switch_to_bridge();
         }
 
-        {
-            let mut guard = self.recorder.write();
-            if let Some(ref mut rec) = *guard {
-                let _ = rec.finalize();
-            }
-            *guard = None;
-        }
-
         self.bridge = None;
+        self.recorder_control = None;
     }
 
     /// Resolve the bridge endpoint for the SIP caller leg.
@@ -194,11 +174,9 @@ impl Drop for MediaSessionGuard {
         if let Some((_, mut sess)) = sessions.remove(&self.session_id) {
             sess.finalize();
         }
-        let _ = self
-            .event_tx
-            .send(MediaEvent::SessionDestroyed {
-                session_id: self.session_id.clone(),
-            });
+        let _ = self.event_tx.send(MediaEvent::SessionDestroyed {
+            session_id: self.session_id.clone(),
+        });
     }
 }
 
@@ -208,6 +186,7 @@ impl std::fmt::Debug for MediaSession {
             .field("session_id", &self.session_id)
             .field("bridge_present", &self.bridge.is_some())
             .field("caller_is_webrtc", &self.caller_is_webrtc)
+            .field("recorder_attached", &self.recorder_control.is_some())
             .field("bridge_playback_track_ids", &self.bridge_playback_track_ids)
             .field(
                 "playback_tracks",

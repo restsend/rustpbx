@@ -3,10 +3,12 @@ use rustrtc::{
     IceServer, IceTransportPolicy, RtcConfiguration, TransportMode, config::BufferDropStrategy,
     config::VideoCapability,
 };
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::RtcTrack;
 use crate::negotiate;
+use crate::recorder_tap::RecorderSender;
 
 pub struct RtpTrackBuilder {
     track_id: String,
@@ -22,6 +24,7 @@ pub struct RtpTrackBuilder {
     probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
     cname: Option<String>,
+    recorder_sender: Option<RecorderSender>,
 }
 
 impl RtpTrackBuilder {
@@ -50,6 +53,7 @@ impl RtpTrackBuilder {
             .collect(),
             video_capabilities: Vec::new(),
             cname: None,
+            recorder_sender: None,
         }
     }
 
@@ -116,6 +120,13 @@ impl RtpTrackBuilder {
         self
     }
 
+    /// Use one call-scoped sender for both receive and send RTP capture.
+    /// The RTC interceptor object is created only when the track is built.
+    pub fn with_recorder_sender(mut self, sender: RecorderSender) -> Self {
+        self.recorder_sender = Some(sender);
+        self
+    }
+
     pub fn build(self) -> RtcTrack {
         let sdp_compatibility = match self.mode {
             TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
@@ -155,7 +166,7 @@ impl RtpTrackBuilder {
             None
         };
 
-        let config = RtcConfiguration {
+        let mut config = RtcConfiguration {
             ice_servers: self.ice_servers,
             ice_transport_policy: if self.mode == TransportMode::WebRtc && has_turn_server {
                 IceTransportPolicy::Relay
@@ -183,6 +194,14 @@ impl RtpTrackBuilder {
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
             ..Default::default()
         };
+        if let Some(sender) = self.recorder_sender {
+            let interceptor = Arc::new(sender);
+            config
+                .recorder_interceptors
+                .receivers
+                .push(interceptor.clone());
+            config.recorder_interceptors.senders.push(interceptor);
+        }
 
         if self.video_capabilities.is_empty() {
             RtcTrack::new(self.track_id, config, self.rtp_map)
