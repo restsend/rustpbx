@@ -995,6 +995,16 @@ impl SipSession {
                     .metadata
                     .as_ref()
                     .and_then(|m| m.get("trunk").cloned()),
+                // Root = this session's own call context (root=self). No
+                // cross-session propagation for transferred legs.
+                root: Some(crate::rwi::proto::RootCallInfo {
+                    caller: Some(original_caller.clone()),
+                    caller_name: extract_sip_username(&original_caller),
+                    callee: Some(original_callee.clone()),
+                    callee_name: extract_sip_username(&original_callee),
+                    call_id: Some(session_id_str.clone()),
+                    start_time: Some(context.created_at.clone()),
+                }),
                 ..Default::default()
             };
             let sid = session_id_str.clone();

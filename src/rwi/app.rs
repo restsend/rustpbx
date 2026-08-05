@@ -124,6 +124,14 @@ impl CallApp for RwiApp {
                     trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
                     app_id: None,
                     routing_target: None,
+                    root: Some(crate::rwi::proto::RootCallInfo {
+                        caller: Some(context.call_info.caller.clone()),
+                        caller_name: extract_sip_username(&context.call_info.caller),
+                        callee: Some(context.call_info.callee.clone()),
+                        callee_name: extract_sip_username(&context.call_info.callee),
+                        call_id: Some(call_id.clone()),
+                        start_time: Some(context.call_info.started_at.to_rfc3339()),
+                    }),
                 },
             );
 

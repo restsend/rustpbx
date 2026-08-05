@@ -123,6 +123,23 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 | `trunk` | Option\<String\> | SIP trunk name |
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Current routing target |
+| `root` | Option\<Object\> | Root call identity (see below) |
+
+**Root call (`root`)** — nested object identifying the root call of this call
+tree:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `caller` | Option\<String\> | Root call caller SIP URI |
+| `caller_name` | Option\<String\> | Root call caller name |
+| `callee` | Option\<String\> | Root call callee SIP URI |
+| `callee_name` | Option\<String\> | Root call callee name |
+| `call_id` | Option\<String\> | Root call identifier |
+| `start_time` | Option\<String\> | Root call start time (RFC3339) |
+
+Populated with the session's own call context (`root = self`). Transferred
+legs that run in a separate session keep their own context — there is no
+cross-session root propagation.
 
 **Notes**: the flat context never contains `agent_id`/`agent_name` — those are
 event-specific fields (e.g. `cc_*` events, `record_stopped`) that only appear
@@ -332,11 +349,16 @@ call produces no `cc_*` events.
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `agent_id` | Option\<String\> | CC agent identifier (callee leg) |
+| `agent_name` | Option\<String\> | CC agent display name |
 | `queue_id` | Option\<String\> | Queue/skill-group the call was routed through |
 | `reason` | String | Normalized reason, same vocabulary as `call_hangup.reason` |
 | `hangup_by` | Option\<String\> | `agent` \| `caller` \| `system` \| `transfer` \| `unknown` |
 | `duration_secs` | u64 | Talk time in seconds (0 for unanswered) |
 | *+ctx* | | Flat context fields |
+
+`cc_ringing` / `cc_answered` / `cc_held` / `cc_unheld` also carry `agent_id`
+(canonical agent id, resolved from endpoint → primary_endpoint → agent_id) and
+`agent_name`.
 
 ```json
 {
@@ -532,6 +554,11 @@ Triggered when the recording file upload completes, containing full metadata.
 | `switch_flag` | Option\<String\> | Site identifier |
 | `process_flag` | Option\<String\> | Process identifier (e.g., `ks_22_normal`) |
 | `root_call_id` | Option\<String\> | Root call ID |
+
+> `agent_id` / `agent_name` are populated from the session extensions when the
+> call was routed to a CC agent (`agent_id` is the canonical agent id resolved
+> via endpoint → primary_endpoint → agent_id; `agent_name` is the agent display
+> name). For calls without CC agent involvement they are absent.
 
 ```json
 {
