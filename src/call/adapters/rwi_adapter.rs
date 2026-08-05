@@ -219,24 +219,22 @@ pub fn rwi_to_call_command(
         // ========================================================================
         // Media Operations
         // ========================================================================
-        RwiCommandPayload::MediaPlay(req) => {
-            let sid = session_id
-                .or(Some(&req.call_id))
-                .ok_or(AdapterError::MissingField("session_id or call_id"))?;
-            let source = convert_media_source(req.source).unwrap_or(MediaSource::Silence);
-            Ok(CallCommand::Play {
-                leg_id: req.leg_id.map(LegId::new).or(Some(LegId::new(sid))),
-                source,
-                options: Some(PlayOptions {
-                    interrupt_on_dtmf: req.interrupt_on_dtmf,
-                    ..Default::default()
-                }),
-            })
+        // MediaPlay/MediaStop are handled by the legacy processor path which
+        // emits media_play_started / media_play_finished RWI events and
+        // resolves audio file paths. Letting the unified path handle them
+        // would skip event emission and lose loop_playback.
+        RwiCommandPayload::MediaPlay(_) => {
+            return Err(AdapterError::NotSupported(
+                "media.play handled by legacy processor for event emission".to_string(),
+            )
+            .into());
         }
-
-        RwiCommandPayload::MediaStop { leg_id, .. } => Ok(CallCommand::StopPlayback {
-            leg_id: leg_id.map(LegId::new),
-        }),
+        RwiCommandPayload::MediaStop { .. } => {
+            return Err(AdapterError::NotSupported(
+                "media.stop handled by legacy processor for event emission".to_string(),
+            )
+            .into());
+        }
 
         // ========================================================================
         // DTMF

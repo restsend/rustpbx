@@ -808,6 +808,7 @@ impl RwiCommandProcessor {
                         &req.call_id,
                         req.source.clone(),
                         req.interrupt_on_dtmf,
+                        req.loop_playback || req.source.looped.unwrap_or(false),
                         req.leg_id.clone(),
                     )
                     .await;
@@ -1397,7 +1398,10 @@ impl RwiCommandProcessor {
                                         gw.send_event_to_call_owner(
                                             &call_id,
                                             &crate::rwi::event::to_legacy_event(
-                                                &crate::rwi::CallRinging { call_id: call_id.clone() },
+                                                &crate::rwi::CallInitiated {
+                                                    call_id: call_id.clone(),
+                                                    destination: callee_display.clone(),
+                                                },
                                                 None,
                                             ),
                                         );
@@ -1410,13 +1414,26 @@ impl RwiCommandProcessor {
                                             tracing::debug!(%call_id, "Early media SDP received");
                                         }
                                         let gw = gateway.read();
-                                        gw.send_event_to_call_owner(
-                                            &call_id,
-                                            &crate::rwi::event::to_legacy_event(
-                                                &crate::rwi::CallEarlyMedia { call_id: call_id.clone() },
-                                                None,
-                                            ),
-                                        );
+                                        let code = response.status_code().code();
+                                        if code == 180 {
+                                            // 180 Ringing — remote side is alerting.
+                                            gw.send_event_to_call_owner(
+                                                &call_id,
+                                                &crate::rwi::event::to_legacy_event(
+                                                    &crate::rwi::CallRinging { call_id: call_id.clone() },
+                                                    None,
+                                                ),
+                                            );
+                                        } else {
+                                            // 183 or other provisional — treat as early media.
+                                            gw.send_event_to_call_owner(
+                                                &call_id,
+                                                &crate::rwi::event::to_legacy_event(
+                                                    &crate::rwi::CallEarlyMedia { call_id: call_id.clone() },
+                                                    None,
+                                                ),
+                                            );
+                                        }
                                     }
                                     Some(rsipstack::dialog::dialog::DialogState::Terminated(_, _)) => {}
                                     _ => {}
@@ -1455,7 +1472,13 @@ impl RwiCommandProcessor {
                     // Attach the answered first INVITE as the primary caller
                     // (A leg, MediaBridge A side) before starting the loop.
                     let callee_evt_fwd = session.callee_event_tx.clone();
+                    let callee_sdp_for_b_leg = sdp_answer.clone();
                     session.attach_caller_dialog(dialog, sdp_answer).await;
+
+                    // Also create the callee (B leg) in the MediaBridge so
+                    // media_play(leg_id="callee"), hold, and comfort-noise
+                    // can target it.
+                    session.ensure_originate_callee_leg(callee_sdp_for_b_leg.as_deref()).await;
 
                     // Spawn the UAC command loop now that the callee is attached.
                     let session_cancel = cancel_token.clone();
@@ -2296,15 +2319,22 @@ impl RwiCommandProcessor {
         call_id: &str,
         source: crate::rwi::session::MediaSource,
         _interrupt_on_dtmf: bool,
+        loop_playback: bool,
         leg_id: Option<String>,
     ) -> Result<CommandResult, CommandError> {
         use crate::call::domain::{MediaSource as DomainMediaSource, PlayOptions};
 
         let handle = self.get_handle(call_id).await?;
 
-        let domain_source = if source.source_type == "file" {
-            DomainMediaSource::File {
-                path: source.uri.unwrap_or_default(),
+        let domain_source = if source.source_type == "file" || source.source_type == "url" {
+            if source.source_type == "url" {
+                DomainMediaSource::Url {
+                    url: source.uri.unwrap_or_default(),
+                }
+            } else {
+                DomainMediaSource::File {
+                    path: source.uri.unwrap_or_default(),
+                }
             }
         } else {
             DomainMediaSource::Silence
@@ -2317,7 +2347,7 @@ impl RwiCommandProcessor {
                 leg_id: leg_id.map(LegId::new),
                 source: domain_source,
                 options: Some(PlayOptions {
-                    loop_playback: false,
+                    loop_playback,
                     await_completion: false,
                     interrupt_on_dtmf: _interrupt_on_dtmf,
                     track_id: Some(track_id.clone()),
@@ -5088,6 +5118,7 @@ mod tests {
                     },
                     interrupt_on_dtmf: false,
                     leg_id: None,
+                    loop_playback: false,
                 },
             ))
             .await;

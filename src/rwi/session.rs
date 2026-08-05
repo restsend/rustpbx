@@ -378,7 +378,7 @@ pub struct OriginateRequest {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct MediaSource {
-    #[serde(default)]
+    #[serde(default, alias = "type")]
     pub source_type: String,
     pub uri: Option<String>,
     pub looped: Option<bool>,
@@ -395,6 +395,8 @@ pub struct MediaPlayRequest {
     /// Target leg (None = all legs)
     #[serde(default)]
     pub leg_id: Option<String>,
+    #[serde(default, alias = "loop")]
+    pub loop_playback: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
