@@ -156,7 +156,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.6"
 hex = { version = "0.4.3", optional = true }
-audio-codec = "0.3.40"
+audio-codec = "0.3.41"
 rustrtc = "0.3.112"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
