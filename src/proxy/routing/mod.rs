@@ -150,6 +150,10 @@ pub struct TrunkConfig {
     /// Per-trunk ringback/early-media audio configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ringback: Option<RingbackAudio>,
+
+    /// Per-trunk max ring/setup time in seconds before a no-answer rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ring_time: Option<u32>,
 }
 
 /// Per-trunk ringback/early-media audio configuration
@@ -170,6 +174,9 @@ pub struct RingbackAudio {
     /// Not-found tone — played as 183 early media before sending 404
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notfound: Option<String>,
+    /// No-answer tone — played as 183 early media before sending 408
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noanswer: Option<String>,
     /// How many seconds to play the tone before sending the final rejection.
     /// Defaults to 2 seconds when not set (backward compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,25 +184,29 @@ pub struct RingbackAudio {
 }
 
 impl RingbackAudio {
-    /// Get the audio file for a specific SIP status code
+    /// Get the audio file for a specific SIP status code.
+    ///
+    /// Matching is done on the numeric status code so that `StatusCode::Other(486, ..)`
+    /// (as produced by the call session on a callee rejection) matches `BusyHere`
+    /// exactly like the canonical `StatusCode::BusyHere` variant does.
     pub fn for_status(&self, code: &rsipstack::sip::StatusCode) -> Option<&str> {
-        match code {
-            c if *c == rsipstack::sip::StatusCode::BusyHere => self.busy.as_deref(),
-            c if *c == rsipstack::sip::StatusCode::TemporarilyUnavailable => {
-                self.offline.as_deref()
-            }
-            c if *c == rsipstack::sip::StatusCode::NotFound => self.notfound.as_deref(),
-            c if *c == rsipstack::sip::StatusCode::Decline => self.reject.as_deref(),
+        match u16::from(code.clone()) {
+            408 | 487 => self.noanswer.as_deref(),
+            480 => self.offline.as_deref(),
+            404 => self.notfound.as_deref(),
+            486 => self.busy.as_deref(),
+            603 => self.reject.as_deref(),
             _ => None,
         }
     }
 
-    /// Returns `true` if any failure tone (busy/reject/offline/notfound) is configured
+    /// Returns `true` if any failure tone (busy/reject/offline/notfound/noanswer) is configured
     pub fn has_failure_tone(&self) -> bool {
         self.busy.is_some()
             || self.reject.is_some()
             || self.offline.is_some()
             || self.notfound.is_some()
+            || self.noanswer.is_some()
     }
 
     /// Get the play duration before rejection for a given status code.
@@ -314,6 +325,7 @@ impl Default for TrunkConfig {
             bind_ip: None,
             did_numbers: Vec::new(),
             ringback: None,
+            max_ring_time: None,
             origin: ConfigOrigin::embedded(),
         }
     }
@@ -479,6 +491,9 @@ pub struct RouteRule {
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<crate::models::policy::PolicySpec>,
+    /// Max ring/setup time in seconds for calls routed by this rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ring_time: Option<u32>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -498,6 +513,7 @@ impl Default for RouteRule {
             disable_ice_servers: None,
             disabled: None,
             policy: None,
+            max_ring_time: None,
             origin: ConfigOrigin::embedded(),
         }
     }

@@ -72,6 +72,7 @@ mod ringback_audio_tests {
         assert_eq!(audio.reject, None);
         assert_eq!(audio.offline, None);
         assert_eq!(audio.notfound, None);
+        assert_eq!(audio.noanswer, None);
     }
 
     #[test]
@@ -123,6 +124,58 @@ mod ringback_audio_tests {
         assert_eq!(
             audio.for_status(&StatusCode::Decline),
             Some("/sounds/decline.wav")
+        );
+    }
+
+    #[test]
+    fn test_ringback_audio_for_status_noanswer() {
+        let audio = RingbackAudio {
+            noanswer: Some("/sounds/noanswer.wav".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            audio.for_status(&StatusCode::RequestTimeout),
+            Some("/sounds/noanswer.wav")
+        );
+    }
+
+    /// The call session constructs rejection codes as `StatusCode::Other(code, text)`.
+    /// `for_status` must match on the numeric code so these still resolve to the
+    /// configured tone (regression for variant-based equality).
+    #[test]
+    fn test_ringback_audio_for_status_other_codes_match_numerically() {
+        let audio = RingbackAudio {
+            busy: Some("/sounds/busy.wav".to_string()),
+            offline: Some("/sounds/offline.wav".to_string()),
+            notfound: Some("/sounds/notfound.wav".to_string()),
+            reject: Some("/sounds/reject.wav".to_string()),
+            noanswer: Some("/sounds/noanswer.wav".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(486, "Busy Here".to_string())),
+            Some("/sounds/busy.wav")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(480, "Temporarily Unavailable".to_string())),
+            Some("/sounds/offline.wav")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(404, "Not Found".to_string())),
+            Some("/sounds/notfound.wav")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(603, "Decline".to_string())),
+            Some("/sounds/reject.wav")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(408, "Request Timeout".to_string())),
+            Some("/sounds/noanswer.wav")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(487, "Request Terminated".to_string())),
+            Some("/sounds/noanswer.wav"),
+            "no-answer tone must also play on the setup-timeout rejection (487)"
         );
     }
 

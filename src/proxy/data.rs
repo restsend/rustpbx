@@ -1542,6 +1542,7 @@ async fn convert_route(
         origin: ConfigOrigin::embedded(),
         codecs: Vec::new(),
         disable_ice_servers: None,
+        max_ring_time: None,
     };
     Ok(Some(route))
 }

@@ -942,6 +942,7 @@ pub struct DialplanHints {
     pub recording: Option<RecordingPolicy>,
     pub bypass_media: Option<bool>,
     pub max_duration: Option<std::time::Duration>,
+    pub max_ring_time: Option<std::time::Duration>,
     pub enable_sipflow: Option<bool>,
     pub allow_codecs: Option<Vec<String>>,
     pub extensions: http::Extensions,
@@ -971,6 +972,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("recording", &self.recording)
             .field("bypass_media", &self.bypass_media)
             .field("max_duration", &self.max_duration)
+            .field("max_ring_time", &self.max_ring_time)
             .field("enable_sipflow", &self.enable_sipflow)
             .field("disable_ice_servers", &self.disable_ice_servers)
             .field("media_mode", &self.media_mode)

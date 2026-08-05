@@ -323,6 +323,27 @@ engine = "flowdb"
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
 
+# Per-trunk ringback / early-media tones. Each value is an audio file path or a
+# `tone://frequency,duration_ms` spec rendered into a WAV.
+#
+#   ring      — 彩铃/回铃音,played as 183 early media while the callee rings
+#   busy      — 忙音,played as 183 early media before sending 486
+#   reject    — 拒接音,played as 183 early media before sending 603
+#   offline   — 不在线音,played as 183 early media before sending 480
+#   notfound  — 空号音,played as 183 early media before sending 404
+#   noanswer  — 无人应答音,played as 183 early media before the ring-timeout (408)
+#   play_duration_secs — how long to play a failure tone before the rejection
+#
+# [proxy.trunks.wuhoo.ringback]
+# ring = "/sounds/company_ringback.wav"
+# busy = "tone://480,3000"
+# noanswer = "tone://480,3000"
+# play_duration_secs = 2
+
+# Max ring/setup time in seconds for calls on this trunk before a no-answer
+# rejection (408). Defaults to 60s.
+# max_ring_time = 60
+
 # [[proxy.routes]]
 # name = "default"
 # priority = 1

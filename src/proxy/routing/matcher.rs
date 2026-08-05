@@ -363,6 +363,10 @@ async fn match_invite_impl(
             let hints = hints.get_or_insert_with(DialplanHints::default);
             hints.disable_ice_servers = rule.disable_ice_servers;
         }
+        if let Some(max_ring_time) = rule.max_ring_time {
+            let hints = hints.get_or_insert_with(DialplanHints::default);
+            hints.max_ring_time = Some(std::time::Duration::from_secs(max_ring_time as u64));
+        }
 
         // Handle based on action type
         match rule.action.get_action_type() {
@@ -1485,6 +1489,7 @@ pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: 
         && trunk.video_policy.is_none()
         && trunk.recording.is_none()
         && trunk.ringback.is_none()
+        && trunk.max_ring_time.is_none()
         && trunk.external_ip.is_none()
         && trunk.bind_ip.is_none()
     {
@@ -1506,6 +1511,9 @@ pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: 
     }
     if let Some(ringback) = &trunk.ringback {
         hints.ringback = Some(ringback.clone());
+    }
+    if let Some(max_ring_time) = trunk.max_ring_time {
+        hints.max_ring_time = Some(std::time::Duration::from_secs(max_ring_time as u64));
     }
     if let Some(external_ip) = trunk.external_ip.clone() {
         hints.external_ip = Some(external_ip);
