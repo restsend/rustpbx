@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+report/
+.venv/
+node_modules/
+logs/
+screenshots/

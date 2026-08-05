@@ -1,0 +1,29 @@
+[project]
+name = "rustpbx-e2e"
+version = "0.1.0"
+description = "Unified Python + sipbot E2E suite for RustPBX (P2P/queue/IVR/voicemail/wholesale/CDR/sipflow/http-router/SBC)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "p2p: peer-to-peer call / CDR / RTP / media tests",
+    "queue: queue app and hold-music tests",
+    "ivr: IVR greeting/DTMF/publish tests",
+    "cdr: CDR record persistence tests",
+    "sipflow: SIP/RTP capture + WAV export tests",
+    "voicemail: voicemail record/retrieve/MWI tests",
+    "wholesale: wholesale billing CDR tests",
+    "http_router: proxy HTTP router tests",
+    "sbc: SBC JSON-RPC rewrite/reject/inject tests",
+    "record: RWI record_start/stop tests",
+    "bridge: IVR bridge action WS PCM16 audio tests",
+    "outbound: outbound dial SSE interface tests",
+    "media: RWI media.play/media.stop and comfort-noise tests",
+    "slow: tests taking >30s",
+]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
