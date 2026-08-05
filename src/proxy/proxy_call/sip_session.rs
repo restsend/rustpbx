@@ -1106,6 +1106,7 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| server.contact_uri_for_transaction(tx))
             .or_else(|| server.default_contact_uri());
 
         let (state_tx, state_rx) = mpsc::unbounded_channel();

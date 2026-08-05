@@ -40,8 +40,8 @@ use rsipstack::{
         transaction::Transaction,
     },
     transport::{
-        TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
-        WebSocketListenerConnection, udp::UdpConnection,
+        SipAddr, SipConnection, TcpListenerConnection, TlsConfig, TlsListenerConnection,
+        TransportLayer, WebSocketListenerConnection, udp::UdpConnection,
     },
 };
 
@@ -1341,22 +1341,30 @@ impl Drop for SipServerInner {
 impl SipServerInner {
     pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
-        let mut params = Vec::new();
-        if let Some(transport) = addr.r#type
-            && !matches!(transport, Transport::Udp)
-        {
-            params.push(Param::Transport(transport));
+        Some(build_contact_uri(&self.contact_username, &addr, None))
+    }
+
+    /// Build a Contact URI for a response to an inbound SIP transaction.
+    ///
+    /// Stream connections retain the advertised local address of the listener
+    /// that accepted the request, so using the transaction connection keeps the
+    /// Contact scheme, transport, host, and port on that same listener.
+    pub fn contact_uri_for_transaction(&self, tx: &Transaction) -> Option<rsipstack::sip::Uri> {
+        let connection = tx.connection.as_ref()?;
+
+        // RustPBX's HTTP WebSocket adapter represents a client with a synthetic
+        // ChannelConnection whose address is the remote client's address. It
+        // must never be advertised as the server's Contact. Preserve the
+        // existing endpoint-level fallback for that adapter.
+        if matches!(connection, SipConnection::Channel(_)) {
+            return None;
         }
-        Some(rsipstack::sip::Uri {
-            scheme: addr.r#type.map(|t| t.sip_scheme()),
-            auth: Some(Auth {
-                user: self.contact_username.clone(),
-                password: None,
-            }),
-            host_with_port: addr.addr,
-            params,
-            ..Default::default()
-        })
+
+        Some(build_contact_uri(
+            &self.contact_username,
+            connection.get_addr(),
+            Some(connection.transport()),
+        ))
     }
 
     pub fn default_media_config(&self) -> MediaConfig {
@@ -1559,6 +1567,30 @@ impl SipServerInner {
     }
 }
 
+fn build_contact_uri(
+    contact_username: &str,
+    addr: &SipAddr,
+    fallback_transport: Option<Transport>,
+) -> rsipstack::sip::Uri {
+    let transport = addr.r#type.or(fallback_transport);
+    let mut params = Vec::new();
+    if let Some(transport) = transport
+        && !matches!(transport, Transport::Udp)
+    {
+        params.push(Param::Transport(transport));
+    }
+    rsipstack::sip::Uri {
+        scheme: transport.map(|t| t.sip_scheme()),
+        auth: Some(Auth {
+            user: contact_username.to_string(),
+            password: None,
+        }),
+        host_with_port: addr.addr.clone(),
+        params,
+        ..Default::default()
+    }
+}
+
 struct CompositeMessageInspector {
     inspectors: Vec<Box<dyn MessageInspector>>,
 }
@@ -1605,4 +1637,50 @@ async fn log_rlimit_nofile() {
         }
     }
     info!("RLIMIT_NOFILE: current fd count ~{count}");
+}
+
+#[cfg(test)]
+mod contact_uri_tests {
+    use super::*;
+    use rsipstack::sip::HostWithPort;
+
+    fn sip_addr(value: &str, transport: Option<Transport>) -> SipAddr {
+        SipAddr {
+            r#type: transport,
+            addr: HostWithPort::try_from(value).expect("valid SIP address"),
+        }
+    }
+
+    #[test]
+    fn contact_uri_uses_tls_listener_address_and_transport() {
+        let addr = sip_addr("[2001:db8::20]:5061", Some(Transport::Tls));
+
+        let uri = build_contact_uri("rustpbx", &addr, Some(Transport::Udp));
+
+        assert_eq!(
+            uri.to_string(),
+            "sips:rustpbx@[2001:db8::20]:5061;transport=TLS"
+        );
+    }
+
+    #[test]
+    fn contact_uri_falls_back_to_connection_transport() {
+        let addr = sip_addr("[2001:db8::20]:5061", None);
+
+        let uri = build_contact_uri("rustpbx", &addr, Some(Transport::Tls));
+
+        assert_eq!(
+            uri.to_string(),
+            "sips:rustpbx@[2001:db8::20]:5061;transport=TLS"
+        );
+    }
+
+    #[test]
+    fn udp_contact_uri_does_not_add_transport_parameter() {
+        let addr = sip_addr("192.0.2.20:5060", Some(Transport::Udp));
+
+        let uri = build_contact_uri("rustpbx", &addr, None);
+
+        assert_eq!(uri.to_string(), "sip:rustpbx@192.0.2.20:5060");
+    }
 }
