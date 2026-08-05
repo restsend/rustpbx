@@ -156,9 +156,8 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.6"
 hex = { version = "0.4.3", optional = true }
-#rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.40"
-rustrtc = "0.3.110"
+rustrtc = "0.3.112"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -307,10 +306,3 @@ opt-level = 1
 codegen-units = 256
 incremental = true
 debug = 1
-
-# Local rustrtc with RtpObserver (bidirectional plaintext observation covering
-# the relay fast-path) + handle_reinvite sender.set_params fix. Remove this
-# patch once rustrtc >= 0.3.111 is published to the registry.
-[patch.crates-io]
-rustrtc = { path = "../rustrtc" }
-rsipstack = { path = "../rsipstack" }
