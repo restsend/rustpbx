@@ -71,6 +71,22 @@ use std::sync::Arc;
 
 /// Map a SIP response status code to a fine-grained CallRecordHangupReason.
 ///
+/// Normalize `call_hangup.hangup_by`. The core `initiator()` maps any callee
+/// hangup to `"agent"` (contact-center-centric). When no CC agent actually
+/// participated (no queue routing and no resolved_agent_id), report `"callee"`
+/// instead so non-CC calls are not mislabeled as agent-driven.
+fn normalize_call_hangup_by(
+    hangup_by: &str,
+    queue_name: Option<&str>,
+    has_resolved_agent: bool,
+) -> String {
+    if hangup_by == "agent" && queue_name.is_none() && !has_resolved_agent {
+        "callee".to_string()
+    } else {
+        hangup_by.to_string()
+    }
+}
+
 /// This replaces the previous behaviour where every dialplan / callee failure
 /// was uniformly tagged as `Failed`.
 fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
@@ -9228,11 +9244,22 @@ impl SipSession {
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
+        // `initiator()` maps any callee hangup to "agent" (contact-center
+        // centric). When no CC agent actually participated (no queue routing
+        // and no resolved_agent_id), report "callee" so non-CC calls are not
+        // mislabeled as agent-driven.
+        let has_resolved_agent = self
+            .extensions
+            .read()
+            .get::<std::collections::HashMap<String, String>>()
+            .map_or(false, |m| m.get("resolved_agent_id").is_some());
+        let queue_name = self.meta.queue_name.clone();
         let hangup_by = self
             .meta
             .hangup_reason
             .as_ref()
-            .map(|r| r.initiator().to_string());
+            .map(|r| r.initiator().to_string())
+            .map(|h| normalize_call_hangup_by(&h, queue_name.as_deref(), has_resolved_agent));
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             call_id: self.context.session_id.clone(),
@@ -12438,6 +12465,26 @@ mod tests {
     use rustrtc::media::MediaStreamTrack;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ── normalize_call_hangup_by ────────────────────────────────────────────
+
+    #[test]
+    fn hangup_by_agent_requires_cc_participation() {
+        // CC-routed (queue) call: callee hangup stays "agent".
+        assert_eq!(normalize_call_hangup_by("agent", Some("support"), false), "agent");
+        // Skill-group direct routing (resolved_agent_id): stays "agent".
+        assert_eq!(normalize_call_hangup_by("agent", None, true), "agent");
+        // Non-CC call (no queue, no resolved agent): remapped to "callee".
+        assert_eq!(normalize_call_hangup_by("agent", None, false), "callee");
+    }
+
+    #[test]
+    fn hangup_by_non_agent_unchanged() {
+        assert_eq!(normalize_call_hangup_by("caller", None, false), "caller");
+        assert_eq!(normalize_call_hangup_by("system", None, false), "system");
+        assert_eq!(normalize_call_hangup_by("transfer", None, false), "transfer");
+        assert_eq!(normalize_call_hangup_by("unknown", None, false), "unknown");
+    }
 
     // ---- helpers for codec / audio-content verification ----
     fn generate_sine_wav(path: &Path, freq: f64, duration_secs: f64, sample_rate: u32) {
