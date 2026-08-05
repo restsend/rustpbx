@@ -6340,9 +6340,12 @@ impl SipSession {
             if ready {
                 let params = rustrtc::RtpRewriteBridgeParams {
                     ssrc_offset: 0,
+                    fixed_out_ssrc: None,
                     payload_type: None,
+                    dtmf_payload_type: None,
                     initial_sequence_number: None,
                     initial_timestamp_offset: None,
+                    strip_extensions: false,
                 };
                 let a_to_b = caller_pc.bridge_rtp_with_rewrite_to(&callee_pc, params);
                 let b_to_a = callee_pc.bridge_rtp_with_rewrite_to(&caller_pc, params);
@@ -8238,9 +8241,12 @@ impl SipSession {
         if ready {
             let params = rustrtc::RtpRewriteBridgeParams {
                 ssrc_offset: 0,
+                fixed_out_ssrc: None,
                 payload_type: None,
+                dtmf_payload_type: None,
                 initial_sequence_number: None,
                 initial_timestamp_offset: None,
+                strip_extensions: false,
             };
             let a_to_b = caller_pc.bridge_rtp_with_rewrite_to(&callee_pc, params);
             let b_to_a = callee_pc.bridge_rtp_with_rewrite_to(&caller_pc, params);
