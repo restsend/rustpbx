@@ -124,6 +124,40 @@ impl ProxyDataContext {
         self.trunks.get(name).map(|v| v.value().clone())
     }
 
+    /// Resolve a source IP to the inbound trunk it belongs to, reusing the live
+    /// `acl_inbound_trunks` trie (longest-prefix match) plus optional From/To
+    /// user-prefix filtering.  This is the same resolution [`AclModule`] applies
+    /// at transaction start; factored out so diagnostics can invoke it without a
+    /// live SIP request.
+    ///
+    /// Returns the matched trunk as a [`TrunkContext`] (id / name / did_numbers)
+    /// or `None` when no inbound trunk covers the source IP.
+    pub fn resolve_inbound_trunk_by_ip(
+        &self,
+        addr: &IpAddr,
+        from_user: Option<&str>,
+        to_user: Option<&str>,
+    ) -> Option<crate::call::TrunkContext> {
+        let inbound_trunks = self.acl_inbound_trunks.load();
+        let source_network = ipnet::IpNet::from(*addr);
+        for trunks in inbound_trunks.cover_values(&source_network) {
+            for name in trunks {
+                let Some(trunk) = self.get_trunk(name) else {
+                    continue;
+                };
+                if !trunk.matches_incoming_user_prefixes(from_user, to_user) {
+                    continue;
+                }
+                return Some(crate::call::TrunkContext {
+                    id: trunk.id,
+                    name: name.clone(),
+                    did_numbers: trunk.did_numbers,
+                });
+            }
+        }
+        None
+    }
+
     pub fn routes_snapshot(&self) -> Vec<RouteRule> {
         self.routes.read().unwrap().clone()
     }

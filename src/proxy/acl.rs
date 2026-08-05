@@ -264,35 +264,18 @@ impl AclModule {
         let Some(server) = self.inner.server.as_ref() else {
             return None;
         };
-        let inbound_trunks = server.data_context.acl_inbound_trunks.load();
-        let source_network = ipnet::IpNet::from(*addr);
         let invite_users = if matches!(&origin.method, rsipstack::sip::Method::Invite) {
             Some((extract_from_user(origin), extract_to_user(origin)))
         } else {
             None
         };
-        let mut matched = None;
-
-        for trunks in inbound_trunks.cover_values(&source_network) {
-            for name in trunks {
-                let Some(trunk) = server.data_context.get_trunk(name) else {
-                    continue;
-                };
-                if let Some((from_user, to_user)) = &invite_users
-                    && !trunk
-                        .matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
-                {
-                    continue;
-                }
-                matched = Some(TrunkContext {
-                    id: trunk.id,
-                    name: name.clone(),
-                    did_numbers: trunk.did_numbers,
-                });
-                break;
-            }
-        }
-        matched
+        let (from_user, to_user) = invite_users
+            .as_ref()
+            .map(|(f, t)| (f.as_deref(), t.as_deref()))
+            .unwrap_or((None, None));
+        server
+            .data_context
+            .resolve_inbound_trunk_by_ip(addr, from_user, to_user)
     }
 
     pub(crate) async fn is_ip_allowed(&self, addr: &IpAddr) -> bool {
@@ -754,6 +737,68 @@ mod tests {
                 .id,
             Some(200)
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_inbound_trunk_by_ip_matches_and_filters() {
+        let mut config = ProxyConfig::default();
+        config.generated_dir = format!(
+            "target/test-generated/acl-resolve-by-ip-{}",
+            std::process::id()
+        );
+        config.trunks.insert(
+            "carrier-a".to_string(),
+            TrunkConfig {
+                id: Some(301),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["198.51.100.0/24".to_string()],
+                incoming_to_user_prefix: Some("86".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "carrier-b".to_string(),
+            TrunkConfig {
+                id: Some(302),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["203.0.113.5".to_string()],
+                ..Default::default()
+            },
+        );
+        let (server, _config) = create_test_server_with_config(config).await;
+
+        // CIDR match, callee prefix passes -> carrier-a
+        let hit = server.data_context.resolve_inbound_trunk_by_ip(
+            &IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)),
+            None,
+            Some("861234"),
+        );
+        assert_eq!(hit.as_ref().map(|c| c.id), Some(Some(301)));
+        assert_eq!(hit.unwrap().name, "carrier-a");
+
+        // CIDR covers IP but callee prefix does not match -> None
+        let miss = server.data_context.resolve_inbound_trunk_by_ip(
+            &IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)),
+            None,
+            Some("441234"),
+        );
+        assert!(miss.is_none());
+
+        // Exact IP match -> carrier-b
+        let exact = server.data_context.resolve_inbound_trunk_by_ip(
+            &IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+            None,
+            None,
+        );
+        assert_eq!(exact.unwrap().id, Some(302));
+
+        // Uncovered IP -> None
+        let none = server.data_context.resolve_inbound_trunk_by_ip(
+            &IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            None,
+            None,
+        );
+        assert!(none.is_none());
     }
 
     #[tokio::test]

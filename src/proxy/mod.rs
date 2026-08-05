@@ -17,6 +17,7 @@ pub mod cluster_sync;
 pub mod data;
 pub mod dialog_auth_cache;
 pub mod emergency;
+pub mod error_catalog;
 pub mod locator;
 pub mod locator_db;
 pub mod locator_webhook;

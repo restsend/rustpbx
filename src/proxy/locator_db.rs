@@ -405,13 +405,17 @@ impl Locator for DbLocator {
             return Ok(());
         }
 
-        // If the location has an instance_id, find an existing registration with
-        // the same instance_id (any username/realm) but a different AoR and
-        // update only its destination. The identifier may differ between old and
-        // new registration — search globally, not scoped to the current identifier.
+        // If the location has an instance_id, find an existing registration
+        // with the same instance_id AND the same username/realm but a different
+        // AoR and update only its destination. The lookup is scoped to the same
+        // username/realm so that multi-line ATAs (e.g. Grandstream HT8xx) that
+        // reuse one +sip.instance UUID across all lines don't overwrite each
+        // other's destination (see issue #248).
         if let Some(ref instance_id) = location.instance_id {
             let old = Entity::find()
                 .filter(Column::InstanceId.eq(instance_id))
+                .filter(Column::Username.eq(&username_key))
+                .filter(Column::Realm.eq(&realm_key))
                 .filter(Column::Aor.ne(&aor))
                 .one(&self.db)
                 .await
@@ -1060,6 +1064,96 @@ mod tests {
                 .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "new location has correct destination"
+        );
+    }
+
+    /// Regression for issue #248: a multi-line ATA (e.g. Grandstream HT8xx)
+    /// reuses ONE +sip.instance UUID across all lines. Registering line 104
+    /// must NOT overwrite line 103's destination, because the instance-id
+    /// destination refresh is scoped to the same username/realm.
+    #[tokio::test]
+    async fn db_locator_instance_id_does_not_cross_clobber_other_extension() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let instance_id = "urn:uuid:grandstream-ht8xx-shared".to_string();
+        let realm = Some("pbx.example.com");
+
+        // Line 103 registers on port 6060 with the shared instance_id.
+        let aor_103: rsipstack::sip::Uri = "sip:103@lan.invalid"
+            .try_into()
+            .expect("valid aor 103");
+        let dest_103 = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: "192.168.10.50:6060".try_into().expect("valid dest 103"),
+        };
+        locator
+            .register(
+                "103",
+                realm,
+                Location {
+                    aor: aor_103.clone(),
+                    expires: 120,
+                    destination: Some(dest_103.clone()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register 103");
+
+        // Line 104 registers on port 6062 with the SAME instance_id.
+        let aor_104: rsipstack::sip::Uri = "sip:104@lan.invalid"
+            .try_into()
+            .expect("valid aor 104");
+        let dest_104 = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: "192.168.10.50:6062".try_into().expect("valid dest 104"),
+        };
+        locator
+            .register(
+                "104",
+                realm,
+                Location {
+                    aor: aor_104.clone(),
+                    expires: 120,
+                    destination: Some(dest_104.clone()),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register 104");
+
+        // 103 must still point at 6060 — not have been overwritten by 104.
+        let locations_103 = locator
+            .lookup(&aor_103)
+            .await
+            .expect("lookup 103");
+        assert_eq!(locations_103.len(), 1, "103 must still resolve");
+        assert_eq!(
+            locations_103[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
+            Some("192.168.10.50:6060".to_string()),
+            "103 destination must remain its own port (no cross-clobber)"
+        );
+
+        // 104 must point at 6062.
+        let locations_104 = locator
+            .lookup(&aor_104)
+            .await
+            .expect("lookup 104");
+        assert_eq!(locations_104.len(), 1, "104 must resolve");
+        assert_eq!(
+            locations_104[0]
+                .destination
+                .as_ref()
+                .map(|d| d.addr.to_string()),
+            Some("192.168.10.50:6062".to_string()),
+            "104 destination must be its own port"
         );
     }
 }
