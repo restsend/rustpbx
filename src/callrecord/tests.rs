@@ -423,6 +423,50 @@ async fn test_default_db_saver_writes_to_db() {
 }
 
 #[tokio::test]
+async fn test_db_saver_persists_cdr_path_in_metadata() {
+    // Issue #237: the CDR file path is remembered at save time by injecting it
+    // into the existing `metadata` JSON column (no schema migration), so the
+    // console can still locate historical CDRs after the storage root changes.
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let mut record = make_record();
+    record.details.cdr_file_path = Some("/old/root/20260728/test-call-id.json".to_string());
+    manager.saver.save(&record).await.unwrap();
+
+    use crate::models::call_record::Entity as CallRecordEntity;
+    use sea_orm::{EntityTrait, QueryFilter};
+    use sea_orm::ColumnTrait;
+
+    let saved = CallRecordEntity::find()
+        .filter(crate::models::call_record::Column::CallId.eq("test-call-id"))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row must exist");
+
+    let metadata = saved
+        .metadata
+        .expect("metadata must be populated")
+        .get("cdr_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    assert_eq!(
+        metadata.as_deref(),
+        Some("/old/root/20260728/test-call-id.json"),
+        "cdr_path must be persisted inside the metadata JSON column"
+    );
+}
+
+#[tokio::test]
 async fn test_save_with_http_without_media() {
     // Create a test CallRecord
     let record = CallRecord {

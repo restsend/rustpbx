@@ -112,7 +112,13 @@ pub struct CallDetails {
     pub rewrite: CallRecordRewrite,
     pub last_error: Option<CallRecordLastError>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+    /// Transient (never serialized into the CDR JSON): the storage path
+    /// returned by the saver. Threaded into the DB hook so the persisted
+    /// record remembers where its CDR file lives, surviving later storage
+    /// root changes (issue #237).
+    #[serde(skip)]
+    pub cdr_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -910,7 +916,10 @@ impl CallRecordRow {
         let mut metadata_map = details.metadata.clone().unwrap_or_default();
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-            metadata_map.insert("sip_leg_roles".to_string(), json);
+            metadata_map.insert(
+                "sip_leg_roles".to_string(),
+                serde_json::Value::String(json),
+            );
         }
         let metadata = serde_json::to_value(&metadata_map).ok();
 
@@ -1286,6 +1295,10 @@ impl CallRecordManager {
 
                         match saver.save(&record).await {
                             Ok(file_name) => {
+                                // Remember where the CDR file was actually written
+                                // so the DB record can locate it later even if the
+                                // storage root is changed afterwards (issue #237).
+                                record.details.cdr_file_path = Some(file_name.clone());
                                 let elapsed = start_time.elapsed();
                                 info!(
                                     ?elapsed,
@@ -1351,6 +1364,7 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
             transcript_language: val.transcript_language,
             tags: val.tags,
             metadata: val.metadata.and_then(|v| serde_json::from_value(v).ok()),
+            cdr_file_path: None,
             rewrite: CallRecordRewrite {
                 caller_original: val.rewrite_original_from.unwrap_or_default(),
                 caller_final: String::new(),

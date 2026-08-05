@@ -363,6 +363,7 @@ mod tests {
                 rewrite: Default::default(),
                 last_error: None,
                 metadata: None,
+                cdr_file_path: None,
             },
             extensions: http::Extensions::new(),
         }
