@@ -343,8 +343,11 @@ impl AppFactory for BuiltinAppFactory {
                         let timeout = retry
                             .get("timeout_ms")
                             .and_then(|v| v.as_u64())
-                            .or_else(|| retry.get("delay_ms").and_then(|v| v.as_u64()))
                             .unwrap_or(1000);
+                        let retry_delay = retry
+                            .get("delay_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(100);
                         let fallback = serde_json::from_value(
                             retry.get("fallback").cloned().unwrap_or(serde_json::json!({
                                 "type": "hangup",
@@ -355,6 +358,7 @@ impl AppFactory for BuiltinAppFactory {
                         provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
                             max_retries,
                             timeout_ms: timeout,
+                            retry_delay_ms: retry_delay,
                             fallback_action: fallback,
                         });
                     }
@@ -438,11 +442,9 @@ impl AppFactory for BuiltinAppFactory {
                         for (k, v) in &provider_cfg.headers {
                             provider.add_header(k, v);
                         }
-                        provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
-                            max_retries: provider_cfg.max_retries,
-                            timeout_ms: provider_cfg.retry_delay_ms,
-                            fallback_action: None,
-                        });
+                        provider = provider.with_retry(
+                            crate::call::app::ivr::RetryConfig::from(provider_cfg),
+                        );
 
                         let mut app =
                             crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
