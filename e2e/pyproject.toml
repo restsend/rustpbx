@@ -21,6 +21,8 @@ markers = [
     "bridge: IVR bridge action WS PCM16 audio tests",
     "outbound: outbound dial SSE interface tests",
     "media: RWI media.play/media.stop and comfort-noise tests",
+    "trunk_ringback: per-trunk ringback/busy/reject/offline/notfound tone tests",
+    "reinvite: mid-call re-INVITE hold/resume renegotiation tests",
     "slow: tests taking >30s",
 ]
 log_cli = true

@@ -720,6 +720,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         bind_ip: None,
         did_numbers: vec![],
         ringback: None,
+        max_ring_time: None,
     })
 }
 

@@ -1397,7 +1397,8 @@ impl SipSession {
         });
 
         let max_setup_duration =
-            max_ring_time.clamp(Duration::from_secs(30), Duration::from_secs(120));
+            max_ring_time.clamp(Duration::from_secs(30), Duration::from_secs(120))
+                + Duration::from_secs(15); // backstop after the session's ring-timeout
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
 
         loop {
@@ -1673,6 +1674,11 @@ impl SipSession {
             .and_then(|p| p.ring.clone());
 
         let setup_cancel_token = self.cancel_token.clone();
+        // Ring/setup timeout: how long to keep dialing before giving up on a
+        // no-answer call. Configurable per call (default 60s). Firing here —
+        // rather than in `serve` — keeps the caller-dialog message pump alive
+        // so a configured no-answer tone can play as 183 before the rejection.
+        let ring_timeout = self.context.dialplan.max_ring_time;
         let setup_result = {
             let setup = async {
                 if let Some(ref audio) = ring_audio {
@@ -1697,6 +1703,10 @@ impl SipSession {
             tokio::select! {
                 biased;
                 result = &mut setup => result,
+                _ = tokio::time::sleep(ring_timeout) => Err(into_callee_err(
+                    &StatusCode::RequestTimeout,
+                    Some("Ring timeout".to_string()),
+                )),
                 _ = setup_cancel_token.cancelled() => Err(into_callee_err(
                     &StatusCode::RequestTerminated,
                     Some("Call cancelled during setup".to_string()),

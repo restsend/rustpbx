@@ -826,6 +826,9 @@ impl CallModule {
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
+            if let Some(max_ring_time) = hints.max_ring_time {
+                dialplan.max_ring_time = max_ring_time;
+            }
             if let Some(enable_sipflow) = hints.enable_sipflow {
                 dialplan.enable_sipflow = enable_sipflow;
             }
