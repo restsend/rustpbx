@@ -216,12 +216,16 @@ impl TestMediaHarness {
             "a",
             rtc_config(transport_a.clone(), &codec_a),
             vec![codec_a.clone()],
+            true,
+            -35.0,
         )
         .unwrap();
         let leg_b = LegInner::from_rtc_config(
             "b",
             rtc_config(transport_b.clone(), &codec_b),
             vec![codec_b.clone()],
+            true,
+            -35.0,
         )
         .unwrap();
 
@@ -614,7 +618,7 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
     };
     let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
     leg_cfg.media_capabilities = Some(leg_caps);
-    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone()).unwrap();
+    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0).unwrap();
 
     // Peer: offer PCMU + telephone-event so the leg's DTMF PT gets negotiated.
     let mut caps = rustrtc::config::MediaCapabilities::default();
