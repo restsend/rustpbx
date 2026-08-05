@@ -612,6 +612,16 @@ mod tests {
             },
         );
         config.trunks.insert(
+            "broad-prefix-fallback".to_string(),
+            TrunkConfig {
+                id: Some(142),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["43.198.217.0/24".to_string()],
+                incoming_to_user_prefix: Some("861".to_string()),
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
             "prefix-8614".to_string(),
             TrunkConfig {
                 id: Some(144),
