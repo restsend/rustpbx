@@ -4,6 +4,7 @@ use bytes::Bytes;
 use std::borrow::Cow;
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -115,6 +116,8 @@ struct SipFlowInner {
     writer_tx: Option<SyncSender<WriteCommand>>,
     pool: Arc<ItemPool>,
     local_addrs: Vec<String>,
+    /// Number of SIP messages dropped because the async writer channel was full.
+    dropped_count: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -129,6 +132,12 @@ impl SipFlow {
 
     pub fn has_backend(&self) -> bool {
         self.inner.shared_backend.load().0.is_some()
+    }
+
+    /// Number of SIP messages dropped because the async writer channel was full
+    /// (or the writer thread was disconnected). Exposed for call-record diagnostics.
+    pub fn dropped_count(&self) -> u64 {
+        self.inner.dropped_count.load(Ordering::Relaxed)
     }
 
     pub fn new(
@@ -163,6 +172,7 @@ impl SipFlow {
                 writer_tx,
                 pool,
                 local_addrs: Vec::new(),
+                dropped_count: AtomicU64::new(0),
             }),
         }
     }
@@ -335,11 +345,20 @@ impl SipFlow {
             // Send to writer thread (non-blocking, drops if full)
             if let Some(ref tx) = self.inner.writer_tx {
                 // Use try_send to avoid blocking - drop if channel full
-                let _ = tx.try_send(WriteCommand::Record {
+                if tx.try_send(WriteCommand::Record {
                     call_id,
                     item,
                     pool_idx,
-                });
+                })
+                .is_err()
+                {
+                    // Channel full or disconnected: count the drop so it can be
+                    // surfaced in diagnostics instead of being completely silent.
+                    self.inner.dropped_count.fetch_add(1, Ordering::Relaxed);
+                    if let Some(idx) = pool_idx {
+                        self.inner.pool.release(idx);
+                    }
+                }
             } else {
                 // Fallback: direct synchronous write (writer_tx is None)
                 if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {

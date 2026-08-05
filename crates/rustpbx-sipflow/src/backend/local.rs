@@ -269,6 +269,10 @@ impl LocalBackend {
 
 #[async_trait]
 impl SipFlowBackend for LocalBackend {
+    fn kind(&self) -> &'static str {
+        "local"
+    }
+
     async fn flush(&self) -> Result<()> {
         let mut pending = Vec::new();
         for (i, tx) in self.senders.iter().enumerate() {

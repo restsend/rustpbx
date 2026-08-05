@@ -89,6 +89,10 @@ impl HybridLocalBackend {
 
 #[async_trait]
 impl SipFlowBackend for HybridLocalBackend {
+    fn kind(&self) -> &'static str {
+        "hybrid"
+    }
+
     fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         self.primary().record(call_id, item)
     }

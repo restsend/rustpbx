@@ -16,6 +16,13 @@ use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 #[async_trait]
 pub trait SipFlowBackend: Send + Sync {
+    /// Short, stable identifier for the backend implementation (e.g. `"hybrid"`,
+    /// `"remote"`). Used for diagnostics/UI so operators can see which backend
+    /// answered a sip-flow query. Defaults to `"unknown"`.
+    fn kind(&self) -> &'static str {
+        "unknown"
+    }
+
     fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()>;
     /// Flush any in-memory batch to durable storage.
     /// This is a best-effort operation; implementations that have no in-memory

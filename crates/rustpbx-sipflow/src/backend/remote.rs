@@ -733,6 +733,10 @@ async fn report_loop(
 
 #[async_trait]
 impl SipFlowBackend for RemoteBackend {
+    fn kind(&self) -> &'static str {
+        "remote"
+    }
+
     fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
         let result = self

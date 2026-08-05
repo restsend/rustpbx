@@ -240,53 +240,73 @@ async fn download_call_record_sip_flow(
     let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
     let mut call_id_roles: HashMap<String, String> = HashMap::new();
+    // Track where each call_id came from, for diagnostics.
+    let mut call_id_sources: HashMap<String, &'static str> = HashMap::new();
     // Default main call_id to "primary" if not overridden
     call_id_roles.insert(record.call_id.clone(), "primary".to_string());
+    call_id_sources.insert(record.call_id.clone(), "default");
 
     // Load sip_leg_roles from DB metadata first (faster, no file I/O),
     // then fall back to the CDR JSON file.
     let mut sip_leg_roles_loaded = false;
+    let mut sip_leg_roles_source = "default_only";
     if let Some(ref meta) = record.metadata {
         if let Some(meta_map) = meta.as_object() {
             if let Some(json_str) = meta_map.get("sip_leg_roles").and_then(|v| v.as_str()) {
                 if let Ok(roles) = serde_json::from_str::<HashMap<String, String>>(json_str) {
                     for (cid, role) in roles {
-                        call_id_roles.insert(cid, role);
+                        call_id_roles.insert(cid.clone(), role);
+                        call_id_sources.insert(cid, "db_metadata");
                     }
                     sip_leg_roles_loaded = true;
+                    sip_leg_roles_source = "db_metadata";
                 }
             }
         }
     }
 
+    let mut cdr_loaded = false;
     if !sip_leg_roles_loaded {
         let cdr_data = load_cdr_data(&state, &record).await;
         if let Some(cdr) = &cdr_data {
+            cdr_loaded = true;
             for (cid, role) in &cdr.record.sip_leg_roles {
                 call_id_roles.insert(cid.clone(), role.clone());
+                call_id_sources.insert(cid.clone(), "cdr_file");
             }
+            sip_leg_roles_source = "cdr_file";
         }
     }
 
     let mut flow_items = Vec::new();
     let mut rtp_streams = Vec::new();
+    let mut legs_diag: Vec<Value> = Vec::new();
 
     for (cid, role) in &call_id_roles {
+        let source = call_id_sources.get(cid).copied().unwrap_or("default");
+        let mut sip_msg_count: usize = 0;
+        let mut rtp_stream_count: usize = 0;
+        let mut leg_error: Option<String> = None;
+
         if query.detail {
             match backend.query_flow(cid, start_time, end_time).await {
                 Ok(items) => {
+                    sip_msg_count = items.len();
                     for item in items {
                         flow_items.push((item, role.clone(), cid.clone()));
                     }
                 }
                 Err(err) => {
+                    let msg = err.to_string();
                     warn!(identifier = %identifier, call_id = %cid, "failed to query sip flow for leg: {}", err);
+                    leg_error = Some(msg);
                 }
             }
         }
 
         match backend.query_media_stats(cid, start_time, end_time).await {
             Ok(stats) => {
+                rtp_stream_count = stats.len();
                 for stat in stats {
                     let src_addr = if stat.src.is_empty() {
                         format!("Leg {}", stat.leg)
@@ -315,10 +335,23 @@ async fn download_call_record_sip_flow(
                 }
             }
             Err(err) => {
+                let msg = err.to_string();
                 warn!(identifier = %identifier, call_id = %cid, "failed to query media stats for leg: {}", err);
+                leg_error = Some(msg);
             }
         }
+
+        legs_diag.push(json!({
+            "call_id": cid,
+            "role": role,
+            "source": source,
+            "sip_msg_count": sip_msg_count,
+            "rtp_stream_count": rtp_stream_count,
+            "error": leg_error,
+        }));
     }
+
+    let total_rtp_streams = rtp_streams.len();
 
     let mut response = json!({
         "call_id": record.call_id,
@@ -354,6 +387,30 @@ async fn download_call_record_sip_flow(
 
         response["flow"] = Value::Array(flow_json);
     }
+
+    let total_sip_msgs = response["flow"]
+        .as_array()
+        .map(|f| f.len())
+        .unwrap_or(0);
+
+    response["diagnostics"] = json!({
+        "backend_configured": true,
+        "backend_type": backend.kind(),
+        "detail_requested": query.detail,
+        "time_window": {
+            "start": start_time.to_rfc3339(),
+            "end": end_time.to_rfc3339(),
+            "base": "created_at",
+            "before_secs": 3600,
+            "after_secs": 7200,
+        },
+        "sip_leg_roles_source": sip_leg_roles_source,
+        "cdr_loaded": cdr_loaded,
+        "sip_dropped_count": sipflow.dropped_count(),
+        "total_sip_msgs": total_sip_msgs,
+        "total_rtp_streams": total_rtp_streams,
+        "legs": legs_diag,
+    });
 
     Json(response).into_response()
 }

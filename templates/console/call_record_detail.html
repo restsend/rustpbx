@@ -420,6 +420,110 @@
                         </div>
                     </div>
 
+                    <!-- SipFlow Diagnostics -->
+                    <div class="mt-4 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5"
+                        x-show="sipFlowDiagnostics" x-cloak>
+                        <button type="button"
+                            class="flex w-full items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2 text-left"
+                            @click="diagnosticsExpanded = !diagnosticsExpanded">
+                            <div class="flex items-center gap-2">
+                                <span class="font-medium text-slate-700 text-xs">{{ "call_record_detail.diagnostics_title" | t }}</span>
+                                <template x-if="sipFlowDiagnostics && sipFlowDiagnostics.total_sip_msgs === 0">
+                                    <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                        {{ "call_record_detail.diag_status_no_sip" | t }}
+                                    </span>
+                                </template>
+                                <template x-if="sipFlowDiagnostics && sipFlowDiagnostics.sip_dropped_count > 0">
+                                    <span class="inline-flex items-center rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
+                                        <span x-text="sipFlowDiagnostics ? sipFlowDiagnostics.sip_dropped_count : 0"></span>
+                                        <span class="ml-1">{{ "call_record_detail.diag_dropped" | t }}</span>
+                                    </span>
+                                </template>
+                            </div>
+                            <svg class="h-4 w-4 transform text-slate-400 transition-transform"
+                                :class="{ 'rotate-180': diagnosticsExpanded }" fill="none" viewBox="0 0 24 24"
+                                stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </button>
+                        <div x-show="diagnosticsExpanded" x-transition.opacity class="p-4 space-y-3">
+                            <!-- Summary badges -->
+                            <div class="flex flex-wrap gap-2 text-xs">
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_backend" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? sipFlowDiagnostics.backend_type : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_leg_roles_source" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? sipFlowDiagnostics.sip_leg_roles_source : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">CDR:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? (sipFlowDiagnostics.cdr_loaded ? '✓' : '✗') : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_totals" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? (sipFlowDiagnostics.total_sip_msgs + ' SIP / ' + sipFlowDiagnostics.total_rtp_streams + ' RTP') : '-'"></span>
+                                </span>
+                            </div>
+
+                            <!-- Time window -->
+                            <div class="text-xs text-slate-500" x-show="sipFlowDiagnostics && sipFlowDiagnostics.time_window">
+                                <span class="font-medium text-slate-600">{{ "call_record_detail.diag_time_window" | t }}:</span>
+                                <span class="ml-1 font-mono" x-text="sipFlowDiagnostics && sipFlowDiagnostics.time_window ? formatDiagTime(sipFlowDiagnostics.time_window) : ''"></span>
+                            </div>
+
+                            <!-- Per-leg table -->
+                            <div class="overflow-x-auto rounded-lg ring-1 ring-slate-200" x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.length">
+                                <table class="w-full text-left text-xs">
+                                    <thead class="bg-slate-50 text-slate-500">
+                                        <tr>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_call_id" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_role" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_source" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold text-right">{{ "call_record_detail.diag_col_sip" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold text-right">{{ "call_record_detail.diag_col_rtp" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_error" | t }}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        <template x-for="(leg, idx) in (sipFlowDiagnostics ? sipFlowDiagnostics.legs : [])" :key="idx">
+                                            <tr class="hover:bg-slate-50"
+                                                :class="{ 'bg-red-50/40': leg.rtp_stream_count > 0 && leg.sip_msg_count === 0 }">
+                                                <td class="px-3 py-2 font-mono text-slate-600 break-all" x-text="leg.call_id"></td>
+                                                <td class="px-3 py-2 text-slate-600" x-text="leg.role"></td>
+                                                <td class="px-3 py-2 font-mono text-slate-500" x-text="leg.source"></td>
+                                                <td class="px-3 py-2 text-right">
+                                                    <span class="font-mono" :class="leg.sip_msg_count === 0 ? 'text-red-600 font-semibold' : 'text-slate-600'"
+                                                        x-text="leg.sip_msg_count"></span>
+                                                    <span class="ml-1 text-[10px] text-red-600 font-semibold"
+                                                        x-show="leg.rtp_stream_count > 0 && leg.sip_msg_count === 0">({{ "call_record_detail.diag_sip_missing" | t }})</span>
+                                                </td>
+                                                <td class="px-3 py-2 text-right font-mono text-emerald-600" x-text="leg.rtp_stream_count"></td>
+                                                <td class="px-3 py-2 font-mono text-red-500 break-all" x-text="leg.error || ''"
+                                                    x-show="leg.error"></td>
+                                                <td class="px-3 py-2 text-slate-300" x-show="!leg.error">—</td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Possible reasons when no SIP at all -->
+                            <div class="rounded-lg bg-amber-50 p-3 ring-1 ring-amber-600/20"
+                                x-show="sipFlowDiagnostics && sipFlowDiagnostics.total_sip_msgs === 0 && !sipFlowLoading">
+                                <div class="text-xs font-semibold text-amber-800">{{ "call_record_detail.diag_no_signaling_hints_title" | t }}</div>
+                                <ul class="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-700">
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.sip_dropped_count > 0">{{ "call_record_detail.diag_hint_dropped" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.some(l => l.rtp_stream_count > 0 && l.sip_msg_count === 0)">{{ "call_record_detail.diag_hint_callid_mismatch" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.sip_leg_roles_source === 'default_only'">{{ "call_record_detail.diag_hint_leg_roles_missing" | t }}</li>
+                                    <li>{{ "call_record_detail.diag_hint_ttl_or_window" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.every(l => l.sip_msg_count === 0 && l.rtp_stream_count === 0)">{{ "call_record_detail.diag_hint_not_captured" | t }}</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- SIP Signalling Timeline -->
                     <div class="mt-4">
                         <template x-if="sipFlowLoading">
@@ -741,6 +845,7 @@
                 this.rewrite = recordRewrite || topLevelRewrite || {};
                 this.sipFlowEntries = [];
                 this.rtpStreams = [];
+                this.sipFlowDiagnostics = null;
                 this.sipFlowColumns = [
                     { id: 'time', label: 'Time' },
                     { id: 'source', label: 'Source' },
@@ -822,6 +927,8 @@
             sipMessages: [],
             sipFlowColumns: [],
             sipFlowLoading: false,
+            sipFlowDiagnostics: null,
+            diagnosticsExpanded: true,
             selectedSipEntry: null,
             flowStartEpoch: null,
             pbxEndpoints: [],
@@ -1466,6 +1573,22 @@
                 }
                 const parsed = Date.parse(value);
                 return Number.isNaN(parsed) ? NaN : parsed;
+            },
+            formatDiagTime(window) {
+                if (!window || !window.start || !window.end) {
+                    return '—';
+                }
+                const fmt = (s) => {
+                    const d = new Date(s);
+                    return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+                };
+                let label = fmt(window.start) + ' ~ ' + fmt(window.end);
+                if (window.before_secs != null && window.after_secs != null) {
+                    label += ' (base ' + (window.base || 'created_at')
+                        + ', -' + (window.before_secs / 60) + 'min / +'
+                        + (window.after_secs / 60) + 'min)';
+                }
+                return label;
             },
             formatRelativeToStart(entry) {
                 if (!entry) {
@@ -2345,6 +2468,10 @@
                     const response = await fetch(this.actions.download_sip_flow);
                     if (!response.ok) return;
                     const data = await response.json();
+
+                    if (data && data.diagnostics) {
+                        this.sipFlowDiagnostics = data.diagnostics;
+                    }
 
                     if (data && Array.isArray(data.rtp_streams)) {
                         this.rtpStreams = data.rtp_streams;
