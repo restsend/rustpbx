@@ -189,6 +189,16 @@
                                 | t }}</span>
                         </div>
                     </button>
+                    <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
+                        :class="detailTab === 'trace' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="detailTab === 'trace'" aria-controls="call-record-tab-trace"
+                        @click="detailTab = 'trace'">
+                        <div class="flex flex-col">
+                            <span class="text-[13px]">{{ "call_record_detail.tab_trace" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "call_record_detail.tab_trace_desc"
+                                | t }}</span>
+                        </div>
+                    </button>
                 </nav>
             </div>
 
@@ -348,6 +358,58 @@
 
             </div>
 
+            <div x-show="detailTab === 'trace'" x-cloak x-transition.opacity class="space-y-4"
+                id="call-record-tab-trace" role="tabpanel" tabindex="0">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_trace" | t }}</h2>
+                            <p class="mt-1 text-xs text-slate-500">{{ "call_record_detail.section_trace_desc" | t }}</p>
+                        </div>
+                        <template x-if="trace && trace.length">
+                            <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600"
+                                x-text="trace.length + ' events'"></span>
+                        </template>
+                    </div>
+
+                    <template x-if="trace && trace.length">
+                        <ol class="relative mt-6 space-y-0">
+                            <template x-for="(ev, i) in trace" :key="i">
+                                <li class="relative flex gap-4 pb-6 last:pb-0">
+                                    <div x-show="i < trace.length - 1"
+                                        class="absolute left-[11px] top-6 bottom-0 w-px bg-slate-200"></div>
+                                    <div class="relative z-10 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ring-1"
+                                        :class="traceIconClass(ev)">
+                                        <span x-html="traceIconSvg(ev)"></span>
+                                    </div>
+                                    <div class="min-w-0 flex-1">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <span class="text-sm font-semibold text-slate-800" x-text="traceLabel(ev)"></span>
+                                            <span class="font-mono text-[11px] text-slate-400" x-text="formatTraceTs(ev.ts)"></span>
+                                            <template x-if="ev.code">
+                                                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ring-1"
+                                                    :class="traceChipClass(ev)" x-text="ev.code"></span>
+                                            </template>
+                                        </div>
+                                        <p class="mt-0.5 text-sm text-slate-600" x-text="ev.message"></p>
+                                        <template x-if="ev.kind === 'play' && ev.duration_ms != null">
+                                            <p class="mt-0.5 text-xs text-slate-400"
+                                                x-text="'duration: ' + formatTraceMs(ev.duration_ms) + (ev.interrupted ? ' · interrupted' : ' · completed')"></p>
+                                        </template>
+                                    </div>
+                                </li>
+                            </template>
+                        </ol>
+                    </template>
+
+                    <template x-if="!trace || !trace.length">
+                        <div class="mt-6 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                            {{ "call_record_detail.trace_empty" | t }}
+                        </div>
+                    </template>
+                </div>
+            </div>
+
             <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4"
                 id="call-record-tab-diagnostics" role="tabpanel" tabindex="0">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
@@ -416,6 +478,110 @@
                                 x-show="!rtpStreams || !rtpStreams.length">
                                 <span x-show="sipFlowLoading">{{ "call_record_detail.calculating_rtp" | t }}</span>
                                 <span x-show="!sipFlowLoading">{{ "call_record_detail.no_rtp_streams" | t }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SipFlow Diagnostics -->
+                    <div class="mt-4 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5"
+                        x-show="sipFlowDiagnostics" x-cloak>
+                        <button type="button"
+                            class="flex w-full items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2 text-left"
+                            @click="diagnosticsExpanded = !diagnosticsExpanded">
+                            <div class="flex items-center gap-2">
+                                <span class="font-medium text-slate-700 text-xs">{{ "call_record_detail.diagnostics_title" | t }}</span>
+                                <template x-if="sipFlowDiagnostics && sipFlowDiagnostics.total_sip_msgs === 0">
+                                    <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                        {{ "call_record_detail.diag_status_no_sip" | t }}
+                                    </span>
+                                </template>
+                                <template x-if="sipFlowDiagnostics && sipFlowDiagnostics.sip_dropped_count > 0">
+                                    <span class="inline-flex items-center rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
+                                        <span x-text="sipFlowDiagnostics ? sipFlowDiagnostics.sip_dropped_count : 0"></span>
+                                        <span class="ml-1">{{ "call_record_detail.diag_dropped" | t }}</span>
+                                    </span>
+                                </template>
+                            </div>
+                            <svg class="h-4 w-4 transform text-slate-400 transition-transform"
+                                :class="{ 'rotate-180': diagnosticsExpanded }" fill="none" viewBox="0 0 24 24"
+                                stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </button>
+                        <div x-show="diagnosticsExpanded" x-transition.opacity class="p-4 space-y-3">
+                            <!-- Summary badges -->
+                            <div class="flex flex-wrap gap-2 text-xs">
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_backend" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? sipFlowDiagnostics.backend_type : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_leg_roles_source" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? sipFlowDiagnostics.sip_leg_roles_source : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">CDR:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? (sipFlowDiagnostics.cdr_loaded ? '✓' : '✗') : '-'"></span>
+                                </span>
+                                <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
+                                    <span class="text-slate-400">{{ "call_record_detail.diag_totals" | t }}:</span>
+                                    <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? (sipFlowDiagnostics.total_sip_msgs + ' SIP / ' + sipFlowDiagnostics.total_rtp_streams + ' RTP') : '-'"></span>
+                                </span>
+                            </div>
+
+                            <!-- Time window -->
+                            <div class="text-xs text-slate-500" x-show="sipFlowDiagnostics && sipFlowDiagnostics.time_window">
+                                <span class="font-medium text-slate-600">{{ "call_record_detail.diag_time_window" | t }}:</span>
+                                <span class="ml-1 font-mono" x-text="sipFlowDiagnostics && sipFlowDiagnostics.time_window ? formatDiagTime(sipFlowDiagnostics.time_window) : ''"></span>
+                            </div>
+
+                            <!-- Per-leg table -->
+                            <div class="overflow-x-auto rounded-lg ring-1 ring-slate-200" x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.length">
+                                <table class="w-full text-left text-xs">
+                                    <thead class="bg-slate-50 text-slate-500">
+                                        <tr>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_call_id" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_role" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_source" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold text-right">{{ "call_record_detail.diag_col_sip" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold text-right">{{ "call_record_detail.diag_col_rtp" | t }}</th>
+                                            <th class="px-3 py-2 font-semibold">{{ "call_record_detail.diag_col_error" | t }}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        <template x-for="(leg, idx) in (sipFlowDiagnostics ? sipFlowDiagnostics.legs : [])" :key="idx">
+                                            <tr class="hover:bg-slate-50"
+                                                :class="{ 'bg-red-50/40': leg.rtp_stream_count > 0 && leg.sip_msg_count === 0 }">
+                                                <td class="px-3 py-2 font-mono text-slate-600 break-all" x-text="leg.call_id"></td>
+                                                <td class="px-3 py-2 text-slate-600" x-text="leg.role"></td>
+                                                <td class="px-3 py-2 font-mono text-slate-500" x-text="leg.source"></td>
+                                                <td class="px-3 py-2 text-right">
+                                                    <span class="font-mono" :class="leg.sip_msg_count === 0 ? 'text-red-600 font-semibold' : 'text-slate-600'"
+                                                        x-text="leg.sip_msg_count"></span>
+                                                    <span class="ml-1 text-[10px] text-red-600 font-semibold"
+                                                        x-show="leg.rtp_stream_count > 0 && leg.sip_msg_count === 0">({{ "call_record_detail.diag_sip_missing" | t }})</span>
+                                                </td>
+                                                <td class="px-3 py-2 text-right font-mono text-emerald-600" x-text="leg.rtp_stream_count"></td>
+                                                <td class="px-3 py-2 font-mono text-red-500 break-all" x-text="leg.error || ''"
+                                                    x-show="leg.error"></td>
+                                                <td class="px-3 py-2 text-slate-300" x-show="!leg.error">—</td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Possible reasons when no SIP at all -->
+                            <div class="rounded-lg bg-amber-50 p-3 ring-1 ring-amber-600/20"
+                                x-show="sipFlowDiagnostics && sipFlowDiagnostics.total_sip_msgs === 0 && !sipFlowLoading">
+                                <div class="text-xs font-semibold text-amber-800">{{ "call_record_detail.diag_no_signaling_hints_title" | t }}</div>
+                                <ul class="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-700">
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.sip_dropped_count > 0">{{ "call_record_detail.diag_hint_dropped" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.some(l => l.rtp_stream_count > 0 && l.sip_msg_count === 0)">{{ "call_record_detail.diag_hint_callid_mismatch" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.sip_leg_roles_source === 'default_only'">{{ "call_record_detail.diag_hint_leg_roles_missing" | t }}</li>
+                                    <li>{{ "call_record_detail.diag_hint_ttl_or_window" | t }}</li>
+                                    <li x-show="sipFlowDiagnostics && sipFlowDiagnostics.legs && sipFlowDiagnostics.legs.every(l => l.sip_msg_count === 0 && l.rtp_stream_count === 0)">{{ "call_record_detail.diag_hint_not_captured" | t }}</li>
+                                </ul>
                             </div>
                         </div>
                     </div>
@@ -734,6 +900,7 @@
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
                 this.record = data.record || {};
+                this.trace = Array.isArray(data.trace) ? data.trace : [];
                 const recordRewrite = (this.record && this.record.rewrite && typeof this.record.rewrite === 'object')
                     ? this.record.rewrite
                     : null;
@@ -741,6 +908,7 @@
                 this.rewrite = recordRewrite || topLevelRewrite || {};
                 this.sipFlowEntries = [];
                 this.rtpStreams = [];
+                this.sipFlowDiagnostics = null;
                 this.sipFlowColumns = [
                     { id: 'time', label: 'Time' },
                     { id: 'source', label: 'Source' },
@@ -752,6 +920,7 @@
 
                 this.actions = data.actions || {};
                 this.backUrl = data.back_url || '/console/call-records';
+                this.errorCodesUrl = data.error_codes_url || '/console/error-codes';
                 const fallbackUpdateUrl = this.determineRecordUrl(this.record.id);
                 this.updateUrl = (this.actions && this.actions.update_record)
                     ? this.actions.update_record
@@ -818,10 +987,13 @@
                 }
             },
             record: {},
+            trace: [],
             sipFlowEntries: [],
             sipMessages: [],
             sipFlowColumns: [],
             sipFlowLoading: false,
+            sipFlowDiagnostics: null,
+            diagnosticsExpanded: true,
             selectedSipEntry: null,
             flowStartEpoch: null,
             pbxEndpoints: [],
@@ -1467,6 +1639,22 @@
                 const parsed = Date.parse(value);
                 return Number.isNaN(parsed) ? NaN : parsed;
             },
+            formatDiagTime(window) {
+                if (!window || !window.start || !window.end) {
+                    return '—';
+                }
+                const fmt = (s) => {
+                    const d = new Date(s);
+                    return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+                };
+                let label = fmt(window.start) + ' ~ ' + fmt(window.end);
+                if (window.before_secs != null && window.after_secs != null) {
+                    label += ' (base ' + (window.base || 'created_at')
+                        + ', -' + (window.before_secs / 60) + 'min / +'
+                        + (window.after_secs / 60) + 'min)';
+                }
+                return label;
+            },
             formatRelativeToStart(entry) {
                 if (!entry) {
                     return '—';
@@ -2107,6 +2295,93 @@
                 const normalized = Number(code) || 0;
                 return lookup[normalized] || 'SIP error';
             },
+            errorChipClass(severity) {
+                switch ((severity || '').toLowerCase()) {
+                    case 'error':
+                        return 'bg-red-50 text-red-700 ring-red-200';
+                    case 'warn':
+                        return 'bg-amber-50 text-amber-700 ring-amber-200';
+                    case 'info':
+                        return 'bg-sky-50 text-sky-700 ring-sky-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-slate-200';
+                }
+            },
+            traceIconClass(ev) {
+                const sev = (ev.severity || '').toLowerCase();
+                if (sev === 'error') return 'bg-red-50 text-red-600 ring-red-200';
+                if (sev === 'warn') return 'bg-amber-50 text-amber-600 ring-amber-200';
+                return 'bg-sky-50 text-sky-600 ring-sky-200';
+            },
+            traceIconSvg(ev) {
+                const svg = (d) => `<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+                switch ((ev.kind || '').toLowerCase()) {
+                    case 'ring':
+                        // phone-arrow-up-right (outgoing)
+                        return svg('M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z');
+                    case 'answer':
+                        // phone-arrow-down-left (incoming)
+                        return svg('M14.25 9.75v-4.5m0 4.5h4.5m-4.5 0l6-6m-3 18.03A14.947 14.947 0 0112 21c-3.9 0-7.44-1.49-10.09-3.94a2.25 2.25 0 01-.57-2.512l1.245-3.11a1.125 1.125 0 011.067-.736h2.61c.468 0 .904.268 1.1.684l1.344 2.77a.75.75 0 00.835.343l2.855-.714a8.999 8.999 0 015.773 2.238');
+                    case 'bridge':
+                        // arrows-right-left (connected)
+                        return svg('M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5');
+                    case 'hold':
+                        // pause-circle
+                        return svg('M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75v4.5m4.5-4.5v4.5');
+                    case 'resume':
+                        // play-circle
+                        return svg('M21 12a9 9 0 11-18 0 9 9 0 0118 0zM15.91 11.672a.375.375 0 010 .656l-5.603 3.113a.375.375 0 01-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112z');
+                    case 'ivr':
+                        // microphone
+                        return svg('M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z');
+                    case 'queue':
+                        // users (waiting in queue)
+                        return svg('M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z');
+                    case 'transfer':
+                        // arrow-path / repeat (handoff)
+                        return svg('M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99');
+                    case 'play':
+                        // speaker-wave
+                        return svg('M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 001.5 12c0 .898.121 1.768.35 2.595.341 1.24 1.518 1.905 2.659 1.905h1.93l4.5 4.5c.945.945 2.561.276 2.561-1.06V4.06zM18.584 5.106a.75.75 0 011.06 0c3.808 3.807 3.808 9.98 0 13.788a.75.75 0 01-1.06-1.06 8.25 8.25 0 000-11.668.75.75 0 010-1.06z');
+                    case 'end':
+                    default:
+                        // phone-x-mark (hung up)
+                        return svg('M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25zM15.75 10.5l4.5 4.5m0-4.5l-4.5 4.5');
+                }
+            },
+            traceChipClass(ev) {
+                const sev = (ev.severity || '').toLowerCase();
+                if (sev === 'error') return 'bg-red-50 text-red-700 ring-red-200';
+                if (sev === 'warn') return 'bg-amber-50 text-amber-700 ring-amber-200';
+                if (sev === 'info') return 'bg-sky-50 text-sky-700 ring-sky-200';
+                return 'bg-slate-100 text-slate-600 ring-slate-200';
+            },
+            traceLabel(ev) {
+                const kind = ev.kind || '';
+                const map = {
+                    ring: 'Ring',
+                    answer: 'Answer',
+                    bridge: 'Bridge',
+                    hold: 'Hold',
+                    resume: 'Resume',
+                    ivr: 'IVR',
+                    queue: 'Queue',
+                    transfer: 'Transfer',
+                    play: 'Media play',
+                    end: 'Call end',
+                };
+                return map[kind] || kind;
+            },
+            formatTraceTs(ts) {
+                const v = Number(ts) || 0;
+                if (v >= 1000) return '+' + (v / 1000).toFixed(1) + 's';
+                return '+' + v + 'ms';
+            },
+            formatTraceMs(ms) {
+                const v = Number(ms) || 0;
+                if (v >= 1000) return (v / 1000).toFixed(1) + 's';
+                return v + 'ms';
+            },
             hangupTargetLabel(target) {
                 const td = (this.t || {}).call_record_detail || {};
                 if (!target) {
@@ -2345,6 +2620,10 @@
                     const response = await fetch(this.actions.download_sip_flow);
                     if (!response.ok) return;
                     const data = await response.json();
+
+                    if (data && data.diagnostics) {
+                        this.sipFlowDiagnostics = data.diagnostics;
+                    }
 
                     if (data && Array.isArray(data.rtp_streams)) {
                         this.rtpStreams = data.rtp_streams;

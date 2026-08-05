@@ -283,7 +283,11 @@ impl CallRecordHook for RecordingUploadHook {
                     call_start_time: Some(record.start_time.to_rfc3339()),
                     call_end_time: Some(record.end_time.to_rfc3339()),
                     upload_time: Some(chrono::Utc::now().to_rfc3339()),
-                    extra: record.details.metadata.clone(),
+                    extra: record.details.metadata.clone().map(|m| {
+                        m.into_iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                            .collect()
+                    }),
                 };
                 let gw_ref = gw.read();
                 gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {

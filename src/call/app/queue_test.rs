@@ -1523,6 +1523,63 @@ mod tests {
             .await;
     }
 
+    #[tokio::test]
+    async fn test_queue_parallel_waits_until_every_agent_fails() {
+        let mut config = build_parallel_queue_config();
+        config.fallback = Some(QueueFallbackAction::Failure(FailureAction::Hangup {
+            code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            reason: Some("All agents busy".to_string()),
+        }));
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let first = stack.next_cmd(200).await.expect("first parallel LegAdd");
+        let first_leg = match first {
+            CallCommand::LegAdd {
+                leg_id: Some(leg_id),
+                ..
+            } => leg_id,
+            other => panic!("expected first LegAdd, got {other:?}"),
+        };
+        let second = stack.next_cmd(200).await.expect("second parallel LegAdd");
+        let second_leg = match second {
+            CallCommand::LegAdd {
+                leg_id: Some(leg_id),
+                ..
+            } => leg_id,
+            other => panic!("expected second LegAdd, got {other:?}"),
+        };
+
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({"leg_id": first_leg.0}),
+        );
+        assert!(
+            stack.next_cmd(50).await.is_none(),
+            "one failed parallel agent must not trigger fallback"
+        );
+
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({"leg_id": second_leg.0}),
+        );
+        stack
+            .assert_cmd(200, "FallbackHangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
+            .await;
+    }
+
     // ── 按键回拨（Queue Callback on Request） ──
 
     #[tokio::test]
@@ -1902,6 +1959,269 @@ mod tests {
             "hold music should reference the default hold audio, got {path}"
         );
         assert_spec_is_playable("hold", &path).await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    // ── skill-group lifecycle notify hooks ──────────────────────────────────
+
+    /// AgentRegistry double that delegates to `MemoryRegistry` and records the
+    /// skill-group lifecycle notify hooks.
+    struct RecordingRegistry {
+        inner: crate::call::app::agent_registry::memory::MemoryRegistry,
+        abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
+        timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
+        fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl RecordingRegistry {
+        fn new() -> Self {
+            Self {
+                inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
+                abandoned: std::sync::Mutex::new(Vec::new()),
+                timeouts: std::sync::Mutex::new(Vec::new()),
+                fallbacks: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentRegistry for RecordingRegistry {
+        async fn register(
+            &self,
+            agent_id: String,
+            display_name: String,
+            uri: String,
+            skills: Vec<String>,
+            max_concurrency: u32,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .register(agent_id, display_name, uri, skills, max_concurrency)
+                .await
+        }
+
+        async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
+            self.inner.unregister(agent_id).await
+        }
+
+        async fn get_agent(&self, agent_id: &str) -> Option<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.get_agent(agent_id).await
+        }
+
+        async fn list_agents(&self) -> Vec<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.list_agents().await
+        }
+
+        async fn update_presence(
+            &self,
+            agent_id: &str,
+            new_state: crate::call::app::agent_registry::PresenceState,
+        ) -> anyhow::Result<()> {
+            self.inner.update_presence(agent_id, new_state).await
+        }
+
+        async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
+            self.inner.start_call(agent_id).await
+        }
+
+        async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
+            self.inner.end_call(agent_id, talk_time_secs).await
+        }
+
+        async fn find_available_agents(&self, required_skills: &[String]) -> Vec<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.find_available_agents(required_skills).await
+        }
+
+        async fn select_agent(
+            &self,
+            required_skills: &[String],
+            strategy: crate::call::app::agent_registry::RoutingStrategy,
+        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.select_agent(required_skills, strategy).await
+        }
+
+        async fn resolve_target(&self, target_uri: &str) -> Vec<String> {
+            self.inner.resolve_target(target_uri).await
+        }
+
+        async fn notify_call_abandoned(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
+            self.abandoned
+                .lock()
+                .unwrap()
+                .push((call_id.to_string(), queue_id.to_string(), waited_secs));
+        }
+
+        async fn notify_call_timeout(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
+            self.timeouts
+                .lock()
+                .unwrap()
+                .push((call_id.to_string(), queue_id.to_string(), waited_secs));
+        }
+
+        async fn notify_call_fallback(
+            &self,
+            call_id: &str,
+            queue_id: &str,
+            reason: &str,
+            action: &str,
+        ) {
+            self.fallbacks
+                .lock()
+                .unwrap()
+                .push((
+                    call_id.to_string(),
+                    queue_id.to_string(),
+                    reason.to_string(),
+                    action.to_string(),
+                ));
+        }
+    }
+
+    /// A skill-routed queue with no agents available must notify the dispatcher
+    /// of the abandoned call and the executed fallback.
+    #[tokio::test]
+    async fn test_queue_skill_abandon_notifies_registry() {
+        use std::sync::Arc;
+        let registry = Arc::new(RecordingRegistry::new());
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.join().await.unwrap();
+
+        let abandoned = registry.abandoned.lock().unwrap();
+        assert!(
+            abandoned.iter().any(|(c, q, _)| c == "call-001" && q == "test-queue"),
+            "notify_call_abandoned must be called for an abandoned skill-routed call, got {abandoned:?}"
+        );
+        let fallbacks = registry.fallbacks.lock().unwrap();
+        assert!(
+            fallbacks.iter().any(|(c, q, _, _)| c == "call-001" && q == "test-queue"),
+            "notify_call_fallback must be called when the call could not be serviced, got {fallbacks:?}"
+        );
+    }
+
+    /// A non-skill-routed queue must NOT notify the skill-group dispatcher.
+    #[tokio::test]
+    async fn test_queue_non_skill_routing_does_not_notify() {
+        use std::sync::Arc;
+        let registry = Arc::new(RecordingRegistry::new());
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = false;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.join().await.unwrap();
+
+        assert!(registry.abandoned.lock().unwrap().is_empty());
+        assert!(registry.timeouts.lock().unwrap().is_empty());
+        assert!(registry.fallbacks.lock().unwrap().is_empty());
+    }
+
+    /// Agent ring timeout must emit the `queue_agent_no_answer` RWI event via
+    /// the gateway.
+    #[tokio::test]
+    async fn test_queue_agent_ring_timeout_emits_no_answer() {
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw.create_session(RwiIdentity { token: "t".into(), scopes: vec![] }).read().id.clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let registry = Arc::new(RecordingRegistry::new());
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.autonomous_routing = true;
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+
+        // accept_immediately → Answer first, then autonomous dial of the agent.
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "OriginateCall", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
+        stack.timeout("agent_ring_timeout");
+
+        // The no-answer event is broadcast synchronously from the handler; poll briefly.
+        let mut saw = false;
+        for _ in 0..20 {
+            while let Ok(v) = gws_rx.try_recv() {
+                if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_no_answer") {
+                    saw = true;
+                }
+            }
+            if saw {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(saw, "queue_agent_no_answer event must be emitted on ring timeout");
 
         stack.cancel();
         let _ = stack.join().await;

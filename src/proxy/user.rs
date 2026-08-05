@@ -239,6 +239,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             let backend = DbBackend::new(
                 url.clone().ok_or(anyhow!("database url is required"))?,
                 db_config,
+                None,
             )
             .await?;
             Ok(Box::new(backend) as Box<dyn UserBackend>)

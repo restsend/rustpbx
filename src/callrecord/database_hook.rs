@@ -141,7 +141,25 @@ pub async fn persist_call_record(
             let mut m = details.metadata.clone().unwrap_or_default();
             if !record.sip_leg_roles.is_empty() {
                 let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-                m.insert("sip_leg_roles".to_string(), json);
+                m.insert(
+                    "sip_leg_roles".to_string(),
+                    serde_json::Value::String(json),
+                );
+            }
+            // Remember the path the CDR file was actually written to so the
+            // console can still locate it after the storage root is changed in
+            // config (issue #237). Stored in the existing metadata JSON column
+            // to avoid a schema migration.
+            if let Some(path) = record
+                .details
+                .cdr_file_path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+            {
+                m.insert(
+                    "cdr_path".to_string(),
+                    serde_json::Value::String(path.to_string()),
+                );
             }
             serde_json::to_value(&m).ok()
         }),

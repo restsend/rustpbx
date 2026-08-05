@@ -240,53 +240,73 @@ async fn download_call_record_sip_flow(
     let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
     let mut call_id_roles: HashMap<String, String> = HashMap::new();
+    // Track where each call_id came from, for diagnostics.
+    let mut call_id_sources: HashMap<String, &'static str> = HashMap::new();
     // Default main call_id to "primary" if not overridden
     call_id_roles.insert(record.call_id.clone(), "primary".to_string());
+    call_id_sources.insert(record.call_id.clone(), "default");
 
     // Load sip_leg_roles from DB metadata first (faster, no file I/O),
     // then fall back to the CDR JSON file.
     let mut sip_leg_roles_loaded = false;
+    let mut sip_leg_roles_source = "default_only";
     if let Some(ref meta) = record.metadata {
         if let Some(meta_map) = meta.as_object() {
             if let Some(json_str) = meta_map.get("sip_leg_roles").and_then(|v| v.as_str()) {
                 if let Ok(roles) = serde_json::from_str::<HashMap<String, String>>(json_str) {
                     for (cid, role) in roles {
-                        call_id_roles.insert(cid, role);
+                        call_id_roles.insert(cid.clone(), role);
+                        call_id_sources.insert(cid, "db_metadata");
                     }
                     sip_leg_roles_loaded = true;
+                    sip_leg_roles_source = "db_metadata";
                 }
             }
         }
     }
 
+    let mut cdr_loaded = false;
     if !sip_leg_roles_loaded {
         let cdr_data = load_cdr_data(&state, &record).await;
         if let Some(cdr) = &cdr_data {
+            cdr_loaded = true;
             for (cid, role) in &cdr.record.sip_leg_roles {
                 call_id_roles.insert(cid.clone(), role.clone());
+                call_id_sources.insert(cid.clone(), "cdr_file");
             }
+            sip_leg_roles_source = "cdr_file";
         }
     }
 
     let mut flow_items = Vec::new();
     let mut rtp_streams = Vec::new();
+    let mut legs_diag: Vec<Value> = Vec::new();
 
     for (cid, role) in &call_id_roles {
+        let source = call_id_sources.get(cid).copied().unwrap_or("default");
+        let mut sip_msg_count: usize = 0;
+        let mut rtp_stream_count: usize = 0;
+        let mut leg_error: Option<String> = None;
+
         if query.detail {
             match backend.query_flow(cid, start_time, end_time).await {
                 Ok(items) => {
+                    sip_msg_count = items.len();
                     for item in items {
                         flow_items.push((item, role.clone(), cid.clone()));
                     }
                 }
                 Err(err) => {
+                    let msg = err.to_string();
                     warn!(identifier = %identifier, call_id = %cid, "failed to query sip flow for leg: {}", err);
+                    leg_error = Some(msg);
                 }
             }
         }
 
         match backend.query_media_stats(cid, start_time, end_time).await {
             Ok(stats) => {
+                rtp_stream_count = stats.len();
                 for stat in stats {
                     let src_addr = if stat.src.is_empty() {
                         format!("Leg {}", stat.leg)
@@ -315,10 +335,23 @@ async fn download_call_record_sip_flow(
                 }
             }
             Err(err) => {
+                let msg = err.to_string();
                 warn!(identifier = %identifier, call_id = %cid, "failed to query media stats for leg: {}", err);
+                leg_error = Some(msg);
             }
         }
+
+        legs_diag.push(json!({
+            "call_id": cid,
+            "role": role,
+            "source": source,
+            "sip_msg_count": sip_msg_count,
+            "rtp_stream_count": rtp_stream_count,
+            "error": leg_error,
+        }));
     }
+
+    let total_rtp_streams = rtp_streams.len();
 
     let mut response = json!({
         "call_id": record.call_id,
@@ -354,6 +387,30 @@ async fn download_call_record_sip_flow(
 
         response["flow"] = Value::Array(flow_json);
     }
+
+    let total_sip_msgs = response["flow"]
+        .as_array()
+        .map(|f| f.len())
+        .unwrap_or(0);
+
+    response["diagnostics"] = json!({
+        "backend_configured": true,
+        "backend_type": backend.kind(),
+        "detail_requested": query.detail,
+        "time_window": {
+            "start": start_time.to_rfc3339(),
+            "end": end_time.to_rfc3339(),
+            "base": "created_at",
+            "before_secs": 3600,
+            "after_secs": 7200,
+        },
+        "sip_leg_roles_source": sip_leg_roles_source,
+        "cdr_loaded": cdr_loaded,
+        "sip_dropped_count": sipflow.dropped_count(),
+        "total_sip_msgs": total_sip_msgs,
+        "total_rtp_streams": total_rtp_streams,
+        "legs": legs_diag,
+    });
 
     Json(response).into_response()
 }
@@ -1342,6 +1399,7 @@ fn build_record_payload(
     let callee_uri = record.callee_uri.clone();
 
     let recording = build_recording_payload(state, record, inline_recording_url);
+    let error = build_error_payload(record.metadata.as_ref());
 
     let rewrite_caller_original = record.rewrite_original_from.clone();
     let rewrite_caller_final = caller_uri.clone();
@@ -1389,6 +1447,7 @@ fn build_record_payload(
         "status_code": status_code,
         "hangup_reason": hangup_reason,
         "hangup_messages": hangup_messages,
+        "error": error,
         "rewrite": {
             "caller": {
                 "original": rewrite_caller_original,
@@ -1411,6 +1470,45 @@ fn metadata_string(metadata: Option<&Value>, key: &str) -> Option<String> {
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Build the structured error payload for the record UI chip. Reads the/// standardized error fields written by the reporter into `metadata`, and
+/// augments them with the catalog's `locale_key` / `remediation_key` (resolved
+/// against the live [`CallErrRegistry`]) so templates can localize via `| t`.
+///
+/// Returns `Null` when no `error_code` is present (the template hides the chip
+/// with `x-if`).
+fn build_error_payload(metadata: Option<&Value>) -> Value {
+    let Some(code) = metadata_string(metadata, "error_code") else {
+        return Value::Null;
+    };
+    let app = metadata_string(metadata, "error_app");
+    let severity = metadata_string(metadata, "error_severity");
+    let message = metadata_string(metadata, "error_message");
+    // Augment with catalog locale/remediation keys when the code is registered.
+    let (locale_key, remediation_key) = match crate::call_errors::registry().find(&code) {
+        Some(info) => (Some(info.locale_key), info.remediation_key),
+        None => (None, None),
+    };
+    json!({
+        "code": code,
+        "app": app,
+        "severity": severity,
+        "message": message,
+        "locale_key": locale_key,
+        "remediation_key": remediation_key,
+    })
+}
+
+/// Extract the call trace timeline from `metadata["trace"]` (a JSON array of
+/// [`crate::call_errors::TraceEvent`] objects). Returns the array, or `Null`
+/// when absent. Only surfaced on the detail page trace tab.
+fn build_trace_payload(metadata: Option<&Value>) -> Value {
+    metadata
+        .and_then(|value| value.as_object())
+        .and_then(|meta| meta.get("trace"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn build_recording_payload(
@@ -1534,31 +1632,76 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
     };
     let storage = resolve_cdr_storage(state);
     let callrecord: CallRecord = record.clone().into();
-    let candidate = crate::callrecord::format_file_name(root, &callrecord);
+    let reconstructed = crate::callrecord::format_file_name(root, &callrecord);
+
+    // Candidate full-paths to try, in priority order:
+    // 1. The path persisted at write time (survives storage root changes — #237).
+    // 2. The path reconstructed from the current root (legacy / fallback).
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(stored) = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("cdr_path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        if !candidates.iter().any(|c| c == stored) {
+            candidates.push(stored.to_string());
+        }
+    }
+    candidates.push(reconstructed.clone());
+
+    let is_local = storage.as_ref().map(|s| s.is_local()).unwrap_or(false);
+
     let mut content: Option<String> = None;
+    let mut resolved_path: Option<String> = None;
 
-    if let Some(ref storage_ref) = storage {
-        let path_to_read = strip_storage_root(state, &candidate);
+    for candidate in &candidates {
+        if content.is_some() {
+            break;
+        }
 
-        match storage_ref.read_to_string(&path_to_read).await {
-            Ok(value) => content = Some(value),
-            Err(err) => {
-                warn!(call_id = %record.call_id, path = %path_to_read, "failed to load CDR from storage: {}", err);
+        // For local storage, try a direct filesystem read first. This recovers
+        // historical CDRs whose file still lives under a previous storage root
+        // (the absolute persisted path) after the operator changed the root —
+        // see issue #237.
+        if is_local && Path::new(candidate).is_absolute() {
+            if let Ok(value) = tokio::fs::read_to_string(candidate).await {
+                content = Some(value);
+                resolved_path = Some(candidate.clone());
+                continue;
+            }
+        }
+
+        // Storage-backed read: strip the current root, then read via storage.
+        if let Some(ref storage_ref) = storage {
+            let path_to_read = strip_storage_root(state, candidate);
+            match storage_ref.read_to_string(&path_to_read).await {
+                Ok(value) => {
+                    content = Some(value);
+                    resolved_path = Some(candidate.clone());
+                }
+                Err(err) => {
+                    warn!(call_id = %record.call_id, path = %path_to_read, "failed to load CDR from storage: {}", err);
+                }
             }
         }
     }
+
+    let cdr_path = resolved_path.unwrap_or(reconstructed);
+
     if let Some(raw) = content {
         match serde_json::from_str::<CallRecord>(&raw) {
             Ok(parsed) => {
                 return Some(CdrData {
                     record: parsed,
                     raw_content: raw,
-                    cdr_path: candidate,
+                    cdr_path,
                     storage: storage.clone(),
                 });
             }
             Err(err) => {
-                warn!(call_id = %record.call_id, path = %candidate, "failed to parse CDR file: {}", err);
+                warn!(call_id = %record.call_id, path = %cdr_path, "failed to parse CDR file: {}", err);
             }
         }
     }
@@ -1722,7 +1865,9 @@ fn build_detail_payload(
 
     json!({
         "back_url": state.url_for("/call-records"),
+        "error_codes_url": state.url_for("/error-codes"),
         "record": record_payload,
+        "trace": build_trace_payload(record.metadata.as_ref()),
         //"sip_flow": sip_flow_download,
         "media_metrics": media_metrics,
         "notes": notes.unwrap_or(Value::Null),
@@ -2005,6 +2150,122 @@ mod tests {
             payload["outbound_trunk_dest"],
             "sip:carrier-a.example.com:5060"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "addon-wholesale")]
+    async fn build_record_payload_exposes_error_from_metadata() {
+        // Empirically proves the call-record UI error chip data path: the
+        // standardized error fields written by the reporter into the metadata
+        // JSON column are surfaced as a structured `error` object for both the
+        // list and detail templates.
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let record = call_record::ActiveModel {
+            call_id: Set("call-err-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("failed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(0),
+            metadata: Set(Some(json!({
+                "error_code": "wholesale.insufficient_funds",
+                "error_app": "wholesale",
+                "error_severity": "error",
+                "error_message": "Insufficient funds",
+                "sip_code": "402",
+            }))),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let related = load_related_context(&db, &[record.clone()])
+            .await
+            .expect("related context");
+        let payload = build_record_payload(&record, &related, &state, None);
+        assert_eq!(payload["error"]["code"], "wholesale.insufficient_funds");
+        assert_eq!(payload["error"]["app"], "wholesale");
+        assert_eq!(payload["error"]["severity"], "error");
+        assert_eq!(payload["error"]["message"], "Insufficient funds");
+        // registered code -> catalog locale/remediation keys are attached
+        assert_eq!(
+            payload["error"]["locale_key"],
+            "errors.wholesale.insufficient_funds"
+        );
+        assert!(payload["error"]["remediation_key"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_record_payload_error_null_when_no_error_code() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let record = call_record::ActiveModel {
+            call_id: Set("call-ok-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(30),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+        let related = load_related_context(&db, &[record.clone()])
+            .await
+            .expect("related context");
+        let payload = build_record_payload(&record, &related, &state, None);
+        assert!(payload["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn build_trace_payload_extracts_trace_array() {
+        // The call trace (a JSON array under metadata["trace"]) must be surfaced
+        // for the detail page trace tab.
+        let db = setup_db().await;
+        let _state = create_console_state(db.clone()).await;
+        let record = call_record::ActiveModel {
+            call_id: Set("call-trace-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("failed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(0),
+            metadata: Set(Some(json!({
+                "trace": [
+                    { "ts": 0, "kind": "ring", "message": "Dialing", "severity": "info" },
+                    { "ts": 2500, "kind": "answer", "message": "Call answered", "severity": "info" },
+                    { "ts": 5200, "kind": "play", "message": "Played prompt", "duration_ms": 1200, "interrupted": false, "severity": "info" },
+                    { "ts": 8000, "kind": "end", "message": "Call ended", "code": "ivr.timeout", "severity": "warn" }
+                ]
+            }))),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let trace = build_trace_payload(record.metadata.as_ref());
+        let arr = trace.as_array().expect("trace is an array");
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0]["kind"], "ring");
+        assert_eq!(arr[3]["kind"], "end");
+        assert_eq!(arr[3]["severity"], "warn");
+        // No trace -> Null
+        let no_trace = build_trace_payload(Some(&json!({ "error_code": "proxy.callee_offline" })));
+        assert!(no_trace.is_null());
     }
 
     #[tokio::test]

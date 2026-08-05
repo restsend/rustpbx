@@ -90,10 +90,37 @@ impl std::fmt::Display for PresenceStatus {
                 if detail.is_empty() {
                     write!(f, "away")
                 } else {
-                    write!(f, "{}", detail)
+                    write!(f, "away:{}", detail)
                 }
             }
             PresenceStatus::Offline => write!(f, "offline"),
+        }
+    }
+}
+
+impl PresenceStatus {
+    /// Parse a status string into a `PresenceStatus`.
+    ///
+    /// Accepts the canonical form (`away:<detail>`, `away`) as well as the
+    /// legacy bare-detail (`lunch`) and `custom:<detail>` spellings so every
+    /// inbound boundary tolerates historical payloads. Bare or prefixed detail
+    /// values collapse to `Away(detail)`.
+    pub fn normalize(status: &str) -> PresenceStatus {
+        match status {
+            "idle" | "online" | "available" => PresenceStatus::Idle,
+            "dnd" => PresenceStatus::Dnd,
+            "busy" => PresenceStatus::Busy,
+            "ringing" => PresenceStatus::Ringing,
+            "wrapup" | "wrap-up" | "wrap_up" => PresenceStatus::Wrapup,
+            "offline" | "closed" | "" => PresenceStatus::Offline,
+            "away" => PresenceStatus::Away(String::new()),
+            s if s.starts_with("away:") => {
+                PresenceStatus::Away(s["away:".len()..].to_string())
+            }
+            s if s.starts_with("custom:") => {
+                PresenceStatus::Away(s["custom:".len()..].to_string())
+            }
+            other => PresenceStatus::Away(other.to_string()),
         }
     }
 }
@@ -201,16 +228,7 @@ impl PresenceManager {
             let states = presence::Entity::find().all(db).await?;
             let mut map = self.states.write().unwrap();
             for s in states {
-                let status = match s.status.as_str() {
-                    "idle" | "available" => PresenceStatus::Idle,
-                    "busy" => PresenceStatus::Busy,
-                    "ringing" => PresenceStatus::Ringing,
-                    "wrapup" => PresenceStatus::Wrapup,
-                    "away" => PresenceStatus::Away(String::new()),
-                    "dnd" => PresenceStatus::Dnd,
-                    "offline" => PresenceStatus::Offline,
-                    other => PresenceStatus::Away(other.to_string()),
-                };
+                let status = PresenceStatus::normalize(&s.status);
                 map.insert(
                     s.identity,
                     PresenceState {
@@ -419,16 +437,7 @@ impl PresenceManager {
                     });
 
                     let new_status = match header_status {
-                        Some("online" | "available" | "idle") => PresenceStatus::Idle,
-                        Some(
-                            s @ ("away" | "break" | "lunch" | "training" | "meeting" | "personal"),
-                        ) => PresenceStatus::Away(s.to_string()),
-                        Some("dnd") => PresenceStatus::Dnd,
-                        Some("busy") => PresenceStatus::Busy,
-                        Some("ringing") => PresenceStatus::Ringing,
-                        Some("wrapup") => PresenceStatus::Wrapup,
-                        Some("offline" | "closed") => PresenceStatus::Offline,
-                        Some(s) => PresenceStatus::Away(s.to_string()),
+                        Some(s) => PresenceStatus::normalize(s),
                         None if current.status == PresenceStatus::Offline => PresenceStatus::Idle,
                         None => return,
                     };
@@ -729,7 +738,15 @@ impl PresenceModule {
                         if activities.busy.is_some() || activities.on_the_phone.is_some() {
                             status = PresenceStatus::Busy;
                         } else if activities.away.is_some() {
-                            status = PresenceStatus::Away(tuple.note.clone().unwrap_or_default());
+                            // RPID <rpid:away/> implies an away state; the
+                            // <note> carries the break detail. Accept both the
+                            // canonical "away:<detail>" and legacy bare detail.
+                            let note = tuple.note.clone().unwrap_or_default();
+                            let detail = note
+                                .strip_prefix("away:")
+                                .or_else(|| note.strip_prefix("custom:"))
+                                .unwrap_or(&note);
+                            status = PresenceStatus::Away(detail.to_string());
                         }
                     }
                     // Allow clients to signal call-related states via the
@@ -1002,10 +1019,16 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
             status: PidfStatus {
                 basic: basic_status.to_string(),
             },
-            note: state.note.clone().or_else(|| match &state.status {
-                PresenceStatus::Away(detail) if !detail.is_empty() => Some(detail.clone()),
-                _ => Some(state.status.to_string()),
-            }),
+            note: match &state.status {
+                // Away states carry the canonical status string in the note
+                // (e.g. "away:lunch") so subscribers see one consistent
+                // vocabulary regardless of what the publisher sent.
+                PresenceStatus::Away(_) => Some(state.status.to_string()),
+                _ => state
+                    .note
+                    .clone()
+                    .or_else(|| Some(state.status.to_string())),
+            },
             contact: Some(format!("sip:{}@{}", identity, domain)),
             activities: match state.status {
                 PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
@@ -1118,6 +1141,34 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_status_strings() {
+        use PresenceStatus as P;
+        assert_eq!(P::normalize("idle"), P::Idle);
+        assert_eq!(P::normalize("available"), P::Idle);
+        assert_eq!(P::normalize("dnd"), P::Dnd);
+        assert_eq!(P::normalize("busy"), P::Busy);
+        assert_eq!(P::normalize("ringing"), P::Ringing);
+        assert_eq!(P::normalize("wrapup"), P::Wrapup);
+        assert_eq!(P::normalize("offline"), P::Offline);
+        assert_eq!(P::normalize("closed"), P::Offline);
+        assert_eq!(P::normalize(""), P::Offline);
+        assert_eq!(P::normalize("away"), P::Away(String::new()));
+        // Canonical prefixed form.
+        assert_eq!(P::normalize("away:lunch"), P::Away("lunch".to_string()));
+        // Legacy bare and custom spellings.
+        assert_eq!(P::normalize("lunch"), P::Away("lunch".to_string()));
+        assert_eq!(P::normalize("custom:lunch"), P::Away("lunch".to_string()));
+        // Bare/unknown detail without a prefix stays an away detail.
+        assert_eq!(P::normalize("smoke"), P::Away("smoke".to_string()));
+    }
+
+    #[test]
+    fn test_presence_status_display_canonical() {
+        assert_eq!(PresenceStatus::Away(String::new()).to_string(), "away");
+        assert_eq!(PresenceStatus::Away("lunch".to_string()).to_string(), "away:lunch");
+    }
+
+    #[test]
     fn test_build_pidf_body_idle() {
         let body = build_pidf_body("1001", "pbx.example.com", &make_state(PresenceStatus::Idle));
         assert!(body.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
@@ -1163,7 +1214,7 @@ mod tests {
         let state = make_state(PresenceStatus::Away("lunch".to_string()));
         let body = build_pidf_body("1001", "pbx.example.com", &state);
         assert!(body.contains("<basic>open</basic>"));
-        assert!(body.contains("<note>lunch</note>"));
+        assert!(body.contains("<note>away:lunch</note>"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::config::SipFlowSubdirs;
 use crate::flusher::{FlushCommand, FlushMeta};
 use crate::protocol::{MsgType, Packet};
 use crate::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
+use crate::shard::{RouterState, bucket_query_dirs, detect_bucket_layout};
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes};
@@ -12,6 +13,7 @@ use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -26,9 +28,22 @@ pub struct StorageManager {
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
     raw_file: Option<File>,
     current_offset: u64,
+    /// Whether the raw file cursor is known to equal `current_offset`.
+    ///
+    /// True after a successful write or a `rotate()` seek; set to false when a
+    /// write fails (a partial write leaves the cursor ahead of `current_offset`),
+    /// forcing the next write to re-seek before appending.
+    pos_known: bool,
     subdirs: SipFlowSubdirs,
-    flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+    flusher_tx: Option<mpsc::Sender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
+    /// Shard this writer belongs to (0..shard_count). Used to pick the
+    /// `shard-{i}` subdir when the active bucket is sharded.
+    shard_index: usize,
+    /// Configured shard count. `<= 1` forces the legacy single-file layout.
+    shard_count: usize,
+    /// Shared write-routing state; updated on rotate, read by `record()`.
+    router: Option<Arc<RouterState>>,
 }
 
 pub struct ProcessedPacket {
@@ -107,32 +122,31 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
     process_packet_with(packet, Some(DEFAULT_COMPRESS_LEVEL))
 }
 
-/// Like [`process_packet`], with explicit compression control:
-/// `Some(level)` gzip-compresses large payloads at that level, `None`
-/// stores payloads uncompressed. Both forms are always readable — the read
-/// path auto-detects compression from magic bytes.
-pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPacket {
-    let Packet {
-        msg_type,
-        src,
-        dst,
-        timestamp,
-        call_id,
-        leg,
-        payload,
-    } = packet;
+/// Like [`process_packet_with`], but takes pre-formatted `"ip:port"` address
+/// strings instead of a [`Packet`]. Use this on paths that already hold the
+/// address strings (e.g. [`SipFlowItem`]-based recording) to avoid the
+/// `String → IpAddr → String` round-trip.
+#[allow(clippy::too_many_arguments)]
+pub fn process_packet_with_addr(
+    msg_type: MsgType,
+    src_addr: String,
+    dst_addr: String,
+    timestamp: u64,
+    call_id: Option<String>,
+    leg: Option<i32>,
+    payload: Bytes,
+    compress: Option<u32>,
+) -> ProcessedPacket {
     let mut callid = call_id;
-    let src_addr = format!("{}:{}", src.0, src.1);
-    let dst_addr = format!("{}:{}", dst.0, dst.1);
-
     if matches!(msg_type, MsgType::Sip) && callid.is_none() {
         callid = extract_callid(&payload);
     }
 
     let orig_size = payload.len();
-    let payload = match compress {
-        Some(level) => maybe_compress_payload(payload, level),
-        None => payload,
+    let payload = match (compress, msg_type) {
+        (Some(level), MsgType::Sip) => maybe_compress_payload(payload, level),
+        // RTP: 包小压缩比极低，跳过以节省 CPU
+        _ => payload,
     };
     let comp_size = payload.len();
 
@@ -147,6 +161,26 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
         orig_size,
         comp_size,
     }
+}
+
+/// Like [`process_packet`], with explicit compression control:
+/// `Some(level)` gzip-compresses large payloads at that level, `None`
+/// stores payloads uncompressed. Both forms are always readable — the read
+/// path auto-detects compression from magic bytes.
+pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPacket {
+    let Packet {
+        msg_type,
+        src,
+        dst,
+        timestamp,
+        call_id,
+        leg,
+        payload,
+        ..
+    } = packet;
+    let src_addr = format!("{}:{}", src.0, src.1);
+    let dst_addr = format!("{}:{}", dst.0, dst.1);
+    process_packet_with_addr(msg_type, src_addr, dst_addr, timestamp, call_id, leg, payload, compress)
 }
 
 async fn seek_or_read_through(
@@ -211,17 +245,24 @@ impl StorageManager {
     pub(crate) fn new(
         base_path: &Path,
         subdirs: SipFlowSubdirs,
-        flusher_tx: Option<mpsc::UnboundedSender<FlushCommand>>,
+        flusher_tx: Option<mpsc::Sender<FlushCommand>>,
         dropped: Option<Arc<AtomicU64>>,
+        shard_index: usize,
+        shard_count: usize,
+        router: Option<Arc<RouterState>>,
     ) -> Self {
         Self {
             base_path: base_path.to_path_buf(),
             current_hour: (0, 0, 0, 0),
             raw_file: None,
             current_offset: 0,
+            pos_known: true,
             subdirs,
             flusher_tx,
             dropped: dropped.unwrap_or_default(),
+            shard_index,
+            shard_count,
+            router,
         }
     }
 
@@ -240,9 +281,15 @@ impl StorageManager {
             .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
         let offset = self.current_offset;
 
-        // Seek to the tracked offset so the write goes exactly where the
-        // database will say it is, regardless of O_APPEND being absent.
-        file.seek(SeekFrom::Start(offset)).await?;
+        // Only write_processed writes to this fd, and every successful write
+        // advances the cursor to exactly `current_offset`, so on the happy path
+        // the cursor already sits where the DB index says the record lives.
+        // Re-seek only when the cursor may have diverged (a prior write error
+        // can leave it mid-record).
+        let write_start = Instant::now();
+        if !self.pos_known {
+            file.seek(SeekFrom::Start(offset)).await?;
+        }
 
         let mut header = [0u8; RAW_RECORD_HEADER_LEN as usize];
         let mut header_buf = &mut header[..];
@@ -250,7 +297,13 @@ impl StorageManager {
         header_buf.put_u32(processed.orig_size as u32);
         header_buf.put_u32(processed.comp_size as u32);
         let mut record = Buf::chain(&header[..], processed.payload.as_ref());
-        file.write_all_buf(&mut record).await?;
+        if let Err(e) = file.write_all_buf(&mut record).await {
+            self.pos_known = false;
+            return Err(e.into());
+        }
+        self.pos_known = true;
+        metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
+            .record(write_start.elapsed().as_secs_f64());
 
         self.current_offset += RAW_RECORD_HEADER_LEN as u64 + processed.comp_size as u64;
 
@@ -265,7 +318,9 @@ impl StorageManager {
                 offset,
                 size: processed.comp_size,
             };
-            if tx.send(FlushCommand::Meta(meta)).is_err() {
+            // Bounded channel: awaiting parks this worker until the flusher
+            // drains, so the flusher's backlog stays capped (backpressure).
+            if tx.send(FlushCommand::Meta(meta)).await.is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -273,14 +328,16 @@ impl StorageManager {
         Ok(())
     }
 
-    /// Number of items dropped due to flusher channel being full.
+    /// Number of items dropped due to flusher channel being closed.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
     pub async fn check_flush(&mut self) -> Result<()> {
         if let Some(ref tx) = self.flusher_tx {
-            let _ = tx.send(FlushCommand::Flush);
+            let _ = tx.send(FlushCommand::Flush {
+                enqueued_at: Instant::now(),
+            }).await;
         }
         Ok(())
     }
@@ -289,7 +346,14 @@ impl StorageManager {
     pub async fn force_flush(&mut self) -> Result<()> {
         if let Some(ref tx) = self.flusher_tx {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            if tx.send(FlushCommand::FlushSync { done: done_tx }).is_ok() {
+            if tx
+                .send(FlushCommand::FlushSync {
+                    done: done_tx,
+                    enqueued_at: Instant::now(),
+                })
+                .await
+                .is_ok()
+            {
                 let _ = done_rx.await;
             }
         }
@@ -297,22 +361,40 @@ impl StorageManager {
     }
 
     async fn rotate(&mut self, dt: DateTime<Local>) -> Result<()> {
-        let subdir = match self.subdirs {
-            SipFlowSubdirs::Hourly => format!(
-                "{:04}{:02}{:02}/{:02}",
-                dt.year(),
-                dt.month(),
-                dt.day(),
-                dt.hour()
-            ),
-            SipFlowSubdirs::Daily => format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
-            SipFlowSubdirs::None => String::new(),
-        };
-        let dir = self.base_path.join(subdir);
-        tokio::fs::create_dir_all(&dir).await?;
+        let subdir = crate::shard::bucket_subdir(&self.subdirs, dt);
+        let bucket_dir = self.base_path.join(&subdir);
+        tokio::fs::create_dir_all(&bucket_dir).await?;
 
-        let db_path = dir.join("sipflow.db");
-        let raw_path = dir.join("data.raw");
+        // Directory state is the source of truth for the bucket layout (shared
+        // via the router): new/empty dir → Multi, has shard-* → Multi,
+        // legacy files with no shard-* → Single. The router caches it and
+        // publishes the mode used by record() routing.
+        let layout = match &self.router {
+            Some(router) => router.current_layout(&subdir, &bucket_dir),
+            None if self.shard_count <= 1 => crate::shard::BucketLayout::Single,
+            None => detect_bucket_layout(&bucket_dir),
+        };
+
+        let write_dir = match layout {
+            crate::shard::BucketLayout::Multi => {
+                // Worker 0 materialises all shard dirs so readers see a complete
+                // multi bucket; other workers ensure their own exists.
+                if self.shard_index == 0 {
+                    for i in 0..self.shard_count {
+                        tokio::fs::create_dir_all(&bucket_dir.join(format!("shard-{i}")))
+                            .await?;
+                    }
+                } else {
+                    tokio::fs::create_dir_all(&bucket_dir.join(format!("shard-{}", self.shard_index)))
+                        .await?;
+                }
+                bucket_dir.join(format!("shard-{}", self.shard_index))
+            }
+            crate::shard::BucketLayout::Single => bucket_dir,
+        };
+
+        let db_path = write_dir.join("sipflow.db");
+        let raw_path = write_dir.join("data.raw");
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -339,13 +421,14 @@ impl StorageManager {
         // Read the current file length only ONCE here; after this,
         // write_processed tracks the offset in-memory.
         self.current_offset = file.metadata().await?.len();
-        // Seek to end so subsequent seek+write goes to the correct position.
+        // Seek to end so subsequent writes go to the correct position.
         file.seek(SeekFrom::Start(self.current_offset)).await?;
+        self.pos_known = true;
 
         self.raw_file = Some(file);
 
         if let Some(ref tx) = self.flusher_tx {
-            let _ = tx.send(FlushCommand::Rotate { db_path });
+            let _ = tx.send(FlushCommand::Rotate { db_path }).await;
         }
 
         Ok(())
@@ -375,56 +458,61 @@ impl StorageManager {
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
-            let db_path = dir.join("sipflow.db");
-            let raw_path = dir.join("data.raw");
+            for sub in bucket_query_dirs(&dir) {
+                let db_path = sub.join("sipflow.db");
+                let raw_path = sub.join("data.raw");
 
-            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
-                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
-            {
-                continue;
-            }
+                if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                    || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+                {
+                    continue;
+                }
 
-            let mut conn =
-                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
-            Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path).await?;
-            let mut current_pos = None;
+                let mut conn = SqliteConnection::connect(&format!(
+                    "sqlite:{}",
+                    db_path.to_string_lossy()
+                ))
+                .await?;
+                Self::configure_read_conn(&mut conn).await;
+                let mut raw_file = File::open(raw_path).await?;
+                let mut current_pos = None;
 
-            // Query using JOIN with call_meta
-            let rows = sqlx::query_as::<_, SipPacketRow>(
-                "SELECT s.src AS src,
-                        s.dst AS dst,
-                        s.timestamp AS timestamp,
-                        s.offset AS offset,
-                        s.size AS size
-                 FROM sip_msgs s
-                 JOIN call_meta c ON s.call_id = c.id
-                  WHERE c.callid = ?
-                  AND s.timestamp >= ?
-                  AND s.timestamp <= ?
-                 ORDER BY s.offset ASC",
-            )
-            .bind(callid)
-            .bind(start_ts)
-            .bind(end_ts)
-            .fetch_all(&mut conn)
-            .await?;
+                // Query using JOIN with call_meta
+                let rows = sqlx::query_as::<_, SipPacketRow>(
+                    "SELECT s.src AS src,
+                            s.dst AS dst,
+                            s.timestamp AS timestamp,
+                            s.offset AS offset,
+                            s.size AS size
+                     FROM sip_msgs s
+                     JOIN call_meta c ON s.call_id = c.id
+                      WHERE c.callid = ?
+                      AND s.timestamp >= ?
+                      AND s.timestamp <= ?
+                     ORDER BY s.offset ASC",
+                )
+                .bind(callid)
+                .bind(start_ts)
+                .bind(end_ts)
+                .fetch_all(&mut conn)
+                .await?;
 
-            for row in rows {
-                let offset = u64::try_from(row.offset)?;
-                let size = usize::try_from(row.size)?;
-                let raw_msg =
-                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
+                for row in rows {
+                    let offset = u64::try_from(row.offset)?;
+                    let size = usize::try_from(row.size)?;
+                    let raw_msg =
+                        read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
 
-                results.push(SipFlowItem {
-                    src_addr: row.src,
-                    dst_addr: row.dst,
-                    timestamp: row.timestamp as u64,
-                    payload: Bytes::from(raw_msg),
-                    msg_type: SipFlowMsgType::Sip,
-                    seq: 0,
-                    leg: None,
-                });
+                    results.push(SipFlowItem {
+                        src_addr: row.src,
+                        dst_addr: row.dst,
+                        timestamp: row.timestamp as u64,
+                        payload: Bytes::from(raw_msg),
+                        msg_type: SipFlowMsgType::Sip,
+                        seq: 0,
+                        leg: None,
+                    });
+                }
             }
         }
         results.sort_by_key(|r| r.timestamp);
@@ -442,52 +530,57 @@ impl StorageManager {
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
-            let db_path = dir.join("sipflow.db");
-            let raw_path = dir.join("data.raw");
+            for sub in bucket_query_dirs(&dir) {
+                let db_path = sub.join("sipflow.db");
+                let raw_path = sub.join("data.raw");
 
-            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
-                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
-            {
-                continue;
-            }
+                if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                    || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+                {
+                    continue;
+                }
 
-            let mut conn =
-                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
-            Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(raw_path).await?;
-            let mut current_pos = None;
+                let mut conn = SqliteConnection::connect(&format!(
+                    "sqlite:{}",
+                    db_path.to_string_lossy()
+                ))
+                .await?;
+                Self::configure_read_conn(&mut conn).await;
+                let mut raw_file = File::open(raw_path).await?;
+                let mut current_pos = None;
 
-            let rows = sqlx::query_as::<_, SipPacketRow>(
-                "SELECT s.src AS src,
-                        s.dst AS dst,
-                        s.timestamp AS timestamp,
-                        s.offset AS offset,
-                        s.size AS size
-                 FROM sip_msgs s
-                  WHERE s.timestamp >= ?
-                  AND s.timestamp <= ?
-                 ORDER BY s.offset ASC",
-            )
-            .bind(start_ts)
-            .bind(end_ts)
-            .fetch_all(&mut conn)
-            .await?;
+                let rows = sqlx::query_as::<_, SipPacketRow>(
+                    "SELECT s.src AS src,
+                            s.dst AS dst,
+                            s.timestamp AS timestamp,
+                            s.offset AS offset,
+                            s.size AS size
+                     FROM sip_msgs s
+                      WHERE s.timestamp >= ?
+                      AND s.timestamp <= ?
+                     ORDER BY s.offset ASC",
+                )
+                .bind(start_ts)
+                .bind(end_ts)
+                .fetch_all(&mut conn)
+                .await?;
 
-            for row in rows {
-                let offset = u64::try_from(row.offset)?;
-                let size = usize::try_from(row.size)?;
-                let raw_msg =
-                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
+                for row in rows {
+                    let offset = u64::try_from(row.offset)?;
+                    let size = usize::try_from(row.size)?;
+                    let raw_msg =
+                        read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await?;
 
-                results.push(SipFlowItem {
-                    src_addr: row.src,
-                    dst_addr: row.dst,
-                    timestamp: row.timestamp as u64,
-                    payload: Bytes::from(raw_msg),
-                    msg_type: SipFlowMsgType::Sip,
-                    seq: 0,
-                    leg: None,
-                });
+                    results.push(SipFlowItem {
+                        src_addr: row.src,
+                        dst_addr: row.dst,
+                        timestamp: row.timestamp as u64,
+                        payload: Bytes::from(raw_msg),
+                        msg_type: SipFlowMsgType::Sip,
+                        seq: 0,
+                        leg: None,
+                    });
+                }
             }
         }
 
@@ -532,34 +625,39 @@ impl StorageManager {
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
-            let db_path = dir.join("sipflow.db");
+            for sub in bucket_query_dirs(&dir) {
+                let db_path = sub.join("sipflow.db");
 
-            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false) {
-                continue;
-            }
+                if !tokio::fs::try_exists(&db_path).await.unwrap_or(false) {
+                    continue;
+                }
 
-            let mut conn =
-                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
-            Self::configure_read_conn(&mut conn).await;
+                let mut conn = SqliteConnection::connect(&format!(
+                    "sqlite:{}",
+                    db_path.to_string_lossy()
+                ))
+                .await?;
+                Self::configure_read_conn(&mut conn).await;
 
-            let mut rows = sqlx::query_as::<_, MediaSourceRow>(
-                "SELECT m.leg AS leg,
-                        m.src AS src
-                 FROM media_msgs m
-                 JOIN call_meta c ON m.call_id = c.id
-                 WHERE c.callid = ?
-                 AND m.timestamp >= ?
-                 AND m.timestamp <= ?
-                 ORDER BY m.timestamp ASC, m.id ASC",
-            )
-            .bind(callid)
-            .bind(start_ts)
-            .bind(end_ts)
-            .fetch(&mut conn);
+                let mut rows = sqlx::query_as::<_, MediaSourceRow>(
+                    "SELECT m.leg AS leg,
+                            m.src AS src
+                     FROM media_msgs m
+                     JOIN call_meta c ON m.call_id = c.id
+                     WHERE c.callid = ?
+                     AND m.timestamp >= ?
+                     AND m.timestamp <= ?
+                     ORDER BY m.timestamp ASC, m.id ASC",
+                )
+                .bind(callid)
+                .bind(start_ts)
+                .bind(end_ts)
+                .fetch(&mut conn);
 
-            while let Some(row) = rows.try_next().await? {
-                if seen.insert((row.leg, row.src.clone())) {
-                    results.push(row);
+                while let Some(row) = rows.try_next().await? {
+                    if seen.insert((row.leg, row.src.clone())) {
+                        results.push(row);
+                    }
                 }
             }
         }
@@ -579,97 +677,83 @@ impl StorageManager {
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
-            let db_path = dir.join("sipflow.db");
-            let raw_path = dir.join("data.raw");
+            for sub in bucket_query_dirs(&dir) {
+                let db_path = sub.join("sipflow.db");
+                let raw_path = sub.join("data.raw");
 
-            if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
-                || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
-            {
-                let db_ex = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
-                let raw_ex = tokio::fs::try_exists(&raw_path).await.unwrap_or(false);
-                tracing::debug!(
-                    "query_media_packets[SKIP]: callid={} dir={} db={} raw={} db_ex={} raw_ex={}",
-                    callid, dir.display(), db_path.display(), raw_path.display(), db_ex, raw_ex,
-                );
-                continue;
-            }
+                if !tokio::fs::try_exists(&db_path).await.unwrap_or(false)
+                    || !tokio::fs::try_exists(&raw_path).await.unwrap_or(false)
+                {
+                    continue;
+                }
 
-            let mut conn =
-                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
-            Self::configure_read_conn(&mut conn).await;
-            let mut raw_file = File::open(&raw_path).await?;
-            let mut current_pos = None;
+                let mut conn = SqliteConnection::connect(&format!(
+                    "sqlite:{}",
+                    db_path.to_string_lossy()
+                ))
+                .await?;
+                Self::configure_read_conn(&mut conn).await;
+                let mut raw_file = File::open(&raw_path).await?;
+                let mut current_pos = None;
 
-            let rows = sqlx::query_as::<_, MediaPacketRow>(
-                "SELECT s.leg AS leg,
-                        s.src AS src,
-                        s.timestamp AS timestamp,
-                        s.offset AS offset,
-                        s.size AS size
-                 FROM media_msgs s
-                  JOIN call_meta c ON s.call_id = c.id
-                  WHERE c.callid = ?
-                  AND s.timestamp >= ?
-                  AND s.timestamp <= ?
-                  ORDER BY s.offset ASC",
-            )
-            .bind(callid)
-            .bind(start_ts)
-            .bind(end_ts)
-            .fetch_all(&mut conn)
-            .await?;
+                let rows = sqlx::query_as::<_, MediaPacketRow>(
+                    "SELECT s.leg AS leg,
+                            s.src AS src,
+                            s.timestamp AS timestamp,
+                            s.offset AS offset,
+                            s.size AS size
+                     FROM media_msgs s
+                      JOIN call_meta c ON s.call_id = c.id
+                      WHERE c.callid = ?
+                      AND s.timestamp >= ?
+                      AND s.timestamp <= ?
+                      ORDER BY s.offset ASC",
+                )
+                .bind(callid)
+                .bind(start_ts)
+                .bind(end_ts)
+                .fetch_all(&mut conn)
+                .await?;
 
-            if !rows.is_empty() {
-                tracing::info!(
-                    "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
-                    callid, dir.display(), db_path.display(), rows.len(), start_ts, end_ts,
-                );
-            } else {
-                let db_sz = tokio::fs::metadata(&db_path).await.map(|m| m.len()).unwrap_or(0);
-                let raw_sz = tokio::fs::metadata(&raw_path).await.map(|m| m.len()).unwrap_or(0);
-                tracing::info!(
-                    "query_media_packets[EMPTY]: callid={} dir={} db_path={} raw_path={} start_ts={} end_ts={} db_size={} raw_size={}",
-                    callid, dir.display(), db_path.display(), raw_path.display(),
-                    start_ts, end_ts, db_sz, raw_sz,
-                );
-            }
+                if !rows.is_empty() {
+                    tracing::info!(
+                        "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
+                        callid, sub.display(), db_path.display(), rows.len(), start_ts, end_ts,
+                    );
+                }
 
-            for row in rows {
-                let offset = match u64::try_from(row.offset) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::warn!("skip bad media packet: offset overflow: {e}");
-                        current_pos = None;
-                        continue;
-                    }
-                };
-                let size = match usize::try_from(row.size) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(
-                            "skip bad media packet: size overflow: {e} offset={offset}"
-                        );
-                        current_pos = None;
-                        continue;
-                    }
-                };
-                match read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await {
-                    Ok(payload) => {
-                        results.push(StoredMediaPacket {
-                            leg: row.leg,
-                            src: row.src,
-                            timestamp: row.timestamp as u64,
-                            payload,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            callid,
-                            offset,
-                            size,
-                            "skip bad media packet: {e}"
-                        );
-                        current_pos = None;
+                for row in rows {
+                    let offset = match u64::try_from(row.offset) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            tracing::debug!("skip bad media packet: offset overflow: {e}");
+                            current_pos = None;
+                            continue;
+                        }
+                    };
+                    let size = match usize::try_from(row.size) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!(
+                                "skip bad media packet: size overflow: {e} offset={offset}"
+                            );
+                            current_pos = None;
+                            continue;
+                        }
+                    };
+                    match read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await {
+                        Ok(payload) => {
+                            results.push(StoredMediaPacket {
+                                leg: row.leg,
+                                src: row.src,
+                                timestamp: row.timestamp as u64,
+                                payload,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!(callid, offset, size, "skip bad media packet: {e}");
+                            current_pos = None;
+                        }
                     }
                 }
             }
@@ -828,6 +912,7 @@ pub fn extract_callid(payload: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::flusher::SipFlowFlusher;
+    use crate::shard::MODE_MULTI;
     use chrono::TimeZone;
     use std::net::IpAddr;
 
@@ -845,6 +930,28 @@ mod tests {
             SipFlowSubdirs::None,
             Some(flusher.sender()),
             Some(flusher.dropped_count()),
+            0,
+            1,
+            None,
+        );
+        (storage, flusher)
+    }
+
+    async fn new_test_storage_sharded(
+        base_path: &Path,
+        shard_index: usize,
+        shard_count: usize,
+    ) -> (StorageManager, SipFlowFlusher) {
+        let flusher = SipFlowFlusher::new(1000, 3600, 128);
+        let router = Arc::new(RouterState::new(MODE_MULTI, shard_count));
+        let storage = StorageManager::new(
+            base_path,
+            SipFlowSubdirs::None,
+            Some(flusher.sender()),
+            Some(flusher.dropped_count()),
+            shard_index,
+            shard_count,
+            Some(router),
         );
         (storage, flusher)
     }
@@ -862,6 +969,7 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from(payload),
+            client_id: 0,
         })
     }
 
@@ -880,6 +988,7 @@ mod tests {
             call_id: None,
             leg: None,
             payload: Bytes::from(payload.to_vec()),
+            client_id: 0,
         });
         packet.callid = Some(call_id.to_string());
         packet.leg = Some(leg);
@@ -910,6 +1019,7 @@ mod tests {
             call_id: Some("remote-call-1".to_string()),
             leg: Some(1),
             payload: rtp.clone(),
+            client_id: 0,
         });
 
         assert_eq!(processed.callid, Some("remote-call-1".to_string()));
@@ -934,6 +1044,7 @@ mod tests {
             call_id: Some("remote-call-2".to_string()),
             leg: Some(0),
             payload: rtp.clone(),
+            client_id: 0,
         });
         storage.write_processed(processed).await.expect("write RTP");
         storage.force_flush().await.expect("flush");
@@ -1084,7 +1195,7 @@ mod tests {
 
         // Query with Daily subdirs for today's range — the 20200101 bucket
         // is outside the computed range but must still be scanned.
-        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None);
+        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None, 0, 1, None);
         let items = reader
             .query_flow(
                 call_id,
@@ -1114,7 +1225,7 @@ mod tests {
             .expect("write");
         writer.force_flush().await.expect("flush");
 
-        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None);
+        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None, 0, 1, None);
         let items = reader
             .query_flow(
                 call_id,
@@ -1189,6 +1300,7 @@ mod tests {
                 call_id: None,
                 leg: None,
                 payload: Bytes::from(sip_payload.clone()),
+                client_id: 0,
             },
             None,
         );
@@ -1244,6 +1356,7 @@ mod tests {
             call_id: Some(call_id.to_string()),
             leg: None,
             payload: compressed.clone(),
+            client_id: 0,
         });
         assert_eq!(processed.callid, Some(call_id.to_string()));
         assert_eq!(
@@ -1341,5 +1454,293 @@ mod tests {
         // and directly contributes to the OOM crashes observed in
         // production (~3 GB RSS → kernel kill).
         // ─────────────────────────────────────────────────────────
+    }
+
+    /// Regression: the batched multi-row INSERT flush path must round-trip
+    /// everything. Writes > INSERT_CHUNK_ROWS (500) RTP packets plus mixed
+    /// calls' SIP so the count-trigger (flush_count=1000) and multi-chunk
+    /// inserts are exercised, then verifies all rows are queryable.
+    #[tokio::test]
+    async fn test_batched_flush_roundtrips_large_batch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        let n_rtp = 1_200usize;
+        let n_sip = 30usize;
+
+        let mut timestamps = Vec::with_capacity(n_rtp);
+        for i in 0..n_rtp {
+            let ts = base + i as u64 * 1000;
+            timestamps.push(ts);
+            let payload = format!("rtp-payload-{i:04}");
+            storage
+                .write_processed(make_rtp_processed(
+                    ts,
+                    "batch-call-0",
+                    (i % 2) as i32,
+                    "127.0.0.1:4000",
+                    payload.as_bytes(),
+                ))
+                .await
+                .expect("write rtp");
+        }
+        for i in 0..n_sip {
+            storage
+                .write_processed(make_sip_processed(
+                    base + 10_000_000 + i as u64 * 1000,
+                    &format!("batch-sip-call-{mod}", mod = i % 3),
+                ))
+                .await
+                .expect("write sip");
+        }
+
+        storage.force_flush().await.expect("flush");
+
+        let start = local_dt_from_micros(base as i64);
+        let end = local_dt_from_micros(base as i64 + n_rtp as i64 * 1000);
+
+        let media = storage
+            .query_media("batch-call-0", start, end)
+            .await
+            .expect("query media");
+        assert_eq!(media.len(), n_rtp, "all RTP packets must round-trip");
+        for (i, (leg, ts, payload)) in media.iter().enumerate() {
+            assert_eq!(*leg, (i % 2) as i32);
+            assert_eq!(*ts, timestamps[i]);
+            assert_eq!(
+                payload,
+                format!("rtp-payload-{i:04}").as_bytes(),
+                "payload for packet {i} must match"
+            );
+        }
+
+        let stats = storage
+            .query_media_stats("batch-call-0", start, end)
+            .await
+            .expect("query media stats");
+        let total: usize = stats.iter().map(|s| s.packet_count).sum();
+        assert_eq!(total, n_rtp, "stats must account for every RTP packet");
+
+        for k in 0..3usize {
+            let flow = storage
+                .query_flow(
+                    &format!("batch-sip-call-{k}"),
+                    local_dt_from_micros(base as i64 + 10_000_000),
+                    local_dt_from_micros(base as i64 + 10_000_000 + n_sip as i64 * 1000),
+                )
+                .await
+                .expect("query flow");
+            assert_eq!(
+                flow.len(),
+                n_sip / 3,
+                "each SIP message for call {k} must round-trip"
+            );
+        }
+    }
+
+    /// Regression guard for the seek-less write path: every offset the DB
+    /// records must point at exactly the right bytes in `data.raw`.
+    ///
+    /// The writer relies on the invariant that the raw-file cursor tracks
+    /// `current_offset` (only `write_processed` writes to the fd; a failed
+    /// write forces a re-seek via `pos_known`). If that ever breaks — e.g. the
+    /// historical wrong-offset bug this design replaced — the DB index would
+    /// point at the wrong physical bytes. This test reads `data.raw` *directly*
+    /// (not through the query path) and verifies byte-for-byte that the record
+    /// at each recorded offset matches what was written, using distinct
+    /// variable-length payloads so any drift aliases loudly.
+    #[tokio::test]
+    async fn test_db_offsets_match_physical_raw_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        let n = 300usize;
+        let mut expected: Vec<(i32, u64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let len = 40 + (i % 200);
+            let payload: Vec<u8> =
+                (0..len).map(|j| ((i * 31 + j * 7) & 0xff) as u8).collect();
+            let ts = base + i as u64 * 1000;
+            expected.push(((i % 2) as i32, ts, payload.clone()));
+            storage
+                .write_processed(make_rtp_processed(
+                    ts,
+                    "offset-check",
+                    (i % 2) as i32,
+                    "127.0.0.1:4000",
+                    &payload,
+                ))
+                .await
+                .expect("write rtp");
+        }
+        storage.force_flush().await.expect("flush");
+
+        let db_path = dir.path().join("sipflow.db");
+        let raw_path = dir.path().join("data.raw");
+        let mut conn = SqliteConnection::connect(&format!("sqlite:{}", db_path.display()))
+            .await
+            .expect("open sipflow.db");
+        let rows = sqlx::query_as::<_, (i32, i64, i64, i64)>(
+            "SELECT m.leg, m.timestamp, m.offset, m.size
+             FROM media_msgs m
+             JOIN call_meta c ON m.call_id = c.id
+             WHERE c.callid = ?
+             ORDER BY m.offset ASC",
+        )
+        .bind("offset-check")
+        .fetch_all(&mut conn)
+        .await
+        .expect("query media_msgs");
+
+        assert_eq!(rows.len(), n, "all rows must be flushed and indexed");
+
+        let raw = std::fs::read(&raw_path).expect("read data.raw");
+        let mut prev_end: i64 = 0;
+        for (idx, (leg, ts, offset, size)) in rows.iter().enumerate() {
+            let start = *offset as usize;
+            let end = start + RAW_RECORD_HEADER_LEN as usize + *size as usize;
+            assert_eq!(
+                &raw[start..start + 2],
+                &[0x53, 0x46],
+                "record magic for packet {idx}"
+            );
+            assert_eq!(
+                *offset as i64, prev_end,
+                "record {idx} offset must be exactly contiguous (no gap/overlap)"
+            );
+            let payload = &raw[start + RAW_RECORD_HEADER_LEN as usize..end];
+            let (eleg, ets, epayload) = &expected[idx];
+            assert_eq!(*leg, *eleg, "leg for packet {idx}");
+            assert_eq!(*ts as u64, *ets, "timestamp for packet {idx}");
+            assert_eq!(
+                payload, epayload.as_slice(),
+                "physical payload bytes at recorded offset for packet {idx}"
+            );
+            prev_end = end as i64;
+        }
+        assert_eq!(prev_end as usize, raw.len(), "no trailing bytes in data.raw");
+    }
+
+    /// Sharded writers must land in `shard-{i}` subdirs and remain queryable
+    /// through a read-only StorageManager (which expands `shard-*` dirs).
+    #[tokio::test]
+    async fn test_sharded_storage_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let n_shards = 4usize;
+        let mut storages = Vec::new();
+        let mut _flushers = Vec::new();
+        for i in 0..n_shards {
+            let (storage, flusher) = new_test_storage_sharded(dir.path(), i, n_shards).await;
+            storages.push(storage);
+            _flushers.push(flusher);
+        }
+
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        for i in 0..n_shards {
+            let call_id = format!("shard-test-{i}");
+            for r in 0..100u64 {
+                let ts = base + (i as u64 * 100_000) + r * 1000;
+                let payload = format!("payload-{i}-{r}");
+                storages[i]
+                    .write_processed(make_rtp_processed(
+                        ts,
+                        &call_id,
+                        (r % 2) as i32,
+                        "127.0.0.1:4000",
+                        payload.as_bytes(),
+                    ))
+                    .await
+                    .expect("write rtp");
+            }
+        }
+        for s in storages.iter_mut() {
+            s.force_flush().await.expect("flush");
+        }
+
+        let mut shard_dirs: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("shard-"))
+            .collect();
+        shard_dirs.sort();
+        assert_eq!(
+            shard_dirs,
+            vec![
+                "shard-0".to_string(),
+                "shard-1".to_string(),
+                "shard-2".to_string(),
+                "shard-3".to_string(),
+            ],
+            "all shard dirs must be materialised"
+        );
+
+        let mut reader = StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
+        for i in 0..n_shards {
+            let call_id = format!("shard-test-{i}");
+            let media = reader
+                .query_media(
+                    &call_id,
+                    local_dt_from_micros(base as i64 - 1),
+                    local_dt_from_micros(base as i64 + 1_000_000),
+                )
+                .await
+                .expect("query media");
+            assert_eq!(media.len(), 100, "shard {i} must round-trip all packets");
+        }
+    }
+
+    /// A legacy single-file bucket must stay writeable single-threaded (no
+    /// `shard-*` dirs created) even with `shard_count > 1`, matching the
+    /// "old version directory stays single until the next rotation" rule.
+    #[tokio::test]
+    async fn test_legacy_bucket_stays_single() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Simulate an old-version bucket: legacy files at the bucket root.
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("sipflow.db"), b"").unwrap();
+
+        let (mut storage, _flusher) = new_test_storage_sharded(dir.path(), 0, 4).await;
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        let call_id = "legacy-call";
+        for r in 0..20u64 {
+            let ts = base + r * 1000;
+            let payload = format!("legacy-{r}");
+            storage
+                .write_processed(make_rtp_processed(
+                    ts,
+                    call_id,
+                    (r % 2) as i32,
+                    "127.0.0.1:4000",
+                    payload.as_bytes(),
+                ))
+                .await
+                .expect("write rtp");
+        }
+        storage.force_flush().await.expect("flush");
+
+        // No shard dirs must appear in the legacy bucket.
+        let has_shards = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("shard-"));
+        assert!(!has_shards, "legacy bucket must not be sharded");
+
+        // Data lives at the bucket root and is queryable.
+        assert!(dir.path().join("sipflow.db").exists());
+        assert!(dir.path().join("data.raw").exists());
+        let mut reader = StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
+        let media = reader
+            .query_media(
+                call_id,
+                local_dt_from_micros(base as i64 - 1),
+                local_dt_from_micros(base as i64 + 1_000_000),
+            )
+            .await
+            .expect("query media");
+        assert_eq!(media.len(), 20, "legacy single-file data must round-trip");
     }
 }

@@ -3285,6 +3285,7 @@ mod tests {
             StepProvider::new(format!("http://{addr}/ivr/step")).with_retry(RetryConfig {
                 max_retries: 1,
                 timeout_ms: 15_000,
+                retry_delay_ms: 100,
                 fallback_action: None,
             });
         let ctx = make_test_context();

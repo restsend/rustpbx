@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use serde::Serialize;
 use rsipstack::{
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
@@ -26,6 +27,21 @@ pub enum LocatorEvent {
     Registered(Location),
     Unregistered(Location),
     Offline(Vec<Location>),
+}
+
+/// Snapshot of currently online (registered, non-expired) locations.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LocatorStats {
+    /// Total number of online location bindings.
+    pub online_locations: usize,
+    /// Number of distinct online users (identifiers).
+    pub online_users: usize,
+    /// Online bindings broken down by transport type (e.g. "UDP", "WS", "WSS").
+    pub by_transport: HashMap<String, usize>,
+    /// Online bindings that support WebRTC.
+    pub webrtc_locations: usize,
+    /// Online bindings that do not support WebRTC.
+    pub non_webrtc_locations: usize,
 }
 
 pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
@@ -67,6 +83,11 @@ pub trait Locator: Send + Sync {
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
     async fn sweep_expired(&self) -> Result<Vec<Location>> {
         Ok(Vec::new())
+    }
+    /// Snapshot of currently online (registered, non-expired) locations.
+    /// Defaults to all-zero stats; backends override to report real counts.
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        Ok(LocatorStats::default())
     }
 }
 
@@ -492,38 +513,28 @@ impl Locator for MemoryLocator {
         }
 
         // If the location has an instance_id, find an existing binding with the
-        // same instance_id (across any identifier) but a different binding key
-        // and update only its destination. The identifier (username@realm) may
-        // differ between old and new registration — search globally, not scoped
-        // to the current identifier.
-        if let Some(ref instance_id) = location.instance_id {
-            let old_identifier = self.locations.iter().find_map(|map_ref| {
-                if map_ref.value().values().any(|loc| {
-                    loc.instance_id.as_ref() == Some(instance_id)
-                        && loc.binding_key() != binding_key
-                        && !loc.is_expired_at(now)
-                }) {
-                    Some(map_ref.key().clone())
-                } else {
-                    None
-                }
-            });
-            if let Some(old_id) = old_identifier {
-                if let Some(mut map) = self.locations.get_mut(&old_id) {
-                    if let Some(old_loc) = map.values_mut().find(|loc| {
-                        loc.instance_id.as_ref() == Some(instance_id)
-                            && loc.binding_key() != binding_key
-                    }) {
-                        if let Some(ref new_dest) = location.destination {
-                            old_loc.destination = Some(new_dest.clone());
-                            info!(
-                                old_aor = %old_loc.aor,
-                                new_aor = %location.aor,
-                                %instance_id,
-                                "updated destination for same-instance-id binding (rapid reconnect)"
-                            );
-                        }
-                    }
+        // same instance_id under the SAME identifier (username@realm) but a
+        // different binding key and update only its destination. Scoping to the
+        // same identifier prevents multi-line ATAs that reuse one
+        // +sip.instance UUID across all lines from overwriting each other's
+        // destination (see issue #248).
+        if let Some(ref instance_id) = location.instance_id
+            && let Some(mut map) = self.locations.get_mut(&identifier)
+        {
+            if let Some(old_loc) = map.values_mut().find(|loc| {
+                loc.instance_id.as_ref() == Some(instance_id)
+                    && loc.binding_key() != binding_key
+                    && !loc.is_expired_at(now)
+            }) {
+                if let Some(ref new_dest) = location.destination {
+                    old_loc.destination = Some(new_dest.clone());
+                    info!(
+                        old_aor = %old_loc.aor,
+                        new_aor = %location.aor,
+                        %instance_id,
+                        %identifier,
+                        "updated destination for same-instance-id binding (rapid reconnect)"
+                    );
                 }
             }
         }
@@ -748,6 +759,32 @@ impl Locator for MemoryLocator {
         });
 
         Ok(removed)
+    }
+
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        let now = Instant::now();
+        let mut stats = LocatorStats::default();
+        for map_ref in self.locations.iter() {
+            let mut user_online = false;
+            for (_, loc) in map_ref.value().iter() {
+                if loc.is_expired_at(now) {
+                    continue;
+                }
+                stats.online_locations += 1;
+                user_online = true;
+                if let Some(transport) = &loc.transport {
+                    *stats.by_transport.entry(transport.to_string()).or_insert(0) += 1;
+                }
+                if loc.supports_webrtc {
+                    stats.webrtc_locations += 1;
+                }
+            }
+            if user_online {
+                stats.online_users += 1;
+            }
+        }
+        stats.non_webrtc_locations = stats.online_locations - stats.webrtc_locations;
+        Ok(stats)
     }
 }
 
@@ -1647,6 +1684,72 @@ mod tests {
                 .map(|d| d.addr.to_string()),
             Some("10.0.0.1:8443".to_string()),
             "new location has correct destination"
+        );
+    }
+
+    /// Regression for issue #248: a multi-line ATA reusing one +sip.instance
+    /// UUID across all lines must not overwrite another extension's
+    /// destination. The instance-id refresh is scoped to the same
+    /// username@realm identifier.
+    #[tokio::test]
+    async fn memory_locator_instance_id_does_not_cross_clobber_other_extension() {
+        let locator = MemoryLocator::new();
+        let instance_id = "urn:uuid:grandstream-shared".to_string();
+        let realm = Some("pbx.example.com");
+
+        let aor_103: rsipstack::sip::Uri = "sip:103@lan.invalid".try_into().unwrap();
+        let aor_104: rsipstack::sip::Uri = "sip:104@lan.invalid".try_into().unwrap();
+
+        locator
+            .register(
+                "103",
+                realm,
+                Location {
+                    aor: aor_103.clone(),
+                    expires: 120,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: HostWithPort::try_from("192.168.10.50:6060").unwrap(),
+                    }),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        locator
+            .register(
+                "104",
+                realm,
+                Location {
+                    aor: aor_104.clone(),
+                    expires: 120,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: HostWithPort::try_from("192.168.10.50:6062").unwrap(),
+                    }),
+                    instance_id: Some(instance_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let loc_103 = locator.lookup(&aor_103).await.unwrap();
+        assert_eq!(loc_103.len(), 1);
+        assert_eq!(
+            loc_103[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("192.168.10.50:6060".to_string()),
+            "103 must keep its own destination (no cross-clobber)"
+        );
+
+        let loc_104 = locator.lookup(&aor_104).await.unwrap();
+        assert_eq!(loc_104.len(), 1);
+        assert_eq!(
+            loc_104[0].destination.as_ref().map(|d| d.addr.to_string()),
+            Some("192.168.10.50:6062".to_string()),
+            "104 must keep its own destination"
         );
     }
 

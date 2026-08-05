@@ -1,13 +1,14 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use clap::Parser;
+use lru::LruCache;
 use rustpbx::callrecord::sipflow_upload::{
     SipFlowUploadRequest, SipFlowUploadResponse, build_s3_storage, join_root, upload_media,
     upload_signaling_flow,
@@ -17,7 +18,7 @@ use rustpbx::callrecord::{
 };
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
-    SipFlowBackend, SipFlowItem, SipFlowMsgType, create_backend,
+    SipFlowBackend, create_backend,
     perf::PerfCounters,
     protocol::{MsgType, Packet, parse_datagram},
     storage::{extract_callid, maybe_compress_payload},
@@ -25,6 +26,7 @@ use rustpbx::sipflow::{
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -119,6 +121,10 @@ struct Args {
     /// FlowDB block cache capacity in MB (default 128)
     #[arg(long, default_value_t = 128)]
     block_cache_capacity_mb: usize,
+
+    /// Number of parallel shard pipelines (1 = legacy single-file layout)
+    #[arg(long, default_value_t = 4)]
+    shards: usize,
 }
 
 #[derive(Clone)]
@@ -127,39 +133,12 @@ struct AppState {
     root: String,
     subdirs: SipFlowSubdirs,
     client: reqwest::Client,
-}
-
-fn convert_packet_to_item(packet: Packet) -> (String, SipFlowItem) {
-    let call_id = packet
-        .call_id
-        .clone()
-        .or_else(|| {
-            if packet.msg_type == MsgType::Sip {
-                extract_callid(&packet.payload)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-
-    let src = format!("{}:{}", packet.src.0, packet.src.1);
-    let dst = format!("{}:{}", packet.dst.0, packet.dst.1);
-
-    let item = SipFlowItem {
-        timestamp: packet.timestamp,
-        seq: 0,
-        leg: packet.leg,
-        msg_type: if packet.msg_type == MsgType::Sip {
-            SipFlowMsgType::Sip
-        } else {
-            SipFlowMsgType::Rtp
-        },
-        src_addr: src,
-        dst_addr: dst,
-        payload: packet.payload,
-    };
-
-    (call_id, item)
+    receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
+    /// Per-sender report tracking: client_id → (last_sent, last_recv), used to
+    /// derive per-interval loss on the collector when a report is received.
+    /// Bounded (LRU) because `client_id` is random per sender process, so old
+    /// entries from restarted senders must not accumulate forever.
+    report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>>,
 }
 
 /// Bind a UDP socket with a custom SO_RCVBUF (and SO_REUSEPORT when
@@ -267,6 +246,12 @@ async fn main() -> Result<()> {
     };
     let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
 
+
+    println!("Sipflow Start at {}", Utc::now());
+    println!("{}", rustpbx::version::get_version_info());
+    println!("root: {}", args.root);
+    println!("subdirs: {:?}", subdirs);
+    println!("shards: {}", args.shards);
     let config = SipFlowConfig::Local {
         root: args.root.clone(),
         subdirs: subdirs.clone(),
@@ -279,6 +264,8 @@ async fn main() -> Result<()> {
         ttl_secs,
         memtable_size_mb: args.memtable_size_mb,
         block_cache_capacity_mb: args.block_cache_capacity_mb,
+        shards: args.shards,
+        flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
     };
 
@@ -300,11 +287,20 @@ async fn main() -> Result<()> {
         Some(std::time::Duration::from_secs(10)),
     )?;
 
+    let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    )));
+    let report_tracking: Arc<Mutex<LruCache<u32, (u64, u64)>>> = Arc::new(Mutex::new(
+        LruCache::new(std::num::NonZeroUsize::new(65536).unwrap()),
+    ));
+
     let app_state = AppState {
         backend: backend.clone(),
         root: args.root.clone(),
         subdirs,
         client: http_client,
+        receiver_counters: receiver_counters.clone(),
+        report_tracking,
     };
 
     let udp_addr: SocketAddr = format!("{}:{}", args.addr, args.port).parse()?;
@@ -358,16 +354,20 @@ async fn main() -> Result<()> {
                                         .fetch_add(packets.len() as u64, Ordering::Relaxed);
                                     for mut packet in packets {
                                         if let Some(level) = compress_early {
-                                            // The Call-ID header must be
-                                            // extracted before the payload is
-                                            // compressed.
-                                            if packet.msg_type == MsgType::Sip
-                                                && packet.call_id.is_none()
-                                            {
-                                                packet.call_id = extract_callid(&packet.payload);
+                                            match packet.msg_type {
+                                                MsgType::Sip => {
+                                                    if packet.call_id.is_none() {
+                                                        packet.call_id =
+                                                            extract_callid(&packet.payload);
+                                                    }
+                                                    packet.payload = maybe_compress_payload(
+                                                        packet.payload,
+                                                        level,
+                                                    );
+                                                }
+                                                // RTP: 包小压缩比极低，跳过以节省 CPU
+                                                MsgType::Rtp => {}
                                             }
-                                            packet.payload =
-                                                maybe_compress_payload(packet.payload, level);
                                         }
                                         if tx.try_send(packet).is_err() {
                                             perf_rx.items_dropped.fetch_add(1, Ordering::Relaxed);
@@ -395,6 +395,7 @@ async fn main() -> Result<()> {
     let flush_interval_secs = args.flush_interval.max(1);
     let storage_backend = backend.clone();
     let perf_worker = perf_counters.clone();
+    let recv_counters = receiver_counters.clone();
     rustpbx::utils::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
@@ -407,12 +408,20 @@ async fn main() -> Result<()> {
                         break;
                     }
                     for packet in batch.drain(..) {
-                        let (call_id, item) = convert_packet_to_item(packet);
-                        if !call_id.is_empty() {
-                            let _ = storage_backend.record(&call_id, item);
+                        let client_id = packet.client_id;
+                        let has_call_id = packet.call_id.is_some()
+                            || (packet.msg_type == MsgType::Sip && !packet.payload.is_empty());
+                        if has_call_id {
+                            let _ = storage_backend.record_packet(packet);
                             perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
                         } else {
                             perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // Track per-client receive count (LRU to bound memory)
+                        if client_id != 0 {
+                            let mut cache = recv_counters.lock().unwrap();
+                            let val = cache.get(&client_id).copied().unwrap_or(0) + 1;
+                            cache.put(client_id, val);
                         }
                     }
                     perf_worker.set_pending(rx.len() as i64);
@@ -446,13 +455,18 @@ async fn main() -> Result<()> {
         .route("/debug/flow", get(debug_flow_handler))
         .route("/debug/raw", get(debug_raw_handler))
         .route("/upload", post(upload_handler))
+        .route("/report", post(report_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(app_state);
 
     let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
     tracing::info!("HTTP server listening on {}", http_addr);
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -491,13 +505,9 @@ async fn flow_handler(
             let flow_items: Vec<serde_json::Value> = flow
                 .iter()
                 .map(|item| {
-                    let payload: serde_json::Value = if let Ok(s) = String::from_utf8(item.payload.to_vec()) {
-                        serde_json::Value::String(s)
-                    } else {
-                        serde_json::Value::Array(
-                            item.payload.iter().map(|&b| serde_json::Value::Number(b.into())).collect(),
-                        )
-                    };
+                    let payload: serde_json::Value = serde_json::Value::String(
+                        String::from_utf8_lossy(&item.payload).into_owned(),
+                    );
                     serde_json::json!({
                         "timestamp": item.timestamp,
                         "seq": item.seq,
@@ -774,17 +784,20 @@ async fn debug_flow_handler(
 
     match state.backend.query_flow(&callid, start_dt, end_dt).await {
         Ok(flow) => {
-            let items: Vec<serde_json::Value> = flow.iter().map(|item| {
-                serde_json::json!({
-                    "timestamp": item.timestamp,
-                    "seq": item.seq,
-                    "leg": item.leg,
-                    "msg_type": item.msg_type,
-                    "src_addr": item.src_addr,
-                    "dst_addr": item.dst_addr,
-                    "payload_debug": rustpbx::sipflow::diag::payload_analysis(&item.payload),
+            let items: Vec<serde_json::Value> = flow
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "timestamp": item.timestamp,
+                        "seq": item.seq,
+                        "leg": item.leg,
+                        "msg_type": item.msg_type,
+                        "src_addr": item.src_addr,
+                        "dst_addr": item.dst_addr,
+                        "payload_debug": rustpbx::sipflow::diag::payload_analysis(&item.payload),
+                    })
                 })
-            }).collect();
+                .collect();
 
             axum::Json(serde_json::json!({
                 "status": "success",
@@ -793,12 +806,10 @@ async fn debug_flow_handler(
                 "flow": items,
             }))
         }
-        Err(e) => {
-            axum::Json(serde_json::json!({
-                "status": "error",
-                "message": e.to_string(),
-            }))
-        }
+        Err(e) => axum::Json(serde_json::json!({
+            "status": "error",
+            "message": e.to_string(),
+        })),
     }
 }
 
@@ -808,40 +819,60 @@ async fn debug_raw_handler(
     let path = match params.get("path") {
         Some(p) => p,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing 'path' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing 'path' parameter".to_string(),
+            )
+                .into_response();
         }
     };
     let offset = match params.get("offset").and_then(|s| s.parse::<u64>().ok()) {
         Some(o) => o,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing or invalid 'offset' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing or invalid 'offset' parameter".to_string(),
+            )
+                .into_response();
         }
     };
     let size = match params.get("size").and_then(|s| s.parse::<usize>().ok()) {
         Some(s) => s,
         None => {
-            return (StatusCode::BAD_REQUEST, "Missing or invalid 'size' parameter".to_string()).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing or invalid 'size' parameter".to_string(),
+            )
+                .into_response();
         }
     };
 
     let data = match rustpbx::sipflow::diag::raw_read_range(path, offset, size).await {
         Ok(d) => d,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {e}")).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Read error: {e}"),
+            )
+                .into_response();
         }
     };
 
     let analysis = rustpbx::sipflow::diag::payload_analysis(&data);
     let hex_dump = rustpbx::sipflow::diag::hex_dump(&data, 16);
 
-    (StatusCode::OK, format!(
-        "path: {}\noffset: {}\nsize: {}\n\nanalysis: {}\n\nhex dump:\n{}",
-        path,
-        offset,
-        data.len(),
-        serde_json::to_string_pretty(&analysis).unwrap_or_default(),
-        hex_dump,
-    )).into_response()
+    (
+        StatusCode::OK,
+        format!(
+            "path: {}\noffset: {}\nsize: {}\n\nanalysis: {}\n\nhex dump:\n{}",
+            path,
+            offset,
+            data.len(),
+            serde_json::to_string_pretty(&analysis).unwrap_or_default(),
+            hex_dump,
+        ),
+    )
+        .into_response()
 }
 
 async fn upload_handler(
@@ -1004,6 +1035,59 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
         "Prometheus support not enabled (build with --features addon-observability)",
     )
         .into_response()
+}
+
+async fn report_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let client_id = body["client_id"].as_u64().unwrap_or(0) as u32;
+    let sent_count = body["sent_count"].as_u64().unwrap_or(0);
+    let packets_received = state
+        .receiver_counters
+        .lock()
+        .unwrap()
+        .get(&client_id)
+        .copied()
+        .unwrap_or(0);
+
+    // Derive a per-interval loss rate from the sender's cumulative sent count
+    // vs. what this collector actually received, and log it per peer IP.
+    let mut tracking = state.report_tracking.lock().unwrap();
+    let (mut last_sent, mut last_recv) = tracking.get(&client_id).copied().unwrap_or((0, 0));
+    // Sender restarted (counter reset): reset the baseline so the first report
+    // after a restart reports the fresh interval rather than negative loss.
+    if sent_count < last_sent {
+        last_sent = 0;
+        last_recv = 0;
+    }
+    let sent_delta = sent_count.saturating_sub(last_sent);
+    let recv_delta = packets_received.saturating_sub(last_recv);
+    let loss = sent_delta.saturating_sub(recv_delta);
+    let loss_rate = if sent_delta > 0 {
+        loss as f64 / sent_delta as f64
+    } else {
+        0.0
+    };
+    tracking.put(client_id, (sent_count, packets_received));
+    drop(tracking);
+
+    tracing::info!(
+        peer_ip = %peer.ip(),
+        client_id,
+        sent = sent_delta,
+        recv = recv_delta,
+        loss = loss,
+        loss_rate = loss_rate,
+        "sipflow collector report"
+    );
+
+    axum::Json(serde_json::json!({
+        "status": "success",
+        "client_id": client_id,
+        "packets_received": packets_received,
+    }))
 }
 
 #[cfg(test)]

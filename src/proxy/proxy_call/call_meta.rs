@@ -14,11 +14,27 @@ pub struct CallMeta {
     pub hangup_reason: Option<CallRecordHangupReason>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
+    /// The SIP status of the INVITE transaction's final response, captured once
+    /// when call setup finalizes. Later signaling (BYE, transfer failures,
+    /// re-INVITE, ...) must never change it — the CDR/CallEnded status is locked
+    /// to this value.
+    pub invite_final_status: Option<u16>,
     pub routed_caller: Option<String>,
     pub routed_callee: Option<String>,
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub queue_name: Option<String>,
+    /// Standardized error code (from the [`crate::call_errors`] registry) for
+    /// the last in-call failure. Mirrors `last_error` but carries a stable,
+    /// queryable code; injected into call-record metadata by `record_snapshot`.
+    pub error_code: Option<&'static crate::call_errors::CallErrInfo>,
+    /// Name of the application flow currently driving the session
+    /// (e.g. `ivr`, `voicemail`, `conference`, `queue`). Captured at flow start
+    /// so failures are attributable to the running app in the call record.
+    pub app_name: Option<String>,
+    /// Optional display label of the queue driving the session (distinct from
+    /// `queue_name` which is the machine identifier).
+    pub queue_label: Option<String>,
     /// When set and the connected B‑leg terminates, the session returns the
     /// caller to this IVR instead of hanging up.
     /// Set by `handle_blind_transfer` for `TransferTarget::Sip` and
@@ -30,6 +46,10 @@ pub struct CallMeta {
     /// of the transfer target (e.g. `return_menu`, `return_step_id`).
     /// Forwarded as `ivr_params` when restarting the IVR.
     pub transfer_return_params: HashMap<String, String>,
+    /// Ordered diagnostic timeline of the call (ring → answer → ivr → queue →
+    /// transfer → bridge → hold/resume → plays → hangup). Persisted into the
+    /// call-record `metadata["trace"]` array by `record_snapshot`.
+    pub trace: Vec<crate::call_errors::TraceEvent>,
 }
 
 impl CallMeta {
@@ -43,13 +63,18 @@ impl CallMeta {
             hangup_reason: None,
             hangup_messages: Vec::new(),
             last_error: None,
+            invite_final_status: None,
             routed_caller: None,
             routed_callee: None,
             routed_contact: None,
             routed_destination: None,
             queue_name: None,
+            error_code: None,
+            app_name: None,
+            queue_label: None,
             transfer_return_to_ivr: None,
             transfer_return_params: HashMap::new(),
+            trace: Vec::new(),
         }
     }
 }

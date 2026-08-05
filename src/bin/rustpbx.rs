@@ -344,7 +344,7 @@ fn main() -> Result<()> {
             .map(|email| email.to_string())
             .unwrap_or_else(|| format!("{}@localhost", super_username));
 
-        let db = rustpbx::models::create_db(&config.database_url)
+        let db = rustpbx::models::create_db(&config.database_url, Some(&config.database_pool))
             .await
             .expect("Failed to create or connect to database");
 
@@ -693,7 +693,7 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
     ))]
     use sea_orm_migration::MigratorTrait;
 
-    let db = rustpbx::models::create_db(database_url).await?;
+    let db = rustpbx::models::create_db(database_url, None).await?;
 
     // ── Run addon migrations so all tables are created ──────────────
     #[cfg(feature = "addon-cc")]

@@ -17,6 +17,18 @@ impl SipSession {
         use crate::call::DialStrategy;
 
         self.meta.queue_name = Some(plan.queue_name.clone());
+        self.meta.queue_label = plan.label.clone();
+        self.meta.app_name = Some("queue".to_string());
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                format!(
+                    "Call entered queue '{}'",
+                    plan.label.as_deref().unwrap_or(&plan.queue_name)
+                ),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
 
         info!(session_id = %self.context.session_id, "Executing queue plan");
 
@@ -171,10 +183,14 @@ impl SipSession {
         no_trying_timeout: Option<Duration>,
         retry_codes: Option<&[u16]>,
     ) -> Result<(), CalleeError> {
-        let mut last_error = into_callee_err(
-            &StatusCode::TemporarilyUnavailable,
-            Some("All agents unavailable".to_string()),
-        );
+        let mut last_error = {
+            self.meta.error_code =
+                Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE);
+            into_callee_err(
+                &StatusCode::TemporarilyUnavailable,
+                Some("All agents unavailable".to_string()),
+            )
+        };
 
         for (idx, agent) in agents.iter().enumerate() {
             if self.cancel_token.is_cancelled() || self.caller_dialog.as_ref().is_none_or(|d| d.state().is_terminated()) {
@@ -227,6 +243,8 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
         if agents.is_empty() {
+            self.meta.error_code =
+                Some(&crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS);
             return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No agents available".to_string()),
@@ -442,7 +460,10 @@ impl SipSession {
                             .await
                             .map_err(super::map_queue_xfer_err)
                         } else {
-                            warn!(session_id = %self.context.session_id, skill_group = %skill_group_id, "No agents found for this skill group");
+                            warn!(skill_group = %skill_group_id, "No agents found for this skill group");
+                            self.meta.error_code = Some(
+                                &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS_SKILL,
+                            );
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!(
@@ -452,7 +473,10 @@ impl SipSession {
                             ))
                         }
                     } else {
-                        warn!(session_id = %self.context.session_id, "No agent registry available for skill group resolution");
+                        warn!("No agent registry available for skill group resolution");
+                        self.meta.error_code = Some(
+                            &crate::proxy::proxy_call::error_catalog::QUEUE_AGENT_REGISTRY_MISSING,
+                        );
                         Err(into_callee_err(
                             &StatusCode::TemporarilyUnavailable,
                             Some("Agent registry not available".to_string()),
@@ -475,7 +499,10 @@ impl SipSession {
                             Ok(())
                         }
                         Err(e) => {
-                            warn!(session_id = %self.context.session_id, queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
+                            warn!(queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
+                            self.meta.error_code = Some(
+                                &crate::proxy::proxy_call::error_catalog::QUEUE_REENQUEUE_FAILED,
+                            );
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!("Re-enqueue failed: {}", e)),
@@ -485,7 +512,10 @@ impl SipSession {
                 }
             }
             None => {
-                info!(session_id = %self.context.session_id, "Queue fallback - default hangup with busy tone");
+                info!("Queue fallback - default hangup with busy tone");
+                self.meta.error_code = Some(
+                    &crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE_DEFAULT,
+                );
                 Err(into_callee_err(
                     &StatusCode::BusyHere,
                     Some("All agents unavailable".to_string()),
@@ -496,7 +526,7 @@ impl SipSession {
 
     pub(super) async fn prepare_queue_playback_media(&mut self) {
         if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
-            if !true {
+            if self.media.bridge.is_none() {
                 warn!(session_id = %self.context.session_id, "Queue playback: caller leg is already answered without media bridge");
             }
             return;

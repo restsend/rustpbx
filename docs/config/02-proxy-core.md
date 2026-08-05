@@ -13,6 +13,8 @@ addr = "0.0.0.0"
 udp_port = 5060
 # Multiple UDP ports (e.g., for multi-tenant or port range binding)
 # udp_ports = [5060, 5062, 5064]
+# Omit both udp_port and udp_ports to disable UDP listening.
+# Port 0 requests an OS-assigned ephemeral port; it does not disable UDP.
 tcp_port = 5060
 
 # Encrypted SIP (SIPS)
@@ -20,6 +22,8 @@ tls_port = 5061
 # Uses proxy-level ssl_* configs (if not set, falls back to top-level ssl_*)
 ssl_certificate = "./certs/fullchain.pem"
 ssl_private_key = "./certs/privkey.pem"
+# PEM bundle used to validate certificates on outbound SIP/TLS connections
+tls_ca_certificates = "/etc/ssl/certs/ca-certificates.crt"
 
 # WebRTC (SIP over WebSocket)
 ws_port = 8089

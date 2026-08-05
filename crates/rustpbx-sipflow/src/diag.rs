@@ -537,7 +537,7 @@ pub async fn run_diag(
 
     // SQLite pass
     {
-        let mut sqlite = StorageManager::new(&base, subdirs.clone(), None, None);
+        let mut sqlite = StorageManager::new(&base, subdirs.clone(), None, None, 0, 1, None);
 
         if let Ok(items) = sqlite.query_flow(call_id, start, end).await {
             let n = items.len();
@@ -573,7 +573,7 @@ pub async fn run_diag(
     }
 
     // FlowDB pass
-    if let Ok(flowdb) = FlowDbBackend::new(&base, subdirs, None, 64, 128, 1000, 3600, false, 16000) {
+    if let Ok(flowdb) = FlowDbBackend::new(&base, subdirs, None, 64, 128, 1000, 3600, false, 16000, 1, flowdb::SyncMode::Always) {
         let flowdb = Arc::new(flowdb);
 
         if let Ok(items) = flowdb.query_flow(call_id, start, end).await {

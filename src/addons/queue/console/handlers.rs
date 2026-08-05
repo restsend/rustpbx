@@ -878,16 +878,52 @@ pub async fn download_audio_handler(
         .split('?')
         .next()
         .unwrap_or("audio.wav");
+    let ext = std::path::Path::new(url_basename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext != "wav" && ext != "mp3" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": "URL must point to a .wav or .mp3 file"
+            })),
+        )
+            .into_response();
+    }
     let filename = sanitize_filename(url_basename);
     let dest_path = sounds_dir.join(&filename);
 
-    // Download
+    // Download with a hard size cap so oversized files can never exhaust memory
     let opts =
         crate::http_util::HttpFetchOptions::new().with_timeout(std::time::Duration::from_secs(30));
-    match crate::http_util::fetch_bytes(state.http_client(), reqwest::Method::GET, &url, &opts)
-        .await
+    match crate::http_util::fetch_audio_bytes(
+        state.http_client(),
+        reqwest::Method::GET,
+        &url,
+        &opts,
+        state.config().max_audio_download_bytes,
+    )
+    .await
     {
-        Ok(bytes) => {
+        Ok((bytes, headers)) => {
+            // Enforce Content-Type + extension + file-header checks
+            let content_type = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if let Err(msg) = crate::utils::validate_audio_payload(&bytes, content_type, &filename)
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "status": "error", "message": msg
+                    })),
+                )
+                    .into_response();
+            }
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,

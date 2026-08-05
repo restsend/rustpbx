@@ -920,7 +920,21 @@ impl MediaNegotiator {
         }
 
         let mut result = audio;
+        let has_dtmf = !extracted.dtmf.is_empty();
         Self::append_telephone_events_for_audio(&mut result, &extracted.dtmf, false);
+        if !has_dtmf {
+            tracing::debug!(
+                dtmf_in_offer = false,
+                audio_codecs = ?result.iter().map(|c| (c.payload_type, &c.codec, c.clock_rate)).collect::<Vec<_>>(),
+                "build_codec_list_from_offer: no telephone-event in caller offer, DTMF will not be added to answer"
+            );
+        } else {
+            tracing::debug!(
+                dtmf_in_offer = true,
+                offered_dtmf = ?extracted.dtmf.iter().map(|c| (c.payload_type, c.clock_rate)).collect::<Vec<_>>(),
+                "build_codec_list_from_offer: telephone-event found in caller offer"
+            );
+        }
         result
     }
 }

@@ -18,16 +18,16 @@ fn default_sipflow_flush_interval() -> u64 {
     0
 }
 
-fn default_remote_batch_size() -> usize {
-    256
-}
-
-fn default_remote_batch_flush_ms() -> u64 {
-    20
-}
-
 fn default_remote_channel_capacity() -> usize {
     40000
+}
+
+fn default_mtu() -> usize {
+    1500
+}
+
+fn default_report_interval_secs() -> u64 {
+    10
 }
 
 fn default_sipflow_timeout() -> u64 {
@@ -56,6 +56,17 @@ fn default_flowdb_memtable_mb() -> usize {
 
 fn default_flowdb_block_cache_mb() -> usize {
     128
+}
+
+fn default_sipflow_shards() -> usize {
+    4
+}
+
+fn default_flowdb_sync_mode() -> flowdb::SyncMode {
+    // Coalesce WAL fsyncs (every 10ms) instead of per-batch `Always`; trade a
+    // ~10ms crash-loss window for ~15% higher write throughput. Deployments
+    // that must never drop a packet can set `flowdb_sync_mode = "always"`.
+    flowdb::SyncMode::IntervalMs(10)
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Eq, Default)]
@@ -143,6 +154,12 @@ pub enum SipFlowConfig {
         memtable_size_mb: usize,
         #[serde(default = "default_flowdb_block_cache_mb")]
         block_cache_capacity_mb: usize,
+        #[serde(default = "default_sipflow_shards")]
+        shards: usize,
+        /// FlowDB WAL sync mode: `"always"` (fsync per batch, max durability)
+        /// or `{ interval_ms = N }` (coalesced fsync, ~N ms crash-loss window).
+        #[serde(default = "default_flowdb_sync_mode")]
+        flowdb_sync_mode: flowdb::SyncMode,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
     },
@@ -155,17 +172,51 @@ pub enum SipFlowConfig {
         http_addr: Option<String>,
         #[serde(default = "default_sipflow_timeout")]
         timeout_secs: u64,
-        #[serde(default = "default_remote_batch_size")]
-        batch_size: usize,
-        #[serde(default = "default_remote_batch_flush_ms")]
-        batch_flush_ms: u64,
         #[serde(default = "default_remote_channel_capacity")]
         channel_capacity: usize,
         #[serde(default = "default_sipflow_dns_ttl")]
         dns_ttl_secs: u64,
+        #[serde(default = "default_mtu")]
+        mtu: usize,
+        #[serde(default = "default_report_interval_secs")]
+        report_interval_secs: u64,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
         #[serde(default)]
         delegate_upload: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SipFlowConfig;
+
+    #[test]
+    fn remote_config_defaults_mtu_to_standard_ethernet() {
+        let config: SipFlowConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote",
+            "udp_addr": "127.0.0.1:3000",
+            "http_addr": "http://127.0.0.1:3001"
+        }))
+        .expect("remote SipFlow config should deserialize");
+
+        let SipFlowConfig::Remote { mtu, .. } = config else {
+            panic!("expected remote SipFlow config");
+        };
+        assert_eq!(mtu, 1500);
+    }
+
+    #[test]
+    fn remote_config_allows_disabling_mtu_splitting() {
+        let config: SipFlowConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote",
+            "mtu": 0
+        }))
+        .expect("remote SipFlow config should deserialize");
+
+        let SipFlowConfig::Remote { mtu, .. } = config else {
+            panic!("expected remote SipFlow config");
+        };
+        assert_eq!(mtu, 0);
+    }
 }

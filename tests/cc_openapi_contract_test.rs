@@ -208,6 +208,40 @@ fn test_transfers_config_uses_real_fields() {
 }
 
 #[test]
+fn test_skill_delete_documents_purge_option() {
+    // DELETE /cc/skills/{skill_id} supports ?purge=true (hard delete + dangling
+    // reference cleanup). The spec must document the query param and the 409
+    // returned when purging an still-active skill.
+    let raw = load();
+    let paths_idx = raw.find("paths:").unwrap();
+    let skill_path = raw[paths_idx..]
+        .find("/cc/skills/{skill_id}:")
+        .map(|i| paths_idx + i)
+        .unwrap();
+    let after = &raw[skill_path..];
+    let next_path = after[1..]
+        .find("\n  /cc")
+        .map(|i| 1 + i)
+        .unwrap_or(after.len());
+    let block = &after[..next_path];
+    let del = block.find("    delete:").unwrap();
+    let del_block = &block[del..];
+    assert!(del_block.contains("204"), "must document 204");
+    assert!(
+        del_block.contains("name: purge"),
+        "DELETE /cc/skills must document the purge query param"
+    );
+    assert!(
+        del_block.contains("in: query"),
+        "purge must be a query parameter"
+    );
+    assert!(
+        del_block.contains("409"),
+        "DELETE /cc/skills must document 409 (purge on active skill)"
+    );
+}
+
+#[test]
 fn test_supervisor_sessions_has_required_fields() {
     // Drift #10 (severe)
     let raw = load();

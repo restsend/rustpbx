@@ -1,0 +1,95 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ "error_codes.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6" x-data='errorCodesPage({{ data | tojson }})'>
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold text-slate-800">{{ "error_codes.title" | t }}</h1>
+        <p class="mt-1 text-sm text-slate-500">{{ "error_codes.subtitle" | t }} · <span x-text="total"></span> {{ "error_codes.codes" | t }}</p>
+    </div>
+
+    <div class="bg-white shadow-sm border border-slate-200 rounded-lg overflow-hidden">
+        <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex flex-wrap items-center gap-3">
+            <input type="text" x-model="query" placeholder="{{ 'error_codes.search' | t }}"
+                class="flex-1 min-w-[200px] border border-slate-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">
+            <select x-model="appFilter" class="border border-slate-200 rounded-md px-3 py-2 text-sm">
+                <option value="">{{ "error_codes.all_apps" | t }}</option>
+                <template x-for="app in apps" :key="app">
+                    <option :value="app" x-text="app"></option>
+                </template>
+            </select>
+        </div>
+
+        <div class="divide-y divide-slate-100">
+            <template x-for="group in filteredGroups" :key="group.app">
+                <div class="p-4">
+                    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2" x-text="group.app"></h2>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-xs text-slate-400 border-b border-slate-100">
+                                    <th class="py-2 pr-3">{{ "error_codes.col_code" | t }}</th>
+                                    <th class="py-2 pr-3">{{ "error_codes.col_severity" | t }}</th>
+                                    <th class="py-2 pr-3">{{ "error_codes.col_message" | t }}</th>
+                                    <th class="py-2 pr-3">{{ "error_codes.col_sip" | t }}</th>
+                                    <th class="py-2 pr-3">{{ "error_codes.col_hangup" | t }}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="item in group.items" :key="item.code">
+                                    <tr class="border-b border-slate-50">
+                                        <td class="py-2 pr-3 font-mono text-xs text-sky-700" x-text="item.code"></td>
+                                        <td class="py-2 pr-3">
+                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                                                :class="severityClass(item.severity)" x-text="item.severity"></span>
+                                        </td>
+                                        <td class="py-2 pr-3 text-slate-600" x-text="item.message"></td>
+                                        <td class="py-2 pr-3 font-mono text-xs text-slate-500" x-text="item.sip_status || '—'"></td>
+                                        <td class="py-2 pr-3 font-mono text-xs text-slate-500" x-text="item.hangup_reason"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </template>
+            <template x-if="filteredGroups.length === 0">
+                <div class="p-8 text-center text-sm text-slate-400">{{ "error_codes.no_results" | t }}</div>
+            </template>
+        </div>
+    </div>
+</div>
+
+<script>
+    function errorCodesPage(data) {
+        return {
+            total: data.total,
+            groups: data.groups,
+            query: '',
+            appFilter: data.initial_app || '',
+            get apps() {
+                return [...new Set(this.groups.map(g => g.app))].sort();
+            },
+            get filteredGroups() {
+                const q = this.query.trim().toLowerCase();
+                return this.groups
+                    .filter(g => !this.appFilter || g.app === this.appFilter)
+                    .map(g => ({
+                        app: g.app,
+                        items: g.items.filter(i =>
+                            !q ||
+                            i.code.toLowerCase().includes(q) ||
+                            (i.message || '').toLowerCase().includes(q) ||
+                            (i.hangup_reason || '').toLowerCase().includes(q)
+                        ),
+                    }))
+                    .filter(g => g.items.length > 0);
+            },
+            severityClass(s) {
+                if (s === 'error') return 'bg-red-50 text-red-700 ring-1 ring-red-100';
+                if (s === 'warn') return 'bg-amber-50 text-amber-700 ring-1 ring-amber-100';
+                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-100';
+            },
+        };
+    }
+</script>
+{% endblock %}

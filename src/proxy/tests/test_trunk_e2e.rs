@@ -135,10 +135,10 @@ mod tests {
         assert_eq!(routes.len(), 2, "Should have 2 routes configured");
 
         // Routes should be sorted by priority
-        assert_eq!(routes[0].name, "route_national_via_provider_a");
-        assert_eq!(routes[0].priority, 1);
-        assert_eq!(routes[1].name, "route_international_via_provider_b");
-        assert_eq!(routes[1].priority, 10);
+        assert_eq!(routes[0].name, "route_international_via_provider_b");
+        assert_eq!(routes[0].priority, 10);
+        assert_eq!(routes[1].name, "route_national_via_provider_a");
+        assert_eq!(routes[1].priority, 1);
 
         server.stop();
         Ok(())

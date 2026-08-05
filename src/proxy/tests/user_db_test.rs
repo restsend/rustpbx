@@ -73,7 +73,7 @@ async fn test_db_backend() {
         ..Default::default()
     };
     // Create backend with the database URL (this will create its own connection)
-    let backend = DbBackend::new(db_url.clone(), db_config)
+    let backend = DbBackend::new(db_url.clone(), db_config, None)
         .await
         .expect("Failed to create DbBackend");
 
@@ -107,7 +107,7 @@ async fn test_db_backend() {
         realm_column: Some("realm_name".to_string()),
         ..Default::default()
     };
-    let custom_backend = DbBackend::new(db_url.clone(), db_config)
+    let custom_backend = DbBackend::new(db_url.clone(), db_config, None)
         .await
         .expect("Failed to create DbBackend");
 

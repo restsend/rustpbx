@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 pub mod add_leg_timeline_column;
 pub mod add_metadata_column;
@@ -28,6 +30,36 @@ pub mod routing;
 pub mod sip_trunk;
 pub mod system_notification;
 pub mod user;
+
+fn default_max_connections() -> u32 {
+    64
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabasePoolConfig {
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    #[serde(default)]
+    pub min_connections: Option<u32>,
+    #[serde(default)]
+    pub acquire_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub max_lifetime_secs: Option<u64>,
+}
+
+impl Default for DatabasePoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_max_connections(),
+            min_connections: None,
+            acquire_timeout_secs: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+        }
+    }
+}
 
 pub async fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     let Some(path_part) = database_url.strip_prefix("sqlite://") else {
@@ -69,7 +101,33 @@ pub async fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
+fn apply_pool_config(
+    pool_config: Option<&DatabasePoolConfig>,
+    opt: &mut ConnectOptions,
+) {
+    let cfg = match pool_config {
+        Some(c) => c,
+        None => return,
+    };
+    opt.max_connections(cfg.max_connections);
+    if let Some(v) = cfg.min_connections {
+        opt.min_connections(v);
+    }
+    if let Some(v) = cfg.acquire_timeout_secs {
+        opt.acquire_timeout(Duration::from_secs(v));
+    }
+    if let Some(v) = cfg.idle_timeout_secs {
+        opt.idle_timeout(Duration::from_secs(v));
+    }
+    if let Some(v) = cfg.max_lifetime_secs {
+        opt.max_lifetime(Duration::from_secs(v));
+    }
+}
+
+pub async fn connect_db(
+    database_url: &str,
+    pool_config: Option<&DatabasePoolConfig>,
+) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
         prepare_sqlite_database(database_url).await.map_err(|e| {
             tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
@@ -78,7 +136,9 @@ pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
         })?;
     }
 
-    Database::connect(database_url)
+    let mut opt = ConnectOptions::new(database_url.to_owned());
+    apply_pool_config(pool_config, &mut opt);
+    Database::connect(opt)
         .await
         .map_err(|e: sea_orm::DbErr| {
             tracing::error!("failed to connect to database {:?}", e);
@@ -87,7 +147,10 @@ pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
         })
 }
 
-pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
+pub async fn create_db(
+    database_url: &str,
+    pool_config: Option<&DatabasePoolConfig>,
+) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
         prepare_sqlite_database(database_url).await.map_err(|e| {
             tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
@@ -96,7 +159,9 @@ pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
         })?;
     }
 
-    let db = Database::connect(database_url)
+    let mut opt = ConnectOptions::new(database_url.to_owned());
+    apply_pool_config(pool_config, &mut opt);
+    let db = Database::connect(opt)
         .await
         .map_err(|e: sea_orm::DbErr| {
             tracing::error!("failed to connect to database {:?}", e);

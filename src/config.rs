@@ -4,6 +4,7 @@ use crate::{
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
+use rustpbx_models::DatabasePoolConfig;
 use anyhow::{Error, Result};
 use clap::Parser;
 use ipnet::IpNet;
@@ -245,6 +246,8 @@ pub struct Config {
     #[serde(default = "default_database_url")]
     pub database_url: String,
     #[serde(default)]
+    pub database_pool: DatabasePoolConfig,
+    #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default)]
     pub demo_mode: bool,
@@ -263,6 +266,10 @@ pub struct Config {
     pub cluster: Option<ClusterConfig>,
     #[serde(default)]
     pub outbound: Option<OutboundConfig>,
+    /// Maximum size (in bytes) for audio files downloaded over HTTP from the
+    /// console (queue prompts, voicemail prompts, ...). Defaults to 20 MB.
+    #[serde(default = "default_max_audio_download_bytes")]
+    pub max_audio_download_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -276,6 +283,10 @@ pub struct ClusterPeer {
 pub struct ClusterConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<ClusterPeer>,
+}
+
+fn default_max_audio_download_bytes() -> u64 {
+    crate::utils::MAX_AUDIO_DOWNLOAD_BYTES
 }
 
 fn default_locale() -> String {
@@ -691,6 +702,7 @@ pub struct ProxyConfig {
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
+    pub tls_ca_certificates: Option<String>,
     pub udp_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_ports: Option<Vec<u16>>,
@@ -1154,8 +1166,7 @@ impl ProxyConfig {
     }
 
     pub fn all_udp_ports(&self) -> Vec<u16> {
-        let primary = self.udp_port.unwrap_or(5060);
-        let mut ports = vec![primary];
+        let mut ports = self.udp_port.into_iter().collect::<Vec<_>>();
         if let Some(extra) = &self.udp_ports {
             for p in extra {
                 if !ports.contains(p) {
@@ -1202,6 +1213,7 @@ impl Default for ProxyConfig {
             t1x64_timer: None,
             ssl_private_key: None,
             ssl_certificate: None,
+            tls_ca_certificates: None,
             udp_port: Some(5060),
             udp_ports: None,
             tcp_port: None,
@@ -1319,6 +1331,7 @@ impl Default for Config {
             console: None,
             rwi: None,
             database_url: default_database_url(),
+            database_pool: DatabasePoolConfig::default(),
             recording: None,
             demo_mode: false,
             storage: None,
@@ -1328,6 +1341,7 @@ impl Default for Config {
             rwi_webhook: None,
             cluster: None,
             outbound: None,
+            max_audio_download_bytes: default_max_audio_download_bytes(),
         }
     }
 }
@@ -1430,6 +1444,63 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_all_udp_ports_preserves_default_primary_port() {
+        let config = ProxyConfig::default();
+
+        assert_eq!(config.all_udp_ports(), vec![5060]);
+    }
+
+    #[test]
+    fn test_all_udp_ports_is_empty_when_udp_configuration_is_omitted() {
+        let config: ProxyConfig = toml::from_str(
+            r#"
+            addr = "::"
+            tls_port = 5061
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.udp_port, None);
+        assert_eq!(config.udp_ports, None);
+        assert!(config.all_udp_ports().is_empty());
+    }
+
+    #[test]
+    fn test_all_udp_ports_uses_explicit_additional_ports_without_primary() {
+        let mut config = ProxyConfig::default();
+        config.udp_port = None;
+        config.udp_ports = Some(vec![5062, 5064, 5062]);
+
+        assert_eq!(config.all_udp_ports(), vec![5062, 5064]);
+    }
+
+    #[test]
+    fn test_all_udp_ports_combines_primary_and_unique_additional_ports() {
+        let mut config = ProxyConfig::default();
+        config.udp_port = Some(5060);
+        config.udp_ports = Some(vec![5060, 5062, 5064, 5062]);
+
+        assert_eq!(config.all_udp_ports(), vec![5060, 5062, 5064]);
+    }
+
+    #[test]
+    fn test_proxy_tls_ca_certificates_path_is_parsed() {
+        let config: ProxyConfig = toml::from_str(
+            r#"
+            addr = "0.0.0.0"
+            tls_port = 5061
+            tls_ca_certificates = "/etc/ssl/certs/ca-certificates.crt"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.tls_ca_certificates.as_deref(),
+            Some("/etc/ssl/certs/ca-certificates.crt")
+        );
+    }
 
     #[test]
     fn test_callrecord_max_concurrent_is_shared_config() {

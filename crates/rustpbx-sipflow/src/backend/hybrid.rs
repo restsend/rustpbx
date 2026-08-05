@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use std::borrow::Cow;
 
 use crate::config::{SipFlowEngine, SipFlowSubdirs};
 use crate::backend::SipFlowBackend;
@@ -35,8 +36,10 @@ impl HybridLocalBackend {
         ttl_secs: Option<u64>,
         memtable_size_mb: usize,
         block_cache_capacity_mb: usize,
+        shards: usize,
         force_pcm: bool,
         pcm_sample_rate: u32,
+        flowdb_sync_mode: flowdb::SyncMode,
     ) -> Result<Self> {
         let sqlite = LocalBackend::new(
             root.clone(),
@@ -45,6 +48,7 @@ impl HybridLocalBackend {
             flush_interval_secs,
             id_cache_size,
             compress,
+            shards,
             force_pcm,
             pcm_sample_rate,
         )?;
@@ -58,6 +62,8 @@ impl HybridLocalBackend {
             flush_interval_secs,
             force_pcm,
             pcm_sample_rate,
+            shards,
+            flowdb_sync_mode,
         )?;
         Ok(Self {
             write_engine,
@@ -83,7 +89,11 @@ impl HybridLocalBackend {
 
 #[async_trait]
 impl SipFlowBackend for HybridLocalBackend {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
+    fn kind(&self) -> &'static str {
+        "hybrid"
+    }
+
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         self.primary().record(call_id, item)
     }
 
@@ -266,8 +276,10 @@ mod tests {
             None,
             1,
             16,
+            1,
             false,
             16000,
+            flowdb::SyncMode::Always,
         )
         .expect("hybrid backend")
     }
@@ -283,7 +295,7 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -312,7 +324,7 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(call_id, make_sip_item(ts, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -342,12 +354,12 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(call_id, make_sip_item(t0, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(call_id, make_sip_item(t1, call_id)).unwrap();
+            backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
             backend.flush().await.unwrap();
         }
 

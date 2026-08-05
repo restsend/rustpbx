@@ -124,6 +124,40 @@ impl ProxyDataContext {
         self.trunks.get(name).map(|v| v.value().clone())
     }
 
+    /// Resolve a source IP to the inbound trunk it belongs to, reusing the live
+    /// `acl_inbound_trunks` trie (longest-prefix match) plus optional From/To
+    /// user-prefix filtering.  This is the same resolution [`AclModule`] applies
+    /// at transaction start; factored out so diagnostics can invoke it without a
+    /// live SIP request.
+    ///
+    /// Returns the matched trunk as a [`TrunkContext`] (id / name / did_numbers)
+    /// or `None` when no inbound trunk covers the source IP.
+    pub fn resolve_inbound_trunk_by_ip(
+        &self,
+        addr: &IpAddr,
+        from_user: Option<&str>,
+        to_user: Option<&str>,
+    ) -> Option<crate::call::TrunkContext> {
+        let inbound_trunks = self.acl_inbound_trunks.load();
+        let source_network = ipnet::IpNet::from(*addr);
+        for trunks in inbound_trunks.cover_values(&source_network) {
+            for name in trunks {
+                let Some(trunk) = self.get_trunk(name) else {
+                    continue;
+                };
+                if !trunk.matches_incoming_user_prefixes(from_user, to_user) {
+                    continue;
+                }
+                return Some(crate::call::TrunkContext {
+                    id: trunk.id,
+                    name: name.clone(),
+                    did_numbers: trunk.did_numbers,
+                });
+            }
+        }
+        None
+    }
+
     pub fn routes_snapshot(&self) -> Vec<RouteRule> {
         self.routes.read().unwrap().clone()
     }
@@ -547,30 +581,36 @@ impl ProxyDataContext {
                     }
                 }
             }
-        } else {
-            if !config.queues_files.is_empty() {
-                match queue_utils::load_queues_from_files(&config.queues_files).await {
-                    Ok((file_queues, file_paths)) => {
-                        file_count = file_queues.len();
-                        if !file_paths.is_empty() {
-                            files.extend(file_paths.clone());
-                        }
-                        for (key, mut queue) in file_queues {
-                            let path = file_paths
-                                .iter()
-                                .find(|p| p.contains(&key))
-                                .cloned()
-                                .unwrap_or_else(|| config.queues_files.join(", "));
-                            queue.origin = ConfigOrigin::from_file(path);
-                            queues.insert(key, queue);
-                        }
+        }
+        // Always also load from files (mirrors reload_routes behavior) — file
+        // queues are MERGED into the set, with DB entries taking precedence via
+        // the .extend above. Without this, file-based queue configs (including
+        // skill-group→queue mappings) are invisible when a DB is configured.
+        if !config.queues_files.is_empty() {
+            match queue_utils::load_queues_from_files(&config.queues_files).await {
+                Ok((file_queues, file_paths)) => {
+                    file_count = file_queues.len();
+                    if !file_paths.is_empty() {
+                        files.extend(file_paths.clone());
                     }
-                    Err(e) => {
-                        tracing::error!("failed to load queues from files: {}", e);
+                    for (key, mut queue) in file_queues {
+                        let path = file_paths
+                            .iter()
+                            .find(|p| p.contains(&key))
+                            .cloned()
+                            .unwrap_or_else(|| config.queues_files.join(", "));
+                        queue.origin = ConfigOrigin::from_file(path);
+                        queues.entry(key).or_insert(queue);
                     }
                 }
+                Err(e) => {
+                    tracing::error!("failed to load queues from files: {}", e);
+                }
             }
+        }
 
+        // Load generated file if it exists (file-based export, for non-DB setups)
+        {
             let generated_file = config.generated_queue_dir().join("queues.generated.toml");
             if tokio::fs::try_exists(&generated_file)
                 .await
@@ -697,7 +737,7 @@ impl ProxyDataContext {
             }
         }
 
-        routes.sort_by_key(|r| r.priority);
+        routes.sort_by_key(|route| Reverse(route.priority));
         let len = routes.len();
         *self.routes.write().unwrap() = routes;
         let finished_at = Utc::now();
@@ -1369,7 +1409,7 @@ pub(crate) async fn load_routes_from_db(
 ) -> Result<Vec<RouteRule>> {
     let models = routing::Entity::find()
         .filter(routing::Column::IsActive.eq(true))
-        .order_by_asc(routing::Column::Priority)
+        .order_by_desc(routing::Column::Priority)
         .all(db)
         .await?;
 
@@ -1877,6 +1917,47 @@ mod tests {
         );
         assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
         assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
+    }
+
+    #[tokio::test]
+    async fn routes_are_loaded_with_higher_priority_values_first() {
+        let mut config = ProxyConfig::default();
+        config.routes = Some(vec![
+            RouteRule {
+                name: "low".to_string(),
+                priority: 1,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "high-first".to_string(),
+                priority: 10,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "high-second".to_string(),
+                priority: 10,
+                ..Default::default()
+            },
+            RouteRule {
+                name: "middle".to_string(),
+                priority: 5,
+                ..Default::default()
+            },
+        ]);
+
+        let context = ProxyDataContext::new(Arc::new(config), None)
+            .await
+            .expect("initialize proxy data");
+        let route_names: Vec<_> = context
+            .routes_snapshot()
+            .into_iter()
+            .map(|route| route.name)
+            .collect();
+
+        assert_eq!(
+            route_names,
+            vec!["high-first", "high-second", "middle", "low"]
+        );
     }
 
     #[tokio::test]

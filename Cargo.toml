@@ -270,7 +270,7 @@ arc-swap = "1.9.2"
 iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
-flowdb = { version = "0.8.2", default-features = false }
+flowdb = { version = "0.8.3", default-features = false }
 
 # Workspace crates
 rustpbx-models = { path = "crates/rustpbx-models" }
@@ -285,6 +285,7 @@ portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 serde_urlencoded = "0.7"
 ctor = "1.0.7"
+metrics-util = "0.20.4"
 
 [build-dependencies]
 chrono = "0.4"
@@ -297,12 +298,6 @@ path = "src/bin/rustpbx.rs"
 name = "sipflow"
 path = "src/bin/sipflow.rs"
 
-[[bin]]
-name = "sipflow-diag"
-path = "src/bin/sipflow-diag.rs"
-
 [profile.dev]
-opt-level = 1
-codegen-units = 256
-incremental = true
-debug = 1
+opt-level = 0
+codegen-units = 16

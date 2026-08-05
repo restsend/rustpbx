@@ -11,8 +11,17 @@ log_level = "debug"
 media_cache_path = "./config/mediacache"
 # SQLite database (default)
 database_url = "sqlite://rustpbx.sqlite3"
-# MySQL database example:
-# database_url = "mysql://root@localhost:3306/rustpbx"
+# MySQL / PostgreSQL database example:
+# database_url = "postgres://user:pass@localhost/rustpbx"
+
+# Database connection pool settings (applies to PostgreSQL/MySQL)
+# When not configured, max_connections defaults to 64.
+# [database_pool]
+# max_connections = 64
+# min_connections = 0
+# acquire_timeout_secs = 30
+# idle_timeout_secs = 600
+# max_lifetime_secs = 1800
 
 # external IP address for SIP signaling and media
 # if server is behind NAT, set your public IP here (without port)
@@ -25,6 +34,10 @@ database_url = "sqlite://rustpbx.sqlite3"
 
 # rtp_start_port = 20000
 # rtp_end_port = 30000
+
+# Max size in bytes for audio files downloaded over HTTP from the console
+# (queue prompts, voicemail prompts, ...). Default: 20971520 (20 MB)
+# max_audio_download_bytes = 20971520
 
 # setup your STUN/TURN servers here, for webrtc web clients
 # [[ice_servers]]
@@ -272,11 +285,13 @@ engine = "flowdb"
 # udp_addr = "192.168.1.100:3000"
 # http_addr = "http://192.168.1.100:3001"
 # timeout_secs = 10
+# mtu = 1500  # Maximum IP packet size; set to 0 to disable UDP batch splitting
 
 # Remote cluster (multi-node, consistent hashing by call_id):
 # [sipflow]
 # type = "remote"
 # timeout_secs = 10
+# mtu = 1500  # Maximum IP packet size; set to 0 to disable UDP batch splitting
 # nodes = [
 #     { udp = "192.168.1.1:3000", http = "http://192.168.1.1:3001" },
 #     { udp = "192.168.1.2:3000", http = "http://192.168.1.2:3001" },

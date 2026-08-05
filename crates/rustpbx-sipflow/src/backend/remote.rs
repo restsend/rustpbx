@@ -1,25 +1,27 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::BufMut;
 use chrono::{DateTime, Local};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::{UdpSocket, lookup_host};
-use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::time::Duration;
+use tokio::net::lookup_host;
 use tokio_util::sync::CancellationToken;
 
 use tracing::{info, warn};
 
-use crate::config::SipFlowClusterNode;
-use rustpbx_http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
+use std::borrow::Cow;
 use crate::backend::SipFlowBackend;
-use crate::perf::{PerfCounters, PerfDumper};
+use crate::config::SipFlowClusterNode;
+use crate::perf::PerfCounters;
 use crate::protocol::{
-    MAX_BATCH_COUNT, MsgType, Packet, encode_batch_into, encode_packet_into,
+    BATCH_MAGIC, BATCH_VERSION, MsgType, Packet, encode_batch_into, encode_packet_into,
 };
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use arc_swap::ArcSwap;
-use std::sync::atomic::Ordering;
+use rustpbx_http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 
 /// Jump Consistent Hash
 ///
@@ -55,12 +57,6 @@ struct RemoteNode {
     udp_addr: Arc<ArcSwap<SocketAddr>>,
 }
 
-/// Minimum (and default) flush interval. Values below this in config are
-/// silently raised to it, because flushing more often than once per RTP
-/// frame interval (~20ms) defeats the purpose of batching and risks
-/// tight-loop sending under low load.
-const MIN_BATCH_FLUSH_MS: u64 = 20;
-
 /// Default ingest channel capacity when the config value is 0.
 const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
 
@@ -68,6 +64,7 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
 /// always fail, so any sub-1 value is raised to this.
 const MIN_CHANNEL_CAPACITY: usize = 1;
 
+/// Per-node channel capacity as fraction of total ingress capacity.
 enum Command {
     RecordItem { call_id: String, item: SipFlowItem },
 }
@@ -76,17 +73,38 @@ enum Command {
 /// via UDP (write) and HTTP (read). The target node is selected by
 /// consistent hashing on the call_id.
 ///
-/// Writes are coalesced per destination node: items are accumulated into a
-/// per-node buffer and sent as a single batched UDP datagram when either
-/// `batch_size` packets are pending or `batch_flush_ms` elapses since the
-/// last flush. This amortizes syscall and allocation cost across many
-/// packets, dramatically reducing CPU under load compared to a
-/// one-datagram-per-item sender.
+/// ## Architecture
 ///
-/// Setting `batch_size = 0` disables batching entirely: each record is
-/// sent immediately as a single-packet (legacy format) UDP datagram. This
-/// is the safe escape hatch if a receiver is too old to understand the
-/// batch wire format.
+/// ```text
+/// record() callers
+///   │ try_send()
+///   ▼
+/// std::sync::mpsc::SyncSender<Command> (bounded ingress)
+///   │
+///   ▼
+/// [Dispatcher Thread] (1 OS thread) — pure routing, no accumulation
+///   │ build_packet + jump_consistent_hash → per-node channel
+///   │
+///   ├── std::sync::mpsc::SyncSender<Packet> → [Sender Thread 0]
+///   │     std::net::UdpSocket (independent)
+///   │     Accumulates into Vec<Packet>
+///   │     MTU-aware batch encoding → send_to()
+///   │
+///   ├── std::sync::mpsc::SyncSender<Packet> → [Sender Thread 1]
+///   │     ...
+///   └── ...
+/// ```
+///
+/// Batching is driven by packet accumulation in each sender thread:
+///   - When adding a packet would exceed the MTU budget, the pending batch
+///     is flushed as a single batched UDP datagram.
+///   - A periodic timeout (20ms) flushes partially-filled batches to bound
+///     latency under low load.
+///   - No compression is applied — the client side is kept CPU-light.
+///
+/// The receiver side supports both legacy single-packet datagrams and the
+/// batched wire format transparently, so enabling batching here does not
+/// require matching receiver changes.
 ///
 /// ## DNS TTL
 /// When `dns_ttl_secs > 0`, a background task periodically re-resolves
@@ -94,29 +112,28 @@ enum Command {
 /// load-balancer rotation or failover), the new address is used for
 /// subsequent sends without restarting the service.
 pub struct RemoteBackend {
-    sender: mpsc::Sender<Command>,
+    sender: SyncSender<Command>,
     nodes: Vec<RemoteNode>,
     client: reqwest::Client,
     cancel_token: CancellationToken,
     perf: Arc<PerfCounters>,
+    #[allow(dead_code)]
+    client_id: u32,
+    _dispatcher_handle: Option<std::thread::JoinHandle<()>>,
+    _sender_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl RemoteBackend {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         config_nodes: Vec<SipFlowClusterNode>,
         timeout_secs: u64,
-        batch_size_cfg: usize,
-        batch_flush_ms_cfg: u64,
         channel_capacity_cfg: usize,
+        mtu: usize,
         dns_ttl_secs: u64,
+        report_interval_secs: u64,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
-        // Backend shutdown must be one-way: cancelling the server stops this
-        // backend, while dropping/reloading this backend must not stop the server.
         let cancel_token = cancel_token.child_token();
-
-        let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
         let mut nodes = Vec::with_capacity(config_nodes.len());
         for node in config_nodes {
@@ -139,55 +156,90 @@ impl RemoteBackend {
             None,
         )?;
 
+        let client_id = loop {
+            let id = rand::random::<u32>();
+            if id != 0 {
+                break id;
+            }
+        };
+
         // Ingest channel capacity: 0 → default, otherwise clamp to >= 1.
         let channel_capacity = if channel_capacity_cfg == 0 {
             DEFAULT_CHANNEL_CAPACITY
         } else {
             channel_capacity_cfg.max(MIN_CHANNEL_CAPACITY)
         };
-        let (tx, rx) = mpsc::channel::<Command>(channel_capacity);
+        let (tx, rx) = mpsc::sync_channel::<Command>(channel_capacity);
 
-        // `batch_size = 0` disables batching entirely (each record is sent
-        // as a legacy single-packet datagram). Otherwise clamp to a sane
-        // range. We keep a separate `batch_enabled` flag so the flush path
-        // can choose the right wire format (single vs batch).
-        //
-        // `clamp(1, MAX_BATCH_COUNT)` maps 0 → 1 (so the per-node push/flush
-        // logic still works when disabled) and caps pathological large
-        // values at the protocol maximum.
-        let batch_enabled = batch_size_cfg != 0;
-        let batch_size = batch_size_cfg.clamp(1, MAX_BATCH_COUNT);
-        // Clamp flush interval to at least MIN_BATCH_FLUSH_MS. Anything
-        // tighter would defeat batching and risk spin-flushing under low
-        // load.
-        let flush_duration = Duration::from_millis(batch_flush_ms_cfg.max(MIN_BATCH_FLUSH_MS));
+        // Per-node channel capacity: distribute total capacity across nodes
+        let node_count = nodes.len();
+        let per_node_cap = (channel_capacity / node_count).max(64);
+        let mut node_senders = Vec::with_capacity(node_count);
 
-        let cancel_clone = cancel_token.clone();
-        let nodes_clone = nodes.clone();
         let perf = PerfCounters::new_arc();
-        let perf_clone = perf.clone();
+        let cancel_dispatcher = cancel_token.clone();
+        let cancel_dns = cancel_token.clone();
+        let cancel_report = cancel_token.clone();
+        let perf_dispatcher = perf.clone();
 
-        tokio::spawn(async move {
-            worker_loop(
-                rx,
-                udp_socket,
-                nodes_clone,
-                batch_size,
-                batch_enabled,
-                flush_duration,
-                cancel_clone,
-                perf_clone,
-            )
-            .await;
-        });
+        // Per-node data for report loop: (node, sent_count)
+        let mut report_nodes: Vec<(RemoteNode, Arc<AtomicU64>)> = Vec::with_capacity(node_count);
 
-        // Start DNS refresh task if TTL is configured and at least one node
-        // uses a hostname (not a raw IP).
+        // Create per-node SyncSender channels and spawn sender threads
+        let mut sender_handles = Vec::with_capacity(node_count);
+        let cancel_sender = cancel_token.clone();
+        for i in 0..node_count {
+            let (node_tx, node_rx) = mpsc::sync_channel::<Packet>(per_node_cap);
+            node_senders.push(node_tx);
+
+            let sent_count = Arc::new(AtomicU64::new(0));
+            report_nodes.push((nodes[i].clone(), sent_count.clone()));
+
+            let node_addr = nodes[i].udp_addr.clone();
+            let node_perf = perf.clone();
+            let cancel = cancel_sender.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("sipflow-send-{i}"))
+                .spawn(move || {
+                    sender_thread(node_rx, node_addr, mtu, i, node_perf, sent_count, cancel);
+                })?;
+            sender_handles.push(handle);
+        }
+
+        // Spawn dispatcher thread
+        let dispatcher_client_id = client_id;
+        let dispatcher_handle = std::thread::Builder::new()
+            .name("sipflow-dispatch".to_string())
+            .spawn(move || {
+                dispatcher_thread(
+                    rx,
+                    node_senders,
+                    cancel_dispatcher,
+                    perf_dispatcher,
+                    dispatcher_client_id,
+                );
+            })?;
+
+        // Start DNS refresh task if TTL is configured
         if dns_ttl_secs > 0 {
             let dns_nodes = nodes.clone();
-            let dns_cancel = cancel_token.clone();
+            tokio::spawn(
+                async move { dns_refresh_loop(dns_nodes, dns_ttl_secs, cancel_dns).await },
+            );
+        }
+
+        // Start report loop if interval > 0
+        if report_interval_secs > 0 {
+            let report_client = client.clone();
             tokio::spawn(async move {
-                dns_refresh_loop(dns_nodes, dns_ttl_secs, dns_cancel).await
+                report_loop(
+                    report_nodes,
+                    report_client,
+                    report_interval_secs,
+                    client_id,
+                    cancel_report,
+                )
+                .await
             });
         }
 
@@ -197,6 +249,9 @@ impl RemoteBackend {
             client,
             cancel_token,
             perf,
+            client_id,
+            _dispatcher_handle: Some(dispatcher_handle),
+            _sender_handles: sender_handles,
         })
     }
 
@@ -212,7 +267,7 @@ impl RemoteBackend {
 ///
 /// Address parsing uses `split_once` instead of `split(':').collect()` to
 /// avoid heap allocations on every packet.
-fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
+fn build_packet(call_id: String, item: SipFlowItem, client_id: u32) -> Packet {
     let default_port = if matches!(item.msg_type, SipFlowMsgType::Sip) {
         5060
     } else {
@@ -249,9 +304,6 @@ fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
         SipFlowMsgType::Sip => MsgType::Sip,
         SipFlowMsgType::Rtp => MsgType::Rtp,
     };
-    // For RTP the call_id is embedded in the packet metadata; for SIP it is
-    // recovered from the payload on the receiver side (`extract_callid`),
-    // so we move `call_id` only for RTP and let it drop for SIP.
     let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
         (Some(call_id), item.leg)
     } else {
@@ -266,159 +318,258 @@ fn build_packet(call_id: String, item: SipFlowItem) -> Packet {
         call_id: packet_call_id,
         leg: packet_leg,
         payload: item.payload,
+        client_id,
     }
 }
 
-/// Background worker that drains the ingest channel, groups packets by
-/// destination node, and flushes each node's buffer.
-///
-/// When `batch_enabled` is true, each flush encodes the node's pending
-/// packets as a single batched UDP datagram (one syscall for many
-/// packets). When false (config `batch_size = 0`), each packet is sent
-/// immediately as a legacy single-packet datagram — the worker still
-/// threads everything through the same per-node buffers for uniformity,
-/// but the buffers never accumulate (every push triggers a flush).
-///
-/// Flush triggers:
-///   1. A node's buffer reaches `batch_size` → immediate flush of that node.
-///   2. `flush_duration` elapses since the last periodic flush → flush all
-///      non-empty buffers (bounds latency under low load).
-///   3. Channel closed or cancellation → final flush of all buffers.
-async fn worker_loop(
-    mut rx: mpsc::Receiver<Command>,
-    udp_socket: Arc<UdpSocket>,
-    nodes: Vec<RemoteNode>,
-    batch_size: usize,
-    batch_enabled: bool,
-    flush_duration: Duration,
+/// Dispatcher thread: receives Commands from the ingress channel, converts
+/// each to a Packet, routes to the correct per-node channel via consistent
+/// hashing.  This is a pure routing layer — no accumulation, no batch
+/// processing, no compression.  Packets that cannot be enqueued to a node
+/// channel (channel full) are silently dropped and counted.
+fn dispatcher_thread(
+    rx: mpsc::Receiver<Command>,
+    node_senders: Vec<SyncSender<Packet>>,
     cancel: CancellationToken,
     perf: Arc<PerfCounters>,
+    client_id: u32,
 ) {
-    // One pending-packet buffer per destination node.
-    let mut per_node: Vec<Vec<Packet>> = (0..nodes.len()).map(|_| Vec::new()).collect();
-    // Scratch buffer reused across `recv_many` calls to avoid allocation.
-    // Sized to `batch_size` so a single call can pull up to one full batch.
-    let mut scratch: Vec<Command> = Vec::with_capacity(batch_size);
-    // Reusable wire-encoding buffer, kept across flushes for zero-alloc sends.
-    let mut send_buf: Vec<u8> = Vec::new();
-
-    let mut deadline = Instant::now() + flush_duration;
-    // Cache the recv limit outside the select! arm to avoid simultaneous
-    // mutable+immutable borrows of `scratch`.
-    let recv_limit = scratch.capacity().max(1);
-
-    // Perf dump every 1 second: reports signaling/media sent and dropped
-    // counts since the last dump, and exports to `metrics`.
-    let mut perf_dumper = PerfDumper::with_interval(perf.clone(), Duration::from_secs(1));
-    let mut perf_interval = tokio::time::interval(Duration::from_secs(1));
-    // Skip the immediate first tick so we don't dump before any traffic.
-    perf_interval.tick().await;
+    let node_count = node_senders.len();
 
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
-                break;
-            }
-            // `recv_many` returns 0 only when the channel is closed.
-            n = rx.recv_many(&mut scratch, recv_limit) => {
-                if n == 0 {
-                    flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
-                    break;
-                }
-                for cmd in scratch.drain(..) {
-                    let Command::RecordItem { call_id, item } = cmd;
-                    let idx = jump_consistent_hash(&call_id, nodes.len());
-                    let packet = build_packet(call_id, item);
-                    let node_buf = &mut per_node[idx];
-                    node_buf.push(packet);
-                    if node_buf.len() >= batch_size {
-                        flush_one(node_buf, &udp_socket, **nodes[idx].udp_addr.load(), &mut send_buf, batch_enabled).await;
+        if cancel.is_cancelled() {
+            break;
+        }
+
+        match rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(cmd) => {
+                let Command::RecordItem { call_id, item } = cmd;
+                let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
+                let packet = build_packet(call_id, item, client_id);
+                let idx =
+                    jump_consistent_hash(&packet.call_id.as_deref().unwrap_or(""), node_count);
+
+                match node_senders[idx].try_send(packet) {
+                    Ok(()) => {
+                        if is_signaling {
+                            perf.signaling_sent.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            perf.media_sent.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(_) => {
+                        perf.items_dropped.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
-            // Periodic flush: bounds latency to ~flush_duration for low-rate
-            // streams (e.g. trickled RTP at 50pps). With batching disabled
-            // this is effectively a no-op (buffers are always empty).
-            _ = tokio::time::sleep_until(deadline) => {
-                flush_all(&mut per_node, &udp_socket, &nodes, &mut send_buf, batch_enabled).await;
-                deadline = Instant::now() + flush_duration;
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+/// Sender thread: receives Packets from the dispatcher, accumulates into a
+/// Vec<Packet>, and flushes via MTU-aware batch encoding.
+///
+/// Flush triggers:
+///   1. A packet is received and the current batch combined with it would
+///      exceed the MTU — flush the current batch first, then start a new one.
+///   2. No packet arrives within `FLUSH_DURATION` — flush any pending batch
+///      to bound latency under low load.
+///   3. Channel disconnected — final flush and exit.
+///
+/// No compression is applied.  Single-packet batches use the legacy
+/// single-packet wire format; multi-packet batches use the batched format.
+fn sender_thread(
+    rx: mpsc::Receiver<Packet>,
+    target_addr: Arc<ArcSwap<SocketAddr>>,
+    mtu: usize,
+    node_index: usize,
+    _perf: Arc<PerfCounters>,
+    sent_count: Arc<AtomicU64>,
+    cancel: CancellationToken,
+) {
+    let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("[sender-{node_index}] failed to bind UDP socket: {e}");
+            return;
+        }
+    };
+    let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
+
+    const FLUSH_DURATION: Duration = Duration::from_millis(20);
+    let mut batch: Vec<Packet> = Vec::new();
+    let initial_cap = if mtu > 0 { mtu } else { 65535 };
+    let mut send_buf: Vec<u8> = Vec::with_capacity(initial_cap);
+
+    let flush_and_count = |batch: &mut Vec<Packet>,
+                           socket: &std::net::UdpSocket,
+                           addr: &Arc<ArcSwap<SocketAddr>>,
+                           send_buf: &mut Vec<u8>| {
+        let n = flush_batch(batch, socket, addr, send_buf, mtu, node_index);
+        sent_count.fetch_add(n as u64, Ordering::Relaxed);
+    };
+
+    loop {
+        if cancel.is_cancelled() {
+            if !batch.is_empty() {
+                flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
             }
-            // 1-second perf dump: logs send/drop rates and exports metrics.
-            _ = perf_interval.tick() => {
-                perf.set_pending(rx.len() as i64);
-                if let Some(msg) = perf_dumper.try_dump() {
-                    tracing::info!("{msg}");
+            break;
+        }
+
+        match rx.recv_timeout(FLUSH_DURATION) {
+            Ok(packet) => {
+                // When MTU is enabled and the next packet would cause the
+                // batch to exceed the MTU, flush first.  Estimation is
+                // conservative: 5-byte batch header + 4-byte frame_len per
+                // existing packet + the new packet's likely wire size.
+                if mtu > 0 && !batch.is_empty() && would_exceed_mtu(&batch, &packet, mtu) {
+                    flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
+                }
+                batch.push(packet);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !batch.is_empty() {
+                    flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
                 }
             }
-        }
-    }
-}
-
-/// Encode and send a single node's pending buffer.
-///
-/// When `batch_enabled` is true the buffer is sent as one batched datagram.
-/// When false each packet is sent as its own legacy single-packet datagram
-/// (used when the user sets `batch_size = 0` to opt out of batching).
-///
-/// `send_buf` is cleared and reused across calls to avoid per-flush
-/// allocation. The packet buffer is cleared after a successful send.
-async fn flush_one(
-    buf: &mut Vec<Packet>,
-    udp_socket: &UdpSocket,
-    target_addr: SocketAddr,
-    send_buf: &mut Vec<u8>,
-    batch_enabled: bool,
-) {
-    if buf.is_empty() {
-        return;
-    }
-    if batch_enabled {
-        send_buf.clear();
-        if encode_batch_into(send_buf, buf).is_ok() {
-            let _ = udp_socket.send_to(send_buf, target_addr).await;
-        } else {
-            // Encoding can only fail on >MAX_BATCH_COUNT, which we prevent
-            // via clamping in `new()`. Fall back to per-packet sends
-            // defensively.
-            for packet in buf.iter() {
-                send_buf.clear();
-                encode_packet_into(send_buf, packet);
-                let _ = udp_socket.send_to(send_buf, target_addr).await;
+            Err(RecvTimeoutError::Disconnected) => {
+                if !batch.is_empty() {
+                    flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
+                }
+                break;
             }
         }
-    } else {
-        // Batching disabled (`batch_size = 0`): legacy single-packet
-        // datagrams. Buffer should normally contain exactly 1 packet here
-        // (every push triggers a flush), but loop anyway for safety.
-        for packet in buf.iter() {
-            send_buf.clear();
-            encode_packet_into(send_buf, packet);
-            let _ = udp_socket.send_to(send_buf, target_addr).await;
-        }
     }
-    buf.clear();
 }
 
-/// Flush every node's pending buffer. Reads the latest DNS-resolved address
-/// from each node's [`ArcSwap`].
-async fn flush_all(
-    per_node: &mut [Vec<Packet>],
-    udp_socket: &UdpSocket,
-    nodes: &[RemoteNode],
-    send_buf: &mut Vec<u8>,
-    batch_enabled: bool,
-) {
-    for (i, node) in nodes.iter().enumerate() {
-        flush_one(
-            &mut per_node[i],
-            udp_socket,
-            **node.udp_addr.load(),
-            send_buf,
-            batch_enabled,
-        )
-        .await;
+/// Quick estimation: would adding `next` to the existing `batch` push the
+/// encoded size past `mtu`?
+///
+/// We use a conservative formula to avoid actually encoding:
+///   total ≈ batch_header(5) + Σ(4 + frame_len) + 4 + next_frame_len
+fn would_exceed_mtu(batch: &[Packet], next: &Packet, mtu: usize) -> bool {
+    let max_payload = mtu.saturating_sub(28);
+    // Estimate current encoded size (batch header + existing frames)
+    let mut total: usize = 5; // BATCH_MAGIC(2) + VERSION(1) + count(2)
+    for p in batch {
+        // 4-byte frame_len prefix + encoded packet size (conservative)
+        total += 4 + estimated_wire_size(p);
     }
+    total += 4 + estimated_wire_size(next);
+    total > max_payload
+}
+
+/// Rough upper bound on the wire size of a Packet.
+/// Used by [`would_exceed_mtu`] to decide batch splitting without encoding.
+fn estimated_wire_size(p: &Packet) -> usize {
+    // Magic(2) + Version(1) + MsgType(1) + IpFamily(1) + SrcIp(4 or 16)
+    //   + SrcPort(2) + DstIp(4 or 16) + DstPort(2) + Timestamp(8)
+    //   + MetadataLen(4) + metadata(var) + PayloadLen(4) + Payload(var)
+    let ip_size: usize = match p.src.0 {
+        IpAddr::V4(_) => 4,
+        IpAddr::V6(_) => 16,
+    };
+    let metadata_size = if p.call_id.is_some() || p.leg.is_some() {
+        let call_id_len = p.call_id.as_ref().map(|s| s.len()).unwrap_or(0);
+        4 + 4 + 4 + call_id_len // leg(i32) + call_id_len(u32) + call_id
+    } else {
+        4 // metadata_len = 0
+    };
+    2 + 1 + 1 + 1 + ip_size + 2 + ip_size + 2 + 8 + 4 + 4 + metadata_size + 4 + p.payload.len()
+}
+
+/// Encode and send the pending batch of packets.
+///
+/// When `mtu == 0`, all packets are encoded as a single datagram (either
+/// single-packet or batch format). When `mtu > 0`, the batch is split into
+/// multiple MTU-sized datagrams, each carrying a valid batch frame.
+///
+/// Single-packet batches use the legacy single-packet wire format so that
+/// legacy receivers can still parse them without batch support.
+fn flush_batch(
+    batch: &mut Vec<Packet>,
+    socket: &std::net::UdpSocket,
+    addr: &Arc<ArcSwap<SocketAddr>>,
+    send_buf: &mut Vec<u8>,
+    mtu: usize,
+    _node_index: usize,
+) -> usize {
+    if batch.is_empty() {
+        return 0;
+    }
+
+    let target_addr = **addr.load();
+    let total = batch.len();
+
+    if mtu == 0 {
+        // No MTU limit: send as a single datagram
+        send_buf.clear();
+        if batch.len() == 1 {
+            encode_packet_into(send_buf, &batch[0]);
+        } else if encode_batch_into(send_buf, batch).is_err() {
+            // Fallback: should never happen with reasonable batch sizes
+            for packet in batch.drain(..) {
+                send_buf.clear();
+                encode_packet_into(send_buf, &packet);
+                let _ = socket.send_to(send_buf, target_addr);
+            }
+            batch.clear();
+            return total;
+        }
+        let _ = socket.send_to(send_buf, target_addr);
+        batch.clear();
+        return total;
+    }
+
+    // MTU-aware splitting: build batches that fit within `mtu`
+    let max_payload = mtu.saturating_sub(28); // IP(20) + UDP(8)
+    let mut start = 0;
+
+    while start < batch.len() {
+        send_buf.clear();
+        send_buf.put_u16(BATCH_MAGIC);
+        send_buf.put_u8(BATCH_VERSION);
+        let count_pos = send_buf.len();
+        send_buf.put_u16(0); // placeholder count
+        let mut count: u16 = 0;
+
+        for i in start..batch.len() {
+            let frame_start = send_buf.len();
+            send_buf.put_u32(0); // placeholder frame_len
+            encode_packet_into(send_buf, &batch[i]);
+            let frame_len = (send_buf.len() - frame_start - 4) as u32;
+
+            if count > 0 && send_buf.len() > max_payload {
+                // This packet doesn't fit — roll back and send current batch
+                send_buf.truncate(frame_start);
+                break;
+            }
+
+            send_buf[frame_start..frame_start + 4].copy_from_slice(&frame_len.to_be_bytes());
+            count += 1;
+        }
+
+        if count == 0 {
+            // Single packet exceeds MTU (extremely rare — only for very
+            // large SIP messages). Send it as a standalone single-packet
+            // datagram; IP fragmentation will handle it.
+            send_buf.clear();
+            encode_packet_into(send_buf, &batch[start]);
+            let _ = socket.send_to(send_buf, target_addr);
+            start += 1;
+            continue;
+        }
+
+        send_buf[count_pos..count_pos + 2].copy_from_slice(&count.to_be_bytes());
+        let _ = socket.send_to(send_buf, target_addr);
+        start += count as usize;
+    }
+
+    batch.clear();
+    total
 }
 
 /// Background task that periodically re-resolves each node's UDP hostname.
@@ -459,33 +610,149 @@ async fn dns_refresh_loop(nodes: Vec<RemoteNode>, ttl_secs: u64, cancel: Cancell
     }
 }
 
+/// Periodically queries each remote node for per-client receive counters
+/// and logs the loss rate.  Exports per-node loss metrics.
+///
+/// Each node stores a cumulative receive count keyed by `client_id`.
+/// We track the previous `sent`/`recv` snapshots locally and compute
+/// deltas each interval to derive the loss rate.
+async fn report_loop(
+    nodes: Vec<(RemoteNode, Arc<AtomicU64>)>,
+    client: reqwest::Client,
+    interval_secs: u64,
+    client_id: u32,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    let mut last_sent: Vec<u64> = vec![0; nodes.len()];
+    let mut last_recv: Vec<u64> = vec![0; nodes.len()];
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {}
+        }
+
+        for (i, (node, sent_count)) in nodes.iter().enumerate() {
+            let current_sent = sent_count.load(Ordering::Relaxed);
+            let sent_delta = current_sent.saturating_sub(last_sent[i]);
+            if sent_delta == 0 {
+                continue;
+            }
+
+            let node_addr = node.http_addr.clone();
+            let response = client
+                .post(format!("{}/report", node_addr))
+                .json(&serde_json::json!({
+                    "client_id": client_id,
+                    // Cumulative sent count so the collector can also derive a
+                    // per-interval loss rate when it receives the report.
+                    "sent_count": current_sent,
+                }))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+
+            let (recv_delta, loss, loss_rate, collector_ok) = match response {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        let current_recv = data["packets_received"].as_u64().unwrap_or(0);
+                        // Collector restarted (its counters reset to 0): reset
+                        // the baseline so this interval reports the fresh
+                        // window instead of wrapping/negative loss.
+                        if current_recv < last_recv[i] {
+                            last_recv[i] = 0;
+                        }
+                        let recv_delta = current_recv.saturating_sub(last_recv[i]);
+                        let loss = sent_delta.saturating_sub(recv_delta);
+                        let loss_rate = if sent_delta > 0 {
+                            loss as f64 / sent_delta as f64
+                        } else {
+                            0.0
+                        };
+                        last_sent[i] = current_sent;
+                        last_recv[i] = current_recv;
+                        (recv_delta, loss, loss_rate, true)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            node = %node_addr,
+                            error = %e,
+                            "sipflow report: failed to parse response"
+                        );
+                        (0, 0, 0.0, false)
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        node = %node_addr,
+                        error = %e,
+                        "sipflow report failed"
+                    );
+                    (0, 0, 0.0, false)
+                }
+            };
+
+            // Always print the client-side report line so the sender's report
+            // is logged even when the collector is unreachable or misbehaves.
+            tracing::info!(
+                node = %node_addr,
+                client_id,
+                interval_s = interval_secs,
+                sent = sent_delta,
+                recv = recv_delta,
+                loss = loss,
+                loss_rate = loss_rate,
+                collector_ok = collector_ok,
+                "sipflow report"
+            );
+
+            if collector_ok {
+                metrics::gauge!(
+                    "sipflow_loss_rate",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .set(loss_rate);
+                metrics::counter!(
+                    "sipflow_report_sent_total",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .increment(sent_delta);
+                metrics::counter!(
+                    "sipflow_report_lost_total",
+                    "node" => node_addr.clone(),
+                    "client_id" => client_id.to_string(),
+                )
+                .increment(loss);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl SipFlowBackend for RemoteBackend {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
-        // `try_send` (not `send().await`) because this is a sync function:
-        // never blocks, never suspends the caller. On a full bounded channel
-        // (sustained overload) this returns `TrySendError::Full`, which
-        // upstream callers already swallow — preferable to unbounded memory
-        // growth under backpressure.
+    fn kind(&self) -> &'static str {
+        "remote"
+    }
+
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
         let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
         let result = self
             .sender
             .try_send(Command::RecordItem {
-                call_id: call_id.to_string(),
+                call_id: call_id.into_owned(),
                 item,
             })
-            .map_err(anyhow::Error::from);
+            .map_err(|e| anyhow::anyhow!("{e}"));
         if result.is_ok() {
-            // Count successful enqueues by type so we can report per-second
-            // signaling vs media send rates from the worker's perf dumper.
             if is_signaling {
                 self.perf.signaling_sent.fetch_add(1, Ordering::Relaxed);
             } else {
                 self.perf.media_sent.fetch_add(1, Ordering::Relaxed);
             }
         } else {
-            // Channel full: data is dropped. Bump the drop counter so the
-            // loss is visible in both the periodic log and metrics.
             self.perf.items_dropped.fetch_add(1, Ordering::Relaxed);
         }
         result
@@ -663,6 +930,84 @@ impl Drop for RemoteBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dashmap::DashMap;
+
+    /// Minimal HTTP handler that serves POST /report
+    /// Returns `{"status":"success","client_id":<id>,"packets_received":<counter[client_id]>}`
+    async fn serve_report(listener: tokio::net::TcpListener, counters: Arc<DashMap<u32, u64>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
+            // Quick-and-dirty: find `{"client_id":<N>}` in the body
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let client_id: u32 = req
+                .split("client_id")
+                .nth(1)
+                .and_then(|s| {
+                    let s = s.trim_start_matches(|c: char| !c.is_ascii_digit());
+                    s.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .and_then(|d| d.parse().ok())
+                })
+                .unwrap_or(0);
+
+            let received = counters.get(&client_id).map(|v| *v).unwrap_or(0);
+            let body = serde_json::json!({
+                "status": "success",
+                "client_id": client_id,
+                "packets_received": received,
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_report_endpoint_returns_receive_counters() {
+        let counters: Arc<DashMap<u32, u64>> = Arc::new(DashMap::new());
+        counters.insert(42, 100);
+
+        let bind_addr = "127.0.0.1:0";
+        let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn minimal HTTP server
+        let srv_counters = counters.clone();
+        tokio::spawn(async move {
+            serve_report(listener, srv_counters).await;
+        });
+
+        // Generate a unique client_id for the backend so it won't collide with our manual test
+        let test_client_id: u32 = 42;
+
+        // Client: POST /report
+        let client = rustpbx_http_util::build_keepalive_client(None, None).unwrap();
+        let resp = client
+            .post(format!("http://{}/report", addr))
+            .json(&serde_json::json!({ "client_id": test_client_id }))
+            .send()
+            .await
+            .expect("POST /report failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["status"], "success");
+        assert_eq!(json["client_id"], 42);
+        assert_eq!(json["packets_received"], 100);
+    }
 
     #[tokio::test]
     async fn remote_backend_uses_one_way_child_cancellation() {
@@ -673,9 +1018,9 @@ mod tests {
                 http: "http://127.0.0.1:3001".to_string(),
             }],
             1,
-            0,
-            20,
             16,
+            0,
+            0,
             0,
             server_cancel.clone(),
         )
@@ -697,9 +1042,9 @@ mod tests {
                 http: "http://127.0.0.1:3001".to_string(),
             }],
             1,
-            0,
-            20,
             16,
+            0,
+            0,
             0,
             server_cancel.clone(),
         )

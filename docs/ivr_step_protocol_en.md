@@ -435,7 +435,7 @@ When an IVR is entered via `transfer` (with `target="ivr:other_ivr"`) or `jump_i
 
 | Scenario | Behavior |
 |----------|----------|
-| **Provider HTTP timeout** (per‑request timeout = `retry.timeout_ms`, default 1000ms) | Retry, up to `retry.max_retries` (default 3). Between retries: 100ms sleep. |
+| **Provider HTTP timeout** (per‑request timeout = `retry.timeout_ms`, default 1000ms) | Retry, up to `retry.max_retries` (default 3). Between retries: wait `retry.delay_ms` (default 100ms). |
 | **Provider returns 5xx** | Same as timeout — retry loop. |
 | **All retries exhausted** | Execute `retry.fallback` (default: `{"type":"hangup","prompt":"sounds/error.wav"}`). |
 | **Provider returns invalid JSON / unknown action type** | Record trace error → play `sounds/error.wav` → hangup. |
@@ -467,6 +467,7 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
   "retry": {
     "max_retries": 5,
     "timeout_ms": 2000,
+    "delay_ms": 250,
     "fallback": { "type": "transfer", "target": "operator" }
   },
   "name": "my-step-ivr"
@@ -479,6 +480,7 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
 | `headers` | `Map<string,string>` | `{}` | Custom HTTP headers sent on every provider call |
 | `retry.max_retries` | u32 | `3` | Max retry attempts |
 | `retry.timeout_ms` | u64 | `1000` | Per‑request timeout in **milliseconds** |
+| `retry.delay_ms` | u64 | `100` | Delay between failed attempts in **milliseconds** |
 | `retry.fallback` | ActionNode | `{"type":"hangup","prompt":"sounds/error.wav"}` | Action to execute when all retries fail |
 | `name` | string | `"step_ivr"` | Display name for tracing |
 
@@ -492,7 +494,8 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
   "headers": { "Authorization": "Bearer token123" },
   "retry": {
     "max_retries": 3,
-    "timeout_ms": 1000
+    "timeout_ms": 1000,
+    "delay_ms": 100
   }
 }
 ```

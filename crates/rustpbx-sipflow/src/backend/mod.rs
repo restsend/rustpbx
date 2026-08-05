@@ -5,15 +5,25 @@ pub mod remote;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use std::borrow::Cow;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowUploadConfig};
-use crate::{SipFlowItem, SipFlowMediaStats};
+use crate::protocol::{MsgType, Packet};
+use crate::storage::extract_callid;
+use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 #[async_trait]
 pub trait SipFlowBackend: Send + Sync {
-    fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()>;
+    /// Short, stable identifier for the backend implementation (e.g. `"hybrid"`,
+    /// `"remote"`). Used for diagnostics/UI so operators can see which backend
+    /// answered a sip-flow query. Defaults to `"unknown"`.
+    fn kind(&self) -> &'static str {
+        "unknown"
+    }
+
+    fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()>;
     /// Flush any in-memory batch to durable storage.
     /// This is a best-effort operation; implementations that have no in-memory
     /// buffer (e.g. the Remote backend) may ignore it.
@@ -79,6 +89,44 @@ pub trait SipFlowBackend: Send + Sync {
         std::io::Write::flush(&mut file)?;
         Ok(file)
     }
+
+    /// Record a packet directly, bypassing [`SipFlowItem`] serialization.
+    ///
+    /// The default implementation converts to [`SipFlowItem`] and delegates to
+    /// [`record`](SipFlowBackend::record). Backends that would re-parse the
+    /// formatted addresses (e.g. [`LocalBackend`]) should override this to
+    /// avoid the roundtrip.
+    fn record_packet(&self, packet: Packet) -> Result<()> {
+        let call_id = packet
+            .call_id
+            .clone()
+            .or_else(|| {
+                if packet.msg_type == MsgType::Sip {
+                    extract_callid(&packet.payload)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        if call_id.is_empty() {
+            return Ok(());
+        }
+        let src = format!("{}:{}", packet.src.0, packet.src.1);
+        let dst = format!("{}:{}", packet.dst.0, packet.dst.1);
+        let item = SipFlowItem {
+            timestamp: packet.timestamp,
+            seq: 0,
+            leg: packet.leg,
+            msg_type: match packet.msg_type {
+                MsgType::Sip => SipFlowMsgType::Sip,
+                MsgType::Rtp => SipFlowMsgType::Rtp,
+            },
+            src_addr: src,
+            dst_addr: dst,
+            payload: packet.payload,
+        };
+        self.record(Cow::Owned(call_id), item)
+    }
 }
 
 /// Create backend from configuration
@@ -99,6 +147,8 @@ pub async fn create_backend(
             ttl_secs,
             memtable_size_mb,
             block_cache_capacity_mb,
+            shards,
+            flowdb_sync_mode,
             upload,
             ..
         } => {
@@ -134,8 +184,10 @@ pub async fn create_backend(
                 *ttl_secs,
                 *memtable_size_mb,
                 *block_cache_capacity_mb,
+                *shards,
                 force_pcm,
                 pcm_sample_rate,
+                *flowdb_sync_mode,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }
@@ -144,10 +196,10 @@ pub async fn create_backend(
             udp_addr,
             http_addr,
             timeout_secs,
-            batch_size,
-            batch_flush_ms,
             channel_capacity,
             dns_ttl_secs,
+            mtu,
+            report_interval_secs,
             ..
         } => {
             let resolved = if !nodes.is_empty() {
@@ -165,10 +217,10 @@ pub async fn create_backend(
             remote::RemoteBackend::new(
                 resolved,
                 *timeout_secs,
-                *batch_size,
-                *batch_flush_ms,
                 *channel_capacity,
+                *mtu,
                 *dns_ttl_secs,
+                *report_interval_secs,
                 cancel_token,
             )
             .await

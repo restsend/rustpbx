@@ -305,6 +305,73 @@ pub fn reset_task_metrics() {
     GLOBAL_TASK_COUNT.store(0, Ordering::Relaxed);
 }
 
+/// Default maximum size (in bytes) for audio files downloaded over HTTP from
+/// the console settings (queue prompts, voicemail prompts, ...). 20 MB.
+///
+/// Overridable via the top-level `max_audio_download_bytes` config field.
+pub const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Validate that a downloaded audio payload is a real `.wav` / `.mp3` file.
+///
+/// Enforces all three checks:
+/// 1. The HTTP `Content-Type` header must be `audio/wav` or `audio/mpeg`
+///    (`audio/mp3` is accepted too).
+/// 2. The target filename must end with `.wav` or `.mp3`.
+/// 3. The payload magic bytes must match a WAV (`RIFF` + `WAVE`) or MP3
+///    (`ID3` tag, or an MPEG frame sync) file.
+///
+/// Returns `Ok(())` on success, or a human-readable error message.
+pub fn validate_audio_payload(
+    bytes: &[u8],
+    content_type: &str,
+    filename: &str,
+) -> Result<(), String> {
+    let content_type = content_type.to_lowercase();
+    if content_type != "audio/wav"
+        && content_type != "audio/mpeg"
+        && content_type != "audio/mp3"
+    {
+        return Err(format!(
+            "Remote response Content-Type '{}' is not audio/wav or audio/mpeg",
+            content_type
+        ));
+    }
+
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext != "wav" && ext != "mp3" {
+        return Err(format!(
+            "Filename '{}' must end with .wav or .mp3",
+            filename
+        ));
+    }
+
+    if is_wav_bytes(bytes) {
+        return Ok(());
+    }
+    if is_mp3_bytes(bytes) {
+        return Ok(());
+    }
+    Err("Downloaded file is neither a valid WAV nor MP3 audio file".to_string())
+}
+
+/// True if `bytes` start with the WAV `RIFF`/`WAVE` signature.
+fn is_wav_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+/// True if `bytes` look like MP3: either an `ID3` tag or an MPEG frame sync
+/// (`0xFF` followed by a byte whose top 3 bits are set, i.e. `0xE0` mask).
+fn is_mp3_bytes(bytes: &[u8]) -> bool {
+    if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
+        return true;
+    }
+    bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +386,52 @@ mod tests {
         assert_eq!(sanitize_id("symbols=&%$"), "symbols____");
         assert_eq!(sanitize_id("safe-id_123"), "safe-id_123");
         assert_eq!(sanitize_id("more:;*+#"), "more_____");
+    }
+
+    #[test]
+    fn test_validate_audio_payload_wav_ok() {
+        let mut wav = vec![0u8; 44];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        assert!(validate_audio_payload(&wav, "audio/wav", "prompt.wav").is_ok());
+        // case-insensitive content type / extension
+        assert!(validate_audio_payload(&wav, "Audio/WAV", "PROMPT.WAV").is_ok());
+    }
+
+    #[test]
+    fn test_validate_audio_payload_mp3_ok() {
+        let mut id3 = vec![0u8; 10];
+        id3[0..3].copy_from_slice(b"ID3");
+        assert!(validate_audio_payload(&id3, "audio/mpeg", "prompt.mp3").is_ok());
+        assert!(validate_audio_payload(&id3, "audio/mp3", "prompt.mp3").is_ok());
+
+        // MPEG frame sync (no ID3 tag)
+        let frame = vec![0xFF, 0xFB, 0x90, 0x64];
+        assert!(validate_audio_payload(&frame, "audio/mpeg", "prompt.mp3").is_ok());
+    }
+
+    #[test]
+    fn test_validate_audio_payload_rejects_bad_content_type() {
+        let mut wav = vec![0u8; 44];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        let err = validate_audio_payload(&wav, "text/html", "prompt.wav").unwrap_err();
+        assert!(err.contains("Content-Type"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_audio_payload_rejects_bad_extension() {
+        let mut wav = vec![0u8; 44];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        let err = validate_audio_payload(&wav, "audio/wav", "prompt.exe").unwrap_err();
+        assert!(err.contains("wav"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_audio_payload_rejects_non_audio_bytes() {
+        let body = b"<html><body>not audio</body></html>";
+        let err = validate_audio_payload(body, "audio/wav", "prompt.wav").unwrap_err();
+        assert!(err.contains("WAV") && err.contains("MP3"), "got: {}", err);
     }
 }

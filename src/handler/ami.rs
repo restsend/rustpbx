@@ -175,6 +175,11 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         .unwrap_or(0);
     let rwi_gateway_configured = state.core.rwi_gateway.is_some();
 
+    let locator_stats = match sip.inner.locator.online_stats().await {
+        Ok(stats) => serde_json::to_value(stats).unwrap_or_else(|_| serde_json::json!({})),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
@@ -185,6 +190,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "tokio": crate::utils::tokio_runtime_metrics(),
         "sipserver": sipserver_stats,
         "callrecord": callrecord_stats,
+        "locator": locator_stats,
         "rwi": {
             "gateway_configured": rwi_gateway_configured,
             "meta_store_size": rwi_meta_store_size,

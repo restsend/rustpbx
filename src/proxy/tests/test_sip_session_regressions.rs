@@ -1,8 +1,10 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config, create_transaction,
 };
-use crate::call::domain::{CallCommand, LegId, MediaCapability, MediaPathMode};
-use crate::call::runtime::{AppDescriptor, AppRuntime, AppRuntimeError, AppStatus};
+use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaCapability, MediaPathMode};
+use crate::call::runtime::{
+    AppDescriptor, AppRuntime, AppRuntimeError, AppStatus, BridgeConfig,
+};
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
     QueuePlan, TransactionCookie,
@@ -320,6 +322,38 @@ async fn test_media_proxy_auto_anchors_queue_flow() {
 
     let session = build_session(dialplan).await;
     assert_eq!(session.media_profile.path, MediaPathMode::Anchored);
+}
+
+#[tokio::test]
+async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let caller_leg = LegId::from("caller");
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.bridge = BridgeConfig::bridge(caller_leg, agent_leg.clone());
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(session.pending_hangup.contains(&caller_dialog_id));
 }
 
 #[tokio::test]

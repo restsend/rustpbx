@@ -413,6 +413,44 @@ impl QueueApp {
         }
     }
 
+    /// Notify the agent dispatcher that a queued call was abandoned before any
+    /// agent answered. Only meaningful for skill-group-routed queues; the CC
+    /// addon translates this into `skill_group_call_abandoned`.
+    async fn notify_abandoned(&self, wait_secs: u64) {
+        if self.config.skill_routing_enabled
+            && let Some(ref registry) = self.agent_registry
+        {
+            let _ = registry
+                .notify_call_abandoned(&self.call_id, &self.config.name, wait_secs)
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a queued call exceeded its max wait
+    /// time. CC addon translates this into `skill_group_service_unavailable`.
+    async fn notify_timeout(&self, wait_secs: u64) {
+        if self.config.skill_routing_enabled
+            && let Some(ref registry) = self.agent_registry
+        {
+            let _ = registry
+                .notify_call_timeout(&self.call_id, &self.config.name, wait_secs)
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a queued call could not be serviced
+    /// and a fallback action executed. CC addon translates this into
+    /// `skill_group_service_unavailable`.
+    async fn notify_fallback(&self, reason: &str, action: &str) {
+        if self.config.skill_routing_enabled
+            && let Some(ref registry) = self.agent_registry
+        {
+            let _ = registry
+                .notify_call_fallback(&self.call_id, &self.config.name, reason, action)
+                .await;
+        }
+    }
+
     /// Update queue statistics.
     fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
         let mut stat = self.stats
@@ -453,17 +491,22 @@ impl QueueApp {
             },
         };
 
-        // Emit RWI queue lifecycle event: a fallback action was executed.
         let action_label = match &action {
             AppAction::Transfer(t) => format!("transfer:{}", t),
             AppAction::Hangup { .. } => "hangup".to_string(),
             _ => "other".to_string(),
         };
+
+        // Notify the skill-group dispatcher that the call could not be serviced.
+        let reason = "no_agent";
+        self.notify_fallback(reason, &action_label).await;
+
+        // Emit RWI queue lifecycle event: a fallback action was executed.
         self.emit_rwi(&crate::rwi::event::QueueFallbackExecuted {
             call_id: self.call_id.clone(),
             queue_id: self.config.name.clone(),
             action: action_label,
-            reason: "no_agent".to_string(),
+            reason: reason.to_string(),
             trace_id: self.call_id.clone(),
         });
 
@@ -636,9 +679,31 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
         reason: AgentUnavailableReason,
+        failed_leg_id: Option<&str>,
     ) -> anyhow::Result<AppAction> {
         if self.is_parallel() {
-            self.pending_agents.clear();
+            if let Some(failed_leg_id) = failed_leg_id {
+                let pending_before = self.pending_agents.len();
+                self.pending_agents
+                    .retain(|(_, call_id)| call_id != failed_leg_id);
+                if self.pending_agents.len() == pending_before {
+                    warn!(
+                        %failed_leg_id,
+                        "Queue: failed parallel leg was not in the pending agent list"
+                    );
+                }
+            } else if !self.pending_agents.is_empty() {
+                self.pending_agents.pop();
+            }
+
+            if !self.pending_agents.is_empty() {
+                info!(
+                    remaining_agents = self.pending_agents.len(),
+                    "Queue: parallel agent failed; waiting for remaining agents"
+                );
+                return Ok(AppAction::Continue);
+            }
+
             return match reason {
                 AgentUnavailableReason::Busy => self.play_busy_and_then_fallback(ctrl).await,
                 AgentUnavailableReason::NoAnswer => {
@@ -681,6 +746,9 @@ impl QueueApp {
             "Queue: call abandoned, playing busy prompt or fallback"
         );
 
+        // Notify the skill-group dispatcher that the call was abandoned.
+        self.notify_abandoned(wait_secs).await;
+
         // Emit RWI queue lifecycle event: the call abandoned the queue.
         self.emit_rwi(&crate::rwi::event::QueueLeft {
             call_id: self.call_id.clone(),
@@ -720,6 +788,9 @@ impl QueueApp {
             wait_secs,
             "Queue: call abandoned, playing no-answer prompt or fallback"
         );
+
+        // Notify the skill-group dispatcher that the call was abandoned.
+        self.notify_abandoned(wait_secs).await;
 
         // Emit RWI queue lifecycle event: the call abandoned the queue.
         self.emit_rwi(&crate::rwi::event::QueueLeft {
@@ -1263,6 +1334,7 @@ impl CallApp for QueueApp {
             }
             QueueState::PlayingTransferPrompt { agent_uri } => {
                 let agent_uri = agent_uri.clone();
+                ctrl.stop_audio().await?;
                 // Answer the caller if not already answered
                 if !self.answered {
                     ctrl.answer().await?;
@@ -1466,8 +1538,12 @@ impl CallApp for QueueApp {
                             )
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy)
-                        .await
+                    self.handle_agent_unavailable(
+                        ctrl,
+                        AgentUnavailableReason::Busy,
+                        data.get("leg_id").and_then(|value| value.as_str()),
+                    )
+                    .await
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
@@ -1478,8 +1554,12 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Idle)
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer)
-                        .await
+                    self.handle_agent_unavailable(
+                        ctrl,
+                        AgentUnavailableReason::NoAnswer,
+                        data.get("leg_id").and_then(|value| value.as_str()),
+                    )
+                    .await
                 }
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
@@ -1520,12 +1600,25 @@ impl CallApp for QueueApp {
                             )
                             .await?;
 
+                            // Emit RWI queue lifecycle event: the agent did not
+                            // answer before the ring timeout.
+                            self.emit_rwi(&crate::rwi::event::QueueAgentNoAnswer {
+                                call_id: self.call_id.clone(),
+                                queue_id: self.config.name.clone(),
+                                agent_id: agent.agent_id.clone(),
+                                attempt: self.dial_attempts,
+                                trace_id: self.call_id.clone(),
+                            });
+
                             break;
                         }
                     }
                 }
 
-                self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer)
+                if self.is_parallel() {
+                    self.pending_agents.clear();
+                }
+                self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer, None)
                     .await
             }
             "max_wait_timeout" => {
@@ -1541,6 +1634,10 @@ impl CallApp for QueueApp {
                     }),
                 )
                 .await?;
+
+                // Notify the skill-group dispatcher that the wait timed out.
+                let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                self.notify_timeout(wait_secs).await;
 
                 // Emit RWI queue lifecycle event: the wait timed out.
                 self.emit_rwi(&crate::rwi::event::QueueWaitTimeout {
@@ -1576,6 +1673,11 @@ impl CallApp for QueueApp {
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
         });
+
+            // Notify the skill-group dispatcher that the call was abandoned
+            // (e.g. caller hung up while waiting).
+            let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            self.notify_abandoned(wait_secs).await;
 
             // Emit RWI queue lifecycle event: the caller abandoned (e.g. hung
             // up while waiting). The gateway was captured in `on_enter`.

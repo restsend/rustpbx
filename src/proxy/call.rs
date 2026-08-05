@@ -50,6 +50,31 @@ impl<E: Into<anyhow::Error>> From<(E, Option<rsipstack::sip::StatusCode>)> for R
     }
 }
 
+impl RouteError {
+    /// Attach a standardized error code (from the [`crate::call_errors`]
+    /// registry) to this error so the call-record reporter can persist it as
+    /// `error_code` metadata.  The code rides the existing `extensions` seam.
+    pub fn with_code(mut self, info: &'static crate::call_errors::CallErrInfo) -> Self {
+        let mut exts = self.extensions.unwrap_or_default();
+        exts.insert("error_code".to_string(), info.code.to_string());
+        self.extensions = Some(exts);
+        self
+    }
+
+    /// Attach a standardized error code plus a dynamic detail string.
+    pub fn with_code_detail(
+        mut self,
+        info: &'static crate::call_errors::CallErrInfo,
+        detail: impl Into<String>,
+    ) -> Self {
+        let mut exts = self.extensions.unwrap_or_default();
+        exts.insert("error_code".to_string(), info.code.to_string());
+        exts.insert("error_detail".to_string(), detail.into());
+        self.extensions = Some(exts);
+        self
+    }
+}
+
 #[async_trait]
 pub trait CallRouter: Send + Sync {
     async fn resolve(
@@ -427,12 +452,16 @@ impl CallModule {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let callee_uri = resolve_callee_uri(original).map_err(|e| RouteError::from((e, None)))?;
+        let callee_uri = resolve_callee_uri(original)
+            .map_err(|e| RouteError::from((e, None)).with_code(&crate::proxy::error_catalog::CALLEE_URI_INVALID))?;
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
             .call_id_header()
-            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
+            .map_err(|e| {
+                RouteError::from((anyhow::anyhow!(e), None))
+                    .with_code(&crate::proxy::error_catalog::MISSING_CALL_ID)
+            })?
             .value();
         let session_id = dialog_id.to_string();
 
@@ -509,7 +538,8 @@ impl CallModule {
                 return Err(RouteError::from((
                     anyhow::anyhow!("Both caller and callee are external realm"),
                     Some(rsipstack::sip::StatusCode::Forbidden),
-                )));
+                ))
+                .with_code(&crate::proxy::error_catalog::EXTERNAL_REALM_BOTH));
             }
         };
 
@@ -548,6 +578,7 @@ impl CallModule {
                                 anyhow!("invalid always-forwarding target '{}': {}", uri, e),
                                 Some(rsipstack::sip::StatusCode::ServerInternalError),
                             ))
+                            .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_URI_INVALID)
                         })?;
                     forced_preview_forward = Some(InviteOption {
                         callee: forwarded_uri,
@@ -560,7 +591,8 @@ impl CallModule {
                         return Err(RouteError::from((
                             anyhow!("always-forwarding queue reference is empty"),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
-                        )));
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_QUEUE_EMPTY));
                     }
                     let lookup_ref = if reference.chars().all(|c| c.is_ascii_digit()) {
                         format!("db-{}", reference)
@@ -582,12 +614,14 @@ impl CallModule {
                                 ),
                                 Some(rsipstack::sip::StatusCode::ServerInternalError),
                             ))
+                            .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_QUEUE_RESOLVE)
                         })?
                         .ok_or_else(|| {
                             RouteError::from((
                                 anyhow!("always-forwarding queue '{}' not found", reference),
                                 Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                             ))
+                            .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_QUEUE_NOT_FOUND)
                         })?;
 
                     let mut queue_plan = queue_cfg.to_queue_plan().map_err(|e| {
@@ -599,6 +633,7 @@ impl CallModule {
                             ),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
                         ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_QUEUE_BUILD)
                     })?;
                     if queue_plan.label.is_none() {
                         queue_plan.label = Some(reference.to_string());
@@ -611,7 +646,8 @@ impl CallModule {
                         return Err(RouteError::from((
                             anyhow!("always-forwarding IVR name is empty"),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
-                        )));
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_IVR_EMPTY));
                     }
                     let ivr_file = self.inner.server.data_context.resolve_ivr_file(name).await;
                     forced_pending_app = Some((
@@ -626,7 +662,8 @@ impl CallModule {
                         return Err(RouteError::from((
                             anyhow!("always-forwarding voicemail extension is empty"),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
-                        )));
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_VOICEMAIL_EMPTY));
                     }
                     forced_pending_app = Some((
                         "voicemail".to_string(),
@@ -640,7 +677,8 @@ impl CallModule {
                         return Err(RouteError::from((
                             anyhow!("always-forwarding conference id is empty"),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
-                        )));
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_CONFERENCE_EMPTY));
                     }
                     forced_pending_app = Some((
                         "conference".to_string(),
@@ -674,9 +712,15 @@ impl CallModule {
             Some(uri) => uri.clone(),
             None => original
                 .from_header()
-                .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
+                .map_err(|e| {
+                    RouteError::from((anyhow::anyhow!(e), None))
+                        .with_code(&crate::proxy::error_catalog::FROM_HEADER_PARSE)
+                })?
                 .uri()
-                .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?,
+                .map_err(|e| {
+                    RouteError::from((anyhow::anyhow!(e), None))
+                        .with_code(&crate::proxy::error_catalog::FROM_HEADER_PARSE)
+                })?,
         };
 
         let preview_option = InviteOption {
@@ -703,6 +747,7 @@ impl CallModule {
                         anyhow::anyhow!(e),
                         Some(rsipstack::sip::StatusCode::ServerInternalError),
                     ))
+                    .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR)
                 })?;
 
             match preview_outcome {
@@ -713,7 +758,8 @@ impl CallModule {
                     let err = anyhow::anyhow!(
                         reason.unwrap_or_else(|| "route aborted during preview".to_string())
                     );
-                    return Err(RouteError::from((err, Some(code))));
+                    return Err(RouteError::from((err, Some(code)))
+                        .with_code(&crate::proxy::error_catalog::ROUTE_ABORTED));
                 }
                 RouteResult::Application {
                     option,
@@ -1294,7 +1340,8 @@ impl CallModule {
                     error: e,
                     status: None,
                     extensions: None,
-                })?
+                }
+                .with_code(&crate::proxy::error_catalog::CREATE_ROUTE_INVITE_FAILED))?
             } else {
                 Box::new(DefaultRouteInvite {
                     routing_state: self.inner.routing_state.clone(),
@@ -1315,7 +1362,11 @@ impl CallModule {
         let mut dialplan = dialplan;
 
         if dialplan.caller_contact.is_none()
-            && let Some(contact_uri) = self.inner.server.default_contact_uri()
+            && let Some(contact_uri) = self
+                .inner
+                .server
+                .contact_uri_for_transaction(tx)
+                .or_else(|| self.inner.server.default_contact_uri())
         {
             let contact = rsipstack::sip::typed::Contact {
                 display_name: None,
@@ -1381,7 +1432,8 @@ impl CallModule {
             return Err(RouteError::from((
                 anyhow!("target user is offline"),
                 Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
-            )));
+            ))
+            .with_code(&crate::proxy::error_catalog::CALLEE_OFFLINE));
         }
 
         #[cfg(not(feature = "addon-wholesale"))]
@@ -1679,7 +1731,14 @@ impl CallModule {
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
-                debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                // Peers retransmit BYE if we already tore the dialog down. Answer
+                // with 200 so endpoints clear; other methods stay silent at debug.
+                if matches!(tx.original.method, rsipstack::sip::Method::Bye) {
+                    info!(%dialog_id, "BYE with no matching dialog; replying 200 so peer clears");
+                    let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;
+                } else {
+                    debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                }
                 return Ok(());
             }
         };

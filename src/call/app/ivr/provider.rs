@@ -1,5 +1,7 @@
 use crate::call::app::ivr::common::SessionData;
-use crate::call::app::ivr::config::{ActionNode, EntryAction, IvrDefinition, MenuNode};
+use crate::call::app::ivr::config::{
+    ActionNode, EntryAction, IvrDefinition, IvrProviderConfig, MenuNode,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -274,6 +276,7 @@ impl From<&str> for EndReason {
 pub struct RetryConfig {
     pub max_retries: u32,
     pub timeout_ms: u64,
+    pub retry_delay_ms: u64,
     pub fallback_action: Option<ActionNode>,
 }
 
@@ -282,6 +285,7 @@ impl Default for RetryConfig {
         Self {
             max_retries: 3,
             timeout_ms: 1000,
+            retry_delay_ms: 100,
             fallback_action: Some(ActionNode {
                 action: EntryAction::Hangup {
                     prompt: Some("sounds/error.wav".into()),
@@ -293,6 +297,17 @@ impl Default for RetryConfig {
                 step_name: None,
                 extra: None,
             }),
+        }
+    }
+}
+
+impl From<&IvrProviderConfig> for RetryConfig {
+    fn from(config: &IvrProviderConfig) -> Self {
+        Self {
+            max_retries: config.max_retries,
+            timeout_ms: config.timeout_secs.saturating_mul(1000),
+            retry_delay_ms: config.retry_delay_ms,
+            fallback_action: None,
         }
     }
 }
@@ -559,7 +574,7 @@ impl ActionProvider for StepProvider {
                 }
             }
             if attempt < self.retry.max_retries - 1 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(self.retry.retry_delay_ms)).await;
             }
         }
         // All retries exhausted → fallback

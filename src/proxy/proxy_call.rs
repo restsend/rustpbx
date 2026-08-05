@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) mod call_meta;
 pub(crate) mod dtmf;
+pub(crate) mod error_catalog;
 pub(crate) mod ivr_exec_hook;
 pub(crate) mod leg_registry;
 pub(crate) mod media_peer;
@@ -186,10 +187,41 @@ impl CallSessionBuilder {
             call_record_sender,
         };
 
+        // Early/routing failures never create a SipSession, so record_snapshot
+        // cannot run. Build a minimal diagnostic trace so these calls (480
+        // offline, wholesale rejects, ACL/HTTP-router rejections, ...) also show
+        // a trace entry. Severity is resolved from the standardized error code
+        // carried in the routing extensions, defaulting to error.
+        let mut metadata = std::collections::HashMap::new();
+        let err_code = dialplan
+            .extensions
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get("error_code").cloned());
+        let severity = err_code
+            .as_deref()
+            .and_then(|c| crate::call_errors::registry().find(c))
+            .map(|info| info.severity)
+            .unwrap_or(crate::call_errors::ErrSeverity::Error);
+        let mut end = crate::call_errors::TraceEvent::new(
+            crate::call_errors::TraceKind::End,
+            format!(
+                "Call rejected: {}",
+                reason.clone().unwrap_or_else(|| "unknown".to_string())
+            ),
+        )
+        .severity(severity);
+        if let Some(c) = &err_code {
+            end = end.code(c);
+        }
+        if let Ok(arr) = serde_json::to_value(vec![end]) {
+            metadata.insert("trace".to_string(), arr);
+        }
+
         let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
             ring_time: None,
             answer_time: None,
-            last_error: Some((code, reason)),
+            last_error: Some((code.clone(), reason)),
+            invite_final_status: Some(u16::from(code)),
             hangup_reason: Some(crate::callrecord::CallRecordHangupReason::Failed),
             hangup_messages: vec![],
             // callee_hangup_reason: None,
@@ -208,7 +240,7 @@ impl CallSessionBuilder {
                 remote_tag: "".into(),
             },
             extensions: dialplan.extensions.clone(),
-            metadata: std::collections::HashMap::new(),
+            metadata,
         };
 
         reporter.report(snapshot);
@@ -262,5 +294,53 @@ mod tests {
             .expect("wholesale context");
         assert_eq!(ctx.tenant_id, 42);
         assert_eq!(ctx.carrier_id, None);
+    }
+
+    #[tokio::test]
+    async fn report_failure_records_trace_with_error_code() {
+        // Early/routing failures (no SipSession) must still produce a trace so
+        // the detail trace tab shows why the call was rejected. Severity + code
+        // come from the routing extensions error_code seam.
+        let (server, _) = create_test_server().await;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let mut dialplan = crate::call::Dialplan::new(
+            "report-failure-trace".to_string(),
+            request,
+            DialDirection::Inbound,
+        );
+        let mut exts = std::collections::HashMap::new();
+        exts.insert(
+            "error_code".to_string(),
+            "wholesale.insufficient_funds".to_string(),
+        );
+        dialplan = dialplan.with_extension(exts);
+        let cookie = crate::call::TransactionCookie::default();
+
+        CallSessionBuilder::new(cookie, dialplan, 70)
+            .with_call_record_sender(Some(sender))
+            .report_failure(
+                server,
+                rsipstack::sip::StatusCode::PaymentRequired,
+                Some("Insufficient funds".to_string()),
+            )
+            .expect("report failure");
+
+        let record = receiver.recv().await.expect("call record");
+        let meta = record.details.metadata.as_ref().expect("metadata present");
+        let trace = meta
+            .get("trace")
+            .and_then(|v| v.as_array())
+            .expect("trace array present");
+        assert_eq!(trace[0]["kind"], "end");
+        assert_eq!(trace[0]["severity"], "error");
+        assert_eq!(trace[0]["code"], "wholesale.insufficient_funds");
+        assert!(trace[0]["message"].as_str().unwrap().contains("Insufficient funds"));
     }
 }

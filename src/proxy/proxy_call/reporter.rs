@@ -38,10 +38,18 @@ impl CallReporter {
         });
         let call_was_accepted = snapshot.answer_time.is_some();
 
+        // The CDR status must reflect the INVITE transaction's final status and
+        // never be changed by later signaling (BYE, re-INVITE failures, transfer
+        // failures). `invite_final_status` is locked once at call setup; fall
+        // back to `last_error`/200 for sessions where it was never recorded.
         let status_code = snapshot
-            .last_error
-            .as_ref()
-            .map(|(code, _)| u16::from(code.clone()))
+            .invite_final_status
+            .or_else(|| {
+                snapshot
+                    .last_error
+                    .as_ref()
+                    .map(|(code, _)| u16::from(code.clone()))
+            })
             .unwrap_or(200);
 
         let hangup_reason = snapshot.hangup_reason.clone().or_else(|| {
@@ -192,11 +200,33 @@ impl CallReporter {
         let mut metadata_map = snapshot.metadata.clone();
 
         if let Some(ctx) = &outbound_trunk_context {
-            metadata_map.insert("outbound_trunk_name".to_string(), ctx.name.clone());
+            metadata_map.insert(
+                "outbound_trunk_name".to_string(),
+                serde_json::Value::String(ctx.name.clone()),
+            );
             if let Some(dest) = &ctx.dest {
-                metadata_map.insert("outbound_trunk_dest".to_string(), dest.clone());
+                metadata_map.insert(
+                    "outbound_trunk_dest".to_string(),
+                    serde_json::Value::String(dest.clone()),
+                );
             }
         }
+
+        // Harvest routing/in-call error context into metadata so the generic
+        // DB saver (which drops status_code/last_error/hangup_reason) still
+        // preserves a structured, queryable error code.  This also fixes the
+        // early-failure path where snapshot.metadata started empty: routing
+        // error codes ride the typed HashMap extension in snapshot.extensions.
+        // Addon-specific codes (e.g. wholesale) are injected by each addon's
+        // own CallRecordHook::on_record_enrich, keeping core addon-agnostic.
+        let route_ext = snapshot.extensions.get::<HashMap<String, String>>();
+        enrich_error_metadata(
+            &mut metadata_map,
+            route_ext,
+            status_code,
+            last_error.as_ref(),
+            hangup_reason.as_ref(),
+        );
 
         let mut details = CallDetails {
             direction,
@@ -280,6 +310,90 @@ impl CallReporter {
             if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = sender.try_send(record) {
                 tracing::warn!("call record channel full; dropping record to bound memory");
             }
+        }
+    }
+}
+
+/// Enrich the call-record metadata map with structured error context so the
+/// generic DB saver (which drops `status_code`/`last_error`/`hangup_reason`)
+/// still preserves a queryable error code.  Pure / testable: callers extract
+/// the routing extension map from the snapshot.
+///
+/// This function is addon-agnostic. Addon-specific error codes (e.g. wholesale
+/// `reject_code`) are injected by each addon's own `CallRecordHook::on_record_enrich`
+/// implementation to keep the core free of addon dependencies.
+fn enrich_error_metadata(
+    metadata: &mut HashMap<String, serde_json::Value>,
+    route_ext: Option<&HashMap<String, String>>,
+    status_code: u16,
+    last_error: Option<&CallRecordLastError>,
+    hangup_reason: Option<&CallRecordHangupReason>,
+) {
+    // Routing error codes (and any other router-supplied metadata) ride the
+    // typed HashMap<String,String> extension.
+    if let Some(route_meta) = route_ext {
+        for (k, v) in route_meta {
+            metadata
+                .entry(k.clone())
+                .or_insert_with(|| serde_json::Value::String(v.clone()));
+        }
+    }
+    // Already-computed error fields that the DB saver otherwise drops.  These
+    // make the record self-describing for the console error renderer.
+    metadata
+        .entry("sip_code".to_string())
+        .or_insert_with(|| serde_json::Value::String(status_code.to_string()));
+    if let Some(le) = last_error {
+        metadata
+            .entry("last_error_code".to_string())
+            .or_insert_with(|| serde_json::Value::String(le.code.to_string()));
+        if let Some(r) = &le.reason {
+            metadata
+                .entry("last_error_reason".to_string())
+                .or_insert_with(|| serde_json::Value::String(r.clone()));
+        }
+    }
+    if let Some(hr) = hangup_reason {
+        metadata
+            .entry("hangup_reason".to_string())
+            .or_insert_with(|| serde_json::Value::String(hr.to_string()));
+    }
+    // Derive error_app from the hierarchical code prefix (e.g.
+    // "proxy.callee_offline" -> "proxy") so the UI can group/filter without a
+    // registry lookup.  Resolve the registry entry to freeze severity (and a
+    // default message) at write time — this makes the metadata self-describing
+    // for the renderer and keeps a historical snapshot of severity even if the
+    // catalog later changes.
+    if let Some(code) = metadata
+        .get("error_code")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        if let Some(app) = code.split('.').next() {
+            metadata
+                .entry("error_app".to_string())
+                .or_insert_with(|| serde_json::Value::String(app.to_string()));
+        }
+        // Dynamic detail (router-supplied) takes precedence over the catalog
+        // default message, so write it first via or_insert.
+        if let Some(detail) = metadata
+            .get("error_detail")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            metadata
+                .entry("error_message".to_string())
+                .or_insert_with(|| serde_json::Value::String(detail));
+        }
+        // Registry: always freeze severity; catalog default message is the
+        // fallback when no dynamic detail was supplied.
+        if let Some(info) = crate::call_errors::registry().find(&code) {
+            metadata
+                .entry("error_severity".to_string())
+                .or_insert_with(|| serde_json::Value::String(info.severity.as_str().to_string()));
+            metadata
+                .entry("error_message".to_string())
+                .or_insert_with(|| serde_json::Value::String(info.message.to_string()));
         }
     }
 }
@@ -468,6 +582,7 @@ mod tests {
             ring_time: None,
             answer_time: None,
             last_error: None,
+            invite_final_status: None,
             hangup_reason: None,
             hangup_messages: vec![],
             original_caller: None,
@@ -498,5 +613,84 @@ mod tests {
             roles.get("callee-call-id").map(String::as_str),
             Some("callee")
         );
+    }
+
+    fn meta_str<'a>(meta: &'a HashMap<String, serde_json::Value>, key: &str) -> &'a str {
+        meta.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    #[test]
+    fn enrich_metadata_routing_code_and_sip_code() {
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        let route = HashMap::from([
+            ("error_code".to_string(), "proxy.callee_offline".to_string()),
+            ("error_detail".to_string(), "user 1002 offline".to_string()),
+        ]);
+        let le = CallRecordLastError {
+            code: 480,
+            reason: Some("target user is offline".to_string()),
+        };
+        enrich_error_metadata(
+            &mut meta,
+            Some(&route),
+            480,
+            Some(&le),
+            Some(&CallRecordHangupReason::NoAnswer),
+        );
+        assert_eq!(meta_str(&meta, "error_code"), "proxy.callee_offline");
+        assert_eq!(meta_str(&meta, "error_app"), "proxy");
+        assert_eq!(meta_str(&meta, "error_message"), "user 1002 offline");
+        assert_eq!(meta_str(&meta, "error_severity"), "warn");
+        assert_eq!(meta_str(&meta, "sip_code"), "480");
+        assert_eq!(meta_str(&meta, "last_error_code"), "480");
+        assert_eq!(meta_str(&meta, "hangup_reason"), "noAnswer");
+    }
+
+    #[test]
+    #[cfg(feature = "addon-wholesale")]
+    fn enrich_metadata_severity_and_catalog_message_fallback() {
+        // A registered code with no dynamic detail: severity + catalog default
+        // message are resolved from the registry at write time.
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        let route = HashMap::from([(
+            "error_code".to_string(),
+            "wholesale.insufficient_funds".to_string(),
+        )]);
+        enrich_error_metadata(&mut meta, Some(&route), 402, None, None);
+        assert_eq!(
+            meta_str(&meta, "error_severity"),
+            crate::call_errors::ErrSeverity::Error.as_str()
+        );
+        assert_eq!(meta_str(&meta, "error_message"), "Insufficient funds");
+    }
+
+    #[test]
+    fn enrich_metadata_unknown_code_no_severity() {
+        // An unregistered code (e.g. from a newer build) must not panic; it
+        // simply leaves error_severity absent for the renderer to default.
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        let route = HashMap::from([(
+            "error_code".to_string(),
+            "future.unknown".to_string(),
+        )]);
+        enrich_error_metadata(&mut meta, Some(&route), 500, None, None);
+        assert_eq!(meta_str(&meta, "error_code"), "future.unknown");
+        assert!(meta.get("error_severity").is_none());
+    }
+
+    #[test]
+    fn enrich_metadata_does_not_overwrite_existing_code() {
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        meta.insert(
+            "error_code".to_string(),
+            serde_json::Value::String("wholesale.cps_limit".to_string()),
+        );
+        let route = HashMap::from([(
+            "error_code".to_string(),
+            "proxy.route_aborted".to_string(),
+        )]);
+        enrich_error_metadata(&mut meta, Some(&route), 503, None, None);
+        // pre-existing value is preserved (entry().or_insert)
+        assert_eq!(meta_str(&meta, "error_code"), "wholesale.cps_limit");
     }
 }

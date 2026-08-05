@@ -401,10 +401,33 @@ impl SipSession {
                     // apply_sdp(answer) for the transferred-to endpoint.
                     self.media.callee_offer = None;
                     self.media.callee_offer_cached_webrtc = None;
-                    let location = crate::call::Location {
-                        aor: refer_to_uri,
+                    let mut location = crate::call::Location {
+                        aor: refer_to_uri.clone(),
                         ..Default::default()
                     };
+                    match self.server.locator.lookup(&refer_to_uri).await {
+                        Ok(registered_locations) => {
+                            if let Some(registered_location) =
+                                registered_locations.into_iter().next()
+                            {
+                                info!(
+                                    target = %refer_to_uri,
+                                    registered_contact = %registered_location.aor,
+                                    webrtc = registered_location.supports_webrtc,
+                                    transport = ?registered_location.transport,
+                                    "Resolved B-leg transfer target through locator"
+                                );
+                                location = registered_location;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                target = %refer_to_uri,
+                                %error,
+                                "Failed to resolve B-leg transfer target through locator; using bare SIP target"
+                            );
+                        }
+                    }
                     let result = self
                         .try_single_target(&location, callee_state_rx, None, None)
                         .await;
@@ -799,17 +822,49 @@ impl SipSession {
             .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
         let dec_sample_rate = decoder.sample_rate();
 
-        // ── 4. Determine codec type for the forward encoder ───────────
-        let codec_type = match codec.as_str() {
-            "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
-            "pcma" | "g711" => audio_codec::CodecType::PCMA,
-            "opus" => audio_codec::CodecType::Opus,
-            "g722" => audio_codec::CodecType::G722,
-            _ => {
-                let negotiated = self.leg_negotiated_codec(&leg_id);
-                info!(session_id = %self.id, ?negotiated, "Using negotiated codec");
-                negotiated
-            }
+        // ── 4. Determine codec type + payload type for the forward encoder ──
+        // Prefer the caller-leg *negotiated* codec and PT (from the answer SDP)
+        // so the injected audio is decodable by the caller and carries the PT
+        // the caller actually offered. The bridge URL `codec` query param is
+        // only a fallback when no SDP is available.
+        //
+        // The forward loop used to encode the `codec` param and tag frames with
+        // `codec_type.payload_type()` — the codec's STATIC default PT (Opus=111,
+        // PCMU=0). When that differs from the caller's negotiated PT (e.g. Opus
+        // negotiated at 96, or a PCMU caller bridged with codec=opus), the
+        // forward frames carry a PT the caller never offered, which on the same
+        // SSRC as the IVR greeting shows up as a PT 0↔96/111 toggle.
+        let (codec_type, payload_type) = if let Some(audio) = self
+            .legs
+            .get_answer(&leg_id)
+            .or_else(|| {
+                if leg_id.as_str() == "caller" {
+                    self.media.answer.as_deref()
+                } else if leg_id.as_str() == "callee" {
+                    self.media.callee_answer_sdp.as_deref()
+                } else {
+                    None
+                }
+            })
+            .and_then(|s| MediaNegotiator::extract_leg_profile(s).audio)
+        {
+            info!(
+                %leg_id,
+                negotiated_codec = ?audio.codec,
+                negotiated_pt = audio.payload_type,
+                bridge_codec = %codec,
+                "voip_bridge forward loop using leg-negotiated codec/PT"
+            );
+            (audio.codec, audio.payload_type)
+        } else {
+            let fallback = match codec.as_str() {
+                "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
+                "pcma" | "g711" => audio_codec::CodecType::PCMA,
+                "opus" => audio_codec::CodecType::Opus,
+                "g722" => audio_codec::CodecType::G722,
+                _ => self.leg_negotiated_codec(&leg_id),
+            };
+            (fallback, fallback.payload_type())
         };
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
 
@@ -856,7 +911,7 @@ impl SipSession {
                 let mut encoder = create_encoder(codec_type);
                 let enc_sample_rate = encoder.sample_rate();
                 let clock_rate = codec_type.clock_rate() as u32;
-                let payload_type = codec_type.payload_type();
+                // `payload_type` is the caller-negotiated PT, resolved above.
                 let samples_per_frame = (enc_sample_rate * 20 / 1000) as usize;
                 let rtp_ticks_per_frame = clock_rate * 20 / 1000;
 
@@ -1165,6 +1220,14 @@ impl SipSession {
                 self.update_leg_state(&consult_leg, LegState::Connected);
                 let _ = self.handle_unhold(original_leg.clone()).await;
                 info!(session_id = %self.id, "Attended transfer completed successfully");
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Transfer,
+                        "Attended transfer completed",
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Info),
+                );
+                info!("Attended transfer completed successfully");
             } else {
                 return Err(anyhow!("Failed to setup bridge for transfer completion"));
             }

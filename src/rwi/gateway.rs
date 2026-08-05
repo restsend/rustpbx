@@ -549,6 +549,12 @@ impl RwiGateway {
     /// counter so the webhook dedup logic doesn't drop consecutive CC events
     /// (cc_ringing, cc_answered, cc_hangup) that share the same call_id.
     pub fn broadcast_event(&self, event: &RwiEvent) {
+        // Enrich with flat call context (caller/callee/names/direction) from
+        // the CallMetaStore so broadcast events (cc_*, queue_*, skill_group_*)
+        // carry the primary call's context just like call_owner events do.
+        // Events without a call_id (e.g. agent_state_changed, queue_alert) are
+        // unaffected (enrichment is a no-op without a meta entry).
+        let enriched = self.enrich_flat_event(event);
         // Use a unique sequence so webhook dedup doesn't drop consecutive
         // CC events with the same call_id.
         let seq = {
@@ -565,12 +571,18 @@ impl RwiGateway {
             event: event.clone(),
         };
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
+            let entry = EventCacheEntry {
+                sequence: seq,
+                cached_at: chrono::Utc::now(),
+                call_id: event.call_id.clone().unwrap_or_default(),
+                event: enriched.clone(),
+            };
+            let _ = tx.send(entry);
         }
         let _ = self.event_tap.send(entry);
 
         for session_id in self.session_event_senders.keys() {
-            self.send_event_to_session(session_id, event);
+            self.send_event_to_session(session_id, &enriched);
         }
     }
 
@@ -879,6 +891,115 @@ mod tests {
             entry.event.payload.get("agent_id").is_none(),
             "no agent fields when meta absent, got: {}",
             entry.event.payload
+        );
+    }
+
+    /// `broadcast_event` must enrich call-scoped broadcasts with flat context
+    /// (caller/callee/names/direction) from the CallMetaStore — same as
+    /// call_owner events — so cc_*/queue_*/skill_group_* carry primary call info.
+    #[tokio::test]
+    async fn test_broadcast_event_enriches_with_meta() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.meta_store.insert(
+            "c1".to_string(),
+            crate::rwi::CallMeta {
+                caller: Some("sip:alice@localhost".to_string()),
+                callee: Some("sip:4000@localhost".to_string()),
+                caller_name: Some("alice".to_string()),
+                callee_name: Some("4000".to_string()),
+                direction: Some("inbound".to_string()),
+                ..Default::default()
+            },
+        );
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "c1".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["caller"].as_str(), Some("sip:alice@localhost"));
+        assert_eq!(v["callee"].as_str(), Some("sip:4000@localhost"));
+        assert_eq!(v["caller_name"].as_str(), Some("alice"));
+        assert_eq!(v["callee_name"].as_str(), Some("4000"));
+        assert_eq!(v["direction"].as_str(), Some("inbound"));
+    }
+
+    /// Broadcast without a matching meta entry must leave the payload untouched.
+    #[tokio::test]
+    async fn test_broadcast_event_no_meta_untouched() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "call-unknown".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert!(v.get("caller").is_none(), "no caller injected without meta");
+        assert!(v.get("callee").is_none(), "no callee injected without meta");
+    }
+
+    /// When the event already carries its own `caller` field (e.g. cc_ringing
+    /// or call_incoming), enrichment must not overwrite it with the context value.
+    #[tokio::test]
+    async fn test_broadcast_event_preserves_explicit_caller() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.meta_store.insert(
+            "c1".to_string(),
+            crate::rwi::CallMeta {
+                caller: Some("sip:ctx-caller@localhost".to_string()),
+                callee: Some("sip:ctx-callee@localhost".to_string()),
+                ..Default::default()
+            },
+        );
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallIncoming {
+                call_id: "c1".into(),
+                context: "default".into(),
+                caller: "sip:explicit-caller@localhost".into(),
+                callee: "sip:explicit-callee@localhost".into(),
+                dial_direction: "inbound".into(),
+                trunk: None,
+                sip_headers: Default::default(),
+                root_call_id: None,
+                caller_name: None,
+                callee_name: None,
+                called_phone: None,
+                app_id: None,
+                routing_target: None,
+                uuid: None,
+                routing_path: None,
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(
+            v["caller"].as_str(),
+            Some("sip:explicit-caller@localhost"),
+            "event's own caller must win over context"
+        );
+        assert_eq!(
+            v["callee"].as_str(),
+            Some("sip:explicit-callee@localhost"),
+            "event's own callee must win over context"
         );
     }
 }

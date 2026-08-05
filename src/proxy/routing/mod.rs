@@ -21,6 +21,8 @@ use std::{
 use tokio::net::lookup_host;
 
 pub mod http;
+pub mod error_catalog;
+pub mod http_error_catalog;
 #[cfg(test)]
 mod http_tests;
 pub mod matcher;

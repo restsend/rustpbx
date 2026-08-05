@@ -2,6 +2,7 @@ use crate::{
     config::{CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_MAX_CONCURRENT},
     utils::sanitize_id,
 };
+use rustpbx_models::DatabasePoolConfig;
 use anyhow::Result;
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -111,7 +112,13 @@ pub struct CallDetails {
     pub rewrite: CallRecordRewrite,
     pub last_error: Option<CallRecordLastError>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+    /// Transient (never serialized into the CDR JSON): the storage path
+    /// returned by the saver. Threaded into the DB hook so the persisted
+    /// record remembers where its CDR file lives, surviving later storage
+    /// root changes (issue #237).
+    #[serde(skip)]
+    pub cdr_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -517,6 +524,7 @@ pub struct CallRecordManagerBuilder {
     pub max_concurrent: Option<usize>,
     hooks: Vec<Box<dyn CallRecordHook>>,
     main_db: Option<DatabaseConnection>,
+    pool_config: Option<DatabasePoolConfig>,
 }
 
 impl Default for CallRecordManagerBuilder {
@@ -533,6 +541,7 @@ impl CallRecordManagerBuilder {
             max_concurrent: None,
             hooks: Vec::new(),
             main_db: None,
+            pool_config: None,
         }
     }
 
@@ -548,6 +557,11 @@ impl CallRecordManagerBuilder {
 
     pub fn with_config(mut self, config: CallRecordConfig) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    pub fn with_pool_config(mut self, pool_config: DatabasePoolConfig) -> Self {
+        self.pool_config = Some(pool_config);
         self
     }
 
@@ -567,6 +581,7 @@ impl CallRecordManagerBuilder {
             max_concurrent,
             hooks,
             main_db,
+            pool_config,
         } = self;
         let cancel_token = cancel_token.unwrap_or_default();
         let (sender, receiver) = tokio::sync::mpsc::channel(CALL_RECORD_CHANNEL_CAPACITY);
@@ -598,7 +613,7 @@ impl CallRecordManagerBuilder {
                 rotate,
             }) => {
                 let (db, _db_url) = match &database_url {
-                    Some(url) => (crate::models::connect_db(url).await?, url.clone()),
+                    Some(url) => (crate::models::connect_db(url, pool_config.as_ref()).await?, url.clone()),
                     None => (
                         main_db.clone().ok_or_else(|| {
                             anyhow::anyhow!("either database_url or main_db is required")
@@ -901,7 +916,10 @@ impl CallRecordRow {
         let mut metadata_map = details.metadata.clone().unwrap_or_default();
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-            metadata_map.insert("sip_leg_roles".to_string(), json);
+            metadata_map.insert(
+                "sip_leg_roles".to_string(),
+                serde_json::Value::String(json),
+            );
         }
         let metadata = serde_json::to_value(&metadata_map).ok();
 
@@ -1006,7 +1024,7 @@ impl CallRecordSaver for RotatingSqliteSaver {
             let mut st = self.state.lock().await;
             if st.current_date != today {
                 let url = derive_daily_url(&self.base_url, &today);
-                let new_db = crate::models::connect_db(&url).await?;
+                let new_db = crate::models::connect_db(&url, None).await?;
                 if !self.skip_create_table {
                     create_call_record_table(&new_db, &self.table_name).await?;
                 }
@@ -1277,6 +1295,10 @@ impl CallRecordManager {
 
                         match saver.save(&record).await {
                             Ok(file_name) => {
+                                // Remember where the CDR file was actually written
+                                // so the DB record can locate it later even if the
+                                // storage root is changed afterwards (issue #237).
+                                record.details.cdr_file_path = Some(file_name.clone());
                                 let elapsed = start_time.elapsed();
                                 info!(
                                     ?elapsed,
@@ -1342,6 +1364,7 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
             transcript_language: val.transcript_language,
             tags: val.tags,
             metadata: val.metadata.and_then(|v| serde_json::from_value(v).ok()),
+            cdr_file_path: None,
             rewrite: CallRecordRewrite {
                 caller_original: val.rewrite_original_from.unwrap_or_default(),
                 caller_final: String::new(),

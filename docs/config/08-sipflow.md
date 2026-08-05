@@ -208,17 +208,24 @@ Results from `cargo run --release --example sipflow_bench -- --calls 50 --rtp-pe
 
 ### TOML Examples
 
-**Local FlowDB (default):**
+**Local (default engine = sqlite):**
 
 ```toml
 [sipflow]
 type = "local"
 root = "/var/sipflow/data"
-engine = "flowdb"          # "flowdb" (default) or "sqlite"
-subdirs = "hourly"         # "none" / "daily" / "hourly" (default: "daily")
-ttl_secs = 86400           # optional TTL
-memtable_size_mb = 64
-block_cache_capacity_mb = 128
+engine = "sqlite"          # "sqlite" (default) or "flowdb"
+subdirs = "daily"          # "none" / "daily" / "hourly" (default: "daily")
+flush_count = 0            # 0=immediate write, no app-level buffering
+flush_interval_secs = 0
+id_cache_size = 8192       # CallID→row-id LRU cache (SQLite)
+compress = true            # zstd compress payloads (SQLite)
+compress_level = 6         # zstd compression level 0-9 (SQLite)
+
+# Optional FlowDB settings
+# ttl_secs = 86400
+# memtable_size_mb = 64
+# block_cache_capacity_mb = 128
 
 # Optional S3/HTTP upload hook
 [sipflow.upload]
@@ -232,17 +239,17 @@ endpoint = "https://s3.amazonaws.com"
 root = "recordings/"
 ```
 
-**Local SQLite:**
+**Local FlowDB:**
 
 ```toml
 [sipflow]
 type = "local"
 root = "/var/sipflow/data"
-engine = "sqlite"
+engine = "flowdb"
 subdirs = "daily"          # "none" / "daily" / "hourly"
-# flush_count = 0          # 0=immediate write, no app-level buffering
-# flush_interval_secs = 0
-id_cache_size = 8192       # SQLite-only: CallID→row-id LRU cache
+ttl_secs = 86400
+memtable_size_mb = 64
+block_cache_capacity_mb = 128
 ```
 
 **Remote cluster:**
@@ -255,6 +262,11 @@ nodes = [
   { udp = "10.0.0.2:3000", http = "http://10.0.0.2:3001" },
 ]
 timeout_secs = 10
+channel_capacity = 40000   # UDP receive channel buffer
+dns_ttl_secs = 5           # DNS cache TTL for node resolution
+mtu = 0                    # UDP MTU; 0 = use OS default
+report_interval_secs = 10  # Cluster health report interval
+delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 
 # Legacy single-node format:
 # udp_addr = "127.0.0.1:3000"
@@ -263,21 +275,43 @@ timeout_secs = 10
 
 ### Configuration Fields
 
+| Field | Type | Default | Applies To | Description |
+|-------|------|---------|-----------|-------------|
+| `type` | `"local"` / `"remote"` | required | both | Backend type |
+| `root` | String | - | local | Data directory |
+| `engine` | `"sqlite"` / `"flowdb"` | `"sqlite"` | local | Storage engine |
+| `subdirs` | `"none"` / `"daily"` / `"hourly"` | `"daily"` | local | Time-bucketed directory partitioning |
+| `flush_count` | usize | 0 | local | Batch size before flush; 0 = immediate write |
+| `flush_interval_secs` | u64 | 0 | local | Max flush interval in seconds; 0 = no timer |
+| `id_cache_size` | usize | 8192 | local | CallID→ID LRU cache (SQLite) |
+| `compress` | bool | `true` | local | zstd compress stored payloads (SQLite) |
+| `compress_level` | u32 | 6 | local | zstd compression level 0-9 (SQLite) |
+| `ttl_secs` | Option\<u64\> | None | local | FlowDB record TTL (seconds) |
+| `memtable_size_mb` | usize | 64 | local | FlowDB memtable size |
+| `block_cache_capacity_mb` | usize | 128 | local | FlowDB block cache capacity |
+| `nodes` | Vec\<SipFlowClusterNode\> | [] | remote | Cluster node list `{udp, http}` |
+| `udp_addr` | Option\<String\> | None | remote | Legacy single-node UDP address |
+| `http_addr` | Option\<String\> | None | remote | Legacy single-node HTTP address |
+| `timeout_secs` | u64 | 10 | remote | HTTP query timeout |
+| `channel_capacity` | usize | 40000 | remote | UDP receive channel buffer size |
+| `dns_ttl_secs` | u64 | 5 | remote | DNS cache TTL for node resolution |
+| `mtu` | usize | 0 | remote | UDP MTU; 0 = OS default |
+| `report_interval_secs` | u64 | 10 | remote | Cluster health report interval |
+| `delegate_upload` | bool | `false` | remote | Delegate S3/HTTP upload to cluster nodes |
+| `upload` | Option\<SipFlowUploadConfig\> | None | both | S3/HTTP upload hook |
+
+### Upload Config Fields
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | `"local"` / `"remote"` | required | Backend type |
-| `root` | String | - | Data directory (local) |
-| `engine` | `"flowdb"` / `"sqlite"` | `"flowdb"` | Storage engine (local) |
-| `subdirs` | `"none"` / `"daily"` / `"hourly"` | `"daily"` | Time-bucketed directory partitioning (local, both engines) |
-| `flush_count` | usize | 0 | Batch size before flush; 0 = immediate write (local) |
-| `flush_interval_secs` | u64 | 0 | Max flush interval; 0 = no timer (local) |
-| `id_cache_size` | usize | 8192 | CallID→ID LRU cache (local SQLite) |
-| `ttl_secs` | Option\<u64\> | None | FlowDB TTL (local FlowDB) |
-| `memtable_size_mb` | usize | 64 | FlowDB memtable size (local FlowDB) |
-| `block_cache_capacity_mb` | usize | 128 | FlowDB block cache (local FlowDB) |
-| `nodes` | Vec\<SipFlowClusterNode\> | [] | Cluster node list (remote) |
-| `timeout_secs` | u64 | 10 | HTTP query timeout (remote) |
-| `upload` | Option\<SipFlowUploadConfig\> | None | S3/HTTP upload hook |
+| `type` | `"s3"` / `"http"` | required | Upload backend |
+| S3 fields: `vendor`, `bucket`, `region`, `access_key`, `secret_key`, `endpoint`, `root` | various | required | S3 connection and path |
+| HTTP field: `url` | String | required | HTTP endpoint URL |
+| `headers` | Option\<Map\> | None | Custom HTTP headers |
+| `signaling` | Option\<bool\> | `false` | Upload SIP signaling data |
+| `media` | Option\<bool\> | `true` | Upload RTP media (as WAV) |
+| `force_pcm` | Option\<bool\> | `false` | Transcode to PCM before upload |
+| `pcm_sample_rate` | Option\<u32\> | 16000 | PCM sample rate when `force_pcm` is true |
 
 ---
 
@@ -351,19 +385,12 @@ offset  size  field
 ## Standalone Server
 
 ```bash
-# Start with FlowDB engine (default)
+# Start with SQLite engine (default)
 cargo run --release --bin sipflow -- \
     --port 3000 --http-port 3001 \
     --root /var/sipflow/data
 
-# Start with SQLite engine
-cargo run --release --bin sipflow -- \
-    --engine sqlite \
-    --port 3000 --http-port 3001 \
-    --root /var/sipflow/data \
-    --flush-count 1000 --flush-interval 5
-
-# Start with FlowDB + TTL + large memtable
+# Start with FlowDB engine
 cargo run --release --bin sipflow -- \
     --engine flowdb \
     --port 3000 --http-port 3001 \
@@ -371,6 +398,8 @@ cargo run --release --bin sipflow -- \
     --ttl-secs 86400 \
     --memtable-size-mb 256 \
     --block-cache-capacity-mb 512
+
+
 ```
 
 ### CLI Options
@@ -381,14 +410,21 @@ cargo run --release --bin sipflow -- \
 | `-p`, `--port` | `3000` | UDP receive port |
 | `--http-port` | `3001` | HTTP query port |
 | `-r`, `--root` | `./config/sipflow` | Data storage directory |
-| `--engine` | `flowdb` | Storage engine: `flowdb` or `sqlite` |
+| `--engine` | `sqlite` | Storage engine: `sqlite` or `flowdb` |
+| `--no-compress` | `false` | Disable zstd compression of payloads (SQLite) |
+| `--compress-level` | `6` | zstd compression level 0-9 (SQLite) |
+| `--subdirs` | `daily` | Directory layout: `none`, `daily`, `hourly` |
 | `--buffer-size` | `100000` | Channel buffer capacity |
+| `--recv-buffer-size` | `8388608` | UDP receive buffer size (SO_RCVBUF) |
+| `--recv-tasks` | `0` | Parallel UDP receiver tasks (0 = CPU count) |
 | `--flush-count` | `1000` | Flush batch size (SQLite) |
 | `--flush-interval` | `5` | Max flush interval in seconds (SQLite) |
 | `--id-cache-size` | `8192` | CallID→ID cache size (SQLite) |
 | `--ttl-secs` | none | FlowDB record TTL (0 = no expiry) |
 | `--memtable-size-mb` | `64` | FlowDB memtable size |
 | `--block-cache-capacity-mb` | `128` | FlowDB block cache capacity |
+| `--log-file` | `/var/log/sipflow.log` | Log file path |
+| `--log-level` | `info` | Log level (trace, debug, info, warn, error) |
 
 ---
 

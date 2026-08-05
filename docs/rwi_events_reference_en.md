@@ -123,8 +123,11 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 | `trunk` | Option\<String\> | SIP trunk name |
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Current routing target |
-| `agent_id` | Option\<String\> | Agent ID |
-| `agent_name` | Option\<String\> | Agent display name |
+
+**Notes**: the flat context never contains `agent_id`/`agent_name` — those are
+event-specific fields (e.g. `cc_*` events, `record_stopped`) that only appear
+when the event itself carries them. A `call_*` event without agent involvement
+never has agent-related values.
 
 **Notes**:
 - `ani` vs `caller`: `ani` is a plain number (for business logic), `caller` is the full SIP URI
@@ -271,7 +274,7 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `reason` | Option\<String\> | Hangup reason (see table below) |
-| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. Same vocabulary as `cc_hangup.hangup_by`; makes it unambiguous who ended the call. |
+| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. Same vocabulary as `cc_hangup.hangup_by`. A callee hangup is reported as `agent` only when the call actually involved a CC agent (queue-routed or `resolved_agent_id`); otherwise it is `callee`. |
 | `sip_status` | Option\<u16\> | SIP response code |
 | *+ctx* | | Flat context fields |
 
@@ -317,7 +320,13 @@ uses the **same Display vocabulary** as `call_hangup.reason` (e.g. `caller`,
 whether the agent, the caller, the system, or a transfer ended the call —
 this is critical for contact-center reporting.
 
-Dispatch: broadcast (delivered to the configured `[rwi_webhook]`).
+Dispatch: broadcast (delivered to the configured `[rwi_webhook]`). Broadcast
+events carry the primary call's flat context (`caller`/`callee`/names/
+`direction`) via gateway enrichment, like all call-scoped events.
+
+cc_* events (including `cc_ringing`/`cc_answered`) are emitted **only when the
+call actually involves a registered CC agent** — a plain extension-to-extension
+call produces no `cc_*` events.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -327,6 +336,7 @@ Dispatch: broadcast (delivered to the configured `[rwi_webhook]`).
 | `reason` | String | Normalized reason, same vocabulary as `call_hangup.reason` |
 | `hangup_by` | Option\<String\> | `agent` \| `caller` \| `system` \| `transfer` \| `unknown` |
 | `duration_secs` | u64 | Talk time in seconds (0 for unanswered) |
+| *+ctx* | | Flat context fields |
 
 ```json
 {
@@ -715,11 +725,13 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 ### 6.6 Queue / ACD Events
 
 > **Event origin**: Queue-related events come in two families, produced by different subsystems and may co-occur:
-> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`), **fires regardless of whether the CC addon is enabled**. Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback.
-> - **`skill_group_*` (skill-group scheduling decisions)**: produced by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent and the ACD produces a scheduling result. **Fires only when the CC addon is active and skill routing is used.**
+> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`) **and** the CC ACD engine bridge. Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback.
+> - **`skill_group_*` (skill-group scheduling decisions)**: produced **exclusively** by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent. Fires only when the CC addon is active and skill routing is used. The ACD-engine `queue_*` bridge intentionally does **not** emit `skill_group_*` (single source, no duplicates).
 >
 > Typical event sequence for a skill-group-routed call:
-> `queue_joined` → `skill_group_candidates_found` → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
+> `queue_joined` → `skill_group_candidates_found` → `skill_group_call_queued` (only when no agent is immediately available) → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
+>
+> `skill_group_call_abandoned` fires when the caller hangs up while still queued; `skill_group_service_unavailable` fires on queue timeout or fallback. Both are reported by the Queue app through the `AgentRegistry` lifecycle hooks (`notify_call_abandoned` / `notify_call_timeout` / `notify_call_fallback`), which the CC adapter maps to the RWI events.
 
 All queue events carry flat context fields.
 
@@ -841,19 +853,24 @@ Emitted when the ACD scheduler finds candidate agents for a skill group.
 | `skill_group_id` | Option\<String\> | Skill group ID (`Some` for the explicit `skill-group:{id}` path; `None` for autonomous skill routing) |
 | `candidates` | Vec\<String\> | Candidate agent ID list |
 | `trace_id` | String | Trace ID |
+| *+ctx* | | Flat context fields |
 
 #### skill_group_agent_assigned
 
 Dispatch: broadcast
 
-Emitted when the ACD scheduler decides to assign an agent to the call (an ACD `Assign` decision or the first agent selected by the strategy).
+Emitted when the ACD scheduler decides to assign an agent to the call. This fires
+for an ACD `Assign` decision **and** for the strategy-picked first agent when no
+inline ACD policy is configured ("first agent selected by the strategy").
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `skill_group_id` | Option\<String\> | Skill group ID |
 | `agent_id` | String | Assigned agent ID |
+| `dispatch_reason` | String | `regular` / `forced_available` / `overflow` |
 | `trace_id` | String | Trace ID |
+| *+ctx* | | Flat context fields |
 
 #### skill_group_no_agent
 
@@ -866,6 +883,59 @@ Emitted when the ACD scheduler cannot provide an agent for the skill group.
 | `call_id` | String | Call identifier |
 | `skill_group_id` | Option\<String\> | Skill group ID |
 | `reason` | String | Reason (`no_candidates` no matching agent / `acd_blocked` blocked by ACD policy / `no_strategy_match` strategy picked none) |
+| *+ctx* | | Flat context fields |
+
+#### skill_group_call_queued
+
+Dispatch: broadcast
+
+Emitted when the call enters the skill-group queue because no agent was
+immediately available. Fires on an ACD `Wait` decision (with real `position`/
+`ewt_secs`) **or**, when no ACD policy is configured, whenever routing finds no
+currently available agent (best-effort `position`/`ewt_secs`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `position` | usize | Queue position |
+| `ewt_secs` | u32 | Estimated wait time (seconds) |
+| `reason` | String | `no_agent_available` |
+| `trace_id` | String | Trace ID |
+| *+ctx* | | Flat context fields |
+
+#### skill_group_call_abandoned
+
+Dispatch: broadcast
+
+Emitted when the caller hangs up while still waiting in the skill-group queue
+(before any agent answered).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `waited_secs` | u64 | Time waited before abandoning |
+| `position` | usize | Queue position at abandon |
+| `trace_id` | String | Trace ID |
+| *+ctx* | | Flat context fields |
+
+#### skill_group_service_unavailable
+
+Dispatch: broadcast
+
+Emitted when a queued call could not be serviced (queue timeout or fallback).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `reason` | String | `timeout` / fallback reason |
+| `attempts` | u32 | Retry attempts |
+| `waited_secs` | u64 | Time waited |
+| `fallback_action` | String | Executed fallback action |
+| `trace_id` | String | Trace ID |
+| *+ctx* | | Flat context fields |
 
 ---
 
@@ -1270,15 +1340,18 @@ Dispatch: broadcast
 | `queue_agent_rejected` | owner | yes | +ctx |
 | `queue_fallback_executed` | owner | yes | +ctx |
 | `queue_alert` | broadcast | — | — |
-| `skill_group_candidates_found` | broadcast | yes | — |
-| `skill_group_agent_assigned` | broadcast | yes | — |
-| `skill_group_no_agent` | broadcast | yes | — |
-| `agent_state_changed` | broadcast | optional | — |
-| `cc_ringing` | broadcast | optional | — |
-| `cc_answered` | broadcast | optional | — |
-| `cc_hangup` | broadcast | optional | — |
-| `cc_held` | broadcast | optional | — |
-| `cc_unheld` | broadcast | optional | — |
+| `skill_group_candidates_found` | broadcast | yes | +ctx |
+| `skill_group_agent_assigned` | broadcast | yes | +ctx |
+| `skill_group_no_agent` | broadcast | yes | +ctx |
+| `skill_group_call_queued` | broadcast | yes | +ctx |
+| `skill_group_call_abandoned` | broadcast | yes | +ctx |
+| `skill_group_service_unavailable` | broadcast | yes | +ctx |
+| `agent_state_changed` | broadcast | optional | +ctx |
+| `cc_ringing` | broadcast | yes | +ctx |
+| `cc_answered` | broadcast | yes | +ctx |
+| `cc_hangup` | broadcast | yes | +ctx |
+| `cc_held` | broadcast | yes | +ctx |
+| `cc_unheld` | broadcast | yes | +ctx |
 | `dn_state_changed` | broadcast | optional | — |
 | `dn_registered` | broadcast | — | — |
 | `dn_unregistered` | broadcast | — | — |

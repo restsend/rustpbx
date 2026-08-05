@@ -36,7 +36,7 @@ fn make_record() -> CallRecord {
 }
 
 async fn in_memory_db() -> DatabaseConnection {
-    crate::models::connect_db("sqlite::memory:").await.unwrap()
+    crate::models::connect_db("sqlite::memory:", None).await.unwrap()
 }
 
 async fn count_rows(db: &DatabaseConnection, table: &str) -> i64 {
@@ -152,7 +152,7 @@ async fn test_persist_call_record_nulls_stale_fk_ids() {
 
     // Fully-migrated DB so the FK referent tables exist (department /
     // extension / sip_trunk / routing) but contain no rows for our ids.
-    let db = rustpbx_models::create_db("sqlite::memory:")
+    let db = rustpbx_models::create_db("sqlite::memory:", None)
         .await
         .expect("migrated in-memory db");
 
@@ -184,7 +184,7 @@ async fn test_persist_call_record_nulls_stale_fk_ids() {
 async fn test_persist_call_record_keeps_existing_fk_ids() {
     use rustpbx_models::call_record::Column;
 
-    let db = rustpbx_models::create_db("sqlite::memory:")
+    let db = rustpbx_models::create_db("sqlite::memory:", None)
         .await
         .expect("migrated in-memory db");
 
@@ -241,7 +241,7 @@ async fn test_rotating_sqlite_saver_creates_daily_file() {
     let base = format!("sqlite://{}/cdr.db", dir.path().display());
     let today = today_string();
     let daily_url = derive_daily_url(&base, &today);
-    let db = crate::models::connect_db(&daily_url).await.unwrap();
+    let db = crate::models::connect_db(&daily_url, None).await.unwrap();
     create_call_record_table(&db, "rustpbx_call_records")
         .await
         .unwrap();
@@ -492,6 +492,50 @@ async fn test_default_db_saver_writes_to_db() {
 
     let count = count_rows(&db, "rustpbx_call_records").await;
     assert_eq!(count, 1, "default DB saver should write exactly one row");
+}
+
+#[tokio::test]
+async fn test_db_saver_persists_cdr_path_in_metadata() {
+    // Issue #237: the CDR file path is remembered at save time by injecting it
+    // into the existing `metadata` JSON column (no schema migration), so the
+    // console can still locate historical CDRs after the storage root changes.
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let mut record = make_record();
+    record.details.cdr_file_path = Some("/old/root/20260728/test-call-id.json".to_string());
+    manager.saver.save(&record).await.unwrap();
+
+    use crate::models::call_record::Entity as CallRecordEntity;
+    use sea_orm::{EntityTrait, QueryFilter};
+    use sea_orm::ColumnTrait;
+
+    let saved = CallRecordEntity::find()
+        .filter(crate::models::call_record::Column::CallId.eq("test-call-id"))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row must exist");
+
+    let metadata = saved
+        .metadata
+        .expect("metadata must be populated")
+        .get("cdr_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    assert_eq!(
+        metadata.as_deref(),
+        Some("/old/root/20260728/test-call-id.json"),
+        "cdr_path must be persisted inside the metadata JSON column"
+    );
 }
 
 #[tokio::test]

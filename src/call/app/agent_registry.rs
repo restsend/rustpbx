@@ -320,6 +320,29 @@ pub trait AgentRegistry: Send + Sync {
         self.find_available_agents(&[]).await
     }
 
+    /// Notify the dispatcher that a queued call was abandoned by the caller
+    /// before any agent answered. Default no-op; addon implementations (e.g. CC)
+    /// use it to emit skill-group lifecycle events (`skill_group_call_abandoned`).
+    /// `queue_id` is the generic queue name — addon implementations map it to
+    /// their own resource identifiers.
+    async fn notify_call_abandoned(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}
+
+    /// Notify the dispatcher that a queued call exceeded its max wait time.
+    /// Addon implementations use it to emit `skill_group_service_unavailable`.
+    async fn notify_call_timeout(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}
+
+    /// Notify the dispatcher that a queued call could not be serviced and a
+    /// fallback action was executed. Addon implementations use it to emit
+    /// `skill_group_service_unavailable`.
+    async fn notify_call_fallback(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _reason: &str,
+        _action: &str,
+    ) {
+    }
+
     /// Check if state transition is valid
     fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool
     where

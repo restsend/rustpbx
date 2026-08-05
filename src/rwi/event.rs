@@ -333,6 +333,34 @@ pub struct QueueAgentConnected {
 rwi_event!(QueueAgentConnected, "queue_agent_connected");
 
 #[derive(Debug, Clone, Serialize)]
+pub struct QueueAgentNoAnswer {
+    pub call_id: String,
+    pub queue_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub trace_id: String,
+}
+rwi_event!(QueueAgentNoAnswer, "queue_agent_no_answer");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueAgentRejected {
+    pub call_id: String,
+    pub queue_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub trace_id: String,
+}
+rwi_event!(QueueAgentRejected, "queue_agent_rejected");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueuePositionChanged {
+    pub call_id: String,
+    pub queue_id: String,
+    pub position: usize,
+}
+rwi_event!(QueuePositionChanged, "queue_position_changed");
+
+#[derive(Debug, Clone, Serialize)]
 pub struct QueueLeft {
     pub call_id: String,
     pub queue_id: String,

@@ -116,17 +116,7 @@ impl ClusterPresenceMessage {
     }
 
     pub fn to_state(&self) -> Option<PresenceState> {
-        let status = match self.status.as_str() {
-            "idle" | "available" => PresenceStatus::Idle,
-            "busy" => PresenceStatus::Busy,
-            "ringing" => PresenceStatus::Ringing,
-            "wrapup" => PresenceStatus::Wrapup,
-            "away" => PresenceStatus::Away(String::new()),
-            "dnd" => PresenceStatus::Dnd,
-            "offline" => PresenceStatus::Offline,
-            "" => PresenceStatus::Offline,
-            other => PresenceStatus::Away(other.to_string()),
-        };
+        let status = PresenceStatus::normalize(&self.status);
         Some(PresenceState {
             status,
             note: self.note.clone(),
@@ -190,7 +180,8 @@ impl From<(&str, &PresenceState)> for ClusterPresenceMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClusterAgentStatusMessage {
     pub agent_id: String,
-    /// One of: idle / busy / ringing / wrapup / offline / away / dnd.
+    /// One of: idle / busy / ringing / wrapup / offline / away / dnd, or
+    /// `away:<detail>` for a typed break.
     pub status: String,
     /// JSON array of skill names.
     pub skills: serde_json::Value,
@@ -774,6 +765,19 @@ mod tests {
         let msg = ClusterPresenceMessage {
             identity: "test".to_string(),
             status: "lunch".to_string(),
+            note: None,
+            activity: None,
+            last_updated: 0,
+        };
+        let state = msg.to_state().unwrap();
+        assert_eq!(state.status, PresenceStatus::Away("lunch".to_string()));
+    }
+
+    #[test]
+    fn test_presence_message_to_state_away_canonical_detail() {
+        let msg = ClusterPresenceMessage {
+            identity: "test".to_string(),
+            status: "away:lunch".to_string(),
             note: None,
             activity: None,
             last_updated: 0,
