@@ -996,4 +996,41 @@ action = { type = "menu", menu = "root" }
             serde_json::from_str(r#"{"type":"input_phone","prompt":"input_phone.wav"}"#).unwrap();
         assert!(matches!(node.action, EntryAction::InputPhone { .. }));
     }
+
+    #[test]
+    fn test_tree_mode_toml_parses_bridge_entry() {
+        let toml_str = r#"
+[ivr]
+name = "bridge-tree"
+
+[ivr.root]
+greeting = "sounds/bridge.wav"
+timeout_ms = 5000
+max_retries = 1
+
+[[ivr.root.entries]]
+key = "1"
+label = "Bridge"
+action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", headers = { Authorization = "Bearer token" }, timeout_ms = 30000, return_to_ivr = "bridge-tree" }
+"#;
+        let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
+        let root = config.ivr.root.as_ref().expect("root menu");
+        assert_eq!(root.entries.len(), 1);
+        let entry = &root.entries[0];
+        match &entry.action {
+            EntryAction::Bridge {
+                create_room_uri,
+                headers,
+                timeout_ms,
+                return_to_ivr,
+                ..
+            } => {
+                assert_eq!(create_room_uri, "wss://voip.example.com/ws");
+                assert_eq!(headers.get("Authorization"), Some(&"Bearer token".to_string()));
+                assert_eq!(*timeout_ms, Some(30000));
+                assert_eq!(return_to_ivr.as_deref(), Some("bridge-tree"));
+            }
+            other => panic!("expected Bridge action, got {other:?}"),
+        }
+    }
 }

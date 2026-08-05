@@ -335,6 +335,42 @@ impl MediaBridge {
             };
             let dtmf_b_to_a = dtmf_a_to_b.map(|(a, b)| (b, a));
 
+            // DTMF agreement check: a shared telephone-event PT is forwarded
+            // raw (no remap possible), so the two legs must agree on its clock
+            // rate too, otherwise relayed events carry the wrong timestamp /
+            // duration interpretation. Some endpoints (e.g. SipBot's
+            // telephone-event injection) answer telephone-event at a different
+            // rate than the one offered; warn so the mismatch is visible.
+            if let (Some(a), Some(b)) = (pa.dtmf.as_ref(), pb.dtmf.as_ref()) {
+                if a.clock_rate != b.clock_rate {
+                    warn!(
+                        session = %self.session_id,
+                        a_pt = a.payload_type,
+                        a_clock = a.clock_rate,
+                        b_pt = b.payload_type,
+                        b_clock = b.clock_rate,
+                        "DTMF telephone-event clock rates disagree between legs; relayed DTMF may be mistimed"
+                    );
+                }
+            }
+            for (side, leg) in [("a", &la), ("b", &lb)] {
+                let profile = leg.negotiated();
+                if let (Some(dtmf), Some(audio)) = (
+                    profile.as_ref().and_then(|p| p.dtmf.as_ref()),
+                    profile.as_ref().and_then(|p| p.audio.as_ref()),
+                ) && dtmf.clock_rate != audio.clock_rate
+                {
+                    warn!(
+                        session = %self.session_id,
+                        side,
+                        dtmf_pt = dtmf.payload_type,
+                        dtmf_clock = dtmf.clock_rate,
+                        audio_clock = audio.clock_rate,
+                        "DTMF telephone-event clock rate does not match the leg audio codec clock (RFC 4733)"
+                    );
+                }
+            }
+
             let params_a_to_b = RtpRewriteBridgeParams {
                 ssrc_offset: 0,
                 fixed_out_ssrc: Some(b_ssrc),
@@ -429,8 +465,23 @@ impl MediaBridge {
         if let Some(leg) = self.leg(side) {
             leg.accept();
         }
-        if let Err(e) = self.bridge().await {
-            warn!(session = %self.session_id, error = %e, "route activation after accept failed");
+        // The RTP transports may not be ready yet at accept time — a WebRTC
+        // caller's DTLS/SRTP transport is only created after the 200 OK is
+        // sent. Retry the route activation briefly instead of leaving the
+        // relay un-armed (which would strand the call with no media until the
+        // RTP inactivity timeout fires).
+        const MAX_ACCEPT_RETRIES: usize = 5;
+        for attempt in 0..=MAX_ACCEPT_RETRIES {
+            match self.bridge().await {
+                Ok(()) => return,
+                Err(e) => {
+                    if attempt == MAX_ACCEPT_RETRIES {
+                        warn!(session = %self.session_id, error = %e, "route activation after accept failed");
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
         }
     }
 
@@ -812,6 +863,8 @@ mod tests {
             external_ip: None,
             bind_ip: None,
             cname: Some("webrtc-test".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
         };
         let mut mb = MediaBridge::new("s7", BridgeOpts::default());
         let a = LegInner::new("a", &cfg).unwrap();
@@ -858,6 +911,8 @@ mod tests {
             external_ip: None,
             bind_ip: None,
             cname: Some("x-transport".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
         };
 
         let a = LegInner::new("a", &webrtc_cfg).unwrap();
@@ -901,6 +956,97 @@ mod tests {
             !mb.leg(LegSide::B).unwrap().egress_is_relay(),
             "leg B should use transcode (not relay)"
         );
+        mb.close();
+    }
+
+    /// Regression: bridging a WebRTC caller leg whose DTLS/SRTP transport is
+    /// not yet ready (the remote only starts DTLS after it receives the 200 OK)
+    /// with a same-codec RTP callee must NOT block the fast-path relay arming.
+    /// Before the fix `Leg::set_egress_source(RewriteRelay)` synchronously
+    /// waited up to 2s per leg for the WebRTC transport, which deadlocked call
+    /// setup (the 200 OK is sent only after this returns). Now the arming is
+    /// deferred to a background task and the call path returns immediately.
+    #[tokio::test]
+    async fn fastpath_relay_does_not_block_on_unready_webrtc_transport() {
+        use rustrtc::SdpType;
+
+        let webrtc_cfg = LegConfig {
+            transport: rustrtc::TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: audio_codec::CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("unready-webrtc".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+        let rtp_opus_cfg = LegConfig {
+            transport: rustrtc::TransportMode::Rtp,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: audio_codec::CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("rtp-opus".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+
+        // Leg A: WebRTC answerer whose remote (10.0.0.1) never connects, so its
+        // SRTP transport stays unready even though the profile is negotiated.
+        let webrtc_offer = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 5000 UDP/TLS/RTP/SAVPF 111\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
+            a=setup:actpass\r\n\
+            a=ice-ufrag:uv50\r\n\
+            a=ice-pwd:ib8b\r\n\
+            a=candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host\r\n";
+        let a = LegInner::new("a", &webrtc_cfg).unwrap();
+        a.apply_sdp(webrtc_offer, SdpType::Offer)
+            .await
+            .expect("a answers webrtc offer");
+        assert!(a.negotiated().is_some(), "leg A profile should be negotiated");
+
+        // Leg B: RTP/opus — negotiated, transport ready.
+        let b2 = LegInner::new("b2", &rtp_opus_cfg).unwrap();
+        let b_offer = b2.create_offer(vec![]).await.expect("b2 offer");
+        let b = LegInner::new("b", &rtp_opus_cfg).unwrap();
+        b.apply_sdp(&b_offer, SdpType::Offer)
+            .await
+            .expect("b answers rtp offer");
+        assert!(b.negotiated().is_some(), "leg B profile should be negotiated");
+
+        let mut mb = MediaBridge::new("s-no-deadlock", BridgeOpts::default());
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+
+        // Same codec (opus) on both legs → fast-path branch would hit
+        // wait_for_rtp_transport_ready. It must NOT block now.
+        let start = std::time::Instant::now();
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "accept must not block on the unready WebRTC transport (took {elapsed:?})"
+        );
+        assert!(mb.is_bridged(), "route should be active after both answer");
         mb.close();
     }
 

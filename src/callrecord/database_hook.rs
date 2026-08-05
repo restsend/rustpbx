@@ -15,6 +15,36 @@ impl CallRecordHook for DatabaseHook {
     }
 }
 
+/// Null out a FK id when the referenced row no longer exists (e.g. an
+/// auto-created trunk / extension that was never persisted, or was deleted
+/// before the CDR landed). Without this, the INSERT fails with a SQLite
+/// `FOREIGN KEY constraint failed` (code 787) and the call record is lost.
+///
+/// If the referent table cannot be queried (DB hiccup / table missing), keep
+/// the id — the FK would not be enforceable anyway, and we must not lose the
+/// call record because of a verification query.
+macro_rules! fk_id_or_none {
+    ($db:expr, $entity:path, $id:expr) => {{
+        let result: Result<Option<i64>, sea_orm::DbErr> = match $id {
+            Some(id) if id > 0 => {
+                match <$entity>::find_by_id(id).one($db).await {
+                    Ok(Some(_)) => Ok(Some(id)),
+                    Ok(None) => Ok(None),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "call record FK referent lookup failed; keeping id {id}"
+                        );
+                        Ok(Some(id))
+                    }
+                }
+            }
+            _ => Ok(None),
+        };
+        result
+    }};
+}
+
 pub async fn persist_call_record(
     db: &DatabaseConnection,
     record: &CallRecord,
@@ -30,10 +60,15 @@ pub async fn persist_call_record(
     let caller_name = details.caller_name.clone();
     let agent_name = details.agent_name.clone();
     let queue = details.queue.clone();
-    let department_id = details.department_id;
-    let extension_id = details.extension_id;
-    let sip_trunk_id = details.sip_trunk_id;
-    let route_id = details.route_id;
+    // Validate FK referents before insert so stale in-memory ids cannot fail
+    // the write (see `fk_id_or_none`).
+    let department_id =
+        fk_id_or_none!(db, rustpbx_models::department::Entity, details.department_id)?;
+    let extension_id =
+        fk_id_or_none!(db, rustpbx_models::extension::Entity, details.extension_id)?;
+    let sip_trunk_id =
+        fk_id_or_none!(db, rustpbx_models::sip_trunk::Entity, details.sip_trunk_id)?;
+    let route_id = fk_id_or_none!(db, rustpbx_models::routing::Entity, details.route_id)?;
     let sip_gateway = details.sip_gateway.clone();
 
     let rewrite_original_from = if !details.rewrite.caller_original.is_empty() {

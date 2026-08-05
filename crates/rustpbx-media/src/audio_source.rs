@@ -318,6 +318,9 @@ impl AudioSource for ResamplingAudioSource {
     }
 
     fn reset(&mut self) -> Result<()> {
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
         self.source.reset()
     }
 }
@@ -567,6 +570,61 @@ mod tests {
         let mut buf = vec![0i16; 160];
         let read = resampling.read_samples(&mut buf);
         assert_eq!(read, 160);
+    }
+
+    #[test]
+    fn test_resampling_reset_clears_internal_resampler_state() {
+        // A fixed-rate source that reports how many samples it has produced.
+        struct FixedRateSource {
+            rate: u32,
+            produced: u64,
+        }
+        impl AudioSource for FixedRateSource {
+            fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+                let n = buffer.len();
+                self.produced += n as u64;
+                buffer.fill(1000);
+                n
+            }
+            fn sample_rate(&self) -> u32 {
+                self.rate
+            }
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn has_data(&self) -> bool {
+                true
+            }
+            fn reset(&mut self) -> Result<()> {
+                self.produced = 0;
+                Ok(())
+            }
+        }
+
+        let mut resampling = ResamplingAudioSource::new(
+            Box::new(FixedRateSource {
+                rate: 24000,
+                produced: 0,
+            }),
+            48000,
+        );
+
+        // After a full read the resampler holds internal history/phase. Reset
+        // must clear it so a second read starts from a clean slate (looping).
+        let mut buf = vec![0i16; 960];
+        let read = resampling.read_samples(&mut buf);
+        assert!(read > 0, "upsample 24000→48000 must produce output");
+        resampling.reset().expect("reset");
+
+        // Consume again — a stale resampler would offset phase; we only assert
+        // that reads still succeed with sane output after reset.
+        let mut buf2 = vec![0i16; 960];
+        let read2 = resampling.read_samples(&mut buf2);
+        assert!(read2 > 0, "read after reset must still produce output");
+        assert_eq!(
+            read2, 960,
+            "20ms @48kHz should yield a full 960-sample frame after reset"
+        );
     }
 
     #[test]

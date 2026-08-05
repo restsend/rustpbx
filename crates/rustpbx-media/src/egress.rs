@@ -54,7 +54,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
-use crate::audio_source::AudioSource;
+use crate::audio_source::{AudioSource, ResamplingAudioSource};
 
 /// Default ptime (packetization interval) in milliseconds.
 const DEFAULT_PTIME_MS: u32 = 20;
@@ -108,6 +108,22 @@ pub struct EgressCodec {
     pub codec: CodecType,
     pub payload_type: u8,
     pub clock_rate: u32,
+    /// Emit low-level comfort noise instead of digital silence when the source
+    /// has no data. Keeps the outbound stream continuous (fixed seq/ts cadence
+    /// regardless) while avoiding dead-air between playback/legs.
+    pub comfort_noise: bool,
+    /// Comfort noise level in dBFS (e.g. -35.0). Ignored when
+    /// [`Self::comfort_noise`] is false.
+    pub comfort_noise_level_db: f32,
+}
+
+impl EgressCodec {
+    /// CNG defaults: on, at a low perceptible level.
+    pub fn with_comfort_noise(mut self, enabled: bool, level_db: f32) -> Self {
+        self.comfort_noise = enabled;
+        self.comfort_noise_level_db = level_db;
+        self
+    }
 }
 
 /// Per-leg egress pipeline.
@@ -152,6 +168,7 @@ impl EgressPipeline {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let ptime = Duration::from_millis(ptime_ms.unwrap_or(DEFAULT_PTIME_MS) as u64);
+        let noise_amplitude = 10f32.powf(codec.comfort_noise_level_db / 20.0) * i16::MAX as f32;
 
         let task = EgressTask {
             sender,
@@ -164,6 +181,9 @@ impl EgressPipeline {
             rtp_timestamp: 0u32.wrapping_sub(1),
             sequence_number: 0u16.wrapping_sub(1),
             pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, ptime)],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude,
+            noise_lp: 0.0,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()));
 
@@ -215,6 +235,19 @@ fn pcm_samples_per_frame(codec: CodecType, ptime: Duration) -> usize {
     (rate as u64 * ptime.as_millis() as u64 / 1000) as usize
 }
 
+/// Wrap a Media audio source so it yields PCM at the egress codec's sample
+/// rate. The encoder (e.g. opus/48000) must receive samples at its rate; a
+/// file decoded at a different native rate (e.g. a 24 kHz MP3) would otherwise
+/// be encoded as-is → wrong tempo / pitch. No-op passthrough when rates match.
+fn media_source_for_codec(audio: Box<dyn AudioSource>, codec: CodecType) -> Box<dyn AudioSource> {
+    let target = codec.samplerate();
+    if audio.sample_rate() != target {
+        Box::new(ResamplingAudioSource::new(audio, target))
+    } else {
+        audio
+    }
+}
+
 struct EgressTask {
     sender: SampleStreamSource,
     codec: EgressCodec,
@@ -228,6 +261,13 @@ struct EgressTask {
     rtp_timestamp: u32,
     sequence_number: u16,
     pcm_buf: Vec<i16>,
+    /// LCG state for comfort-noise generation (continuous across frames so the
+    /// noise does not repeat per-frame).
+    noise_state: u32,
+    /// Comfort-noise amplitude in 16-bit PCM units (from `codec` level dBFS).
+    noise_amplitude: f32,
+    /// One-pole lowpass state for a softer, less "harsh static" comfort tone.
+    noise_lp: f32,
 }
 
 impl EgressTask {
@@ -262,13 +302,31 @@ impl EgressTask {
                         if let Some(cb) = prev_on_end {
                             cb(true);
                         }
+                        // Resample Media sources to the codec's sample rate
+                        // before encoding (e.g. 24 kHz MP3 → 48 kHz opus).
+                        let s = match s {
+                            EgressSource::Media {
+                                audio,
+                                loop_playback,
+                                on_end,
+                            } => EgressSource::Media {
+                                audio: media_source_for_codec(audio, self.codec.codec),
+                                loop_playback,
+                                on_end,
+                            },
+                            other => other,
+                        };
                         // Auto-configure the resampler for TranscodePeer based
-                        // on src/dst sample rate mismatch.
+                        // on src/dst sample rate mismatch. Use the codec's actual
+                        // PCM sample rate (samplerate), NOT the RTP clock_rate —
+                        // G.722 has clock_rate 8000 but samplerate 16000; using
+                        // clock_rate skips the resampler and doubles the pitch.
                         if let EgressSource::TranscodePeer { src_sample_rate, .. } = &s {
-                            if *src_sample_rate != self.codec.clock_rate {
+                            let dst_sample_rate = self.codec.codec.samplerate();
+                            if *src_sample_rate != dst_sample_rate {
                                 self.resampler = Some(Resampler::new(
                                     *src_sample_rate as usize,
-                                    self.codec.clock_rate as usize,
+                                    dst_sample_rate as usize,
                                 ));
                             } else {
                                 self.resampler = None;
@@ -288,13 +346,15 @@ impl EgressTask {
                     }
                     None => break,
                 },
-                _ = interval.tick(), if !is_relay && !gated => {
-                    if let Some(frame) = self.next_frame().await {
-                        // DropOldest semantics: if the PC sender is saturated
-                        // (slow remote), drop the oldest rather than block the
-                        // pacing task. try_send never awaits.
-                        if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
-                            trace!("egress: sender full, dropping frame to keep cadence");
+                _ = interval.tick() => {
+                    if !is_relay && !gated {
+                        if let Some(frame) = self.next_frame().await {
+                            // DropOldest semantics: if the PC sender is saturated
+                            // (slow remote), drop the oldest rather than block the
+                            // pacing task. try_send never awaits.
+                            if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
+                                trace!("egress: sender full, dropping frame to keep cadence");
+                            }
                         }
                     }
                 }
@@ -394,8 +454,22 @@ impl EgressTask {
 
     /// Zero-fill the PCM buffer (silence).
     fn encode_silence(&mut self) -> Bytes {
-        for s in self.pcm_buf.iter_mut() {
-            *s = 0;
+        if self.codec.comfort_noise && self.noise_amplitude > 0.0 {
+            for s in self.pcm_buf.iter_mut() {
+                // LCG uniform in (-1, 1).
+                self.noise_state = self
+                    .noise_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                let white = ((self.noise_state as f32 / u32::MAX as f32) * 2.0) - 1.0;
+                // One-pole lowpass → soft "room tone" instead of harsh static.
+                self.noise_lp += 0.15 * (white - self.noise_lp);
+                *s = (self.noise_lp * self.noise_amplitude) as i16;
+            }
+        } else {
+            for s in self.pcm_buf.iter_mut() {
+                *s = 0;
+            }
         }
         self.encoder.encode(&self.pcm_buf).into()
     }
@@ -467,6 +541,8 @@ mod tests {
             codec: CodecType::PCMU,
             payload_type: 0,
             clock_rate: 8000,
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
         }
     }
 
@@ -484,6 +560,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn comfort_noise_emits_nonzero_silence_frames() {
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            comfort_noise: true,
+            comfort_noise_level_db: -30.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Silence,
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            rtp_timestamp: 0,
+            sequence_number: 0,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-30.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+        };
+        // With CNG on, the encoded silence frame must differ from a pure
+        // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
+        // deviation proves non-zero samples reached the encoder.
+        let with_noise = task.next_frame().await.expect("frame").data;
+        let zeros = vec![0u8; with_noise.len()];
+        assert_ne!(&with_noise[..], &zeros[..], "CNG must not be digital silence");
+    }
+
+    #[tokio::test]
     async fn switch_source_from_silence_to_media() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
         let pipe = EgressPipeline::start(sender, pcmu_codec(), EgressSource::Silence, Some(20));
@@ -496,6 +606,89 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
+        pipe.stop();
+    }
+
+    /// A Media source whose sample rate differs from the egress codec must be
+    /// resampled to the codec's rate before encoding. Here a 24 kHz source
+    /// feeds an opus (48 kHz) codec: each 20 ms opus frame must consume only
+    /// 480 source samples (24k * 20ms), not 960 (48k * 20ms) — otherwise the
+    /// audio plays at 2× tempo.
+    #[tokio::test]
+    async fn media_source_at_different_rate_is_resampled_to_codec_rate() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct CountingSource {
+            rate: u32,
+            consumed: Arc<AtomicUsize>,
+        }
+        impl AudioSource for CountingSource {
+            fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+                let n = buffer.len();
+                self.consumed.fetch_add(n, AtomicOrdering::Relaxed);
+                buffer.fill(2000);
+                n
+            }
+            fn sample_rate(&self) -> u32 {
+                self.rate
+            }
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn has_data(&self) -> bool {
+                true
+            }
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let codec = EgressCodec {
+            codec: CodecType::Opus,
+            payload_type: 111,
+            clock_rate: 48000,
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
+        };
+        let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
+        let pipe = EgressPipeline::start(sender, codec, EgressSource::Silence, Some(20));
+
+        let consumed = Arc::new(AtomicUsize::new(0));
+        pipe.set_source(EgressSource::Media {
+            audio: Box::new(CountingSource {
+                rate: 24000,
+                consumed: consumed.clone(),
+            }),
+            loop_playback: true,
+            on_end: None,
+        })
+        .await
+        .unwrap();
+
+        // Drain until the media source is definitely being read (consumed > 0),
+        // then observe how many source samples 8 more frames consume.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while consumed.load(AtomicOrdering::Relaxed) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "media source never consumed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(500), track.recv()).await;
+        }
+        let before = consumed.load(AtomicOrdering::Relaxed);
+        for _ in 0..8 {
+            let _ = tokio::time::timeout(Duration::from_millis(500), track.recv()).await;
+        }
+        let after = consumed.load(AtomicOrdering::Relaxed);
+        let consumed_in_8 = after - before;
+
+        // 8 frames × 480 = 3840 for correct 24k→48k resampling; 8 × 960 = 7680
+        // if the source is (wrongly) read at the codec's 48 kHz rate.
+        assert!(
+            consumed_in_8 >= 3072 && consumed_in_8 <= 4800,
+            "expected ~3840 source samples consumed over 8 opus frames (24k→48k resample), got {consumed_in_8}"
+        );
+
         pipe.stop();
     }
 
@@ -516,6 +709,9 @@ mod tests {
             rtp_timestamp: 0,
             sequence_number: 0,
             pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -552,6 +748,9 @@ mod tests {
             rtp_timestamp: 0,
             sequence_number: 0,
             pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task.next_frame().await.expect("EOF media yields silence frame");
@@ -565,5 +764,108 @@ mod tests {
         assert_eq!(pcm_samples_per_frame(CodecType::PCMU, Duration::from_millis(20)), 160);
         // Opus @ 48kHz, 20ms → 960 samples
         assert_eq!(pcm_samples_per_frame(CodecType::Opus, Duration::from_millis(20)), 960);
+    }
+
+    /// `media_source_for_codec` must wrap a 24 kHz source in a resampler that
+    /// produces 48 kHz PCM: a 960-sample read (20 ms @48k) consumes exactly 480
+    /// source samples and the output, once decoded from opus, is 960 @48k.
+    #[test]
+    fn media_source_for_codec_resamples_upsample_24k_to_48k() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct FixedRateSource {
+            rate: u32,
+            consumed: Arc<AtomicUsize>,
+        }
+        impl AudioSource for FixedRateSource {
+            fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+                let n = buffer.len();
+                self.consumed.fetch_add(n, AtomicOrdering::Relaxed);
+                buffer.fill(2000);
+                n
+            }
+            fn sample_rate(&self) -> u32 {
+                self.rate
+            }
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn has_data(&self) -> bool {
+                true
+            }
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let mut wrapped = media_source_for_codec(
+            Box::new(FixedRateSource {
+                rate: 24000,
+                consumed: consumed.clone(),
+            }),
+            CodecType::Opus,
+        );
+        assert_eq!(wrapped.sample_rate(), 48000, "resampled source reports codec rate");
+
+        let mut buf = vec![0i16; 960];
+        let read = wrapped.read_samples(&mut buf);
+        assert_eq!(read, 960, "one 20ms frame must yield 960 PCM samples");
+        assert_eq!(
+            consumed.load(AtomicOrdering::Relaxed),
+            480,
+            "24000→48000: 960 output samples must consume 480 source samples"
+        );
+    }
+
+    /// `media_source_for_codec` is a passthrough when the source rate already
+    /// matches the codec rate (no resampler, no extra buffering).
+    #[test]
+    fn media_source_for_codec_passthrough_when_rates_match() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct FixedRateSource {
+            rate: u32,
+            consumed: Arc<AtomicUsize>,
+        }
+        impl AudioSource for FixedRateSource {
+            fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+                let n = buffer.len();
+                self.consumed.fetch_add(n, AtomicOrdering::Relaxed);
+                buffer.fill(2000);
+                n
+            }
+            fn sample_rate(&self) -> u32 {
+                self.rate
+            }
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn has_data(&self) -> bool {
+                true
+            }
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let mut source = media_source_for_codec(
+            Box::new(FixedRateSource {
+                rate: 8000,
+                consumed: consumed.clone(),
+            }),
+            CodecType::PCMU,
+        );
+        assert_eq!(source.sample_rate(), 8000);
+
+        let mut buf = vec![0i16; 160];
+        let read = source.read_samples(&mut buf);
+        assert_eq!(read, 160);
+        assert_eq!(
+            consumed.load(AtomicOrdering::Relaxed),
+            160,
+            "matching rates → direct read, no intermediate buffer"
+        );
     }
 }

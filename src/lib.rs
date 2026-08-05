@@ -25,6 +25,7 @@ pub use rustpbx_models as models;
 pub mod observability;
 pub mod preflight;
 pub mod proxy;
+pub mod outbound;
 pub mod rwi;
 pub use rustpbx_sipflow as sipflow;
 pub use rustpbx_storage as storage;

@@ -860,6 +860,87 @@ action = { type = "transfer", target = "100" }
             .expect("should exit after voicemail transfer");
     }
 
+    // ── 14b. Bridge action sends TransferTarget bridge:{uri} ──
+
+    fn build_bridge_ivr() -> IvrDefinition {
+        IvrDefinition {
+            name: "test-bridge".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            business_hours: None,
+            tts: None,
+            root: Some(MenuNode {
+                greeting: "sounds/bridge_menu.wav".to_string(),
+                timeout_ms: 200,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Bridge".to_string()),
+                    action: EntryAction::Bridge {
+                        create_room_uri: "wss://voip.example.com/ws".to_string(),
+                        headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
+                        timeout_ms: Some(30000),
+                        return_to_ivr: Some("test-bridge".to_string()),
+                        success: None,
+                        failure: None,
+                    },
+                }],
+                ..Default::default()
+            }),
+            menus: HashMap::new(),
+            ivr_mode: None,
+            provider: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ivr_bridge_action_sends_transfer_target() {
+        let ivr = build_bridge_ivr();
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.audio_complete("default");
+
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(
+                300,
+                "TransferTarget-bridge",
+                |c| {
+                    matches!(c, CallCommand::Transfer { target, .. }
+                        if target.starts_with("bridge:wss://voip.example.com/ws")
+                        && target.contains("return_to_ivr=test-bridge"))
+                },
+            )
+            .await;
+
+        stack
+            .join()
+            .await
+            .expect("should exit after bridge transfer");
+    }
+
     // ── 15. Queue action sends TransferTarget queue:{target} ──
 
     #[tokio::test]

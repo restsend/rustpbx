@@ -804,6 +804,13 @@ pub struct MediaConfig {
     /// egress sample_track. 500 ≈ 10 s @ 20 ms ptime. None ⇒ use the
     /// bridge's built-in default (`BRIDGE_AUDIO_RING_CAPACITY_DEFAULT`).
     pub bridge_audio_buffer_frames: Option<usize>,
+    /// Emit low-level comfort noise instead of digital silence when a leg's
+    /// egress has no source (defaults to true). Disable to keep true digital
+    /// silence (e.g. for `is_silence`/tone tests).
+    pub comfort_noise: bool,
+    /// Comfort-noise level in dBFS (default -35.0). Ignored when
+    /// `comfort_noise` is false.
+    pub comfort_noise_level_db: f32,
 }
 
 impl Default for MediaConfig {
@@ -827,6 +834,8 @@ impl MediaConfig {
             probation_max_packets: None,
             video_policy: None,
             bridge_audio_buffer_frames: None,
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
         }
     }
 
@@ -862,6 +871,12 @@ impl MediaConfig {
 
     pub fn with_ice_servers(mut self, servers: Option<Vec<IceServer>>) -> Self {
         self.ice_servers = servers;
+        self
+    }
+
+    pub fn with_comfort_noise(mut self, enabled: bool, level_db: f32) -> Self {
+        self.comfort_noise = enabled;
+        self.comfort_noise_level_db = level_db;
         self
     }
 

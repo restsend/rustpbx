@@ -1342,6 +1342,7 @@ impl SipServerInner {
             .with_ice_servers(rtp.ice_servers.clone())
             .with_enable_latching(self.proxy_config.enable_latching)
             .with_probation_max_packets(self.proxy_config.latching_probation_max_packets)
+            .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
     }
 
     /// Hot-reload platform settings (external_ip, RTP port range, media proxy

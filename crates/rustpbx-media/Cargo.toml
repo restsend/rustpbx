@@ -30,3 +30,12 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+criterion = "0.5"
+
+[[bench]]
+name = "transcode"
+harness = false
+
+[[bench]]
+name = "mixer"
+harness = false

@@ -17,6 +17,25 @@ use rustrtc::media::SampleStreamSource;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Unified forward sink for the bridge: WS PCM16 → call. Two backing paths:
+/// - [`BridgeForwardSink::Track`]: a `VoiceEnginePeer` track sender (non-app
+///   B2BUA path).
+/// - [`BridgeForwardSink::Inject`]: the MediaBridge A-leg injection channel
+///   (app-anchored flow, e.g. IVR bridge).
+enum BridgeForwardSink {
+    Track(SampleStreamSource),
+    Inject(tokio::sync::mpsc::Sender<rustrtc::media::MediaSample>),
+}
+
+impl BridgeForwardSink {
+    fn send(&self, sample: rustrtc::media::MediaSample) -> bool {
+        match self {
+            BridgeForwardSink::Track(s) => s.send(sample).is_ok(),
+            BridgeForwardSink::Inject(tx) => tx.try_send(sample).is_ok(),
+        }
+    }
+}
+
 /// Parsed representation of a transfer target URI.
 ///
 /// Extracted so that the string-prefix dispatch in `handle_blind_transfer` is
@@ -724,11 +743,11 @@ impl SipSession {
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
-        let mut audio_sender: Option<SampleStreamSource> = None;
+        let mut forward_sink: Option<BridgeForwardSink> = None;
         let mut pc: Option<PeerConnection> = None;
 
         // Fallback: leg's VoiceEnginePeer tracks (non-app B2BUA path).
-        if audio_sender.is_none() || pc.is_none() {
+        if forward_sink.is_none() || pc.is_none() {
             let peer = self
                 .legs
                 .get_peer(&leg_id)
@@ -739,15 +758,37 @@ impl SipSession {
             let tracks = peer.get_tracks().await;
             for t in &tracks {
                 let guard = t.lock().await;
-                if audio_sender.is_none() {
-                    audio_sender = guard.get_sender();
+                if forward_sink.is_none() {
+                    if let Some(sender) = guard.get_sender() {
+                        forward_sink = Some(BridgeForwardSink::Track(sender));
+                    }
                 }
                 if pc.is_none() {
                     pc = guard.get_peer_connection().await;
                 }
             }
         }
-        let audio_sender = audio_sender.ok_or_else(|| anyhow!("No track sender for Bridge"))?;
+
+        // App-anchored flow (IVR / queue / voicemail): caller media lives on
+        // the MediaBridge A leg, not on VoiceEnginePeer tracks. Forward audio
+        // via the A-leg injection channel and read call audio from its PC.
+        if forward_sink.is_none() || pc.is_none() {
+            if let Some(mb) = self.media.bridge.as_ref()
+                && let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A)
+            {
+                info!(session_id = %self.id, %leg_id, "Bridge sourcing caller media from MediaBridge A leg");
+                if forward_sink.is_none() {
+                    if let Ok(tx) = mb.inject(crate::media::media_bridge::LegSide::A) {
+                        forward_sink = Some(BridgeForwardSink::Inject(tx));
+                    }
+                }
+                if pc.is_none() {
+                    pc = Some(leg.pc().clone());
+                }
+            }
+        }
+
+        let forward_sink = forward_sink.ok_or_else(|| anyhow!("No track sender for Bridge"))?;
         let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
 
         // ── 3. Create audio decoder (call → raw PCM) ────────────────
@@ -860,7 +901,7 @@ impl SipSession {
                                             raw_packet: None,
                                             source_addr: None,
                                         };
-                                        if audio_sender.send(MediaSample::Audio(frame)).is_err() {
+                                        if !forward_sink.send(MediaSample::Audio(frame)) {
                                             warn!(session_id = %session_id, %leg_id, "Bridge forward: audio sender closed");
                                             return;
                                         }

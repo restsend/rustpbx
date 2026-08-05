@@ -195,12 +195,10 @@ impl ActiveProxyCallRegistry {
         self.upsert(entry, handle);
     }
 
-    #[cfg(test)]
     pub fn handles_by_dialog_count(&self) -> usize {
         self.handles_by_dialog.len()
     }
 
-    #[cfg(test)]
     pub fn dialog_by_session_count(&self) -> usize {
         self.dialog_by_session.len()
     }

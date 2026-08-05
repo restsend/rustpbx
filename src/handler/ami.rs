@@ -47,6 +47,18 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
         .route("/sipflow/media/{call_id}", get(query_sipflow_media));
 
+    // Outbound dial SSE endpoint — config-gated.
+    let r = if app_state
+        .config()
+        .outbound
+        .as_ref()
+        .is_some_and(|c| c.enabled)
+    {
+        r.route("/outbound/dial", post(outbound_dial_handler))
+    } else {
+        r
+    };
+
     #[cfg(feature = "commerce")]
     let r = r
         .route("/cluster/ping", post(cluster_ping_handler))
@@ -75,6 +87,24 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         crate::handler::middleware::ami_auth::ami_auth_middleware,
     ));
     Router::new().nest(&ami_path, r).with_state(app_state)
+}
+
+/// Thin adapter that builds an `OutboundContext` from `AppState` and delegates
+/// to the outbound module's SSE handler.
+async fn outbound_dial_handler(
+    State(app): State<AppState>,
+    Json(req): Json<crate::outbound::DialRequest>,
+) -> Response {
+    match crate::outbound::OutboundContext::from_app_state(&app) {
+        Some(ctx) => crate::outbound::api::execute_dial_response(ctx, req).await,
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "outbound module not enabled (set [outbound] enabled = true)"
+            })),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
@@ -116,6 +146,10 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "dialogs": sip.inner.dialog_layer.len(),
         "calls": sip.inner.active_call_registry.count(),
         "running_tx": sip.inner.runnings_tx.load(Ordering::Relaxed),
+        "leak": serde_json::json!({
+            "handles_by_dialog": sip.inner.active_call_registry.handles_by_dialog_count(),
+            "dialogs_by_session": sip.inner.active_call_registry.dialog_by_session_count(),
+        }),
         "dashmaps": serde_json::json!({
             "trunks": sip.inner.data_context.trunks.len(),
             "queues": sip.inner.data_context.queues.len(),

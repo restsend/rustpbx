@@ -5,7 +5,9 @@ use crate::callrecord::{
 };
 use crate::config::{CallRecordStorageConfig, RotationMode};
 use chrono::Utc;
+use sea_orm::ColumnTrait;
 use sea_orm::DatabaseConnection;
+use sea_orm::QueryFilter;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -139,6 +141,76 @@ async fn test_builtin_saver_writes_to_rustpbx_call_records() {
         "builtin saver should succeed: {:?}",
         result.err()
     );
+}
+
+/// Stale FK ids (in-memory extensions/trunks/departments that were never
+/// persisted, or were deleted before the CDR landed) must be nulled out so the
+/// INSERT cannot fail with a FOREIGN KEY constraint error.
+#[tokio::test]
+async fn test_persist_call_record_nulls_stale_fk_ids() {
+    use rustpbx_models::call_record::Column;
+
+    // Fully-migrated DB so the FK referent tables exist (department /
+    // extension / sip_trunk / routing) but contain no rows for our ids.
+    let db = rustpbx_models::create_db("sqlite::memory:")
+        .await
+        .expect("migrated in-memory db");
+
+    let mut record = make_record();
+    record.details.department_id = Some(424242);
+    record.details.extension_id = Some(424243);
+    record.details.sip_trunk_id = Some(424244);
+    record.details.route_id = Some(424245);
+
+    let result =
+        crate::callrecord::database_hook::persist_call_record(&db, &record).await;
+    assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
+
+    // The stale ids must have been nulled in the persisted row.
+    let row = <rustpbx_models::call_record::Entity as sea_orm::EntityTrait>::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row exists");
+    assert_eq!(row.department_id, None);
+    assert_eq!(row.extension_id, None);
+    assert_eq!(row.sip_trunk_id, None);
+    assert_eq!(row.route_id, None);
+}
+
+/// When the FK referents DO exist, the ids must be preserved.
+#[tokio::test]
+async fn test_persist_call_record_keeps_existing_fk_ids() {
+    use rustpbx_models::call_record::Column;
+
+    let db = rustpbx_models::create_db("sqlite::memory:")
+        .await
+        .expect("migrated in-memory db");
+
+    // Insert a real extension row so the FK referent exists.
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+    let ext = rustpbx_models::extension::ActiveModel {
+        extension: Set("9001".to_string()),
+        display_name: Set(Some("Test".to_string())),
+        ..Default::default()
+    };
+    let ext = ext.insert(&db).await.expect("extension insert");
+    assert!(ext.id > 0);
+
+    let mut record = make_record();
+    record.details.extension_id = Some(ext.id);
+    let result =
+        crate::callrecord::database_hook::persist_call_record(&db, &record).await;
+    assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
+
+    let row = <rustpbx_models::call_record::Entity as sea_orm::EntityTrait>::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row exists");
+    assert_eq!(row.extension_id, Some(ext.id));
 }
 
 // ── CustomDatabaseSaver ──────────────────────────────────────────────────────

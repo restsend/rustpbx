@@ -450,6 +450,7 @@ impl CallModule {
                 .with_ice_servers(rtp.ice_servers.clone())
                 .with_enable_latching(self.inner.config.enable_latching)
                 .with_probation_max_packets(self.inner.config.latching_probation_max_packets)
+                .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
         };
 
         let caller_is_same_realm = self
@@ -1664,7 +1665,7 @@ impl CallModule {
         let dialplan = match dialplan {
             Ok(d) => d,
             Err(route_err) => {
-                warn!(key = %tx.key, "failed to build dialplan");
+                warn!(key = %tx.key, error = %route_err.error, status = ?route_err.status, "failed to build dialplan");
                 return self.reply_route_error(tx, &cookie, route_err).await;
             }
         };

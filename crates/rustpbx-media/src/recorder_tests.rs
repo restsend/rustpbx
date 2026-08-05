@@ -1048,6 +1048,7 @@ mod recorder_advanced_tests {
                     clock_rate: 8000,
                     channels: 1,
                 }),
+                dtmf_pts: vec![101],
                 transport: rustrtc::TransportMode::Rtp,
             },
         );

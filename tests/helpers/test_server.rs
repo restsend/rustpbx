@@ -73,7 +73,10 @@ pub struct TestPbx {
     pub registry: Arc<ActiveProxyCallRegistry>,
     /// Cancellation token — cancel to shut everything down.
     pub cancel_token: CancellationToken,
-
+    /// Shared SIP server reference for outbound originate tests.
+    pub sip_server: Option<SipServerRef>,
+    /// Shared conference manager (cloned from the SipServer).
+    pub conference_manager: Option<Arc<rustpbx::call::runtime::ConferenceManager>>,
 }
 
 impl TestPbx {
@@ -219,6 +222,8 @@ impl TestPbx {
             gateway,
             registry,
             cancel_token,
+            sip_server: Some(sip_server_ref.clone()),
+            conference_manager: Some(sip_server_ref.conference_manager.clone()),
         }
     }
 

@@ -118,6 +118,12 @@ pub struct NegotiatedLegProfile {
     pub audio: Option<NegotiatedCodec>,
     pub video: Option<NegotiatedCodec>,
     pub dtmf: Option<NegotiatedCodec>,
+    /// ALL telephone-event payload types negotiated in the answer, not just the
+    /// single preferred one (`dtmf`). A WebRTC peer may send DTMF on any of
+    /// them (e.g. `126 telephone-event/8000` for browsers, even when
+    /// `110 telephone-event/48000` is also negotiated for opus), so the leg's
+    /// ingress tap must listen on every one of these.
+    pub dtmf_pts: Vec<u8>,
     /// Transport mode for this leg (RTP or WebRTC/SRTP).
     pub transport: rustrtc::TransportMode,
 }
@@ -128,6 +134,7 @@ impl Default for NegotiatedLegProfile {
             audio: None,
             video: None,
             dtmf: None,
+            dtmf_pts: Vec::new(),
             transport: rustrtc::TransportMode::Rtp,
         }
     }
@@ -150,7 +157,11 @@ impl NegotiatedLegProfile {
 
     /// All telephone-event PTs configured for this leg.
     pub fn dtmf_pts(&self) -> std::collections::HashSet<u8> {
-        self.dtmf.iter().map(|c| c.payload_type).collect()
+        let mut pts: std::collections::HashSet<u8> = self.dtmf_pts.iter().copied().collect();
+        if let Some(dtmf) = &self.dtmf {
+            pts.insert(dtmf.payload_type);
+        }
+        pts
     }
 }
 
@@ -559,6 +570,7 @@ impl MediaNegotiator {
             audio,
             video,
             dtmf,
+            dtmf_pts: extracted.dtmf.iter().map(|c| c.payload_type).collect(),
             transport: rustrtc::TransportMode::Rtp,
         }
     }
@@ -2557,6 +2569,39 @@ a=rtpmap:0 PCMU/8000\r\n";
             "Only G729 allowed, scan past PCMU"
         );
         assert_eq!(best.payload_type, 18);
+    }
+
+    /// A WebRTC answer can negotiate TWO telephone-event payload types — e.g.
+    /// `110 telephone-event/48000` alongside `126 telephone-event/8000`.
+    /// Browsers send DTMF on the 8 kHz PT (126); rustpbx must keep BOTH so the
+    /// leg's ingress tap can detect DTMF regardless of which PT the peer uses.
+    #[test]
+    fn test_extract_leg_profile_webrtc_keeps_all_telephone_event_pts() {
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            t=0 0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 110 126\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:110 telephone-event/48000\r\n\
+            a=rtpmap:126 telephone-event/8000\r\n";
+
+        let profile = MediaNegotiator::extract_leg_profile(sdp);
+        let pts = profile.dtmf_pts();
+        assert!(
+            pts.contains(&110),
+            "must keep 48 kHz telephone-event PT 110, got {:?}",
+            pts
+        );
+        assert!(
+            pts.contains(&126),
+            "must keep 8 kHz telephone-event PT 126 (browser DTMF PT), got {:?}",
+            pts
+        );
     }
 
     #[test]

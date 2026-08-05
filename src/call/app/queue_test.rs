@@ -1799,4 +1799,260 @@ mod tests {
 
         stack.join().await.unwrap();
     }
+
+    // ── Audio path resolution + action rules (online / offline scenarios) ──
+    //
+    // The tests below guard the regression where the queue emitted a
+    // `CallCommand::Play` whose path was never resolved by `handle_play` on
+    // the SipSession side, so the caller heard no hold music and no
+    // transfer/busy/no-answer prompts even though the queue logic ran the
+    // correct branch for the agent status.
+    //
+    // They verify two things together:
+    //   1. The queue picks the right prompt for the agent-status branch
+    //      (online → transfer; all busy → busy; all no-answer → no-answer;
+    //      no agents → busy fallback).
+    //   2. The emitted path actually resolves to a decodable WAV — i.e. it
+    //      would reach the speaker if executed by a real SipSession.
+
+    use crate::call::domain::MediaSource;
+
+    /// Extract the file path from a `CallCommand::Play`, panicking otherwise.
+    fn play_path(cmd: &CallCommand) -> String {
+        match cmd {
+            CallCommand::Play {
+                source: MediaSource::File { path },
+                ..
+            } => path.clone(),
+            other => panic!("expected CallCommand::Play with File source, got {other:?}"),
+        }
+    }
+
+    /// True when the shipped `config/sounds/` tree is present (i.e. the test
+    /// runs from a workspace checkout). Tests that need real audio skip
+    /// otherwise — the resolution logic itself is covered in
+    /// `sip_session::tests`.
+    fn packaged_sounds_available() -> bool {
+        std::path::Path::new("config/sounds").is_dir()
+    }
+
+    /// Resolve a `sounds/…` spec the same way `SipSession::handle_play` does,
+    /// then prove the result is decodable by `FileAudioSource` — the exact
+    /// gate that gates real playback.
+    async fn assert_spec_is_playable(label: &str, spec: &str) {
+        use crate::media::audio_source::{AudioSource, FileAudioSource};
+        use crate::proxy::proxy_call::sip_session::SipSession;
+        let resolved = SipSession::resolve_audio_file_path(spec);
+        let src = FileAudioSource::new(resolved.clone(), false)
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] {spec} did not resolve to a playable file ({resolved}): {e}"));
+        assert!(
+            src.has_data(),
+            "[{label}] resolved file decoded to zero samples: {resolved}"
+        );
+        let _ = AudioSource::has_data(&src);
+    }
+
+    /// Queue config wired to the *real* shipped ZH prompts so the assertion
+    /// `assert_spec_is_playable` is meaningful.
+    fn build_queue_config_with_default_prompts() -> QueueConfig {
+        let mut config = build_simple_queue_config();
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+            loop_playback: true,
+        });
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config
+    }
+
+    /// Build (plan, config) where both halves reference the shipped default
+    /// audio paths. The queue reads hold music from `plan.hold`, so the plan
+    /// must be rebuilt from the default-wired config (not `build_simple_queue`,
+    /// which carries the synthetic `sounds/hold_music.wav` fixture).
+    fn build_plan_and_config_with_default_audio() -> (QueuePlan, QueueConfig) {
+        let config = build_queue_config_with_default_prompts();
+        let plan = config.to_plan();
+        (plan, config)
+    }
+
+    #[tokio::test]
+    async fn test_queue_hold_music_path_is_playable() {
+        if !packaged_sounds_available() {
+            eprintln!("skipping: config/sounds/ not present");
+            return;
+        }
+        let (plan, config) = build_plan_and_config_with_default_audio();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        let hold_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected hold-music Play command");
+        let path = play_path(&hold_cmd);
+        assert!(
+            path.ends_with("phone-calling.wav"),
+            "hold music should reference the default hold audio, got {path}"
+        );
+        assert_spec_is_playable("hold", &path).await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_online_agent_plays_transfer_prompt_that_is_playable() {
+        if !packaged_sounds_available() {
+            eprintln!("skipping: config/sounds/ not present");
+            return;
+        }
+        let (plan, config) = build_plan_and_config_with_default_audio();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // discard hold music
+        let _ = stack.next_cmd(200).await.expect("hold music");
+
+        // Simulate an agent coming online and accepting the call.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+
+        // Hold music is stopped first.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+
+        let transfer_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected transfer-prompt Play command");
+        let path = play_path(&transfer_cmd);
+        assert!(
+            path.ends_with("queue-transfer-zh.wav"),
+            "online agent should trigger the ZH transfer prompt, got {path}"
+        );
+        assert_spec_is_playable("transfer", &path).await;
+
+        stack.audio_complete("default");
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_all_agents_offline_plays_busy_prompt_that_is_playable() {
+        if !packaged_sounds_available() {
+            eprintln!("skipping: config/sounds/ not present");
+            return;
+        }
+        // Sequential plan with multiple agents — every one will report busy,
+        // mirroring the all-agents-offline / no-agents-available case.
+        let mut config = build_queue_config_with_default_prompts();
+        // Reuse the sequential agent list but keep default prompts/audio.
+        let seq = build_sequential_queue_config();
+        config.agents = seq.agents.clone();
+        config.strategy = seq.strategy.clone();
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // discard hold music
+        let _ = stack.next_cmd(200).await.expect("hold music");
+
+        // Every agent is reported busy (offline-equivalent exhaustion path).
+        stack.custom("all_agents_busy", serde_json::json!({}));
+
+        let busy_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected busy-prompt Play command");
+        let path = play_path(&busy_cmd);
+        assert!(
+            path.ends_with("queue-busy-zh.wav"),
+            "all-agents-unavailable should trigger the ZH busy prompt, got {path}"
+        );
+        assert_spec_is_playable("busy", &path).await;
+
+        stack.audio_complete("default");
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_no_answer_agents_plays_no_answer_prompt_that_is_playable() {
+        if !packaged_sounds_available() {
+            eprintln!("skipping: config/sounds/ not present");
+            return;
+        }
+        let mut config = build_queue_config_with_default_prompts();
+        let seq = build_sequential_queue_config();
+        config.agents = seq.agents.clone();
+        config.strategy = seq.strategy.clone();
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _ = stack.next_cmd(200).await.expect("hold music");
+
+        // Sequential no-answer across every agent.
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd-agent3", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        stack.custom("agent_no_answer", serde_json::json!({}));
+
+        let na_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected no-answer-prompt Play command");
+        let path = play_path(&na_cmd);
+        assert!(
+            path.ends_with("queue-no-answer-zh.wav"),
+            "all-agents-no-answer should trigger the ZH no-answer prompt, got {path}"
+        );
+        assert_spec_is_playable("no-answer", &path).await;
+
+        stack.audio_complete("default");
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+    }
 }

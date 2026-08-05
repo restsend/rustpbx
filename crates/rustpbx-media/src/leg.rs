@@ -38,8 +38,11 @@ use crate::ingress_tap::{DtmfEvent, IngressTap, MediaRecorder, TapStats};
 use crate::leg_id::LegId;
 use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
 
-/// Duration of a generated DTMF event in 8 kHz timestamp units (20 ms).
-const DTMF_EVENT_DURATION: u16 = 160;
+/// RFC 4733 telephone-event duration for a 20 ms event at the given clock
+/// rate (e.g. 160 @ 8 kHz, 960 @ 48 kHz).
+fn dtmf_event_duration_for_clock(clock_rate: u32) -> u16 {
+    ((clock_rate * 20) / 1000) as u16
+}
 
 
 /// Configuration for creating a [`Leg`]'s PeerConnection.
@@ -52,6 +55,11 @@ pub struct LegConfig {
     pub external_ip: Option<String>,
     pub bind_ip: Option<String>,
     pub cname: Option<String>,
+    /// Emit comfort noise (instead of digital silence) when the leg's egress
+    /// has no source. Defaults to true.
+    pub comfort_noise: bool,
+    /// Comfort-noise level in dBFS. Ignored when `comfort_noise` is false.
+    pub comfort_noise_level_db: f32,
 }
 
 impl LegConfig {
@@ -70,6 +78,8 @@ impl LegConfig {
             external_ip: None,
             bind_ip: None,
             cname: None,
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
         }
     }
 }
@@ -102,6 +112,10 @@ pub struct LegInner {
     /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
     /// is a no-op.
     dtmf_send: parking_lot::Mutex<DtmfSendState>,
+    /// Comfort-noise settings, preserved so `update_codec` (re-INVITE codec
+    /// switch) rebuilds the egress codec with the same CNG behaviour.
+    comfort_noise: bool,
+    comfort_noise_level_db: f32,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -110,10 +124,14 @@ struct DtmfSendState {
     /// Negotiated telephone-event payload type (e.g. 101), or `None` if the
     /// leg did not negotiate one (or has no profile yet).
     dtmf_pt: Option<u8>,
+    /// Negotiated telephone-event clock rate (RFC 4733: the audio codec's
+    /// clock rate, e.g. 48000 for opus, 8000 for PCMU/G722). Defaults to
+    /// 8000 when no profile is applied yet.
+    dtmf_clock_rate: u32,
     /// Next sequence number for outbound telephone-event packets.
     sequence: u16,
-    /// Timestamp base (8 kHz clock, per RFC 4733). Advanced by the event
-    /// duration for each digit so successive digits do not collide.
+    /// Timestamp base. Advanced by the event duration for each digit so
+    /// successive digits do not collide.
     timestamp: u32,
 }
 
@@ -156,6 +174,8 @@ impl LegInner {
         id: impl Into<String>,
         rtc_config: RtcConfiguration,
         codecs: Vec<CodecInfo>,
+        comfort_noise: bool,
+        comfort_noise_level_db: f32,
     ) -> Result<Leg> {
         let first_codec = codecs.first().ok_or_else(|| anyhow!("no codecs"))?;
         let pc = {
@@ -190,6 +210,8 @@ impl LegInner {
             codec: first_codec.codec,
             payload_type: first_codec.payload_type,
             clock_rate: first_codec.clock_rate,
+            comfort_noise,
+            comfort_noise_level_db,
         };
         let egress = EgressPipeline::start_with_gate(
             sender,
@@ -210,6 +232,8 @@ impl LegInner {
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: AtomicBool::new(false),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
+            comfort_noise,
+            comfort_noise_level_db,
         }))
     }
 
@@ -236,7 +260,13 @@ impl LegInner {
     /// [`RtcConfiguration`] internally). Prefer [`Self::from_rtc_config`] when
     /// you already have a fully-configured `RtcConfiguration`.
     pub fn new(id: impl Into<String>, cfg: &LegConfig) -> Result<Leg> {
-        Self::from_rtc_config(id, build_rtc_config(cfg), cfg.codecs.clone())
+        Self::from_rtc_config(
+            id,
+            build_rtc_config(cfg),
+            cfg.codecs.clone(),
+            cfg.comfort_noise,
+            cfg.comfort_noise_level_db,
+        )
     }
 
     pub fn id(&self) -> &LegId {
@@ -351,6 +381,8 @@ impl LegInner {
                         codec: audio.codec,
                         payload_type: audio.payload_type,
                         clock_rate: audio.clock_rate,
+                        comfort_noise: self.comfort_noise,
+                        comfort_noise_level_db: self.comfort_noise_level_db,
                     })
                     .await?;
             }
@@ -374,13 +406,20 @@ impl LegInner {
 
     fn apply_profile(&self, profile: &NegotiatedLegProfile) {
         *self.negotiated.lock() = Some(profile.clone());
-        // DTMF telephone-event payload types → tap.
-        if let Some(d) = &profile.dtmf {
-            self.tap.set_dtmf_payload_types(vec![d.payload_type]);
-        }
+        // DTMF telephone-event payload types → tap. Listen on ALL negotiated
+        // telephone-event PTs (a WebRTC peer may send DTMF on any of them, e.g.
+        // the 8 kHz PT for browsers), not just the single preferred `dtmf`.
+        let dtmf_pts: Vec<u8> = profile.dtmf_pts().into_iter().collect();
+        self.tap.set_dtmf_payload_types(dtmf_pts);
         // Sync the outbound DTMF send state so RFC 2833 packets use the
-        // negotiated telephone-event payload type.
-        self.dtmf_send.lock().dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
+        // negotiated telephone-event payload type and clock rate.
+        let mut dtmf = self.dtmf_send.lock();
+        dtmf.dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
+        dtmf.dtmf_clock_rate = profile
+            .dtmf
+            .as_ref()
+            .map(|d| d.clock_rate)
+            .unwrap_or(8000);
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -402,15 +441,53 @@ impl LegInner {
             // Switching TO RewriteRelay: (re)arm the rewrite bridge on this PC.
             EgressSource::RewriteRelay { peer_pc, params } => {
                 // The rewrite bridge needs both RTP transports ready (they are
-                // created during SDP negotiation); wait briefly for them.
-                let _ = self                    .pc
-                    .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
-                    .await;
-                let _ = peer_pc
-                    .wait_for_rtp_transport_ready(std::time::Duration::from_secs(2))
-                    .await;
-                self.pc.clear_rtp_rewrite_bridge();
-                self.pc.bridge_rtp_with_rewrite_to(peer_pc, *params)?;
+                // created during SDP negotiation / DTLS start). Block until
+                // they exist instead of proceeding and failing
+                // bridge_rtp_with_rewrite_to, which previously left the relay
+                // un-armed with only a WARN in MediaBridge::accept.
+                //
+                // Exception: a WebRTC peer's SRTP transport only exists after
+                // the remote has received our answer (200 OK) and completed
+                // DTLS. Waiting on it here synchronously deadlocks call setup
+                // (the 200 OK is sent only after this function returns), so
+                // defer the arming to a background task and return
+                // immediately. RTP-mode transports are created during SDP
+                // application and are ready synchronously.
+                let timeout = std::time::Duration::from_secs(2);
+                let has_webrtc_peer = self.pc.config().transport_mode == TransportMode::WebRtc
+                    || peer_pc.config().transport_mode == TransportMode::WebRtc;
+                if has_webrtc_peer {
+                    let pc = self.pc.clone();
+                    let peer = peer_pc.clone();
+                    let params = *params;
+                    tokio::spawn(async move {
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            async {
+                                pc.wait_for_rtp_transport_ready(timeout).await?;
+                                peer.wait_for_rtp_transport_ready(timeout).await?;
+                                pc.clear_rtp_rewrite_bridge();
+                                pc.bridge_rtp_with_rewrite_to(&peer, params)?;
+                                Ok::<_, anyhow::Error>(())
+                            },
+                        )
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                debug!(error = %e, "deferred fast-path relay arming failed");
+                            }
+                            Err(_) => {
+                                debug!("deferred fast-path relay arming timed out");
+                            }
+                        }
+                    });
+                } else {
+                    self.pc.wait_for_rtp_transport_ready(timeout).await?;
+                    peer_pc.wait_for_rtp_transport_ready(timeout).await?;
+                    self.pc.clear_rtp_rewrite_bridge();
+                    self.pc.bridge_rtp_with_rewrite_to(peer_pc, *params)?;
+                }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
             // sender owns the ICE send channel again.
@@ -509,12 +586,13 @@ impl LegInner {
             let Some(code) = crate::telephone_event::dtmf_char_to_code(c) else {
                 continue;
             };
-            let (seq, ts) = {
+            let (seq, ts, duration) = {
                 let mut st = self.dtmf_send.lock();
                 let (seq, ts) = (st.sequence, st.timestamp);
                 st.sequence = st.sequence.wrapping_add(2);
-                st.timestamp = st.timestamp.wrapping_add(DTMF_EVENT_DURATION as u32);
-                (seq, ts)
+                let duration = dtmf_event_duration_for_clock(st.dtmf_clock_rate);
+                st.timestamp = st.timestamp.wrapping_add(duration as u32);
+                (seq, ts, duration)
             };
 
             // Start packet: E=0, duration=0.
@@ -523,10 +601,11 @@ impl LegInner {
                 crate::telephone_event::telephone_event_payload(code, false, 0),
             );
             self.pc.send_raw_rtp(start).await?;
-            // End packet: E=1, duration = total event length (160 units).
+            // End packet: E=1, duration = total event length (20 ms in the
+            // negotiated telephone-event clock units).
             let end = RtpPacket::new(
                 RtpHeader::new(dtmf_pt, seq.wrapping_add(1), ts, ssrc),
-                crate::telephone_event::telephone_event_payload(code, true, DTMF_EVENT_DURATION),
+                crate::telephone_event::telephone_event_payload(code, true, duration),
             );
             self.pc.send_raw_rtp(end).await?;
             digits_sent += 1;
@@ -587,6 +666,7 @@ impl LegInner {
         let state = &self.rtp_timeout;
         state.active.store(false, Ordering::Release);
         if let Some(tx) = state.fire_tx.lock().take() {
+            debug!(leg = %self.id, "RTP inactivity timeout fired (no ingress packets)");
             let _ = tx.send(());
         }
     }
@@ -703,6 +783,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dtmf_event_duration_scales_with_telephone_event_clock() {
+        // RFC 4733: the duration field is in the negotiated telephone-event
+        // clock's units. A 20 ms event is 160 @ 8 kHz, 320 @ 16 kHz, 960 @ 48 kHz.
+        assert_eq!(dtmf_event_duration_for_clock(8000), 160);
+        assert_eq!(dtmf_event_duration_for_clock(16000), 320);
+        assert_eq!(dtmf_event_duration_for_clock(48000), 960);
+    }
+
+
+    /// When a leg negotiates multiple telephone-event PTs (e.g. WebRTC answer
+    /// with both 110 telephone-event/48000 and 126 telephone-event/8000), the
+    /// ingress tap must detect DTMF on ANY of them. Browsers send DTMF on the
+    /// 8 kHz PT (126); if the tap only listened on the preferred 48 kHz PT
+    /// (110) the digit would be silently dropped.
+    #[tokio::test]
+    async fn leg_tap_detects_dtmf_on_any_negotiated_telephone_event_pt() {
+        use rustrtc::peer_connection::RtpObserver;
+        use rustrtc::rtp::{RtpHeader, RtpPacket};
+        use std::net::SocketAddr;
+
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            t=0 0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111 110 126\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtpmap:110 telephone-event/48000\r\n\
+            a=rtpmap:126 telephone-event/8000\r\n";
+        let profile = negotiate::MediaNegotiator::extract_leg_profile(sdp);
+        assert!(profile.dtmf_pts().contains(&110));
+        assert!(profile.dtmf_pts().contains(&126));
+
+        let leg = LegInner::new("dtmf-leg", &LegConfig::rtp_pcmu()).expect("leg");
+        leg.apply_profile(&profile);
+
+        let tap = leg.ingress_tap();
+        let mut rx = tap.subscribe_dtmf();
+        let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+
+        // DTMF "1" = code 0x01, sent on PT 126 (the 8 kHz browser PT).
+        let pkt = RtpPacket::new(RtpHeader::new(126, 1, 0, 1234), vec![1u8, 0x80, 10, 0xA0]);
+        tap.on_ingress(&pkt, addr);
+        let ev = rx
+            .try_recv()
+            .expect("DTMF on negotiated 8 kHz PT (126) must be detected");
+        assert_eq!(ev.digit, '1');
+
+        leg.stop();
+    }
+
     #[tokio::test]
     async fn leg_create_and_close_rtp() {
         // Two RTP legs bound to ephemeral ports must construct and stop
@@ -734,6 +866,8 @@ mod tests {
             external_ip: None,
             bind_ip: None,
             cname: Some("webrtc-test".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
         };
         let a = LegInner::new("a", &cfg).expect("webrtc leg");
         let offer = a.create_offer(vec![]).await.expect("create_offer");

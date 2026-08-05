@@ -235,6 +235,9 @@ pub struct Config {
 
     pub callrecord: Option<CallRecordConfig>,
     pub ice_servers: Option<Vec<IceServer>>,
+    /// Media server settings (comfort noise etc.).
+    #[serde(default)]
+    pub media: Option<MediaSection>,
     #[serde(default = "default_ami_config")]
     pub ami: Option<AmiConfig>,
     #[cfg(feature = "console")]
@@ -258,6 +261,8 @@ pub struct Config {
     pub rwi_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
+    #[serde(default)]
+    pub outbound: Option<OutboundConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -594,9 +599,35 @@ pub struct RtpConfig {
     pub webrtc_start_port: Option<u16>,
     pub webrtc_end_port: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
+    /// Emit comfort noise instead of digital silence when a leg's egress has
+    /// no source (defaults to true).
+    #[serde(default = "default_comfort_noise")]
+    pub comfort_noise: bool,
+    /// Comfort-noise level in dBFS (default -35.0).
+    #[serde(default = "default_comfort_noise_level_db")]
+    pub comfort_noise_level_db: f32,
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+fn default_comfort_noise() -> bool {
+    true
+}
+
+fn default_comfort_noise_level_db() -> f32 {
+    -35.0
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct MediaSection {
+    /// Emit comfort noise instead of digital silence when a leg's egress has
+    /// no source. Defaults to true.
+    #[serde(default = "default_comfort_noise")]
+    pub comfort_noise: bool,
+    /// Comfort-noise level in dBFS (default -35.0).
+    #[serde(default = "default_comfort_noise_level_db")]
+    pub comfort_noise_level_db: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpRouterConfig {
     pub url: String,
     pub headers: Option<HashMap<String, String>>,
@@ -960,6 +991,48 @@ pub struct AmiConfig {
     pub allows: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OutboundConfig {
+    #[serde(default = "default_outbound_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_outbound_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_outbound_ring_timeout")]
+    pub default_ring_timeout: u64,
+    #[serde(default = "default_outbound_answer_timeout")]
+    pub default_answer_timeout: u64,
+    #[serde(default = "default_outbound_webhook_timeout")]
+    pub default_webhook_timeout: u64,
+}
+
+impl Default for OutboundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: 100,
+            default_ring_timeout: 30,
+            default_answer_timeout: 60,
+            default_webhook_timeout: 5,
+        }
+    }
+}
+
+fn default_outbound_enabled() -> bool {
+    true
+}
+fn default_outbound_max_concurrent() -> usize {
+    100
+}
+fn default_outbound_ring_timeout() -> u64 {
+    30
+}
+fn default_outbound_answer_timeout() -> u64 {
+    60
+}
+fn default_outbound_webhook_timeout() -> u64 {
+    5
+}
+
 impl AmiConfig {
     pub fn is_allowed(&self, addr: &str) -> bool {
         if let Some(allows) = &self.allows {
@@ -1234,6 +1307,7 @@ impl Default for Config {
             proxy: ProxyConfig::default(),
             callrecord: None,
             ice_servers: None,
+            media: None,
             ami: Some(AmiConfig::default()),
             external_ip: None,
             auto_external_ip: None,
@@ -1253,6 +1327,7 @@ impl Default for Config {
             licenses: None,
             rwi_webhook: None,
             cluster: None,
+            outbound: None,
         }
     }
 }
@@ -1288,6 +1363,7 @@ impl Config {
     }
 
     pub fn rtp_config(&self) -> RtpConfig {
+        let media = self.media.as_ref();
         RtpConfig {
             external_ip: self.external_ip.clone(),
             auto_external_ip: self.auto_external_ip.clone(),
@@ -1297,6 +1373,12 @@ impl Config {
             webrtc_start_port: self.webrtc_port_start,
             webrtc_end_port: self.webrtc_port_end,
             ice_servers: self.ice_servers.clone(),
+            comfort_noise: media
+                .map(|m| m.comfort_noise)
+                .unwrap_or_else(default_comfort_noise),
+            comfort_noise_level_db: media
+                .map(|m| m.comfort_noise_level_db)
+                .unwrap_or_else(default_comfort_noise_level_db),
         }
     }
 

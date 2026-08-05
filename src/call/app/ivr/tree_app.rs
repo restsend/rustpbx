@@ -601,6 +601,46 @@ impl IvrApp {
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(format!("voicemail:{}", target)))
             }
+            EntryAction::Bridge {
+                create_room_uri,
+                headers,
+                return_to_ivr,
+                success,
+                failure,
+                ..
+            } => {
+                // Mirror step-mode behavior (common.rs execute_action): substitute
+                // variables, expose bridge_* session vars, append return_to_ivr,
+                // then transfer to the `bridge:` target.
+                let mut vars: std::collections::HashMap<String, String> = ctx
+                    .session_vars
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().clone()))
+                    .collect();
+                for (k, v) in &self.collected_variables {
+                    vars.insert(k.clone(), v.clone());
+                }
+                let mut uri = super::common::substitute_vars(create_room_uri, &vars);
+                ctx.session_vars
+                    .insert("bridge_room_uri".into(), uri.clone());
+                for (k, v) in headers {
+                    ctx.session_vars
+                        .insert(format!("bridge_hdr_{}", k), v.clone());
+                }
+                if success.is_some() || failure.is_some() {
+                    ctx.session_vars.insert("bridge_branch".into(), "true".into());
+                }
+                if let Some(ivr_name) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
+                    let sep = if uri.contains('?') { "&" } else { "?" };
+                    uri = format!("{}{}return_to_ivr={}", uri, sep, ivr_name);
+                }
+                let target = format!("bridge:{}", uri);
+                info!(ivr = %self.definition.name, target = %target, "IVR bridging to WebSocket endpoint");
+                self.ivr_flow_completed(ctx, "transferred", "bridge", Some(target.as_str()))
+                    .await;
+                self.state = IvrState::Done;
+                Ok(AppAction::Transfer(target))
+            }
             EntryAction::Play {
                 prompt,
                 prompt_text,
@@ -894,8 +934,7 @@ impl IvrApp {
             | EntryAction::Api { .. }
             | EntryAction::Torecord { .. }
             | EntryAction::JumpIvr { .. }
-            | EntryAction::RouteToAgent { .. }
-            | EntryAction::Bridge { .. } => {
+            | EntryAction::RouteToAgent { .. } => {
                 error!(ivr = %self.definition.name, action = ?std::mem::discriminant(action),
                     "Tree mode IVR received unsupported step-mode action");
                 Err(anyhow::anyhow!("unsupported action type for tree mode"))

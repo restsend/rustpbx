@@ -185,6 +185,10 @@ pub struct SipflowItem {
     pub timestamp: u32,
     pub ssrc: u32,
     pub sequence_number: u16,
+    /// Wall-clock receive time (epoch micros), used by sipflow for query
+    /// range filtering and WAV timeline placement.
+    pub received_at_micros: u64,
+    /// Full marshaled RTP packet (header + payload) exactly as observed.
     pub raw: Bytes,
 }
 
@@ -196,13 +200,23 @@ impl SipflowRecorder {
 
 impl MediaRecorder for SipflowRecorder {
     fn write_sample(&self, direction: PacketDirection, packet: &RtpPacket) {
+        // Marshal the full packet (header + payload) so the sipflow export
+        // path can decode codec / timing from the RTP header.
+        let Ok(raw) = packet.marshal() else {
+            return;
+        };
+        let received_at_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or_default();
         let item = SipflowItem {
             direction,
             payload_type: packet.header.payload_type,
             timestamp: packet.header.timestamp,
             ssrc: packet.header.ssrc,
             sequence_number: packet.header.sequence_number,
-            raw: Bytes::copy_from_slice(&packet.payload),
+            received_at_micros,
+            raw: Bytes::from(raw),
         };
         let _ = self.tx.try_send(item);
     }
@@ -264,7 +278,8 @@ mod tests {
         let a = rx.recv().await.unwrap();
         assert_eq!(a.direction, PacketDirection::Ingress);
         assert_eq!(a.payload_type, 0);
-        assert_eq!(a.raw.len(), 80);
+        // Full RTP packet (12-byte header + 80-byte payload).
+        assert_eq!(a.raw.len(), 92);
         let b = rx.recv().await.unwrap();
         assert_eq!(b.direction, PacketDirection::Egress);
         rec.finalize(); // no-op, must not panic
