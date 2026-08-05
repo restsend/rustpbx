@@ -3867,13 +3867,18 @@ impl SipSession {
             )
             .severity(crate::call_errors::ErrSeverity::Info),
         );
-        let mut last_error = {
+        if targets.is_empty() {
             self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_TARGETS);
-            into_callee_err(
+            return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
-            )
-        };
+            ));
+        }
+
+        let mut last_error = into_callee_err(
+            &StatusCode::TemporarilyUnavailable,
+            Some("All targets failed".to_string()),
+        );
 
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
@@ -3893,6 +3898,8 @@ impl SipSession {
             }
         }
 
+        self.meta.error_code =
+            Some(&crate::proxy::proxy_call::error_catalog::DIAL_ALL_TARGETS_FAILED);
         Err(last_error)
     }
 

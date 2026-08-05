@@ -1210,6 +1210,16 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
     let records = server.cdr_capture.get_all_records().await;
     assert!(!records.is_empty(), "Should have CDR");
     assert_eq!(records[0].details.status, "completed");
+    let error_code = records[0]
+        .details
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("error_code"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(
+        error_code, None,
+        "a successful sequential call must not retain a dialing error"
+    );
 
     server.stop();
     info!("test_trunk_b2bua_options_keepalive PASSED");
