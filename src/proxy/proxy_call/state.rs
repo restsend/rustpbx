@@ -39,8 +39,20 @@ pub struct CallSessionRecordSnapshot {
     /// Merged session + routing metadata (opaque HashMap pass-through).
     /// Populated by `record_snapshot` from the session extensions bag and
     /// consumed directly by the reporter — no longer hidden inside `extensions`.
-    pub metadata: std::collections::HashMap<String, String>,
+    /// Values are JSON so structured entries (e.g. the `trace` array) persist
+    /// cleanly into the call-record `metadata` column.
+    pub metadata: std::collections::HashMap<String, serde_json::Value>,
     pub extensions: http::Extensions,
+}
+
+/// Bookkeeping for an in-flight `media.play`, used to emit `Play` trace events
+/// with duration and interruption.
+#[derive(Clone, Debug)]
+pub struct ActivePlay {
+    /// What was being played (file path or description).
+    pub source: String,
+    /// When playback started (relative to session start, ms).
+    pub started_at: std::time::Instant,
 }
 
 /// Session hangup message

@@ -1206,6 +1206,13 @@ impl SipSession {
                 self.update_leg_state(&original_leg, LegState::Connected);
                 self.update_leg_state(&consult_leg, LegState::Connected);
                 let _ = self.handle_unhold(original_leg.clone()).await;
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Transfer,
+                        "Attended transfer completed",
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Info),
+                );
                 info!("Attended transfer completed successfully");
             } else {
                 return Err(anyhow!("Failed to setup bridge for transfer completion"));

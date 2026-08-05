@@ -127,6 +127,15 @@ enum DialogSide {
 
 pub type CalleeError = (u16, String, Option<String>);
 
+/// Format a millisecond duration for trace messages, e.g. `1.2s`, `850ms`.
+fn format_duration_ms(ms: i64) -> String {
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}ms", ms)
+    }
+}
+
 pub fn into_callee_err(code: &StatusCode, msg: Option<String>) -> CalleeError {
     (code.code(), code.text().to_string(), msg)
 }
@@ -214,6 +223,11 @@ pub struct SipSession {
     /// recorder control). No command-channel communication is involved, so the
     /// leak-by-lost-command failure mode cannot occur.
     media_session_guard: Option<crate::media::engine::session::MediaSessionGuard>,
+
+    /// In-flight `media.play` bookkeeping for the call trace: track_id → what
+    /// is playing and when it started. Used to emit `Play` trace events with
+    /// duration + interruption. `record_play_end` is idempotent via `remove`.
+    active_plays: std::collections::HashMap<String, crate::proxy::proxy_call::state::ActivePlay>,
 }
 
 #[derive(Clone)]
@@ -1072,6 +1086,7 @@ impl SipSession {
             cmd_tx: Some(cmd_tx.clone()),
             dtmf_digits: Vec::new(),
             media_session_guard: Some(media_session_guard),
+            active_plays: std::collections::HashMap::new(),
         };
 
         // Create the rtp-timeout channel at construction time so the sender is
@@ -3774,6 +3789,14 @@ impl SipSession {
                     auto_answer,
                 } => {
                     info!(app_name = %app_name, "Executing application flow");
+                    self.meta.app_name = Some(app_name.clone());
+                    self.record_trace(
+                        crate::call_errors::TraceEvent::new(
+                            crate::call_errors::TraceKind::Ivr,
+                            format!("Application '{}' started", app_name),
+                        )
+                        .severity(crate::call_errors::ErrSeverity::Info),
+                    );
                     if let Err(e) = self
                         .app_runtime
                         .start_app(app_name, app_params.clone(), *auto_answer)
@@ -3821,10 +3844,20 @@ impl SipSession {
         targets: &[crate::call::Location],
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
-        let mut last_error = into_callee_err(
-            &StatusCode::TemporarilyUnavailable,
-            Some("No targets to dial".to_string()),
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Ring,
+                format!("Dialing {} target(s) sequentially", targets.len()),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
         );
+        let mut last_error = {
+            self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_TARGETS);
+            into_callee_err(
+                &StatusCode::TemporarilyUnavailable,
+                Some("No targets to dial".to_string()),
+            )
+        };
 
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
@@ -3853,6 +3886,7 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
         if targets.is_empty() {
+            self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_TARGETS);
             return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
@@ -3883,7 +3917,16 @@ impl SipSession {
         use rsipstack::dialog::invitation::InviteOption;
         use rsipstack::sip::StatusCodeKind;
 
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Ring,
+                format!("Forking INVITEs to {} target(s) in parallel", targets.len()),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
+
         if targets.is_empty() {
+            self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_TARGETS);
             return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
@@ -3891,6 +3934,7 @@ impl SipSession {
         }
 
         if self.context.dialplan.caller.is_none() {
+            self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_CALLER);
             return Err(into_callee_err(
                 &StatusCode::ServerInternalError,
                 Some("No caller in dialplan".to_string()),
@@ -4117,6 +4161,21 @@ impl SipSession {
     /// Send 183 Session Progress with early media audio played to the caller.
     /// Supports file paths and `tone://frequency,duration_ms` format.
     async fn send_early_media_tone(&mut self, audio_path: &str) -> Result<()> {
+        self.send_early_media(audio_path, true).await
+    }
+
+    /// Play a one-shot early-media cue (e.g. a failure/beep tone) through the
+    /// caller media bridge. Unlike [`send_early_media_tone`], the asset is
+    /// played exactly once and is never looped — see issue #249.
+    async fn send_early_media_cue(&mut self, audio_path: &str) -> Result<()> {
+        self.send_early_media(audio_path, false).await
+    }
+
+    /// Build (if needed) the caller media bridge, send 183 Session Progress,
+    /// and play `audio_path` as early media. `loop_playback` controls whether
+    /// the asset repeats until the call answers (ringback) or plays once
+    /// (short cues/beeps).
+    async fn send_early_media(&mut self, audio_path: &str, loop_playback: bool) -> Result<()> {
         if self.media.early_media_sent {
             return Ok(());
         }
@@ -4195,7 +4254,7 @@ impl SipSession {
             let track = crate::media::FileTrack::new("progress-media".to_string())
                 .with_session_id(self.id.clone())
                 .with_path(resolved_path)
-                .with_loop(true)
+                .with_loop(loop_playback)
                 .with_codec_info(codec_info)
                 .with_cname(self.server.rtc_cname.clone());
             if let Err(e) = bridge
@@ -4210,6 +4269,7 @@ impl SipSession {
             self.media
                 .playback_tracks
                 .insert("progress-media".to_string(), track);
+            self.record_play_start("progress-media", "ringback");
         }
 
         Ok(())
@@ -4306,7 +4366,7 @@ impl SipSession {
                 play_seconds = %dur.as_secs(),
                 "Playing failure tone before rejection",
             );
-            if let Err(e) = self.send_early_media_tone(path).await {
+            if let Err(e) = self.send_early_media_cue(path).await {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to play failure tone");
             } else {
                 tokio::time::sleep(dur).await;
@@ -6087,6 +6147,13 @@ impl SipSession {
             bridge.clear_app_ingress_drain();
             bridge.start_bridge().await;
             self.media.media_bridge_started = true;
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Bridge,
+                    "Media bridge established",
+                )
+                .severity(crate::call_errors::ErrSeverity::Info),
+            );
         }
     }
 
@@ -7898,6 +7965,13 @@ impl SipSession {
         }
 
         self.meta.answer_time = Some(Instant::now());
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Answer,
+                "Call answered",
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
         // The INVITE final status for an answered call is the 2xx that
         // established it (200 in practice). Lock it so later signaling (BYE,
         // re-INVITE failures, transfer failures) cannot change the CDR status.
@@ -8406,6 +8480,7 @@ impl SipSession {
                     self.media
                         .playback_tracks
                         .insert("hold-music-callee".to_string(), track);
+                    self.record_play_start("hold-music-callee", "hold music (callee)");
                     self.media
                         .bridge_playback_track_ids
                         .insert("callee".to_string(), "hold-music-callee".to_string());
@@ -8485,6 +8560,7 @@ impl SipSession {
                     self.media
                         .playback_tracks
                         .insert("hold-music-caller".to_string(), track);
+                    self.record_play_start("hold-music-caller", "hold music (caller)");
                     self.media
                         .bridge_playback_track_ids
                         .insert("caller".to_string(), "hold-music-caller".to_string());
@@ -8830,6 +8906,7 @@ impl SipSession {
         let Some(track) = self.media.playback_tracks.remove(track_id) else {
             return;
         };
+        self.record_play_end(track_id, true);
 
         track.stop().await;
         let (leg_label, dynamic_leg_id) = Self::infer_track_leg(track_id);
@@ -9044,6 +9121,13 @@ impl SipSession {
     async fn cleanup(&mut self) {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
 
+        // Flush any in-flight media plays that finished naturally (without an
+        // explicit stop) so the trace shows their full duration + completion.
+        let leftover: Vec<String> = self.active_plays.keys().cloned().collect();
+        for track_id in leftover {
+            self.record_play_end(&track_id, false);
+        }
+
         // The call has entered terminal cleanup. Release tenant, carrier, and
         // trunk concurrent-call permits before any potentially slow cleanup.
         self.concurrent_call_lease.release_all();
@@ -9219,6 +9303,16 @@ impl SipSession {
             )
         {
             self.meta.hangup_reason = Some(CallRecordHangupReason::Abandoned);
+            self.meta.error_code =
+                Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Queue,
+                    "Caller abandoned the queue",
+                )
+                .severity(crate::call_errors::ErrSeverity::Warn)
+                .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code),
+            );
         }
 
         // ── 2. IVR end reason bridge ────────────────────────────────
@@ -9234,18 +9328,45 @@ impl SipSession {
             let ivr_error = runtime.context.get_var("ivr_last_error");
 
             let ivr_override = match ivr_end.as_deref() {
-                Some("hangup") => Some(CallRecordHangupReason::BySystem),
-                Some("remote_hangup") => Some(CallRecordHangupReason::ByCaller),
-                Some("timeout") => Some(CallRecordHangupReason::Autohangup),
+                Some("normal") => {
+                    self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_NORMAL);
+                    Some(CallRecordHangupReason::BySystem)
+                }
+                Some("hangup") => {
+                    self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_HANGUP);
+                    Some(CallRecordHangupReason::BySystem)
+                }
+                // NOTE: EndReason::UserHangup serializes as "user_hangup";
+                // "remote_hangup" is a legacy value kept for compatibility.
+                Some("user_hangup") | Some("remote_hangup") => {
+                    self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_USER_HANGUP);
+                    Some(CallRecordHangupReason::ByCaller)
+                }
+                Some("timeout") => {
+                    self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_TIMEOUT);
+                    Some(CallRecordHangupReason::Autohangup)
+                }
                 Some("error") => {
                     let msg = ivr_error.unwrap_or_else(|| "unknown ivr error".to_string());
+                    self.meta.error_code =
+                        Some(&crate::call::app::error_catalog::IVR_EXECUTE_ERROR);
                     Some(CallRecordHangupReason::Other(format!("ivr_error: {}", msg)))
                 }
-                // normal / transferred / chained / cancelled — call may have
-                // continued; keep the SIP-layer reason.
+                // transfer / transfer_to_queue / transfer_to_ivr / chained /
+                // cancelled — call continued; keep the SIP-layer reason.
                 _ => None,
             };
 
+            if let Some(info) = self.meta.error_code {
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Ivr,
+                        format!("IVR ended: {}", info.message),
+                    )
+                    .severity(info.severity)
+                    .code(info.code),
+                );
+            }
             if let Some(reason) = ivr_override {
                 self.meta.hangup_reason = Some(reason);
             }
@@ -9717,34 +9838,152 @@ impl SipSession {
         Ok(())
     }
 
+    /// Append an event to the session's diagnostic trace timeline. `ts` is
+    /// computed as milliseconds since the session started.
+    pub fn record_trace(&mut self, event: crate::call_errors::TraceEvent) {
+        let mut ev = event;
+        ev.ts = self.context.start_time.elapsed().as_millis() as i64;
+        self.meta.trace.push(ev);
+    }
+
+    /// Record the start of a media playback for the trace. The `track_id` is
+    /// later passed to [`Self::record_play_end`] to emit a `Play` event with
+    /// duration and interruption status.
+    pub fn record_play_start(&mut self, track_id: impl Into<String>, source: impl Into<String>) {
+        self.active_plays.insert(
+            track_id.into(),
+            crate::proxy::proxy_call::state::ActivePlay {
+                source: source.into(),
+                started_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// Record the end of a media playback: emits a `Play` trace event carrying
+    /// the played duration and whether it was interrupted. Idempotent — a
+    /// second call for the same `track_id` is a no-op.
+    pub fn record_play_end(&mut self, track_id: &str, interrupted: bool) {
+        let Some(play) = self.active_plays.remove(track_id) else {
+            return;
+        };
+        let duration_ms = play.started_at.elapsed().as_millis() as i64;
+        let message = format!(
+            "Played {} · {} · {}",
+            play.source,
+            format_duration_ms(duration_ms),
+            if interrupted { "interrupted" } else { "completed" }
+        );
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(crate::call_errors::TraceKind::Play, message)
+                .duration(duration_ms)
+                .interrupted(interrupted)
+                .detail(serde_json::json!({ "source": play.source })),
+        );
+    }
+
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
-        // Merge agent + routing data into a HashMap so the reporter picks it up.
+        // Merge agent + routing data into a JSON map so the reporter picks it up.
         // Agent info was written into session extensions by CcCallSessionHook
         // (as a HashMap<String, String>). Routing metadata comes from the
-        // dialplan extensions (also HashMap<String, String>).
+        // dialplan extensions (also HashMap<String, String>). Values are JSON
+        // so structured entries (e.g. the `trace` array) persist cleanly.
         let extensions = self.context.dialplan.extensions.clone();
         let metadata = {
             // Start with session extensions (CC agent info)
-            let mut meta: std::collections::HashMap<String, String> = self
+            let mut meta: std::collections::HashMap<String, serde_json::Value> = self
                 .extensions
                 .read()
                 .get::<std::collections::HashMap<String, String>>()
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
             // Merge in dialplan extensions (routing metadata)
             if let Some(route_meta) = extensions
                 .get::<std::collections::HashMap<String, String>>()
                 .cloned()
             {
                 for (k, v) in route_meta {
-                    meta.entry(k).or_insert(v);
+                    meta.entry(k).or_insert_with(|| serde_json::Value::String(v));
                 }
             }
             if let Some(ref qn) = self.meta.queue_name {
-                meta.insert("queue_name".to_string(), qn.clone());
+                meta.insert(
+                    "queue_name".to_string(),
+                    serde_json::Value::String(qn.clone()),
+                );
+            }
+            if let Some(info) = self.meta.error_code {
+                meta.insert(
+                    "error_code".to_string(),
+                    serde_json::Value::String(info.code.to_string()),
+                );
+                if let Some(app) = info.code.split('.').next() {
+                    meta.insert(
+                        "error_app".to_string(),
+                        serde_json::Value::String(app.to_string()),
+                    );
+                }
+            }
+            if let Some(ref app) = self.meta.app_name {
+                meta.insert(
+                    "app_name".to_string(),
+                    serde_json::Value::String(app.clone()),
+                );
+            }
+            if let Some(ref ql) = self.meta.queue_label {
+                meta.insert(
+                    "queue_label".to_string(),
+                    serde_json::Value::String(ql.clone()),
+                );
             }
             if let Some(ref callee) = self.meta.connected_callee {
-                meta.insert("connected_callee".to_string(), callee.clone());
+                meta.insert(
+                    "connected_callee".to_string(),
+                    serde_json::Value::String(callee.clone()),
+                );
+            }
+            // Call trace: ordered timeline of transitions + media plays +
+            // terminal outcome. Stored as a real JSON array under `trace`.
+            let mut trace: Vec<crate::call_errors::TraceEvent> = self.meta.trace.clone();
+            // Terminal End event — carries the hangup initiator and any
+            // standardized error code so "why did the call end" is visible.
+            {
+                let (severity, code, msg) = if let Some(info) = self.meta.error_code {
+                    (
+                        info.severity,
+                        Some(info.code.to_string()),
+                        format!("Call ended: {}", info.message),
+                    )
+                } else {
+                    let reason = self
+                        .meta
+                        .hangup_reason
+                        .as_ref()
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (
+                        crate::call_errors::ErrSeverity::Info,
+                        None,
+                        format!("Call ended: {}", reason),
+                    )
+                };
+                let end = crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::End,
+                    msg,
+                )
+                .severity(severity);
+                let end = match code {
+                    Some(c) => end.code(&c),
+                    None => end,
+                };
+                trace.push(end);
+            }
+            if !trace.is_empty() {
+                if let Ok(arr) = serde_json::to_value(&trace) {
+                    meta.insert("trace".to_string(), arr);
+                }
             }
             meta
         };
@@ -10467,7 +10706,7 @@ impl SipSession {
     /// inbound re-INVITE carrying `sendonly`/`inactive` (or back to
     /// `sendrecv`). No-op when there is no transition or no hooks registered.
     async fn fire_hold_transition_hooks(
-        &self,
+        &mut self,
         leg_id: &LegId,
         prev: Option<LegState>,
         new: LegState,
@@ -10476,6 +10715,23 @@ impl SipSession {
         let left_hold = matches!(prev, Some(LegState::Hold)) && new != LegState::Hold;
         if !entered_hold && !left_hold {
             return;
+        }
+        if entered_hold {
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Hold,
+                    format!("Leg {} placed on hold", leg_id),
+                )
+                .severity(crate::call_errors::ErrSeverity::Info),
+            );
+        } else {
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Resume,
+                    format!("Leg {} resumed from hold", leg_id),
+                )
+                .severity(crate::call_errors::ErrSeverity::Info),
+            );
         }
         if self.server.session_hooks.is_empty() {
             return;
@@ -11230,6 +11486,7 @@ impl SipSession {
                     .insert($leg_str.to_string(), target_tid.clone());
                 self.media.playback_tracks
                     .insert(target_tid.clone(), leg_track);
+                self.record_play_start(target_tid.clone(), file_path.clone());
             }};
         }
 

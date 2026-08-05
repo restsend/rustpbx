@@ -17,6 +17,18 @@ impl SipSession {
         use crate::call::DialStrategy;
 
         self.meta.queue_name = Some(plan.queue_name.clone());
+        self.meta.queue_label = plan.label.clone();
+        self.meta.app_name = Some("queue".to_string());
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                format!(
+                    "Call entered queue '{}'",
+                    plan.label.as_deref().unwrap_or(&plan.queue_name)
+                ),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
 
         info!("Executing queue plan");
 
@@ -178,10 +190,14 @@ impl SipSession {
         no_trying_timeout: Option<Duration>,
         retry_codes: Option<&[u16]>,
     ) -> Result<(), CalleeError> {
-        let mut last_error = into_callee_err(
-            &StatusCode::TemporarilyUnavailable,
-            Some("All agents unavailable".to_string()),
-        );
+        let mut last_error = {
+            self.meta.error_code =
+                Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE);
+            into_callee_err(
+                &StatusCode::TemporarilyUnavailable,
+                Some("All agents unavailable".to_string()),
+            )
+        };
 
         for (idx, agent) in agents.iter().enumerate() {
             if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
@@ -234,6 +250,8 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
         if agents.is_empty() {
+            self.meta.error_code =
+                Some(&crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS);
             return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No agents available".to_string()),
@@ -450,6 +468,9 @@ impl SipSession {
                             .map_err(super::map_queue_xfer_err)
                         } else {
                             warn!(skill_group = %skill_group_id, "No agents found for this skill group");
+                            self.meta.error_code = Some(
+                                &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS_SKILL,
+                            );
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!(
@@ -460,6 +481,9 @@ impl SipSession {
                         }
                     } else {
                         warn!("No agent registry available for skill group resolution");
+                        self.meta.error_code = Some(
+                            &crate::proxy::proxy_call::error_catalog::QUEUE_AGENT_REGISTRY_MISSING,
+                        );
                         Err(into_callee_err(
                             &StatusCode::TemporarilyUnavailable,
                             Some("Agent registry not available".to_string()),
@@ -483,6 +507,9 @@ impl SipSession {
                         }
                         Err(e) => {
                             warn!(queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
+                            self.meta.error_code = Some(
+                                &crate::proxy::proxy_call::error_catalog::QUEUE_REENQUEUE_FAILED,
+                            );
                             Err(into_callee_err(
                                 &StatusCode::TemporarilyUnavailable,
                                 Some(format!("Re-enqueue failed: {}", e)),
@@ -493,6 +520,9 @@ impl SipSession {
             }
             None => {
                 info!("Queue fallback - default hangup with busy tone");
+                self.meta.error_code = Some(
+                    &crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE_DEFAULT,
+                );
                 Err(into_callee_err(
                     &StatusCode::BusyHere,
                     Some("All agents unavailable".to_string()),

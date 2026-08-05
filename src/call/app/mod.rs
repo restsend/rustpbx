@@ -85,6 +85,7 @@ mod event_loop;
 
 pub mod agent_registry;
 pub mod conference;
+pub mod error_catalog;
 pub mod ivr;
 pub mod ivr_config;
 pub mod queue;
