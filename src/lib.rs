@@ -9,6 +9,7 @@ pub mod app;
 pub mod auth;
 pub mod auto_external_ip;
 pub mod call;
+pub mod call_errors;
 pub mod callrecord;
 pub mod config;
 pub mod config_store;

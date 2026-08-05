@@ -72,6 +72,9 @@ pub struct AppStateInner {
     pub config_path: Option<String>,
     pub reload_requested: AtomicBool,
     pub addon_registry: Arc<crate::addons::registry::AddonRegistry>,
+    /// Merged call-error registry (catalogs from all compiled-in subsystems).
+    /// Powers call-record error rendering and the live error-codes manual page.
+    pub call_errors: Arc<crate::call_errors::CallErrRegistry>,
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
     pub tls_reloader: Arc<RwLock<Option<Arc<TlsReloaderRegistry>>>>,
@@ -522,6 +525,7 @@ impl AppStateBuilder {
             config_path,
             reload_requested: AtomicBool::new(false),
             addon_registry: addon_registry.clone(),
+            call_errors: crate::call_errors::build_registry(),
             #[cfg(feature = "console")]
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),

@@ -9,6 +9,7 @@ pub mod call_control;
 pub mod call_record;
 pub mod dashboard;
 pub mod diagnostics;
+pub mod error_codes;
 pub mod extension;
 pub mod forms;
 pub mod licenses;
@@ -60,6 +61,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(routing::urls())
         .merge(call_record::urls())
         .merge(diagnostics::urls())
+        .merge(error_codes::urls())
         .merge(call_control::urls())
         .merge(addons::urls())
         .merge(licenses::urls())
