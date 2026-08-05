@@ -300,16 +300,6 @@ path = "src/bin/rustpbx.rs"
 name = "sipflow"
 path = "src/bin/sipflow.rs"
 
-[[bin]]
-name = "sipflow-diag"
-path = "src/bin/sipflow-diag.rs"
-
-# Use the local flowdb crate (block-index prefix query fix).
-# [patch.crates-io]
-# flowdb = { path = "../flowdb" }
-
 [profile.dev]
-opt-level = 1
-codegen-units = 256
-incremental = true
-debug = 1
+opt-level = 0
+codegen-units = 16
