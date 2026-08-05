@@ -264,18 +264,13 @@ impl AclModule {
         let Some(server) = self.inner.server.as_ref() else {
             return None;
         };
-        let invite_users = if matches!(&origin.method, rsipstack::sip::Method::Invite) {
-            Some((extract_from_user(origin), extract_to_user(origin)))
-        } else {
-            None
-        };
-        let (from_user, to_user) = invite_users
-            .as_ref()
-            .map(|(f, t)| (f.as_deref(), t.as_deref()))
-            .unwrap_or((None, None));
-        server
-            .data_context
-            .resolve_inbound_trunk_by_ip(addr, from_user, to_user)
+        let from_user = extract_from_user(origin);
+        let to_user = extract_to_user(origin);
+        server.data_context.resolve_inbound_trunk_by_ip(
+            addr,
+            from_user.as_deref(),
+            to_user.as_deref(),
+        )
     }
 
     pub(crate) async fn is_ip_allowed(&self, addr: &IpAddr) -> bool {
@@ -599,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_trunk_index_matches_cidr_and_invite_prefix() {
+    async fn runtime_trunk_index_matches_cidr_and_request_prefix() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
         let mut config = ProxyConfig::default();
         config.generated_dir = format!(
@@ -667,6 +662,19 @@ mod tests {
         let ctx = acl
             .is_from_trunk_context(&source_ip, &matching_request)
             .expect("matching prefix should select a trunk");
+        assert_eq!(ctx.id, Some(145));
+        assert_eq!(ctx.name, "prefix-86155");
+
+        let matching_bye = create_test_request(
+            rsipstack::sip::Method::Bye,
+            "861551234",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let ctx = acl
+            .is_from_trunk_context(&source_ip, &matching_bye)
+            .expect("BYE should use its From/To users for prefix matching");
         assert_eq!(ctx.id, Some(145));
         assert_eq!(ctx.name, "prefix-86155");
 
