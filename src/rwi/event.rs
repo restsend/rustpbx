@@ -110,6 +110,13 @@ pub struct CallIncoming {
 rwi_event!(CallIncoming, "call_incoming");
 
 #[derive(Debug, Clone, Serialize)]
+pub struct CallInitiated {
+    pub call_id: String,
+    pub destination: String,
+}
+rwi_event!(CallInitiated, "call_initiated");
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {
     pub call_id: String,
 }

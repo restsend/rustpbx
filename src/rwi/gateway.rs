@@ -55,6 +55,9 @@ pub struct RwiGateway {
     session_event_filters: HashMap<SessionId, HashSet<String>>,
     /// Optional broadcast sender for the RWI webhook handler.
     webhook_tx: Option<broadcast::Sender<EventCacheEntry>>,
+    /// Always-on event tap — every cached event is fanned out here.
+    /// Used by the outbound SSE interface to subscribe to call progress events.
+    event_tap: broadcast::Sender<EventCacheEntry>,
     /// In-memory call context store for event enrichment.
     pub meta_store: Arc<CallMetaStore>,
 }
@@ -83,6 +86,7 @@ impl RwiGateway {
     /// * `max_cache_size` - Maximum number of events to cache
     /// * `max_cache_age_secs` - Maximum age of cached events in seconds
     pub fn with_config(max_cache_size: usize, max_cache_age_secs: u64) -> Self {
+        let (event_tap, _) = broadcast::channel(512);
         Self {
             sessions: HashMap::new(),
             session_event_senders: HashMap::new(),
@@ -99,6 +103,7 @@ impl RwiGateway {
             call_vars: HashMap::new(),
             session_event_filters: HashMap::new(),
             webhook_tx: None,
+            event_tap,
             meta_store: CallMetaStore::new(),
         }
     }
@@ -124,6 +129,18 @@ impl RwiGateway {
     /// Set the broadcast sender for the RWI webhook handler.
     pub fn set_webhook_tx(&mut self, tx: broadcast::Sender<EventCacheEntry>) {
         self.webhook_tx = Some(tx);
+    }
+
+    /// Subscribe to the always-on event tap.
+    ///
+    /// Every event that flows through the gateway (via `send_event_to_call_owner`,
+    /// `fan_out_event_to_context`, `broadcast_event`, and their typed-spec
+    /// counterparts) is fanned out to this broadcast channel.
+    ///
+    /// Callers should filter by `call_id` and handle `RecvError::Lagged`
+    /// gracefully (e.g. skip missed events and continue).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<EventCacheEntry> {
+        self.event_tap.subscribe()
     }
 
     /// Returns true if a webhook handler is configured and wired.
@@ -432,17 +449,19 @@ impl RwiGateway {
         cache_state.next_sequence
     }
 
-    /// Forward a cached event to the webhook broadcast channel, if configured.
+    /// Forward a cached event to the webhook broadcast channel (if configured)
+    /// and to the always-on event tap.
     fn forward_to_webhook(&self, call_id: &CallId, event: &RwiEvent, sequence: u64) {
+        let entry = EventCacheEntry {
+            sequence,
+            cached_at: chrono::Utc::now(),
+            call_id: call_id.clone(),
+            event: event.clone(),
+        };
         if let Some(tx) = &self.webhook_tx {
-            let entry = EventCacheEntry {
-                sequence,
-                cached_at: chrono::Utc::now(),
-                call_id: call_id.clone(),
-                event: event.clone(),
-            };
-            let _ = tx.send(entry);
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
     }
 
     /// Send an event to the owner of a call_id (if any).
@@ -538,15 +557,17 @@ impl RwiGateway {
             cache_state.next_sequence += 1;
             s
         };
+        let call_id = event.call_id.clone().unwrap_or_default();
+        let entry = EventCacheEntry {
+            sequence: seq,
+            cached_at: chrono::Utc::now(),
+            call_id: call_id.clone(),
+            event: event.clone(),
+        };
         if let Some(tx) = &self.webhook_tx {
-            let entry = EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: event.call_id.clone().unwrap_or_default(),
-                event: event.clone(),
-            };
-            let _ = tx.send(entry);
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
 
         for session_id in self.session_event_senders.keys() {
             self.send_event_to_session(session_id, event);
@@ -653,17 +674,22 @@ impl RwiGateway {
 
     pub fn broadcast<E: RwiEventSpec>(&self, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
-        if let Some(tx) = &self.webhook_tx {
+        let seq = {
             let mut cs = self.event_cache.lock();
-            let seq = cs.next_sequence;
+            let s = cs.next_sequence;
             cs.next_sequence += 1;
-            let _ = tx.send(EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: String::new(),
-                event: flat.clone(),
-            });
+            s
+        };
+        let entry = EventCacheEntry {
+            sequence: seq,
+            cached_at: chrono::Utc::now(),
+            call_id: String::new(),
+            event: flat.clone(),
+        };
+        if let Some(tx) = &self.webhook_tx {
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
         self.dispatch_flat(&flat);
     }
 
@@ -675,14 +701,16 @@ impl RwiGateway {
         let flat = RwiEvent::from_spec(event, None);
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
+        let entry = EventCacheEntry {
+            sequence: seq,
+            cached_at: chrono::Utc::now(),
+            call_id: cid.clone(),
+            event: enriched.clone(),
+        };
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: cid.clone(),
-                event: enriched.clone(),
-            });
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
         if let Some(owner_id) = self.call_ownership.get(&cid) {
             self.send_flat_to_session(owner_id, &enriched);
         }
@@ -696,14 +724,16 @@ impl RwiGateway {
         let flat = RwiEvent::from_spec(event, None);
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
+        let entry = EventCacheEntry {
+            sequence: seq,
+            cached_at: chrono::Utc::now(),
+            call_id: cid.clone(),
+            event: enriched.clone(),
+        };
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: cid.clone(),
-                event: enriched.clone(),
-            });
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
         if let Some(subscribers) = self.context_subscriptions.get(context) {
             for session_id in subscribers {
                 self.send_flat_to_session(session_id, &enriched);
@@ -730,14 +760,16 @@ impl RwiGateway {
         let flat = RwiEvent::from_spec(event, None);
         let seq = self.cache_flat_event(&cid, &flat);
         let enriched = self.enrich_flat_event(&flat);
+        let entry = EventCacheEntry {
+            sequence: seq,
+            cached_at: chrono::Utc::now(),
+            call_id: cid.clone(),
+            event: enriched.clone(),
+        };
         if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: cid.clone(),
-                event: enriched.clone(),
-            });
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry);
         if let Some(subscribers) = self.context_subscriptions.get(context) {
             for session_id in subscribers {
                 if exclude.map_or(false, |e| e == session_id) {

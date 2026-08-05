@@ -136,6 +136,13 @@ class BenchmarkResult:
     leak_final_slope_mb_per_min: float = 0.0
     leak_base_delta_mb: float = 0.0
 
+    # Media/session task-count drift after drain
+    task_drift: dict[str, Any] = field(default_factory=dict)
+    drain_passed: bool = True
+    drain_details: dict[str, Any] = field(default_factory=dict)
+    audio_format: dict[str, Any] = field(default_factory=dict)
+    media_continuity: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario,
@@ -168,6 +175,11 @@ class BenchmarkResult:
             "leak_final_assessment": self.leak_final_assessment,
             "leak_final_slope_mb_per_min": self.leak_final_slope_mb_per_min,
             "leak_base_delta_mb": self.leak_base_delta_mb,
+            "task_drift": self.task_drift,
+            "drain_passed": self.drain_passed,
+            "drain_details": self.drain_details,
+            "audio_format": self.audio_format,
+            "media_continuity": self.media_continuity,
         }
 
 
@@ -271,6 +283,18 @@ class ResourceMonitor:
                     data = json.loads(resp.read())
                     calls = data.get("sipserver", {}).get("calls", 0)
                     sample["calls"] = float(calls)
+                    # Media/session task-count leak signals.
+                    tokio = data.get("tokio", {})
+                    sample["tasks_total"] = float(data.get("tasks", {}).get("total", 0) or 0)
+                    sample["media_alive_tasks"] = float(
+                        (tokio.get("media") or {}).get("num_alive_tasks", 0) or 0
+                    )
+                    sample["sip_alive_tasks"] = float(
+                        (tokio.get("sip") or {}).get("num_alive_tasks", 0) or 0
+                    )
+                    leak = data.get("sipserver", {}).get("leak", {}) or {}
+                    sample["leak_handles"] = float(leak.get("handles_by_dialog", 0) or 0)
+                    sample["leak_dialogs"] = float(leak.get("dialogs_by_session", 0) or 0)
             except Exception:
                 pass
 
@@ -495,9 +519,22 @@ class ResourceMonitor:
         if calls_list:
             result["calls_peak"] = int(max(calls_list))
             result["calls_avg"] = sum(calls_list) / len(calls_list)
+            result["calls_end"] = int(calls_list[-1])
         else:
             result["calls_peak"] = 0
             result["calls_avg"] = 0.0
+            result["calls_end"] = 0
+
+        # Media/session task-count leak signals: after calls drain, live tasks
+        # should return to the idle baseline. Report min/end/drift.
+        for key in ("tasks_total", "media_alive_tasks", "sip_alive_tasks",
+                    "leak_handles", "leak_dialogs"):
+            vals = [s[key] for s in snap if key in s]
+            if vals:
+                result[f"{key}_min"] = int(min(vals))
+                result[f"{key}_end"] = int(vals[-1])
+                result[f"{key}_drift"] = int(vals[-1] - min(vals))
+
         if self.leak_reports:
             final = self.leak_reports[-1]
             result["leak_final_assessment"] = final["assessment"]
@@ -743,10 +780,12 @@ class P2PBenchmark:
                 self.sipflow_process.wait()
             self.sipflow_process = None
 
-    def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False, wholesale: bool = False) -> bool:
+    def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False, wholesale: bool = False,
+                      recording: bool = False, webrtc: bool = False) -> bool:
         """Start rustpbx with specified configuration."""
         print(f"\n{'='*60}")
-        print(f"Starting rustpbx (mediaproxy={mediaproxy}, sipflow={sipflow}, wholesale={wholesale})")
+        print(f"Starting rustpbx (mediaproxy={mediaproxy}, sipflow={sipflow}, wholesale={wholesale}, "
+              f"recording={recording}, webrtc={webrtc})")
         print(f"{'='*60}")
 
         self._kill_rustpbx()
@@ -758,7 +797,8 @@ class P2PBenchmark:
             self.start_sipflow_server()
 
         db_suffix = self._create_database()
-        config_path = self._create_config(mediaproxy, sipflow, db_suffix, wholesale=wholesale)
+        config_path = self._create_config(mediaproxy, sipflow, db_suffix, wholesale=wholesale,
+                                          recording=recording, webrtc=webrtc)
         if not config_path:
             return False
 
@@ -902,7 +942,9 @@ class P2PBenchmark:
             print(f"[mysql] Failed to create database ({e}), using base config")
             return ""
 
-    def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "", wholesale: bool = False) -> str | None:
+    def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "",
+                       wholesale: bool = False, recording: bool = False,
+                       webrtc: bool = False) -> str | None:
         """Create a temporary config file with specified settings."""
         try:
             with open(self.rustpbx_config, "r") as f:
@@ -923,15 +965,54 @@ class P2PBenchmark:
                 config_content,
             )
 
-            # Disable recording — recording.enabled=true forces media proxy on
-            # regardless of media_proxy setting, which would invalidate the
-            # mediaproxy=none scenario.
-            config_content = re.sub(
-                r'(\[recording\][^\[]*enabled\s*=\s*)true',
-                lambda m: m.group(1) + "false",
-                config_content,
-                flags=re.DOTALL,
-            )
+            # Recording: by default disable (recording.enabled=true forces media
+            # proxy on regardless of media_proxy, invalidating mediaproxy=none).
+            # When `recording` is requested, keep it enabled; if sipflow is also
+            # on, set force_file=true so both coexist.
+            if not recording:
+                config_content = re.sub(
+                    r'(\[recording\][^\[]*enabled\s*=\s*)true',
+                    lambda m: m.group(1) + "false",
+                    config_content,
+                    flags=re.DOTALL,
+                )
+            elif sipflow:
+                if not re.search(r'(?m)\[recording\].*?force_file\s*=',
+                                 config_content, flags=re.DOTALL):
+                    config_content = re.sub(
+                        r'(?m)(\[recording\])(\s*\n[^[]*?auto_start\s*=\s*true)',
+                        lambda m: m.group(1) + m.group(2) + "\nforce_file = true",
+                        config_content,
+                        flags=re.DOTALL,
+                    )
+                    if "force_file" not in config_content:
+                        config_content = re.sub(
+                            r'(?m)^\[recording\]\n',
+                            "[recording]\nforce_file = true\n",
+                            config_content,
+                        )
+
+            # WebRTC: mark the memory users WebRTC-capable (DTLS-SRTP).
+            if webrtc:
+                config_content = re.sub(
+                    r'(?m)^(username\s*=\s*"(?:bob|alice)")[^\S\n]*\n',
+                    lambda m: m.group(1) + "\nis_support_webrtc = true\n",
+                    config_content,
+                )
+
+            # Ensure an RWI token exists (needed for conference scenarios).
+            if not re.search(r'(?m)^\[\[rwi\.tokens\]\]', config_content):
+                config_content += (
+                    "\n[[rwi.tokens]]\n"
+                    'token = "bench-rwi-token"\n'
+                    'scopes = ["call", "session", "media", "record", "conference", "queue"]\n'
+                )
+            else:
+                config_content = re.sub(
+                    r'(?m)(\[\[rwi\.tokens\]\]\s*\n\s*token\s*=\s*)"[^"]*"',
+                    lambda m: m.group(1) + '"bench-rwi-token"',
+                    config_content,
+                )
 
             # Enable wholesale addon under [proxy] (addons is a ProxyConfig field).
             # wholesale is a commercial addon; initialize() runs migrations +
@@ -1039,6 +1120,9 @@ class P2PBenchmark:
         hangup: int = 120,
         verbose: bool = True,
         ring_duration: float = 0.0,
+        codecs: str = "pcmu",
+        webrtc: bool = False,
+        audio_quality: bool = False,
     ) -> bool:
         """Start UAS instances registered as extension users.
 
@@ -1080,7 +1164,7 @@ class P2PBenchmark:
                 "--password", password,
                 "--register", f"{self.proxy_host}:{self.proxy_port}",
                 "-a", f"127.0.0.1:{port}",
-                "--codecs", "pcmu",
+                "--codecs", codecs,
                 "--hangup", str(hangup),
             ]
             if ring_duration and ring_duration > 0:
@@ -1088,6 +1172,10 @@ class P2PBenchmark:
             cmd += [
                 "--echo",  # echo mode for realistic bidirectional RTP
             ]
+            if webrtc:
+                cmd.append("--webrtc")
+            if audio_quality:
+                cmd.append("--audio-quality")
             if verbose:
                 cmd.append("-v")
 
@@ -1115,6 +1203,9 @@ class P2PBenchmark:
         wall_time: int = 0,
         batch_window: int = 120,
         cancel_prob: int = 0,
+        codecs: str = "pcmu",
+        webrtc: bool = False,
+        audio_quality: bool = False,
     ) -> tuple[str, float]:
         """Run batch UAC calls via sipbot call --total --cps.
 
@@ -1132,15 +1223,18 @@ class P2PBenchmark:
         run_benchmark around this call.
         """
         if soak and wall_time > 0:
-            return self._run_uac_soak(cps, duration, wall_time, batch_window)
-        return self._run_uac_single(total, cps, duration, soak=False)
+            return self._run_uac_soak(cps, duration, wall_time, batch_window, codecs=codecs, webrtc=webrtc)
+        return self._run_uac_single(total, cps, duration, soak=False, codecs=codecs, cancel_prob=cancel_prob, webrtc=webrtc, audio_quality=audio_quality)
 
     def _run_uac_single(
         self, total: int, cps: int, duration: int, soak: bool,
+        codecs: str = "pcmu", cancel_prob: int = 0, webrtc: bool = False,
+        audio_quality: bool = False,
     ) -> tuple[str, float]:
         """Run one sipbot call batch."""
         print(f"\n{'='*60}")
         print(f"Starting UAC batch: {total} calls @ {cps} CPS, duration={duration}s"
+              f", codecs={codecs}, webrtc={webrtc}"
               f"{' [SOAK batch]' if soak else ''}")
         print(f"{'='*60}")
 
@@ -1158,13 +1252,17 @@ class P2PBenchmark:
             "--username", username,
             "--password", password,
             "--register", f"{self.proxy_host}:{self.proxy_port}",
-            "--codecs", "pcmu",
+            "--codecs", codecs,
             "--hangup", str(duration),
             "--total", str(total),
             "--cps", str(cps),
         ]
         if cancel_prob > 0:
             cmd += ["--cancel-prob", str(cancel_prob)]
+        if webrtc:
+            cmd.append("--webrtc")
+        if audio_quality:
+            cmd.append("--audio-quality")
         if not soak:
             cmd.append("-v")  # -v logs every RTP packet — unusable over long runs
 
@@ -1190,6 +1288,7 @@ class P2PBenchmark:
 
     def _run_uac_soak(
         self, cps: int, duration: int, wall_time: int, batch_window: int,
+        codecs: str = "pcmu", webrtc: bool = False, audio_quality: bool = False,
     ) -> tuple[str, float]:
         """Sustain load for wall_time by looping sipbot batches.
 
@@ -1211,7 +1310,7 @@ class P2PBenchmark:
 
         try:
             for i in range(batches):
-                output, _bw = self._run_uac_single(batch_total, cps, duration, soak=True)
+                output, _bw = self._run_uac_single(batch_total, cps, duration, soak=True, codecs=codecs, webrtc=webrtc, audio_quality=audio_quality)
                 completed, ctotal, status = self._parse_batch_progress(output)
                 agg_completed += completed
                 agg_total += ctotal
@@ -1304,6 +1403,11 @@ class P2PBenchmark:
         wholesale: bool = False,
         wall_time: int = 0,
         leak_check_interval: int = 0,
+        uas_codecs: str = "pcmu",
+        uac_codecs: str = "pcmu",
+        recording: bool = False,
+        webrtc: bool = False,
+        audio_quality: bool = False,
     ) -> BenchmarkResult:
         """Run a single benchmark scenario."""
         # In wall-time (soak) mode, derive total so the batch sustains for the
@@ -1344,14 +1448,17 @@ class P2PBenchmark:
 
         try:
             # 1. Start rustpbx
-            if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=sipflow, wholesale=wholesale):
+            if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=sipflow, wholesale=wholesale,
+                                      recording=recording, webrtc=webrtc):
                 result.errors.append("Failed to start rustpbx")
                 return result
 
             time.sleep(2)
 
             # 2. Start UAS instances (hangup > call_duration so UAS doesn't hang up early)
-            if not self.start_uas_instances(uas_count, base_port=uas_base_port, hangup=duration + 30, verbose=not soak):
+            if not self.start_uas_instances(uas_count, base_port=uas_base_port, hangup=duration + 30,
+                                            verbose=not soak, codecs=uas_codecs, webrtc=webrtc,
+                                            audio_quality=audio_quality):
                 result.errors.append("Failed to start UAS instances")
                 return result
 
@@ -1367,7 +1474,8 @@ class P2PBenchmark:
             # 4. Run UAC batch (loops sipbot batches in soak mode)
             uac_output, wall_time = self.run_uac_batch(
                 total, cps, duration, soak=soak, wall_time=wall_time,
-                cancel_prob=self.cancel_prob,
+                cancel_prob=self.cancel_prob, codecs=uac_codecs, webrtc=webrtc,
+                audio_quality=audio_quality,
             )
             result.test_duration_s = wall_time
 
@@ -1377,8 +1485,18 @@ class P2PBenchmark:
             # 6. Stop monitoring (triggers final leak check)
             resource_summary = self.stop_monitoring()
 
-            # 7. Collect results
+            # 7. Drain + assert: calls/tasks/sessions must return to baseline.
+            drain_ok = self.drain_and_assert(result)
+
+            # 8. Collect results
             self._collect_results(result, uac_output, resource_summary)
+            result.drain_passed = drain_ok
+
+            # 9. Verify audio format (PT + samplerate) on each leg.
+            self.verify_audio_format(result, uac_codecs, uas_codecs)
+
+            # 10. Verify media continuity (no seq/ts jumps → no audio glitches).
+            self.verify_media_continuity(result)
 
             result.end_time = datetime.now(timezone.utc).isoformat()
 
@@ -1411,6 +1529,16 @@ class P2PBenchmark:
         result.leak_final_slope_mb_per_min = resource_summary.get("leak_final_slope_mb_per_min", 0.0)
         result.leak_base_delta_mb = resource_summary.get("leak_base_delta_mb", 0.0)
 
+        # Media/session task-count leak signals (drift after drain)
+        result.task_drift = {
+            "tasks_total": resource_summary.get("tasks_total_drift"),
+            "media_alive_tasks": resource_summary.get("media_alive_tasks_drift"),
+            "sip_alive_tasks": resource_summary.get("sip_alive_tasks_drift"),
+            "leak_handles": resource_summary.get("leak_handles_drift"),
+            "leak_dialogs": resource_summary.get("leak_dialogs_drift"),
+            "calls_end": resource_summary.get("calls_end"),
+        }
+
         # Parse UAC metrics
         metrics = parse_stress_metrics(uac_output)
 
@@ -1426,6 +1554,562 @@ class P2PBenchmark:
         result.tx_packets = metrics["tx_packets"]
         result.rx_packets = metrics["rx_packets"]
         result.status_counts = metrics["status_counts"]
+
+    # -----------------------------------------------------------------------
+    # Drain + leak assertion (the core media leak check)
+    # -----------------------------------------------------------------------
+
+    def drain_and_assert(self, result: BenchmarkResult, drain_timeout: int = 45,
+                         task_drift_max: int = 20, handles_max: int = 5) -> bool:
+        """After the load wave, poll /ami/v1/health until active calls drain to 0,
+        then assert sessions/tasks return to baseline.
+
+        Fails (returns False) when calls stay stuck, leaked handles/dialogs
+        remain, or the tracked task count drifts beyond `task_drift_max`.
+        """
+        health_url = f"{self.http_base}/ami/v1/health"
+        details: dict[str, Any] = {}
+
+        def fetch() -> dict:
+            try:
+                req = urllib.request.Request(health_url)
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return json.loads(resp.read())
+            except Exception:
+                return {}
+
+        # 1. Wait for active calls to drain. A successful fetch must be observed;
+        #    if the health endpoint is unreachable the whole time, calls stays -1
+        #    and we FAIL (cannot confirm drain).
+        deadline = time.time() + drain_timeout
+        calls = -1
+        saw_health = False
+        while time.time() < deadline:
+            data = fetch()
+            if "sipserver" in data:
+                saw_health = True
+                calls = data.get("sipserver", {}).get("calls", calls)
+                if calls in (0, None):
+                    break
+            time.sleep(1)
+        details["calls_at_end"] = calls
+        details["health_observed"] = saw_health
+
+        # 2. Final leak gauges + task counts (best-effort).
+        data = fetch()
+        leak = data.get("sipserver", {}).get("leak", {}) or {}
+        tokio = data.get("tokio", {})
+        details["leak_handles"] = leak.get("handles_by_dialog", 0)
+        details["leak_dialogs"] = leak.get("dialogs_by_session", 0)
+        details["tasks_total"] = data.get("tasks", {}).get("total", 0)
+        details["media_alive_tasks"] = (tokio.get("media") or {}).get("num_alive_tasks", 0)
+
+        result.drain_details = details
+
+        problems: list[str] = []
+        if not saw_health:
+            problems.append("health endpoint unreachable — cannot confirm drain")
+        if calls not in (0, None):
+            problems.append(f"calls stuck at {calls}")
+        if details.get("leak_handles", 0) > handles_max:
+            problems.append(f"leaked handles_by_dialog={details['leak_handles']}")
+        if details.get("leak_dialogs", 0) > handles_max:
+            problems.append(f"leaked dialogs_by_session={details['leak_dialogs']}")
+        if details.get("tasks_total", 0) > task_drift_max:
+            problems.append(f"tasks.total={details['tasks_total']} > {task_drift_max}")
+        if details.get("media_alive_tasks", 0) > task_drift_max:
+            problems.append(f"media alive tasks={details['media_alive_tasks']} > {task_drift_max}")
+
+        ok = not problems
+        if ok:
+            print(f"[drain] PASS — calls={calls}, handles={details.get('leak_handles')}, "
+                  f"dialogs={details.get('leak_dialogs')}, tasks={details.get('tasks_total')}")
+        else:
+            msg = "; ".join(problems)
+            result.errors.append(f"drain/leak failed: {msg}")
+            print(f"  ⚠ [drain] FAIL — {msg}", flush=True)
+        return ok
+
+    # -----------------------------------------------------------------------
+    # Conference (MCU mixer) benchmark
+    # -----------------------------------------------------------------------
+
+    # Negotiated codec → (payload_type, sample_rate). Used to assert each leg
+    # of every scenario negotiated the expected audio format end-to-end.
+    AUDIO_FORMAT: dict[str, tuple[int, int]] = {
+        "pcmu": (0, 8000),
+        "pcma": (8, 8000),
+        "g722": (9, 8000),
+        "g729": (18, 8000),
+        "opus": (111, 48000),
+    }
+
+    @staticmethod
+    def _codec_normalize(name: str) -> str:
+        return name.strip().lower()
+
+    def verify_audio_format(self, result: BenchmarkResult,
+                            uac_codecs: str, uas_codecs: str) -> bool:
+        """Assert the UAC and UAS legs negotiated the expected codec (hence the
+        expected PT + sample rate) across the whole run.
+
+        Parses sipbot logs: UAC `codec: X` / `Preferred Codec: X`; UAS
+        `Negotiated Codec: X` / `Preferred Codec: X`. The dominant negotiated
+        codec on each leg must equal the scenario's codec.
+        """
+        def dominant(paths: list[str], patterns: list[str]) -> str | None:
+            counts: dict[str, int] = {}
+            import glob as _glob
+            for p in paths:
+                for f in _glob.glob(p):
+                    try:
+                        text = open(f, errors="replace").read()
+                    except Exception:
+                        continue
+                    for pat in patterns:
+                        for m in re.finditer(pat, text):
+                            c = self._codec_normalize(m.group(1))
+                            counts[c] = counts.get(c, 0) + 1
+            if not counts:
+                return None
+            return max(counts, key=counts.get)
+
+        uac_codes = ["codec: ([A-Za-z0-9]+)", "Preferred Codec: ([A-Za-z0-9]+)"]
+        uas_codes = ["Negotiated Codec: ([A-Za-z0-9]+)", "Preferred Codec: ([A-Za-z0-9]+)"]
+
+        uac_actual = dominant(
+            [getattr(self, "uac_process", None) and getattr(self.uac_process, "_log_file", "") or ""],
+            uac_codes,
+        )
+        uas_paths = [getattr(u, "_log_file", "") for u in getattr(self, "uas_list", [])]
+        uas_actual = dominant(uas_paths, uas_codes)
+
+        # Actual-audio samplerate check: sipbot's --audio-quality analyzer reports
+        # `mismatch=N` when the decoded frame sample count does not match the codec's
+        # declared sample rate (i.e. the actual audio rate is wrong). N>0 = FAIL.
+        def max_mismatch(paths: list[str]) -> int:
+            worst = 0
+            import glob as _glob
+            for p in paths:
+                for f in _glob.glob(p):
+                    try:
+                        text = open(f, errors="replace").read()
+                    except Exception:
+                        continue
+                    for m in re.finditer(r"mismatch=(\d+)", text):
+                        worst = max(worst, int(m.group(1)))
+            return worst
+
+        uac_mm = max_mismatch(
+            [getattr(self, "uac_process", None) and getattr(self.uac_process, "_log_file", "") or ""])
+        uas_mm = max_mismatch(uas_paths)
+
+        exp_uac = self._codec_normalize(uac_codecs)
+        exp_uas = self._codec_normalize(uas_codecs)
+        uac_pt, uac_sr = self.AUDIO_FORMAT.get(exp_uac, (None, None))
+        uas_pt, uas_sr = self.AUDIO_FORMAT.get(exp_uas, (None, None))
+
+        def fmt(codec: str | None, pt, sr) -> dict:
+            if codec is None:
+                return {"codec": None, "pt": None, "samplerate": None, "observed": False}
+            return {"codec": codec, "pt": pt, "samplerate": sr, "observed": True}
+
+        ok_uac = uac_actual is not None and uac_actual == exp_uac
+        ok_uas = uas_actual is not None and uas_actual == exp_uas
+        ok_rate = (uac_mm == 0) and (uas_mm == 0)
+
+        result.audio_format = {
+            "uac": {"expected": exp_uac, "actual": uac_actual,
+                    "pt": uac_pt, "samplerate": uac_sr,
+                    "rate_mismatch": uac_mm, "ok": ok_uac},
+            "uas": {"expected": exp_uas, "actual": uas_actual,
+                    "pt": uas_pt, "samplerate": uas_sr,
+                    "rate_mismatch": uas_mm, "ok": ok_uas},
+            "pass": ok_uac and ok_uas and ok_rate,
+        }
+        if not ok_uac:
+            result.errors.append(
+                f"audio-format UAC: expected {exp_uac} (PT {uac_pt}, {uac_sr}Hz), "
+                f"negotiated {uac_actual}")
+        if not ok_uas:
+            result.errors.append(
+                f"audio-format UAS: expected {exp_uas} (PT {uas_pt}, {uas_sr}Hz), "
+                f"negotiated {uas_actual}")
+        if uac_mm > 0:
+            result.errors.append(f"actual-audio UAC: {uac_mm} samplerate mismatches")
+        if uas_mm > 0:
+            result.errors.append(f"actual-audio UAS: {uas_mm} samplerate mismatches")
+        return result.audio_format["pass"]
+
+    @staticmethod
+    def _parse_jump_max(paths: list[str], key: str) -> int:
+        """Worst (max) value of one seq/ts jump stat grepped from sipbot logs
+        (`jumps=[seq_gap_events=.., ts_jump_events=.., ...]`)."""
+        import glob as _glob
+
+        worst = 0
+        for p in paths:
+            if not p:
+                continue
+            for f in _glob.glob(p):
+                try:
+                    text = open(f, errors="replace").read()
+                except Exception:
+                    continue
+                for m in re.finditer(r"jumps=\[(.*?)\]", text):
+                    for kv in m.group(1).split(","):
+                        k, v = kv.strip().split("=", 1)
+                        if k.strip() == key:
+                            try:
+                                worst = max(worst, int(v))
+                            except ValueError:
+                                pass
+        return worst
+
+    def verify_media_continuity(self, result: BenchmarkResult) -> bool:
+        """Assert the media stream stayed continuous (no seq/ts jumps).
+
+        The UAC is authoritative: each caller call has its own track, so its
+        `seq_gap_events`/`ts_jump_events` directly reflect stream glitches.
+        The UAS recorder path collapses many concurrent calls into one seq
+        tracker, so it can false-positive `gap=1` under concurrency — reported
+        but not a hard failure.
+        """
+        uac_paths = [
+            getattr(self, "uac_process", None) and getattr(self.uac_process, "_log_file", "") or ""
+        ]
+        uas_paths = [getattr(u, "_log_file", "") for u in getattr(self, "uas_list", [])]
+
+        def grab(paths, key):
+            w = 0
+            for p in paths:
+                w = max(w, self._parse_jump_max([p], key))
+            return w
+
+        uac_gap = grab(uac_paths, "seq_gap_events")
+        uac_ts = grab(uac_paths, "ts_jump_events")
+        uas_gap = grab(uas_paths, "seq_gap_events")
+        uas_ts = grab(uas_paths, "ts_jump_events")
+
+        ok_uac = uac_gap == 0 and uac_ts == 0
+        ok_uas = uas_gap == 0 and uas_ts == 0
+
+        result.media_continuity = {
+            "pass": ok_uac,
+            "uac": {"seq_gap_events": uac_gap, "ts_jump_events": uac_ts, "ok": ok_uac},
+            "uas": {"seq_gap_events": uas_gap, "ts_jump_events": uas_ts, "ok": ok_uas},
+        }
+        if not ok_uac:
+            result.errors.append(
+                f"media-continuity UAC: seq_gap_events={uac_gap} ts_jump_events={uac_ts} "
+                f"(audio glitch detected)")
+        if not ok_uas:
+            result.errors.append(
+                f"media-continuity UAS: seq_gap_events={uas_gap} ts_jump_events={uas_ts} "
+                f"(may be multi-call tracker artifact if UAC clean)")
+        return ok_uac
+
+    def run_audio_verify(self, uac_codecs: str = "pcmu", uas_codecs: str = "opus",
+                         webrtc: bool = False, hold: int = 6) -> dict:
+        """Definitive actual-audio samplerate check via a tone.
+
+        Injects a known 440 Hz tone (8 kHz WAV) from the UAC; the UAS echoes and
+        the UAC records. If the media/samplerate path is correct, the recorded
+        echo's dominant frequency is ~440 Hz; if a codec/resampler applies the
+        wrong sample rate, the frequency shifts proportionally (e.g. 440 Hz at
+        8 kHz played as 48 kHz would appear near 2640 Hz).
+        """
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "e2e"))
+            from helpers.audio_verifier import (generate_sine_wav, read_wav_stereo,
+                                                find_signal_start, extract_audio_region,
+                                                find_dominant_frequency)
+        except Exception as e:
+            return {"pass": False, "error": f"audio_verifier import failed: {e}"}
+
+        # Start PBX + one echo UAS with the target callee codec.
+        if not self.start_rustpbx(mediaproxy="all", sipflow=False):
+            return {"pass": False, "error": "start rustpbx failed"}
+        time.sleep(2)
+        if not self.start_uas_instances(1, base_port=DEFAULT_UAS_BASE_PORT, hangup=hold + 10,
+                                        verbose=True, codecs=uas_codecs, webrtc=webrtc):
+            return {"pass": False, "error": "start UAS failed"}
+
+        # Generate a 440 Hz tone at 8 kHz.
+        tone = os.path.join(self.log_dir, f"tone_440_{int(time.time())}.wav")
+        generate_sine_wav(tone, 440.0, 1.0, 8000, 0.5)
+
+        # UAC: call bob, play the tone, record RX (the echo).
+        rec = os.path.join(self.log_dir, f"caller_rec_{int(time.time())}.wav")
+        target = f"sip:bob@{self.proxy_host}:{self.proxy_port}"
+        username, password = EXTENSION_USERS[1]  # alice
+        cmd = ["sipbot", "call", "-t", target, "--username", username, "--password", password,
+               "--register", f"{self.proxy_host}:{self.proxy_port}",
+               "--codecs", uac_codecs, "--hangup", str(hold),
+               "--play", tone, "--record", rec, "-v"]
+        if webrtc:
+            cmd.append("--webrtc")
+        uac = SipProcess("audio-verify-uac", log_file=rec + ".log")
+        uac.start(cmd)
+        uac.wait(timeout=hold + 30)
+        time.sleep(2)
+
+        # Analyze the caller's recorded RX for the dominant frequency.
+        try:
+            rx, _tx, sr = read_wav_stereo(rec)
+            start = find_signal_start(rx, 0.01, sr // 50)
+            region = extract_audio_region(rx, sr, start, 4000)
+            freq, mag = find_dominant_frequency(region, sr, 100, 1000, 2.0)
+            ok = abs(freq - 440.0) < 40.0
+        except Exception as e:
+            return {"pass": False, "error": f"analyze failed: {e}", "note": "no valid recorded audio"}
+
+        result = {
+            "pass": ok,
+            "injected_hz": 440.0,
+            "detected_hz": round(freq, 1),
+            "wav_samplerate": sr,
+            "uac_codec": uac_codecs,
+            "uas_codec": uas_codecs,
+            "webrtc": webrtc,
+        }
+        print(f"[audio-verify] tone 440Hz -> detected {freq:.1f}Hz (wav sr={sr}) "
+              f"[{'PASS' if ok else 'FAIL'}]")
+        return result
+
+    def run_idle_gap(
+        self,
+        uac_codecs: str = "pcmu",
+        uas_codecs: str = "pcmu",
+        webrtc: bool = False,
+        gap: int = 2,
+        hold: int = 6,
+    ) -> dict:
+        """Verify the "no source / on-hold" window keeps the stream continuous.
+
+        The caller (UAC) sends a re-INVITE hold for `gap` seconds mid-call —
+        during that window the PBX egress for the caller has no media source and
+        must emit continuous comfort-noise/silence frames (fixed seq/ts cadence),
+        not a gap. On resume the audio must come back cleanly.
+
+        Assertions:
+          - UAC rx: seq_gap_events=0 and ts_jump_events=0 across the whole call
+            (proves the hold window + resume transition did not glitch).
+          - The recorded RX has signal after resume (no dead tail / corruption).
+        """
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "e2e"))
+            from helpers.audio_verifier import (generate_sine_wav, read_wav_stereo)
+        except Exception as e:
+            return {"pass": False, "error": f"audio_verifier import failed: {e}"}
+
+        # Delays are cumulative: hold at `gap`s, resume at 2*`gap`s. Keep resume
+        # well before hangup (`hold`s) so there is clean audio after resume.
+        flows = f"{gap}s:hold,{gap}s:resume"
+        if not self.start_rustpbx(mediaproxy="all", sipflow=False, webrtc=webrtc):
+            return {"pass": False, "error": "start rustpbx failed"}
+        time.sleep(2)
+        if not self.start_uas_instances(1, base_port=DEFAULT_UAS_BASE_PORT,
+                                        hangup=hold + 10, verbose=True,
+                                        codecs=uas_codecs, webrtc=webrtc,
+                                        audio_quality=True):
+            return {"pass": False, "error": "start UAS failed"}
+
+        tone = os.path.join(self.log_dir, f"tone_440_{int(time.time())}.wav")
+        generate_sine_wav(tone, 440.0, float(hold), 8000, 0.5)
+        rec = os.path.join(self.log_dir, f"idle_gap_rec_{int(time.time())}.wav")
+        target = f"sip:bob@{self.proxy_host}:{self.proxy_port}"
+        username, password = EXTENSION_USERS[1]  # alice
+        cmd = ["sipbot", "call", "-t", target, "--username", username, "--password", password,
+               "--register", f"{self.proxy_host}:{self.proxy_port}",
+               "--codecs", uac_codecs, "--hangup", str(hold),
+               "--play", tone, "--record", rec, "--audio-quality", "-v",
+               "--reinvite-flows", flows]
+        if webrtc:
+            cmd.append("--webrtc")
+        uac = SipProcess("idle-gap-uac", log_file=rec + ".log")
+        uac.start(cmd)
+        uac.wait(timeout=hold + 30)
+        time.sleep(2)
+
+        # 1. Jump stats on the caller (authoritative, single call).
+        uac_gap = self._parse_jump_max([rec + ".log"], "seq_gap_events")
+        uac_ts = self._parse_jump_max([rec + ".log"], "ts_jump_events")
+        jumps_ok = uac_gap == 0 and uac_ts == 0
+
+        # 2. Recorded RX must contain signal after the hold/resume (tail).
+        tail_ok = False
+        sr = 0
+        tail_rms = 0.0
+        try:
+            rx, _tx, sr = read_wav_stereo(rec)
+            if len(rx) > sr:  # at least ~1s of audio
+                tail = rx[-int(sr * 1.5):]
+                tail_rms = float((tail.astype("float64") ** 2).mean() ** 0.5)
+                tail_ok = tail_rms > 200.0
+        except Exception as e:
+            return {"pass": False, "error": f"analyze failed: {e}", "note": "no valid recorded audio"}
+
+        ok = jumps_ok and tail_ok
+        result = {
+            "pass": ok,
+            "flows": flows,
+            "uac_seq_gap_events": uac_gap,
+            "uac_ts_jump_events": uac_ts,
+            "tail_rms": round(tail_rms, 1),
+            "wav_samplerate": sr,
+            "uac_codec": uac_codecs,
+            "uas_codec": uas_codecs,
+            "webrtc": webrtc,
+        }
+        print(f"[idle-gap] flows={flows} seq_gap={uac_gap} ts_jump={uac_ts} "
+              f"tail_rms={tail_rms:.1f} [{'PASS' if ok else 'FAIL'}]")
+        return result
+
+    @staticmethod
+    def _rwi_call(ws, action: str, params: dict, aid: str) -> dict | None:
+        """Send one RWI request and wait for the matching response."""
+        import websockets  # local import: conference mode only
+
+        req = {"rwi": "1.0", "action_id": aid, "action": action, "params": params}
+        ws.send(json.dumps(req))
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            raw = ws.recv(timeout=15)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("action_id") == aid:
+                return msg
+        return None
+
+    def run_conference_benchmark(
+        self,
+        members: int,
+        rounds: int,
+        hold_secs: int,
+        wall_time: int = 0,
+        leak_check_interval: int = 0,
+        uas_base_port: int = DEFAULT_UAS_BASE_PORT,
+        mediaproxy: str = "all",
+    ) -> BenchmarkResult:
+        """Sustain an N-way conference (MCU mixer path) via RWI + sipbot echo UAs.
+
+        Each round: originate calls to `members` UAs, conference.create + add all,
+        hold `hold_secs` (mixer runs), destroy + hangup. RSS + task counts are
+        sampled throughout; a final task-drift check flags leaked media tasks.
+        """
+        import websockets  # local import: conference mode only
+
+        scenario = f"conference_{members}way"
+        result = BenchmarkResult(
+            scenario=scenario,
+            total_calls=rounds * members,
+            duration=hold_secs,
+            mediaproxy=mediaproxy,
+            sipflow_enabled=False,
+            uas_count=members,
+            cps=0,
+            start_time=datetime.now(timezone.utc).isoformat(),
+        )
+        print(f"\n{'='*70}\nCONFERENCE BENCHMARK: {scenario} "
+              f"({rounds} rounds × {members} members, hold {hold_secs}s)\n{'='*70}")
+
+        try:
+            if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=False):
+                result.errors.append("Failed to start rustpbx")
+                return result
+            time.sleep(2)
+            if not self.start_uas_instances(members, base_port=uas_base_port,
+                                            hangup=hold_secs + 60, verbose=True):
+                result.errors.append("Failed to start UAS instances")
+                return result
+
+            leak_csv = os.path.join(self.log_dir, "leak_check.csv") if leak_check_interval else None
+            self.start_monitoring(
+                interval=1.0,
+                leak_check_interval=float(leak_check_interval),
+                target_concurrency=members,
+                leak_csv=leak_csv,
+            )
+
+            token = "bench-rwi-token"
+            ws_url = f"ws://127.0.0.1:{self.http_base.rsplit(':', 1)[-1]}/rwi/v1?token={token}"
+            t0 = time.time()
+            total_rounds = rounds if wall_time <= 0 else max(1, int(wall_time / (hold_secs + 3)))
+            ok_rounds = 0
+            try:
+                with websockets.connect(ws_url) as ws:
+                    for r in range(total_rounds):
+                        conf_id = f"bench-conf-{r}"
+                        call_ids: list[str] = []
+                        for m in range(members):
+                            user, pw = EXTENSION_USERS[m % len(EXTENSION_USERS)]
+                            cid = f"bench-{r}-{m}"
+                            aid = f"o{r}-{m}"
+                            resp = self._rwi_call(ws, "call.originate", {
+                                "call_id": cid,
+                                "destination": f"sip:{user}@{self.proxy_host}:{self.proxy_port}",
+                                "caller_id": f"sip:bench@{self.proxy_host}",
+                                "context": "default",
+                                "timeout_secs": 20,
+                            }, aid)
+                            if not resp or resp.get("type") != "command_completed":
+                                continue
+                            call_ids.append(cid)
+                            # Give the call a moment to answer before joining.
+                            time.sleep(1.0)
+                        if len(call_ids) < 2:
+                            print(f"[conf] round {r}: only {len(call_ids)} answered, skipping")
+                            continue
+                        self._rwi_call(ws, "conference.create",
+                                       {"conference_id": conf_id, "max_members": members}, f"c{r}")
+                        for m, cid in enumerate(call_ids):
+                            self._rwi_call(ws, "conference.add",
+                                           {"conference_id": conf_id, "call_id": cid}, f"a{r}-{m}")
+                        time.sleep(hold_secs)  # mixer running
+                        self._rwi_call(ws, "conference.destroy", {"conference_id": conf_id}, f"d{r}")
+                        for cid in call_ids:
+                            self._rwi_call(ws, "call.hangup", {"call_id": cid}, f"h{r}-{cid}")
+                        ok_rounds += 1
+                        print(f"[conf] round {r+1}/{total_rounds} ok "
+                              f"({len(call_ids)} members), elapsed {time.time()-t0:.0f}s", flush=True)
+            except KeyboardInterrupt:
+                print("[conf] interrupted")
+            except Exception as e:
+                print(f"[conf] error: {e}")
+                result.errors.append(str(e))
+
+            result.test_duration_s = time.time() - t0
+            time.sleep(3)  # drain
+            summary = self.stop_monitoring()
+
+            result.calls_completed = ok_rounds * members
+            result.calls_failed = result.total_calls - result.calls_completed
+            if result.total_calls > 0:
+                result.success_rate = (result.calls_completed / result.total_calls) * 100
+            result.cpu_avg = summary.get("cpu_avg", 0.0)
+            result.cpu_peak = summary.get("cpu_peak", 0.0)
+            result.mem_avg_mb = summary.get("mem_avg_mb", 0.0)
+            result.mem_peak_mb = summary.get("mem_peak_mb", 0.0)
+            result.calls_peak = summary.get("calls_peak", 0)
+            result.calls_avg = summary.get("calls_avg", 0.0)
+            result.leak_final_assessment = summary.get("leak_final_assessment")
+            result.leak_final_slope_mb_per_min = summary.get("leak_final_slope_mb_per_min", 0.0)
+            result.leak_base_delta_mb = summary.get("leak_base_delta_mb", 0.0)
+            result.task_drift = {
+                "tasks_total": summary.get("tasks_total_drift"),
+                "media_alive_tasks": summary.get("media_alive_tasks_drift"),
+                "sip_alive_tasks": summary.get("sip_alive_tasks_drift"),
+                "leak_handles": summary.get("leak_handles_drift"),
+                "leak_dialogs": summary.get("leak_dialogs_drift"),
+                "calls_end": summary.get("calls_end"),
+            }
+            result.end_time = datetime.now(timezone.utc).isoformat()
+        finally:
+            pass
+        return result
 
     # -----------------------------------------------------------------------
     # Cleanup
@@ -1911,6 +2595,49 @@ class P2PBenchmark:
             print(f"Final Slope       : {result.leak_final_slope_mb_per_min:.3f} MB/min")
             print(f"Total Growth      : {result.leak_base_delta_mb:+.1f} MB (vs first window)")
 
+        if result.task_drift:
+            td = result.task_drift
+            print(f"\n--- Media Task Drift (after drain) ---")
+            print(f"tasks.total drift     : {td.get('tasks_total')}")
+            print(f"media alive tasks     : {td.get('media_alive_tasks')}")
+            print(f"sip alive tasks       : {td.get('sip_alive_tasks')}")
+            print(f"leak handles          : {td.get('leak_handles')}")
+            print(f"leak dialogs          : {td.get('leak_dialogs')}")
+            print(f"active calls at end   : {td.get('calls_end')}")
+
+        if result.drain_details:
+            dd = result.drain_details
+            status = "PASS" if result.drain_passed else "FAIL"
+            print(f"\n--- Drain / Leak Assertion ---")
+            print(f"Result               : {status}")
+            print(f"active calls at end  : {dd.get('calls_at_end')}")
+            print(f"leak handles         : {dd.get('leak_handles')}")
+            print(f"leak dialogs         : {dd.get('leak_dialogs')}")
+            print(f"tasks.total          : {dd.get('tasks_total')}")
+            print(f"media alive tasks    : {dd.get('media_alive_tasks')}")
+
+        if result.audio_format:
+            af = result.audio_format
+            uac = af.get("uac", {}); uas = af.get("uas", {})
+            print(f"\n--- Audio Format (PT + samplerate) ---")
+            print(f"Result               : {'PASS' if af.get('pass') else 'FAIL'}")
+            print(f"UAC leg              : expected={uac.get('expected')} "
+                  f"negotiated={uac.get('actual')} PT={uac.get('pt')} sr={uac.get('samplerate')} "
+                  f"rate_mismatch={uac.get('rate_mismatch')}")
+            print(f"UAS leg              : expected={uas.get('expected')} "
+                  f"negotiated={uas.get('actual')} PT={uas.get('pt')} sr={uas.get('samplerate')} "
+                  f"rate_mismatch={uas.get('rate_mismatch')}")
+
+        if result.media_continuity:
+            mc = result.media_continuity
+            uacj = mc.get("uac", {}); uasj = mc.get("uas", {})
+            print(f"\n--- Media Continuity (seq/ts jumps = audio-glitch warnings) ---")
+            print(f"Result               : {'PASS' if mc.get('pass') else 'FAIL'}")
+            print(f"UAC leg (authorit.)  : seq_gap_events={uacj.get('seq_gap_events')} "
+                  f"ts_jump_events={uacj.get('ts_jump_events')} {'OK' if uacj.get('ok') else 'GLITCH'}")
+            print(f"UAS leg (info)       : seq_gap_events={uasj.get('seq_gap_events')} "
+                  f"ts_jump_events={uasj.get('ts_jump_events')} {'OK' if uasj.get('ok') else 'artifact?'}")
+
         if result.errors:
             print(f"\n--- Errors ---")
             for error in result.errors:
@@ -1950,10 +2677,73 @@ Examples:
 
     parser.add_argument(
         "--scenario",
-        choices=["bypass", "forward", "bypass_sipflow", "forward_sipflow", "all"],
+        choices=["bypass", "forward", "bypass_sipflow", "forward_sipflow",
+                 "transcode", "transcode_g729", "transcode_opus",
+                 "transcode_opus_rev", "transcode_sipflow", "matrix", "all",
+                 "rtp_fastpath", "rtp_fastpath_rec", "rtp_fastpath_sipflow",
+                 "rtp_fastpath_rec_sipflow", "rtp_transcode", "rtp_transcode_rec",
+                 "rtp_transcode_sipflow", "rtp_transcode_rec_sipflow",
+                 "webrtc_fastpath", "webrtc_fastpath_rec", "webrtc_fastpath_sipflow",
+                 "webrtc_fastpath_rec_sipflow", "webrtc_transcode",
+                 "webrtc_transcode_rec", "webrtc_transcode_sipflow",
+                 "webrtc_transcode_rec_sipflow"],
         default="all",
         help="Benchmark scenario (default: all). "
-             "bypass=media_proxy:none, forward=media_proxy:all",
+             "matrix = full 16-combo media matrix (RTP|WebRTC × fastpath|transcode "
+             "× recording × sipflow), each at --total/--cps/--duration. "
+             "bypass=media_proxy:none, forward=media_proxy:all, "
+             "transcode=UAC pcmu -> UAS pcma (PCMU↔PCMA), "
+             "transcode_g729=UAC pcmu -> UAS g729, "
+             "transcode_opus=UAC pcmu -> UAS opus (pcmu→opus), "
+             "transcode_opus_rev=UAC opus -> UAS pcmu (opus→pcmu), "
+             "transcode_sipflow=transcode + sipflow",
+    )
+    parser.add_argument(
+        "--recording",
+        action="store_true",
+        help="Enable [recording] (WAV output) for the scenario. With sipflow on, "
+             "force_file=true is set so both recording and sipflow coexist.",
+    )
+    parser.add_argument(
+        "--webrtc",
+        action="store_true",
+        help="Use WebRTC (DTLS-SRTP) media: sipbot UAC/UAS get --webrtc and the "
+             "config users are marked is_support_webrtc=true.",
+    )
+    parser.add_argument(
+        "--audio-quality",
+        action="store_true",
+        help="Enable sipbot --audio-quality on UAC/UAS so the actual decoded "
+             "audio sample-rate is verified (mismatch count must be 0).",
+    )
+    parser.add_argument(
+        "--audio-verify",
+        nargs="?", const="opus", default=None,
+        metavar="CODEC",
+        help="Definitive actual-audio samplerate check: play a 440 Hz tone from "
+             "the UAC, record the echo, and assert the detected frequency is "
+             "~440 Hz (a wrong sample-rate path shifts it). Optional CODEC = the "
+             "callee codec (default opus). Runs standalone.",
+    )
+    parser.add_argument(
+        "--idle-gap",
+        nargs="?", const=2, default=0, type=int,
+        metavar="SECONDS",
+        help="Standalone continuity check: UAC calls the echo UAS which holds for "
+             "SECONDS (re-INVITE hold) mid-call, then resumes. Asserts the caller's "
+             "rx had seq_gap=0 and ts_jump=0 across the hold/silence window and the "
+             "recorded audio has signal after resume (proves the PBX egress keeps "
+             "the stream continuous when it has no media source). Default 2s.",
+    )
+    parser.add_argument(
+        "--uas-codecs",
+        default=None,
+        help="UAS (callee) codec for --idle-gap (e.g. pcmu, opus).",
+    )
+    parser.add_argument(
+        "--uac-codecs",
+        default=None,
+        help="UAC (caller) codec for --idle-gap (e.g. pcmu, opus).",
     )
     parser.add_argument(
         "--total",
@@ -2023,7 +2813,6 @@ Examples:
         help="Cooldown between scenarios in seconds (default: 10)",
     )
     parser.add_argument(
-    parser.add_argument(
         "--wholesale",
         action="store_true",
         help="Enable the wholesale addon (injects addons=[\"wholesale\"] under [proxy]). "
@@ -2079,6 +2868,20 @@ Examples:
         help="UAS ring duration (seconds) before answering. >0 keeps calls in "
              "ringing so CANCEL lands before 200 (reliably 487). Default 0.",
     )
+    parser.add_argument(
+        "--conference-members",
+        type=int,
+        default=0,
+        help="Conference benchmark mode: N-way MCU conference via RWI + sipbot "
+             "echo UAs (exercises the mixer). When >0, runs the conference "
+             "benchmark instead of the UAC scenario loop.",
+    )
+    parser.add_argument(
+        "--conference-rounds",
+        type=int,
+        default=20,
+        help="Number of conference rounds in conference mode (default 20).",
+    )
 
 
     args = parser.parse_args()
@@ -2130,23 +2933,127 @@ Examples:
         finally:
             benchmark.cleanup()
 
-    # Define scenarios: (name, mediaproxy, sipflow_enabled)
+    # ------------------------------------------------------------------
+    # Conference (MCU mixer) benchmark mode.
+    # ------------------------------------------------------------------
+    if args.conference_members > 0:
+        try:
+            result = benchmark.run_conference_benchmark(
+                members=args.conference_members,
+                rounds=args.conference_rounds,
+                hold_secs=args.duration,
+                wall_time=args.wall_time,
+                leak_check_interval=args.leak_check_interval,
+                uas_base_port=args.uas_base_port,
+            )
+            benchmark.print_summary(result)
+            benchmark.save_results(result)
+        except KeyboardInterrupt:
+            print("\n\n⚠ Conference benchmark interrupted by user")
+            return 130
+        except Exception as e:
+            print(f"\n\n❌ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+        finally:
+            benchmark.cleanup()
+        return 0
+
+    # ------------------------------------------------------------------
+    # Actual-audio samplerate verification (440 Hz tone echo check).
+    # ------------------------------------------------------------------
+    if args.audio_verify:
+        try:
+            result = benchmark.run_audio_verify(
+                uac_codecs="pcmu", uas_codecs=args.audio_verify,
+                webrtc=args.webrtc,
+            )
+            ok = result.get("pass")
+            print(f"\n{'='*70}")
+            print(f"AUDIO VERIFY: {'PASS' if ok else 'FAIL'}")
+            for k, v in result.items():
+                print(f"  {k:<18}: {v}")
+            print(f"{'='*70}")
+            return 0 if ok else 1
+        except KeyboardInterrupt:
+            return 130
+        finally:
+            benchmark.cleanup()
+
+    if args.idle_gap:
+        try:
+            result = benchmark.run_idle_gap(
+                uac_codecs=args.uac_codecs or "pcmu",
+                uas_codecs=args.uas_codecs or "pcmu",
+                webrtc=args.webrtc,
+                gap=args.idle_gap,
+            )
+            ok = result.get("pass")
+            print(f"\n{'='*70}")
+            print(f"IDLE-GAP (hold/silence window continuity): {'PASS' if ok else 'FAIL'}")
+            for k, v in result.items():
+                print(f"  {k:<22}: {v}")
+            print(f"{'='*70}")
+            return 0 if ok else 1
+        except KeyboardInterrupt:
+            return 130
+        finally:
+            benchmark.cleanup()
+
+    # Define scenarios: (name, mediaproxy, sipflow, uas_codecs, uac_codecs, recording, webrtc)
+    MATRIX_COMBOS = [
+        ("rtp_fastpath",              "all", False, "pcmu", "pcmu", False, False),
+        ("rtp_fastpath_rec",          "all", False, "pcmu", "pcmu", True,  False),
+        ("rtp_fastpath_sipflow",      "all", True,  "pcmu", "pcmu", False, False),
+        ("rtp_fastpath_rec_sipflow",  "all", True,  "pcmu", "pcmu", True,  False),
+        ("rtp_transcode",             "all", False, "opus", "pcmu", False, False),
+        ("rtp_transcode_rec",         "all", False, "opus", "pcmu", True,  False),
+        ("rtp_transcode_sipflow",     "all", True,  "opus", "pcmu", False, False),
+        ("rtp_transcode_rec_sipflow", "all", True,  "opus", "pcmu", True,  False),
+        ("webrtc_fastpath",           "all", False, "pcmu", "pcmu", False, True),
+        ("webrtc_fastpath_rec",       "all", False, "pcmu", "pcmu", True,  True),
+        ("webrtc_fastpath_sipflow",   "all", True,  "pcmu", "pcmu", False, True),
+        ("webrtc_fastpath_rec_sipflow", "all", True, "pcmu", "pcmu", True, True),
+        ("webrtc_transcode",          "all", False, "opus", "pcmu", False, True),
+        ("webrtc_transcode_rec",      "all", False, "opus", "pcmu", True,  True),
+        ("webrtc_transcode_sipflow",  "all", True,  "opus", "pcmu", False, True),
+        ("webrtc_transcode_rec_sipflow", "all", True, "opus", "pcmu", True, True),
+    ]
+    _combo_map = {c[0]: c for c in MATRIX_COMBOS}
+
     scenarios = []
     if args.scenario == "all":
         scenarios = [
-            ("bypass",            "none", False),
-            ("forward",           "all",  False),
-            ("bypass_sipflow",    "none", True),
-            ("forward_sipflow",   "all",  True),
+            ("bypass",            "none", False, "pcmu", "pcmu", False, False),
+            ("forward",           "all",  False, "pcmu", "pcmu", False, False),
+            ("bypass_sipflow",    "none", True,  "pcmu", "pcmu", False, False),
+            ("forward_sipflow",   "all",  True,  "pcmu", "pcmu", False, False),
         ]
     elif args.scenario == "bypass":
-        scenarios = [("bypass", "none", False)]
+        scenarios = [("bypass", "none", False, "pcmu", "pcmu", False, False)]
     elif args.scenario == "forward":
-        scenarios = [("forward", "all", False)]
+        scenarios = [("forward", "all", False, "pcmu", "pcmu", False, False)]
     elif args.scenario == "bypass_sipflow":
-        scenarios = [("bypass_sipflow", "none", True)]
+        scenarios = [("bypass_sipflow", "none", True, "pcmu", "pcmu", False, False)]
     elif args.scenario == "forward_sipflow":
-        scenarios = [("forward_sipflow", "all", True)]
+        scenarios = [("forward_sipflow", "all", True, "pcmu", "pcmu", False, False)]
+    elif args.scenario == "transcode":
+        scenarios = [("transcode", "all", False, "pcma", "pcmu", False, False)]
+    elif args.scenario == "transcode_g729":
+        scenarios = [("transcode_g729", "all", False, "g729", "pcmu", False, False)]
+    elif args.scenario == "transcode_opus":
+        scenarios = [("transcode_opus", "all", False, "opus", "pcmu", False, False)]
+    elif args.scenario == "transcode_opus_rev":
+        scenarios = [("transcode_opus_rev", "all", False, "pcmu", "opus", False, False)]
+    elif args.scenario == "transcode_sipflow":
+        scenarios = [("transcode_sipflow", "all", True, "pcma", "pcmu", False, False)]
+    elif args.scenario == "matrix":
+        # Full media performance/leak matrix: 16 combos.
+        # RTP|WebRTC × fastpath(pcmu→pcmu)|transcode(pcmu→opus) × recording × sipflow.
+        scenarios = list(MATRIX_COMBOS)
+    elif args.scenario in _combo_map:
+        scenarios = [_combo_map[args.scenario]]
 
     # In soak (wall-time) mode, running all 4 scenarios back-to-back would take
     # 4× the wall time. Force a single scenario, defaulting to forward_sipflow
@@ -2155,16 +3062,18 @@ Examples:
     if args.wall_time > 0 and args.scenario == "all":
         print(f"[soak] --wall-time={args.wall_time}s set with --scenario all; "
               f"narrowing to forward_sipflow only (media_proxy=all + sipflow remote)")
-        scenarios = [("forward_sipflow", "all", True)]
+        scenarios = [("forward_sipflow", "all", True, "pcmu", "pcmu", False, False)]
 
     leak_interval = args.leak_check_interval if args.wall_time > 0 else 0
 
     # Run scenarios
     all_results: list[BenchmarkResult] = []
     try:
-        for idx, (name, mediaproxy, sipflow) in enumerate(scenarios):
+        for idx, (name, mediaproxy, sipflow, uas_codecs, uac_codecs, recording, webrtc) in enumerate(scenarios):
             print(f"\n{'#'*70}")
             print(f"# SCENARIO {idx + 1}/{len(scenarios)}: {name}")
+            print(f"# codecs: UAS={uas_codecs} UAC={uac_codecs} "
+                  f"recording={recording} webrtc={webrtc} sipflow={sipflow}")
             print(f"{'#'*70}")
 
             result = benchmark.run_benchmark(
@@ -2179,6 +3088,11 @@ Examples:
                 wholesale=args.wholesale,
                 wall_time=args.wall_time,
                 leak_check_interval=leak_interval,
+                uas_codecs=uas_codecs,
+                uac_codecs=uac_codecs,
+                recording=recording,
+                webrtc=webrtc,
+                audio_quality=args.audio_quality,
             )
 
             benchmark.print_summary(result)

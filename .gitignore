@@ -28,6 +28,7 @@ cdr/
 /.idea/
 .vscode/
 *.pyc
+__pycache__/
 *.pcap
 *.md
 *.dev
