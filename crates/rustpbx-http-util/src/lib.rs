@@ -127,6 +127,51 @@ pub async fn fetch_bytes(
         .map_err(|e| anyhow!("Failed to read response body: {}", e))
 }
 
+/// Download a body with a hard size cap so oversized responses can never
+/// exhaust memory. The response headers are returned alongside the bytes so
+/// callers can validate `Content-Type`.
+///
+/// The advertised `Content-Length` is checked up-front; when it is missing or
+/// larger than the cap, the body is still streamed and aborted as soon as the
+/// accumulated size exceeds `max_bytes`.
+pub async fn fetch_audio_bytes(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    options: &HttpFetchOptions,
+    max_bytes: u64,
+) -> Result<(bytes::Bytes, reqwest::header::HeaderMap)> {
+    let req = client.request(method, url);
+    let resp = execute_request(req, &options.headers, options.timeout).await?;
+
+    if let Some(len) = resp.content_length()
+        && len > max_bytes
+    {
+        return Err(anyhow!(
+            "Remote file is too large (Content-Length: {} bytes, limit: {} bytes)",
+            len,
+            max_bytes
+        ));
+    }
+
+    let headers = resp.headers().clone();
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow!("Failed to read response chunk: {}", e))?;
+        if body.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(anyhow!(
+                "Remote file is too large (limit: {} bytes)",
+                max_bytes
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok((bytes::Bytes::from(body), headers))
+}
+
 pub async fn fetch_to_writer<W: tokio::io::AsyncWrite + Unpin>(
     client: &reqwest::Client,
     method: reqwest::Method,

@@ -35,6 +35,10 @@ database_url = "sqlite://rustpbx.sqlite3"
 # rtp_start_port = 20000
 # rtp_end_port = 30000
 
+# Max size in bytes for audio files downloaded over HTTP from the console
+# (queue prompts, voicemail prompts, ...). Default: 20971520 (20 MB)
+# max_audio_download_bytes = 20971520
+
 # setup your STUN/TURN servers here, for webrtc web clients
 # [[ice_servers]]
 # urls = ["stun:stun.l.google.com:19302"]

@@ -261,6 +261,10 @@ pub struct Config {
     pub rwi_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
+    /// Maximum size (in bytes) for audio files downloaded over HTTP from the
+    /// console (queue prompts, voicemail prompts, ...). Defaults to 20 MB.
+    #[serde(default = "default_max_audio_download_bytes")]
+    pub max_audio_download_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -274,6 +278,10 @@ pub struct ClusterPeer {
 pub struct ClusterConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<ClusterPeer>,
+}
+
+fn default_max_audio_download_bytes() -> u64 {
+    crate::utils::MAX_AUDIO_DOWNLOAD_BYTES
 }
 
 fn default_locale() -> String {
@@ -1258,6 +1266,7 @@ impl Default for Config {
             licenses: None,
             rwi_webhook: None,
             cluster: None,
+            max_audio_download_bytes: default_max_audio_download_bytes(),
         }
     }
 }
