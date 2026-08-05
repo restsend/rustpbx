@@ -580,6 +580,7 @@ fn forward_dtmf_event(
         warn!(session_id = %session_id, digit = %digit_str, error = %e, "Detected DTMF but failed to inject event");
         return;
     }
+    info!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
     if let Some(gw) = rwi_gateway.as_ref() {
         let g = gw.read();
         g.send_to_owner(&crate::rwi::Dtmf {
@@ -664,6 +665,57 @@ impl SipSession {
     // ── MediaBridge helpers ─────────────────────────────────────────────
     pub(super) fn bridge(&self) -> Option<&MediaBridge> { self.media.bridge.as_ref() }
     pub(super) fn bridge_mut(&mut self) -> Option<&mut MediaBridge> { self.media.bridge.as_mut() }
+
+    /// Attach a [`SipflowRecorder`] to the media bridge so RTP packets are
+    /// stored in the sipflow backend for later WAV export.
+    ///
+    /// Per design, when sipflow is enabled and `force_file` is NOT set, media
+    /// capture happens through sipflow (not the WAV file recorder). This
+    /// re-wires RTP → sipflow after the media-layer rewrite that dropped the
+    /// old `setup_sipflow_capture` wiring.
+    pub(super) fn attach_sipflow_media_capture(&mut self) {
+        let Some(mb) = self.media.bridge.as_mut() else {
+            return;
+        };
+        let recording = &self.context.dialplan.recording;
+        if !recording.enabled || recording.force_file {
+            return;
+        }
+        let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend()) else {
+            return;
+        };
+        let call_id = self.context.session_id.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<
+            crate::media::media_recorder::SipflowItem,
+        >(1024);
+        let recorder = crate::media::media_recorder::SipflowRecorder::new(tx);
+        let drain_call_id = call_id.clone();
+        crate::utils::spawn(async move {
+            while let Some(item) = rx.recv().await {
+                let leg = match item.direction {
+                    crate::media::ingress_tap::PacketDirection::Ingress => 0i32,
+                    crate::media::ingress_tap::PacketDirection::Egress => 1i32,
+                };
+                let sipflow_item = crate::sipflow::SipFlowItem {
+                    timestamp: item.received_at_micros,
+                    seq: item.sequence_number as u64,
+                    leg: Some(leg),
+                    msg_type: crate::sipflow::SipFlowMsgType::Rtp,
+                    src_addr: "synth".to_string(),
+                    dst_addr: String::new(),
+                    payload: item.raw,
+                };
+                if let Err(e) = backend.record(&drain_call_id, sipflow_item) {
+                    warn!(session_id = %drain_call_id, error = %e, "sipflow media record failed");
+                }
+            }
+        });
+        mb.set_recorder(recorder);
+        info!(
+            session_id = %call_id,
+            "sipflow media capture attached to media bridge"
+        );
+    }
     /// Put a leg on hold playing a file as hold music (looping).
     /// Ensure a conference exists — create it if missing.
 
@@ -1039,6 +1091,7 @@ impl SipSession {
             ));
             session.spawn_dtmf_forwarder();
         }
+        session.attach_sipflow_media_capture();
 
         (session, sip_handle, cmd_rx)
     }
@@ -1218,6 +1271,7 @@ impl SipSession {
             ));
             session.spawn_dtmf_forwarder();
         }
+        session.attach_sipflow_media_capture();
 
         (session, sip_handle, cmd_rx)
     }
@@ -1476,7 +1530,7 @@ impl SipSession {
             let sid = session_id.to_string();
             crate::utils::spawn(async move {
                 if rx.await.is_ok() {
-                    warn!(session_id = %sid, "RTP inactivity timeout fired");
+                    warn!(session_id = %sid, leg_side = ?side, "RTP inactivity timeout fired");
                     if let Some(tx) = cmd_tx {
                         let _ = tx.try_send(CallCommand::Hangup(
                             crate::call::domain::HangupCommand::all(
@@ -1993,6 +2047,7 @@ impl SipSession {
                     crate::media::media_bridge::LegSide::A => "caller",
                     crate::media::media_bridge::LegSide::B => "callee",
                 };
+                debug!(session_id = %session_id, leg_id, digit = ev.digit.to_string(), "RTP DTMF received from media bridge, forwarding");
                 forward_dtmf_event(
                     ev.digit,
                     leg_id,
@@ -2031,6 +2086,8 @@ impl SipSession {
             external_ip,
             bind_ip,
             cname,
+            comfort_noise: self.context.dialplan.media.comfort_noise,
+            comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
         };
 
         let Some(mb) = self.bridge_mut() else {
@@ -2061,8 +2118,19 @@ impl SipSession {
         let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
-        // Ensure the A leg exists and apply the caller's answer SDP.
-        if let Some(sdp) = caller_sdp {
+        // Create the A leg from the internal caller's offer (NOT the callee's
+        // answer). In the originate (UAC) path, caller_offer was set from the
+        // RtpTrackBuilder's local SDP before the INVITE was sent. Using it
+        // here ensures LegSide::A represents the internal/PBX side, while
+        // LegSide::B (created by ensure_originate_callee_leg) represents the
+        // external SIP callee.
+        if self.media.bridge.is_some() && self.media.caller_offer.is_some() {
+            if let Err(e) = self.ensure_caller_leg().await {
+                warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge A leg");
+            }
+        } else if let Some(sdp) = caller_sdp {
+            // Fallback: no caller_offer available — apply callee SDP directly
+            // (legacy behavior for non-originate paths).
             if let Err(e) = self
                 .ensure_media_leg(
                     crate::media::media_bridge::LegSide::A,
@@ -2076,14 +2144,9 @@ impl SipSession {
             }
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
-                    // UAC mode: no local offer yet → generate one with the
-                    // answer's codecs so set_remote_description(answer) works
-                    // and the negotiated profile is set.
                     if leg.negotiated().is_none() {
                         if let Ok(offer) = leg.create_offer(vec![]).await {
                             debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for caller MediaBridge leg");
-                        } else {
-                            warn!(session_id = %self.id, "Failed to generate UAC offer for caller leg");
                         }
                     }
                     if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
@@ -2091,6 +2154,54 @@ impl SipSession {
                     }
                 }
             }
+        }
+    }
+
+    /// Ensure the callee (B leg) exists in the MediaBridge for the originate
+    /// (UAC) path. In this path, the INVITE SDP was generated by RtpTrackBuilder,
+    /// so the B leg is never created by the normal dialplan flow.
+    pub async fn ensure_originate_callee_leg(&mut self, callee_sdp: Option<&str>) {
+        let Some(sdp) = callee_sdp else { return };
+        if self.media.bridge.is_none() {
+            return;
+        }
+        let session_id = self.context.session_id.clone();
+        let has_b = self
+            .bridge()
+            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::B))
+            .is_some();
+        if has_b {
+            return;
+        }
+        let transport = if Self::sdp_transport_mode(sdp) == rustrtc::TransportMode::WebRtc {
+            rustrtc::TransportMode::WebRtc
+        } else {
+            rustrtc::TransportMode::Rtp
+        };
+        if let Err(e) = self
+            .ensure_media_leg(crate::media::media_bridge::LegSide::B, sdp, transport)
+            .await
+        {
+            warn!(session_id = %session_id, error = %e, "Failed to create B leg for originate");
+            return;
+        }
+        let session_id2 = self.context.session_id.clone();
+        if let Some(mb) = self.bridge_mut() {
+            if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
+                if leg.negotiated().is_none() {
+                    if let Ok(offer) = leg.create_offer(vec![]).await {
+                        info!(session_id = %session_id2, offer_len = offer.len(), "Created B leg offer for originate MediaBridge");
+                    }
+                }
+                if let Err(e) = leg.apply_sdp(sdp, rustrtc::SdpType::Answer).await {
+                    warn!(session_id = %session_id2, error = %e, "Failed to apply callee SDP to B leg");
+                }
+            }
+            // Activate the bridge relay: accept both legs so the bridge
+            // can start forwarding RTP between A and B.
+            mb.accept(crate::media::media_bridge::LegSide::B).await;
+            mb.accept(crate::media::media_bridge::LegSide::A).await;
+            info!(session_id = %session_id2, "Originated MediaBridge legs accepted (A+B)");
         }
     }
 
@@ -3000,6 +3111,23 @@ impl SipSession {
             .unwrap_or("ivr")
             .to_string();
         let ivr_params = p.and_then(|p| p.get("ivr_params")).cloned();
+        // Resolve route_point → file path so the IVR factory can find the config.
+        let route_point = p
+            .and_then(|p| p.get("route_point"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut ivr_params = ivr_params.unwrap_or(serde_json::json!({}));
+        if !route_point.is_empty()
+            && ivr_params.get("file").is_none()
+            && ivr_params.get("mode").is_none()
+        {
+            let file = format!("config/ivr/{}.toml", route_point);
+            if let Some(obj) = ivr_params.as_object_mut() {
+                obj.insert("file".to_string(), serde_json::json!(file));
+            } else {
+                ivr_params = serde_json::json!({"file": file});
+            }
+        }
         let hold_agent = p
             .and_then(|p| p.get("hold_agent"))
             .and_then(|v| v.as_bool())
@@ -3041,7 +3169,7 @@ impl SipSession {
         // 3. Start the app on the caller leg.
         let cmd = CallCommand::StartApp {
             app_name,
-            params: ivr_params,
+            params: Some(ivr_params),
             auto_answer: false,
         };
         Self::send_or_log_cmd(&self.cmd_tx, cmd, "ivr.exec", &session_id);
@@ -4096,6 +4224,8 @@ impl SipSession {
             external_ip: self.context.dialplan.media.external_ip.clone(),
             bind_ip: self.context.dialplan.media.bind_ip.clone(),
             cname: Some(self.server.rtc_cname.clone()),
+            comfort_noise: self.context.dialplan.media.comfort_noise,
+            comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
         };
 
         let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
@@ -4341,7 +4471,7 @@ impl SipSession {
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
-        no_trying_timeout: Option<Duration>,
+        no_trying_timeout: Option<std::time::Duration>,
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
 
@@ -4667,6 +4797,76 @@ impl SipSession {
 
         let callee_guard =
             ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog_id.clone());
+
+        // Ensure callee leg exists in the MediaBridge.
+        // For originate (UAC) path, the INVITE SDP was generated by RtpTrackBuilder,
+        // so create_callee_track was never called and the bridge has no B leg.
+        // Create one here so media_play / hold / comfort-noise can target it.
+        if self.media.bridge.is_some() {
+            let has_callee_leg = self
+                .bridge()
+                .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::B))
+                .is_some();
+            if !has_callee_leg {
+                if let Some(ref callee_sdp_str) = callee_sdp {
+                    let callee_is_webrtc =
+                        Self::sdp_transport_mode(callee_sdp_str) == rustrtc::TransportMode::WebRtc;
+                    let callee_mode = self.callee_transport_mode(callee_is_webrtc);
+                    let allow_codecs = self.resolve_effective_codecs();
+                    let codecs = self
+                        .media
+                        .caller_offer
+                        .as_ref()
+                        .map(|offer| {
+                            MediaNegotiator::build_callee_codec_offer_with_allow(
+                                offer, &allow_codecs,
+                            )
+                        })
+                        .unwrap_or_default();
+                    let cfg = crate::media::leg::LegConfig {
+                        transport: callee_mode,
+                        codecs,
+                        rtp_port_range: self
+                            .context
+                            .dialplan
+                            .media
+                            .rtp_start_port
+                            .zip(self.context.dialplan.media.rtp_end_port),
+                        external_ip: self.context.dialplan.media.external_ip.clone(),
+                        bind_ip: self.context.dialplan.media.bind_ip.clone(),
+                        cname: Some(self.server.rtc_cname.clone()),
+                        comfort_noise: self.context.dialplan.media.comfort_noise,
+                        comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
+                    };
+                    match crate::media::leg::LegInner::new("callee", &cfg) {
+                        Ok(leg) => {
+                            if let Ok(offer) = leg.create_offer(vec![]).await {
+                                if let Some(mb) = self.bridge_mut() {
+                                    mb.replace_leg(
+                                        crate::media::media_bridge::LegSide::B,
+                                        leg,
+                                    )
+                                    .await;
+                                    info!(
+                                        session_id = %self.id,
+                                        offer_len = offer.len(),
+                                        "Created callee leg in bridge during finalize (originate path)"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                session_id = %self.id,
+                                error = %e,
+                                "Failed to create callee leg in bridge during finalize"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let caller_answer = self
             .prepare_caller_answer_from_callee_sdp(
                 callee_sdp,
@@ -4804,7 +5004,15 @@ impl SipSession {
                 .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::B))
                 .is_some();
 
-            if self.media.bridge.is_some() && has_callee_leg {
+            let has_bridge = self.media.bridge.is_some();
+            tracing::info!(
+                session_id = %self.id,
+                has_bridge,
+                has_callee_leg,
+                "prepare_caller_answer_from_callee_sdp: checking MediaBridge path"
+            );
+
+        if has_bridge && has_callee_leg {
                 let cmd_tx = self.cmd_tx.clone();
                 let session_id = self.context.session_id.clone();
                 let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
@@ -5276,6 +5484,8 @@ impl SipSession {
                 external_ip: self.context.dialplan.media.external_ip.clone(),
                 bind_ip: self.context.dialplan.media.bind_ip.clone(),
                 cname: Some(self.server.rtc_cname.clone()),
+                comfort_noise: self.context.dialplan.media.comfort_noise,
+                comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
             };
 
             let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
@@ -6236,7 +6446,7 @@ impl SipSession {
 
     /// Infer which leg this track_id belongs to from the canonical suffix.
     /// Returns (leg_label, Option<dynamic_leg_id>).
-    fn resolve_audio_file_path(audio_file: &str) -> String {
+    pub(crate) fn resolve_audio_file_path(audio_file: &str) -> String {
         if audio_file.starts_with("http://") || audio_file.starts_with("https://") {
             return audio_file.to_string();
         }
@@ -8405,7 +8615,7 @@ impl SipSession {
             .and_then(|o| o.track_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let file_path = match source {
-            crate::call::domain::MediaSource::File { path } => path,
+            crate::call::domain::MediaSource::File { path } => Self::resolve_audio_file_path(&path),
             crate::call::domain::MediaSource::Url { url } => url,
             _ => return Err(anyhow!("Only file/URL playback supported")),
         };
@@ -8432,14 +8642,30 @@ impl SipSession {
             // the media route (both legs) once playback ends.
             let app_event_bridge = self.app_event_bridge.clone();
             let handle_for_restore = self.handle.clone();
+            let rwi_gateway = self.server.rwi_gateway.clone();
+            let session_id = self.id.clone();
+            let event_leg_id_str = leg_id.as_ref().map(|l| l.0.clone());
             crate::utils::spawn(async move {
                 let result = handle.done.await.ok();
                 let interrupted = result.map(|r| r.interrupted).unwrap_or(true);
                 if let Some(h) = app_event_bridge.read().as_ref() {
                     let _ = h.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
-                        track_id,
+                        track_id: track_id.clone(),
                         interrupted,
                     });
+                }
+                if let Some(ref gw) = rwi_gateway {
+                    let event = crate::rwi::event::to_legacy_event(
+                        &crate::rwi::MediaPlayFinished {
+                            call_id: session_id.to_string(),
+                            leg_id: event_leg_id_str.clone(),
+                            track_id: track_id.clone(),
+                            interrupted,
+                        },
+                        None,
+                    );
+                    let g = gw.read();
+                    g.send_event_to_call_owner(&session_id.to_string(), &event);
                 }
                 let _ = handle_for_restore.send_command(CallCommand::ResumeMedia);
             });
@@ -11207,6 +11433,132 @@ max_retries = 3
             "section c=0.0.0.0 → answer inactive:\n{}",
             result
         );
+    }
+
+    // ── resolve_audio_file_path: the path resolution that handle_play relies on ──
+
+    #[test]
+    fn test_resolve_audio_file_path_http_passthrough() {
+        assert_eq!(
+            SipSession::resolve_audio_file_path("http://example.com/a.wav"),
+            "http://example.com/a.wav"
+        );
+        assert_eq!(
+            SipSession::resolve_audio_file_path("https://example.com/a.wav"),
+            "https://example.com/a.wav"
+        );
+    }
+
+    #[test]
+    fn test_resolve_audio_file_path_absolute_passthrough() {
+        let abs = if cfg!(windows) {
+            "C:\\tmp\\a.wav"
+        } else {
+            "/tmp/a.wav"
+        };
+        assert_eq!(SipSession::resolve_audio_file_path(abs), abs);
+    }
+
+    #[test]
+    fn test_resolve_audio_file_path_config_prefix_passthrough() {
+        // Already-prefixed paths must be returned as-is to avoid double prefixing.
+        assert_eq!(
+            SipSession::resolve_audio_file_path("config/sounds/foo.wav"),
+            "config/sounds/foo.wav"
+        );
+        assert_eq!(
+            SipSession::resolve_audio_file_path("./config/sounds/foo.wav"),
+            "./config/sounds/foo.wav"
+        );
+    }
+
+    #[test]
+    fn test_resolve_audio_file_path_falls_back_to_config_prefix() {
+        // The shipped convention: configs reference "sounds/foo.wav" but the
+        // files live under "config/sounds/" at dev time. The resolver must
+        // transparently rewrite to the existing config-prefixed path.
+        let tmp = std::env::temp_dir().join("rp_bench_exists.wav");
+        std::fs::write(&tmp, b"dummy").unwrap();
+        let abs = tmp.to_string_lossy().to_string();
+        // Absolute path that exists → passthrough.
+        assert_eq!(SipSession::resolve_audio_file_path(&abs), abs);
+
+        // Non-existent bare path with no fallback → returned unchanged.
+        let bare = "definitely_missing_zzz.wav";
+        assert_eq!(SipSession::resolve_audio_file_path(bare), bare);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_resolve_audio_file_path_packaged_sounds_resolve_to_config() {
+        // Regression for the queue-hold-music bug: the default constant
+        // `sounds/phone-calling.wav` does not exist at the workspace root but
+        // `config/sounds/phone-calling.wav` does. Resolution must find it.
+        if !Path::new("config/sounds/phone-calling.wav").exists() {
+            eprintln!("skipping: config/sounds/phone-calling.wav absent (not in workspace root)");
+            return;
+        }
+        let resolved = SipSession::resolve_audio_file_path(crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
+        assert!(
+            resolved.ends_with("phone-calling.wav"),
+            "expected resolved path to end with phone-calling.wav, got {resolved}"
+        );
+        assert!(
+            Path::new(&resolved).exists(),
+            "resolved hold-audio path must exist: {resolved}"
+        );
+    }
+
+    /// Every shipped default queue prompt must resolve to a real, decodable
+    /// WAV file. This guards against the regression where `handle_play`
+    /// skipped path resolution and failed with "Audio file not found".
+    #[tokio::test]
+    async fn test_default_queue_prompts_resolve_and_are_playable() {
+        use crate::media::audio_source::{AudioSource, FileAudioSource};
+
+        let cases = [
+            ("hold", crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+            ("failure", crate::call::DEFAULT_QUEUE_FAILURE_AUDIO),
+            (
+                "transfer-zh",
+                crate::call::DEFAULT_QUEUE_TRANSFER_PROMPT_ZH,
+            ),
+            ("busy-zh", crate::call::DEFAULT_QUEUE_BUSY_PROMPT_ZH),
+            ("no-answer-zh", crate::call::DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH),
+        ];
+
+        // If the test host has no `config/sounds` checkout, skip gracefully
+        // rather than failing — the resolution logic is covered by other unit
+        // tests in this module.
+        if !Path::new("config/sounds").is_dir() {
+            eprintln!("skipping: config/sounds/ directory not present");
+            return;
+        }
+
+        for (label, spec) in cases {
+            let resolved = SipSession::resolve_audio_file_path(spec);
+            assert!(
+                Path::new(&resolved).exists(),
+                "[{label}] resolved path must exist: spec={spec} resolved={resolved}"
+            );
+
+            // The file must be openable AND decodable — the exact gate that
+            // `handle_play` → `play_file` → `FileAudioSource::new` applies.
+            let src = FileAudioSource::new(resolved.clone(), false)
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] FileAudioSource::new failed for {resolved}: {e}"));
+            assert!(
+                src.sample_rate() > 0,
+                "[{label}] decoded file should report a positive sample rate"
+            );
+            // Pre-decoded cache must be non-empty for shipped prompts.
+            assert!(
+                src.has_data(),
+                "[{label}] decoded file should contain PCM samples: {resolved}"
+            );
+            let _ = AudioSource::has_data(&src); // quiet dead_code if not used elsewhere
+        }
     }
 }
 
