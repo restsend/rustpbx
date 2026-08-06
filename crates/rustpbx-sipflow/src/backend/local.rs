@@ -21,22 +21,49 @@ use crate::storage::{StorageManager, extract_callid, process_packet_with, proces
 use crate::wav_utils::generate_wav_to_writer_with_rate;
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
-/// How long `record()` blocks on a full worker channel before dropping the
-/// record (bounded backpressure: never grow memory without limit, never drop
-/// under brief overload).
-const BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(1);
-
 /// Capacity for the bounded record→worker channel per shard.
 fn command_capacity(flush_count: usize) -> usize {
     flush_count.max(1024)
 }
 
-/// Send a command with bounded backpressure (policy A): block the calling
-/// thread with short parks while the worker channel is full, up to `timeout`;
-/// if it is still full after that, drop the record and count it rather than
-/// grow memory without limit.
-fn send_command(tx: &mpsc::Sender<Command>, cmd: Command, timeout: Duration) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
+/// Send a command without ever blocking the caller.
+///
+/// The caller here is the single UDP ingest task; blocking it on a full
+/// shard channel (as the previous bounded-backpressure loop did) starves
+/// every other shard and stalls the whole UDP drain. Instead we drop the
+/// record at the shard boundary and count it, so an overloaded shard only
+/// loses its own records while the others keep draining. When
+/// `blocking_backpressure` is set (embedded callers that prefer bounded
+/// backpressure over drops), the original bounded-wait behavior is kept.
+fn send_command(
+    tx: &mpsc::Sender<Command>,
+    cmd: Command,
+    blocking_backpressure: bool,
+) -> anyhow::Result<()> {
+    if blocking_backpressure {
+        return send_command_blocking(tx, cmd);
+    }
+    match tx.try_send(cmd) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => {
+            metrics::counter!(
+                "sipflow_record_backpressure_dropped_total",
+                "component" => "sipflow"
+            )
+            .increment(1);
+            Ok(())
+        }
+        Err(TrySendError::Closed(_)) => Err(anyhow::anyhow!("worker channel closed")),
+    }
+}
+
+/// Bounded backpressure: block the caller with short parks while the worker
+/// channel is full, up to a hard timeout, then drop + count. Used only when
+/// `blocking_backpressure` is enabled (e.g. embedded recording callers that
+/// accept stalling their own producer over losing records).
+fn send_command_blocking(tx: &mpsc::Sender<Command>, cmd: Command) -> anyhow::Result<()> {
+    const BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(1);
+    let deadline = Instant::now() + BACKPRESSURE_TIMEOUT;
     let mut cmd = cmd;
     loop {
         match tx.try_send(cmd) {
@@ -48,9 +75,6 @@ fn send_command(tx: &mpsc::Sender<Command>, cmd: Command, timeout: Duration) -> 
                         "component" => "sipflow"
                     )
                     .increment(1);
-                    tracing::warn!(
-                        "sipflow record: worker channel full, dropped a record after {timeout:?}"
-                    );
                     return Ok(());
                 }
                 std::thread::park_timeout(Duration::from_micros(100));
@@ -94,6 +118,7 @@ pub struct LocalBackend {
     _flushers: Vec<SipFlowFlusher>,
     force_pcm: bool,
     pcm_sample_rate: u32,
+    blocking_backpressure: bool,
 }
 
 impl LocalBackend {
@@ -108,6 +133,7 @@ impl LocalBackend {
         shards: usize,
         force_pcm: bool,
         pcm_sample_rate: u32,
+        blocking_backpressure: bool,
     ) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
         let shards = shards.max(1);
@@ -129,7 +155,7 @@ impl LocalBackend {
 
         for shard in 0..shards {
             // Spawn the dedicated SQLite flush thread for this shard.
-            let flusher = SipFlowFlusher::new(flush_count, flush_interval_secs, id_cache_size);
+            let flusher = SipFlowFlusher::new(flush_count, flush_interval_secs, id_cache_size, shard);
             let flusher_tx = flusher.sender();
             let dropped = flusher.dropped_count();
 
@@ -226,7 +252,7 @@ impl LocalBackend {
                                     )
                                     .record(wait_start.elapsed().as_secs_f64());
                                     perf.flushes.fetch_add(1, Ordering::Relaxed);
-                                    perf.set_pending(storage.dropped() as i64);
+                                    perf.set_pending(rx.len() as i64);
                                     let _ = done.send(());
                                 }
                             }
@@ -235,7 +261,7 @@ impl LocalBackend {
                             let _ = storage.check_flush().await;
                             metrics::gauge!("sipflow_worker_queue_depth", "component" => "sipflow")
                                 .set(rx.len() as f64);
-                            perf.set_pending(storage.dropped() as i64);
+                            perf.set_pending(rx.len() as i64);
                             if let Some(msg) = dumper.try_dump() {
                                 tracing::info!("{msg}");
                             }
@@ -257,6 +283,7 @@ impl LocalBackend {
             _flushers: flushers,
             force_pcm,
             pcm_sample_rate,
+            blocking_backpressure,
         })
     }
 
@@ -324,7 +351,7 @@ impl SipFlowBackend for LocalBackend {
                 call_id: call_id.into_owned(),
                 item,
             },
-            BACKPRESSURE_TIMEOUT,
+            self.blocking_backpressure,
         )
     }
 
@@ -343,7 +370,7 @@ impl SipFlowBackend for LocalBackend {
         send_command(
             &self.senders[idx],
             Command::RecordPacket { packet },
-            BACKPRESSURE_TIMEOUT,
+            self.blocking_backpressure,
         )
     }
 
@@ -655,6 +682,7 @@ mod tests {
             shards,
             false,
             16000,
+            false,
         )
         .unwrap()
     }
@@ -777,9 +805,8 @@ mod tests {
         }
     }
 
-    /// Bounded backpressure (policy A): when the worker channel is full and the
-    /// timeout has elapsed, `send_command` must drop + return Ok instead of
-    /// blocking forever or growing memory.
+    /// Non-blocking dispatch: when the worker channel is full, `send_command`
+    /// must drop + return Ok (never block the caller / grow memory).
     #[test]
     fn test_send_command_drops_when_full() {
         let (tx, _rx) = mpsc::channel::<Command>(2);
@@ -789,19 +816,17 @@ mod tests {
             })
             .unwrap();
         }
-        // A zero timeout means "never wait": the full channel must drop the
-        // record and return Ok (not block).
         let result = send_command(
             &tx,
             Command::RecordPacket {
                 packet: dummy_packet(),
             },
-            Duration::ZERO,
+            false,
         );
-        assert!(result.is_ok(), "full channel with zero timeout must drop, not block");
+        assert!(result.is_ok(), "full channel must drop, not block");
     }
 
-    /// Backpressure must not lose records when the receiver drains promptly.
+    /// Dispatch must not lose records when the receiver drains promptly.
     #[test]
     fn test_send_command_succeeds_when_drained() {
         let (tx, mut rx) = mpsc::channel::<Command>(1);
@@ -810,7 +835,7 @@ mod tests {
             Command::RecordPacket {
                 packet: dummy_packet(),
             },
-            Duration::from_millis(100),
+            false,
         );
         assert!(result.is_ok());
         assert!(matches!(

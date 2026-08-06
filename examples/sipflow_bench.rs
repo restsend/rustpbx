@@ -279,6 +279,7 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         shards: args.shards,
         flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
+        blocking_backpressure: false,
     };
 
     let backend: std::sync::Arc<dyn SipFlowBackend> =

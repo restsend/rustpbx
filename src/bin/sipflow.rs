@@ -19,7 +19,7 @@ use rustpbx::callrecord::{
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
     SipFlowBackend, create_backend,
-    perf::PerfCounters,
+    perf::{PerfCounters, PerfDumper},
     protocol::{MsgType, Packet, parse_datagram},
     storage::{extract_callid, maybe_compress_payload},
 };
@@ -108,6 +108,18 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Interval in seconds for the ingest-side perf/water-level log lines
+    /// (UDP pending, recv/drop rates). 0 disables the periodic log.
+    #[arg(long, default_value_t = 5)]
+    perf_log_interval: u64,
+
+    /// Block (up to 1s) on a full shard worker channel instead of dropping
+    /// the record immediately. Keeps the old bounded-backpressure semantics
+    /// for callers that prefer stalling over losing records; the non-blocking
+    /// default is what keeps the collector from head-of-line blocking.
+    #[arg(long, default_value_t = false)]
+    blocking_backpressure: bool,
 
     // ── FlowDB options ──
     /// TTL in seconds for FlowDB records (optional, 0 = no ttl)
@@ -267,11 +279,33 @@ async fn main() -> Result<()> {
         shards: args.shards,
         flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
+        blocking_backpressure: args.blocking_backpressure,
     };
 
     let backend: Arc<dyn SipFlowBackend> =
         Arc::from(create_backend(&config, CancellationToken::new()).await?);
     let perf_counters = PerfCounters::new_arc();
+
+    // Export the ingest-side counters (packets parsed on the receiver threads,
+    // UDP-channel drops, items routed to shards, pending backlog) to /metrics.
+    // These are the counters that distinguish "collector ingest drops" from
+    // "upstream loss" — previously only the backend's own (unused) counters
+    // were exported.
+    {
+        let perf = perf_counters.clone();
+        rustpbx::utils::spawn(async move {
+            if args.perf_log_interval > 0 {
+                let mut dumper =
+                    PerfDumper::with_interval(perf, std::time::Duration::from_secs(args.perf_log_interval));
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Some(msg) = dumper.try_dump() {
+                        tracing::info!("{msg}");
+                    }
+                }
+            }
+        });
+    }
 
     // Install global Prometheus recorder so all metrics::counter!/gauge!/histogram!
     // calls in the process are captured. Idempotent — safe to call even when another
@@ -388,61 +422,75 @@ async fn main() -> Result<()> {
             })?;
     }
 
-    // Storage Worker Task. `recv_many` drains packets in batches so a
-    // single wakeup processes up to `RECV_BATCH` packets instead of one.
-    // The periodic force-flush honors the CLI `--flush-interval`.
+    // Storage ingest task + independent periodic-flush task.
+    //
+    // The UDP drain runs in its own task and NEVER awaits a storage flush:
+    // blocking it on `backend.flush()` (as a single select! did) stalls the
+    // entire pipeline for the flush duration every `--flush-interval`, which
+    // throttles sustained throughput. `record_packet` is non-blocking
+    // (drops-on-full per shard), so a saturated shard only loses its own
+    // records while the others keep draining.
     const RECV_BATCH: usize = 1024;
     let flush_interval_secs = args.flush_interval.max(1);
     let storage_backend = backend.clone();
     let perf_worker = perf_counters.clone();
     let recv_counters = receiver_counters.clone();
-    rustpbx::utils::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
-        let mut batch = Vec::with_capacity(RECV_BATCH);
-        loop {
-            tokio::select! {
-                n = rx.recv_many(&mut batch, RECV_BATCH) => {
-                    if n == 0 {
-                        // All senders dropped; nothing more will arrive.
-                        break;
-                    }
-                    for packet in batch.drain(..) {
-                        let client_id = packet.client_id;
-                        let has_call_id = packet.call_id.is_some()
-                            || (packet.msg_type == MsgType::Sip && !packet.payload.is_empty());
-                        if has_call_id {
-                            let _ = storage_backend.record_packet(packet);
-                            perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
-                        }
-                        // Track per-client receive count (LRU to bound memory)
-                        if client_id != 0 {
-                            let mut cache = recv_counters.lock().unwrap();
-                            let val = cache.get(&client_id).copied().unwrap_or(0) + 1;
-                            cache.put(client_id, val);
-                        }
-                    }
-                    perf_worker.set_pending(rx.len() as i64);
-                }
-                _ = interval.tick() => {
-                    let flush_start = std::time::Instant::now();
-                    let pending = rx.len();
-                    let _ = storage_backend.flush().await;
-                    let flush_secs = flush_start.elapsed().as_secs_f64();
-                    perf_worker.flushes.fetch_add(1, Ordering::Relaxed);
-                    metrics::histogram!("sipflow_flush_duration_seconds", "component" => "sipflow")
-                        .record(flush_secs);
-                    if flush_secs > 0.1 {
-                        tracing::warn!(
-                            elapsed = %format!("{:.2?}", flush_start.elapsed()),
-                            pending,
-                            "storage flush took > 100ms"
-                        );
-                    }
+
+    // Periodic force-flush in a dedicated task: flush latency must never
+    // block the ingest loop.
+    {
+        let storage_backend = storage_backend.clone();
+        let perf_worker = perf_worker.clone();
+        rustpbx::utils::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs));
+            // Consume the immediate first tick so the first real flush is at
+            // `flush_interval` seconds, matching prior behavior.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let flush_start = std::time::Instant::now();
+                let _ = storage_backend.flush().await;
+                let flush_secs = flush_start.elapsed().as_secs_f64();
+                perf_worker.flushes.fetch_add(1, Ordering::Relaxed);
+                metrics::histogram!("sipflow_flush_duration_seconds", "component" => "sipflow")
+                    .record(flush_secs);
+                if flush_secs > 0.1 {
+                    tracing::warn!(
+                        elapsed = %format!("{:.2?}", flush_start.elapsed()),
+                        "storage flush took > 100ms"
+                    );
                 }
             }
+        });
+    }
+
+    rustpbx::utils::spawn(async move {
+        let mut batch = Vec::with_capacity(RECV_BATCH);
+        loop {
+            let n = rx.recv_many(&mut batch, RECV_BATCH).await;
+            if n == 0 {
+                // All senders dropped; nothing more will arrive.
+                break;
+            }
+            for packet in batch.drain(..) {
+                let client_id = packet.client_id;
+                let has_call_id = packet.call_id.is_some()
+                    || (packet.msg_type == MsgType::Sip && !packet.payload.is_empty());
+                if has_call_id {
+                    let _ = storage_backend.record_packet(packet);
+                    perf_worker.items_recorded.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    perf_worker.items_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                // Track per-client receive count (LRU to bound memory)
+                if client_id != 0 {
+                    let mut cache = recv_counters.lock().unwrap();
+                    let val = cache.get(&client_id).copied().unwrap_or(0) + 1;
+                    cache.put(client_id, val);
+                }
+            }
+            perf_worker.set_pending(rx.len() as i64);
         }
     });
 

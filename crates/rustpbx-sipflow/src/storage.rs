@@ -5,7 +5,7 @@ use crate::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
 use crate::shard::{RouterState, bucket_query_dirs, detect_bucket_layout};
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use anyhow::Result;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use futures::TryStreamExt;
 use sqlx::{Connection, SqliteConnection};
@@ -23,6 +23,11 @@ const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
 const RAW_RECORD_HEADER_LEN: u64 = 10;
 const RAW_READ_THROUGH_GAP: u64 = 64 * 1024;
 
+/// In-memory buffer for raw-record appends. Packets are appended here and
+/// written to the raw file in bulk once this threshold is crossed (or on
+/// rotate/flush), eliminating the per-packet blocking-pool round-trip.
+const RAW_WRITE_BUF_SIZE: usize = 64 * 1024;
+
 pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
@@ -34,6 +39,8 @@ pub struct StorageManager {
     /// write fails (a partial write leaves the cursor ahead of `current_offset`),
     /// forcing the next write to re-seek before appending.
     pos_known: bool,
+    /// Buffered raw records awaiting a bulk file write.
+    write_buf: Vec<u8>,
     subdirs: SipFlowSubdirs,
     flusher_tx: Option<mpsc::Sender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
@@ -257,6 +264,7 @@ impl StorageManager {
             raw_file: None,
             current_offset: 0,
             pos_known: true,
+            write_buf: Vec::with_capacity(RAW_WRITE_BUF_SIZE),
             subdirs,
             flusher_tx,
             dropped: dropped.unwrap_or_default(),
@@ -275,37 +283,25 @@ impl StorageManager {
             self.current_hour = h;
         }
 
-        let file = self
-            .raw_file
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("raw_file not initialized after rotate"))?;
         let offset = self.current_offset;
 
-        // Only write_processed writes to this fd, and every successful write
-        // advances the cursor to exactly `current_offset`, so on the happy path
-        // the cursor already sits where the DB index says the record lives.
-        // Re-seek only when the cursor may have diverged (a prior write error
-        // can leave it mid-record).
-        let write_start = Instant::now();
-        if !self.pos_known {
-            file.seek(SeekFrom::Start(offset)).await?;
-        }
-
+        // Append header + payload to the in-memory buffer; the actual file
+        // write happens in bulk once the buffer crosses a threshold (or on
+        // rotate/flush). This avoids a blocking-pool round-trip per packet.
         let mut header = [0u8; RAW_RECORD_HEADER_LEN as usize];
-        let mut header_buf = &mut header[..];
-        header_buf.put_u16(0x5346);
-        header_buf.put_u32(processed.orig_size as u32);
-        header_buf.put_u32(processed.comp_size as u32);
-        let mut record = Buf::chain(&header[..], processed.payload.as_ref());
-        if let Err(e) = file.write_all_buf(&mut record).await {
-            self.pos_known = false;
-            return Err(e.into());
+        {
+            let mut header_buf = &mut header[..];
+            header_buf.put_u16(0x5346);
+            header_buf.put_u32(processed.orig_size as u32);
+            header_buf.put_u32(processed.comp_size as u32);
         }
-        self.pos_known = true;
-        metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
-            .record(write_start.elapsed().as_secs_f64());
-
+        self.write_buf.extend_from_slice(&header);
+        self.write_buf.extend_from_slice(&processed.payload);
         self.current_offset += RAW_RECORD_HEADER_LEN as u64 + processed.comp_size as u64;
+
+        if self.write_buf.len() >= RAW_WRITE_BUF_SIZE {
+            self.flush_raw_buf().await?;
+        }
 
         if let Some(ref tx) = self.flusher_tx {
             let meta = FlushMeta {
@@ -328,12 +324,40 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Write the buffered raw records to the file, advancing the cursor to
+    /// `current_offset`. Callers must invoke this before any DB flush that
+    /// references the buffered offsets (rotate / check_flush / force_flush)
+    /// so on-disk raw data stays ahead of its index.
+    async fn flush_raw_buf(&mut self) -> Result<()> {
+        if self.write_buf.is_empty() {
+            return Ok(());
+        }
+        let Some(file) = self.raw_file.as_mut() else {
+            return Ok(());
+        };
+        let offset = self.current_offset.saturating_sub(self.write_buf.len() as u64);
+        let write_start = Instant::now();
+        if !self.pos_known {
+            file.seek(SeekFrom::Start(offset)).await?;
+        }
+        if let Err(e) = file.write_all(&self.write_buf).await {
+            self.pos_known = false;
+            return Err(e.into());
+        }
+        self.pos_known = true;
+        self.write_buf.clear();
+        metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
+            .record(write_start.elapsed().as_secs_f64());
+        Ok(())
+    }
+
     /// Number of items dropped due to flusher channel being closed.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
     pub async fn check_flush(&mut self) -> Result<()> {
+        self.flush_raw_buf().await?;
         if let Some(ref tx) = self.flusher_tx {
             let _ = tx.send(FlushCommand::Flush {
                 enqueued_at: Instant::now(),
@@ -344,6 +368,7 @@ impl StorageManager {
 
     /// Force-flush all pending items and wait for completion.
     pub async fn force_flush(&mut self) -> Result<()> {
+        self.flush_raw_buf().await?;
         if let Some(ref tx) = self.flusher_tx {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             if tx
@@ -361,6 +386,10 @@ impl StorageManager {
     }
 
     async fn rotate(&mut self, dt: DateTime<Local>) -> Result<()> {
+        // Persist buffered records to the current raw file before switching,
+        // so their offsets remain valid in the DB index.
+        self.flush_raw_buf().await?;
+
         let subdir = crate::shard::bucket_subdir(&self.subdirs, dt);
         let bucket_dir = self.base_path.join(&subdir);
         tokio::fs::create_dir_all(&bucket_dir).await?;
@@ -924,7 +953,7 @@ mod tests {
     }
 
     async fn new_test_storage(base_path: &Path) -> (StorageManager, SipFlowFlusher) {
-        let flusher = SipFlowFlusher::new(1000, 3600, 128);
+        let flusher = SipFlowFlusher::new(1000, 3600, 128, 0);
         let storage = StorageManager::new(
             base_path,
             SipFlowSubdirs::None,
@@ -942,7 +971,7 @@ mod tests {
         shard_index: usize,
         shard_count: usize,
     ) -> (StorageManager, SipFlowFlusher) {
-        let flusher = SipFlowFlusher::new(1000, 3600, 128);
+        let flusher = SipFlowFlusher::new(1000, 3600, 128, 0);
         let router = Arc::new(RouterState::new(MODE_MULTI, shard_count));
         let storage = StorageManager::new(
             base_path,

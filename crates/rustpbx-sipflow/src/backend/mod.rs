@@ -150,6 +150,7 @@ pub async fn create_backend(
             shards,
             flowdb_sync_mode,
             upload,
+            blocking_backpressure,
             ..
         } => {
             // Extract force_pcm and sample_rate from upload config (if present)
@@ -188,6 +189,7 @@ pub async fn create_backend(
                 force_pcm,
                 pcm_sample_rate,
                 *flowdb_sync_mode,
+                *blocking_backpressure,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
         }

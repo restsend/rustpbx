@@ -162,6 +162,13 @@ pub enum SipFlowConfig {
         flowdb_sync_mode: flowdb::SyncMode,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
+        /// When true, `record()` blocks (up to 1s) on a full worker channel
+        /// instead of dropping the record immediately. The non-blocking
+        /// default keeps a saturated shard from stalling the whole ingest
+        /// pipeline; embedded callers that prefer bounded backpressure over
+        /// drops can opt in.
+        #[serde(default)]
+        blocking_backpressure: bool,
     },
     Remote {
         #[serde(default)]

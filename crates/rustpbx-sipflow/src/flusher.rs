@@ -16,10 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Max rows per multi-row INSERT statement.
 ///
-/// 6 columns × 500 rows = 3000 bound parameters, safely under SQLite's
+/// 6 columns × 2000 rows = 12000 bound parameters, safely under SQLite's
 /// `SQLITE_LIMIT_VARIABLE_NUMBER` (32766 since 3.32.0; sqlx bundles a recent
 /// libsqlite3-sys). Lower for the `call_meta` upsert, which is 1 param/row.
-const INSERT_CHUNK_ROWS: usize = 500;
+const INSERT_CHUNK_ROWS: usize = 2000;
 
 #[derive(Debug)]
 pub(crate) struct FlushMeta {
@@ -50,6 +50,9 @@ pub(crate) struct SipFlowFlusher {
     dropped: Arc<AtomicU64>,
 }
 
+/// How often the flusher emits a periodic queue-depth status log line.
+const FLUSHER_STATUS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Capacity for the bounded worker→flusher channel.
 ///
 /// The flusher accumulates up to `flush_count` metas in its in-memory batch
@@ -61,7 +64,12 @@ pub(crate) fn flusher_capacity(flush_count: usize) -> usize {
 }
 
 impl SipFlowFlusher {
-    pub(crate) fn new(flush_count: usize, flush_interval_secs: u64, id_cache_size: usize) -> Self {
+    pub(crate) fn new(
+        flush_count: usize,
+        flush_interval_secs: u64,
+        id_cache_size: usize,
+        shard: usize,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<FlushCommand>(flusher_capacity(flush_count));
         let dropped = Arc::new(AtomicU64::new(0));
         let dropped_clone = dropped.clone();
@@ -84,6 +92,7 @@ impl SipFlowFlusher {
                         id_cache_size,
                         dropped_clone,
                         cancel_clone,
+                        shard,
                     )
                     .await;
                 });
@@ -129,6 +138,7 @@ async fn run(
     id_cache_size: usize,
     _dropped: Arc<AtomicU64>,
     cancel: CancellationToken,
+    shard: usize,
 ) {
     let flush_interval = Duration::from_secs(flush_interval_secs);
     let mut db_conn: Option<SqliteConnection> = None;
@@ -137,8 +147,13 @@ async fn run(
     let mut call_id_cache: LruCache<String, i32> =
         LruCache::new(NonZeroUsize::new(id_cache_size.max(1)).unwrap());
     let mut last_flush = Instant::now();
+    let mut last_checkpoint = Instant::now();
     let mut sip_rows_written: u64 = 0;
     let mut media_rows_written: u64 = 0;
+    // Periodic water-level status line; consume the first tick so the first
+    // log is after one full interval.
+    let mut status_interval = tokio::time::interval(FLUSHER_STATUS_INTERVAL);
+    status_interval.tick().await;
 
     loop {
         metrics::gauge!("sipflow_flusher_queue_depth", "component" => "sipflow")
@@ -162,6 +177,7 @@ async fn run(
                         flush_count,
                         flush_interval,
                         &mut last_flush,
+                        &mut last_checkpoint,
                     )
                     .await;
                 }
@@ -173,6 +189,7 @@ async fn run(
                         &db_path,
                         &mut sip_rows_written,
                         &mut media_rows_written,
+                        &mut last_checkpoint,
                     )
                     .await;
                 }
@@ -190,8 +207,17 @@ async fn run(
                     flush_count,
                     flush_interval,
                     &mut last_flush,
+                    &mut last_checkpoint,
                 )
                 .await;
+            }
+            _ = status_interval.tick() => {
+                tracing::info!(
+                    shard,
+                    queue_depth = rx.len(),
+                    batch_len = batch.len(),
+                    "sipflow flusher status"
+                );
             }
             else => {
                 if !batch.is_empty() {
@@ -202,6 +228,7 @@ async fn run(
                         &db_path,
                         &mut sip_rows_written,
                         &mut media_rows_written,
+                        &mut last_checkpoint,
                     )
                     .await;
                 }
@@ -223,6 +250,7 @@ async fn handle_flush_command(
     flush_count: usize,
     flush_interval: Duration,
     last_flush: &mut Instant,
+    last_checkpoint: &mut Instant,
 ) {
     match cmd {
         FlushCommand::Meta(meta) => {
@@ -237,6 +265,7 @@ async fn handle_flush_command(
                     db_path,
                     sip_rows_written,
                     media_rows_written,
+                    last_checkpoint,
                 )
                 .await;
                 *last_flush = Instant::now();
@@ -254,6 +283,7 @@ async fn handle_flush_command(
                     db_path,
                     sip_rows_written,
                     media_rows_written,
+                    last_checkpoint,
                 )
                 .await;
                 *last_flush = Instant::now();
@@ -271,6 +301,7 @@ async fn handle_flush_command(
                     db_path,
                     sip_rows_written,
                     media_rows_written,
+                    last_checkpoint,
                 )
                 .await;
                 *last_flush = Instant::now();
@@ -286,9 +317,21 @@ async fn handle_flush_command(
                     db_path,
                     sip_rows_written,
                     media_rows_written,
+                    last_checkpoint,
                 )
                 .await;
                 *last_flush = Instant::now();
+            }
+            // Before switching to the new bucket: checkpoint + truncate the old
+            // WAL and shrink its page cache so the previous bucket's WAL
+            // doesn't linger on disk and its pages are released from RSS.
+            if let Some(conn) = db_conn.as_mut() {
+                let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut *conn)
+                    .await;
+                let _ = sqlx::query("PRAGMA shrink_memory")
+                    .execute(&mut *conn)
+                    .await;
             }
             drop(db_conn.take());
             *db_conn = Some(open_db_with_pragmas(&new_db_path).await);
@@ -379,7 +422,12 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
     .await
     .ok();
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_call ON media_msgs(call_id)")
+    // `idx_media_call_timestamp` (call_id, timestamp) already covers all
+    // call_id-prefix lookups, so the standalone `idx_media_call` index is
+    // redundant. Every media row insert updated two B-trees; dropping the
+    // redundant one measurably raises sustained write throughput on large
+    // DBs. Existing databases are migrated (one-time) by the DROP below.
+    sqlx::query("DROP INDEX IF EXISTS idx_media_call")
         .execute(&mut conn)
         .await
         .ok();
@@ -401,6 +449,7 @@ async fn flush_to_db(
     db_path: &Option<PathBuf>,
     sip_rows_written: &mut u64,
     media_rows_written: &mut u64,
+    last_checkpoint: &mut Instant,
 ) {
     if batch.is_empty() {
         return;
@@ -442,18 +491,40 @@ async fn flush_to_db(
                 "sipflow flusher: flushed batch"
             );
 
-            // Bound WAL growth and amortise checkpoint cost across every flush
-            // instead of letting a single auto-checkpoint stall one commit.
-            // PASSIVE returns immediately (SQLITE_BUSY) if a reader holds the
-            // WAL, so it never blocks; the auto-checkpoint remains as a safety
-            // net. Kept outside the flush timing window so `flush_db_seconds`
-            // stays comparable to previous runs.
-            let ckpt_start = Instant::now();
-            let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-                .execute(conn)
-                .await;
-            metrics::histogram!("sipflow_wal_checkpoint_seconds", "component" => "sipflow")
-                .record(ckpt_start.elapsed().as_secs_f64());
+            // Bound WAL growth and amortise checkpoint cost by throttling it to
+            // a coarse cadence instead of after every flush (a per-flush
+            // checkpoint measurably dominates flush latency). Also checkpoint
+            // early when the WAL file has grown large (a sustained writer can
+            // otherwise outpace a time-throttled checkpoint). PASSIVE returns
+            // immediately (SQLITE_BUSY) if a reader holds the WAL, so it never
+            // blocks; the auto-checkpoint remains as a safety net. Kept outside
+            // the flush timing window so `flush_db_seconds` stays comparable.
+            let wal_too_big = db_path
+                .as_ref()
+                .map(|p| {
+                    std::fs::metadata(format!("{}-wal", p.display()))
+                        .map(|m| m.len() > WAL_MAX_BYTES)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL || wal_too_big {
+                let ckpt_start = Instant::now();
+                let row = sqlx::query_as::<_, WalCheckpointRow>("PRAGMA wal_checkpoint(PASSIVE)")
+                    .fetch_one(&mut *conn)
+                    .await;
+                if let Ok(row) = row {
+                    if row.busy > 0 {
+                        metrics::counter!(
+                            "sipflow_wal_checkpoint_busy_total",
+                            "component" => "sipflow"
+                        )
+                        .increment(1);
+                    }
+                }
+                *last_checkpoint = Instant::now();
+                metrics::histogram!("sipflow_wal_checkpoint_seconds", "component" => "sipflow")
+                    .record(ckpt_start.elapsed().as_secs_f64());
+            }
         }
         Err(e) => {
             metrics::counter!("sipflow_flush_errors_total", "component" => "sipflow").increment(1);
@@ -469,6 +540,15 @@ struct SipRow {
     timestamp: i64,
     offset: i64,
     size: i64,
+}
+
+/// Result row of `PRAGMA wal_checkpoint(PASSIVE)`:
+/// `busy` = 1 when a reader held the WAL so the checkpoint was skipped.
+#[derive(sqlx::FromRow)]
+struct WalCheckpointRow {
+    busy: i64,
+    log: i64,
+    checkpointed: i64,
 }
 
 struct RtpRow {
@@ -532,7 +612,18 @@ async fn insert_callids(
 /// (e.g. default `flush_count=0` with a busy 1s tick) can't stall every
 /// flush behind it. Each commit is one WAL fsync under `synchronous=NORMAL`,
 /// so the chunk is large enough to amortise that cost.
-const COMMIT_CHUNK_ROWS: usize = 2000;
+const COMMIT_CHUNK_ROWS: usize = 5000;
+
+/// How often a `wal_checkpoint(PASSIVE)` may run. Checkpointing after every
+/// flush measurably dominates flush latency (it walks dirty pages back into
+/// the main DB B-trees); throttling it to a coarser cadence lets flush
+/// throughput scale while the WAL stays bounded (SQLite's default
+/// auto-checkpoint remains as a safety net).
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// If the WAL file exceeds this size, checkpoint immediately regardless of
+/// `CHECKPOINT_INTERVAL`, so a sustained writer can't outpace the throttle.
+const WAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 async fn try_flush(
     conn: &mut SqliteConnection,
