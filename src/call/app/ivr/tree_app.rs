@@ -101,6 +101,19 @@ pub struct IvrApp {
     flow_started_at: Option<std::time::Instant>,
     /// Timestamp when the current node was entered (for IvrNodeExited.duration_ms).
     node_entered_at: Option<std::time::Instant>,
+    /// Shared session variables, stashed in `on_enter` so `on_exit` (which has
+    /// no context) can publish the IVR end reason.
+    runtime_vars: Option<Arc<dashmap::DashMap<String, String>>>,
+    /// RWI gateway, stashed in `on_enter` so `on_exit` can emit events.
+    rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
+    /// Call session id, stashed in `on_enter` for `on_exit` event payloads.
+    session_id: Option<String>,
+    /// Session extensions clone stashed in `on_enter`, used in `on_exit` to
+    /// write an `IvrExecResult` when the IVR was started via `ivr.exec`.
+    session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
+    /// Set when a terminal action already emitted `IvrFlowCompleted`, so
+    /// `on_exit` does not double-report an aborted flow.
+    flow_completed: bool,
 }
 
 impl IvrApp {
@@ -122,6 +135,11 @@ impl IvrApp {
             flow_started_at: None,
             node_entered_at: None,
             start_menu: None,
+            runtime_vars: None,
+            rwi_gateway: None,
+            session_id: None,
+            session_extensions: None,
+            flow_completed: false,
         }
     }
 
@@ -170,12 +188,14 @@ impl IvrApp {
     /// `"hangup"`, etc.) and `reason` provides finer detail (e.g.
     /// `"agent_transfer"`, `"queue"`, `"voicemail"`, `"caller_hangup"`).
     async fn ivr_flow_completed(
-        &self,
+        &mut self,
         ctx: &ApplicationContext,
         status: &str,
         reason: &str,
         target: Option<&str>,
     ) {
+        // Guard `on_exit` against double-reporting this flow.
+        self.flow_completed = true;
         let total_duration_ms = self
             .flow_started_at
             .map(|t| t.elapsed().as_millis() as u64)
@@ -1192,6 +1212,11 @@ impl CallApp for IvrApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         info!(ivr = %self.definition.name, "IVR application started");
+        // Stash references for `on_exit`, which receives no context.
+        self.runtime_vars = Some(ctx.session_vars.clone());
+        self.rwi_gateway = ctx.rwi_gateway.clone();
+        self.session_id = Some(ctx.call_info.session_id.clone());
+        self.session_extensions = Some(ctx.session_extensions.clone());
         ctrl.answer().await?;
 
         // Check business hours
@@ -1490,5 +1515,278 @@ impl CallApp for IvrApp {
         } else {
             Ok(AppAction::Continue)
         }
+    }
+
+    async fn on_exit(&mut self, reason: crate::call::app::ExitReason) -> anyhow::Result<()> {
+        // A terminal action already emitted IvrFlowCompleted (transfer, queue,
+        // voicemail, deliberate hangup) — nothing to report here.
+        if self.flow_completed {
+            return Ok(());
+        }
+
+        let end_reason_label = match reason {
+            crate::call::app::ExitReason::Normal => "normal",
+            crate::call::app::ExitReason::Hangup => "hangup",
+            crate::call::app::ExitReason::RemoteHangup(_) => "remote_hangup",
+            crate::call::app::ExitReason::Transferred => "transferred",
+            crate::call::app::ExitReason::Chained => "chained",
+            crate::call::app::ExitReason::Cancelled => "cancelled",
+            crate::call::app::ExitReason::Error(_) => "error",
+        };
+
+        // The node the caller was on when the session terminated.
+        let menu_key = match &self.state {
+            IvrState::PlayingGreeting { menu_key }
+            | IvrState::WaitingDtmf { menu_key, .. }
+            | IvrState::PlayingInvalid { menu_key, .. } => menu_key.clone(),
+            _ => self.current_menu_key().to_string(),
+        };
+        let duration_ms = self
+            .node_entered_at
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let total_duration_ms = self
+            .flow_started_at
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let call_id = self.session_id.clone().unwrap_or_default();
+        let completion_time = chrono::Utc::now().to_rfc3339();
+
+        info!(
+            ivr = %self.definition.name,
+            node = %menu_key,
+            end_reason = end_reason_label,
+            "IVR flow ended by session termination"
+        );
+
+        // Record the node the caller was on when the session terminated.
+        if let Some(ref gw) = self.rwi_gateway {
+            let gw = gw.clone();
+            let cid = call_id.clone();
+            let ev = crate::rwi::IvrNodeExited {
+                call_id: cid.clone(),
+                node_id: menu_key.clone(),
+                node_name: menu_key.clone(),
+                result_value: None,
+                duration_ms: duration_ms as u32,
+                exit_time: completion_time.clone(),
+                next_node_id: None,
+                hangup_reason: Some(end_reason_label.to_string()),
+                call_result: Some("hangup".to_string()),
+                extra: None,
+            };
+            crate::utils::spawn(async move {
+                let guard = gw.read();
+                guard.fan_out(&cid, &ev);
+            });
+        }
+
+        // Report the whole flow as aborted (not completed via a terminal action).
+        if let Some(ref gw) = self.rwi_gateway {
+            let gw = gw.clone();
+            let cid = call_id.clone();
+            let ev = crate::rwi::IvrFlowCompleted {
+                call_id: cid.clone(),
+                app_id: self.definition.name.clone(),
+                total_nodes_traversed: self.nodes_traversed,
+                total_duration_ms: total_duration_ms as u32,
+                final_result: end_reason_label.to_string(),
+                completion_time,
+                final_routing_target: None,
+                extra: None,
+            };
+            crate::utils::spawn(async move {
+                let guard = gw.read();
+                guard.fan_out(&cid, &ev);
+            });
+        }
+
+        // Publish the end reason so the session can enrich CallHangup / CDR
+        // (resolve_final_hangup_reason reads ivr_end_reason).
+        if let Some(ref vars) = self.runtime_vars {
+            vars.insert("ivr_end_reason".to_string(), end_reason_label.to_string());
+            vars.insert("ivr_status".to_string(), end_reason_label.to_string());
+            vars.insert("ivr_name".to_string(), self.definition.name.clone());
+        }
+
+        // If started via ivr.exec, write the result so the post-exit hook can
+        // deliver it (mirrors StepIvrApp::on_exit).
+        if let Some(ref ext) = self.session_extensions {
+            let is_exec = ext
+                .read()
+                .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+                .is_some();
+            if is_exec {
+                ext.write().insert(
+                    crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
+                        status: end_reason_label.to_string(),
+                        reason: end_reason_label.to_string(),
+                        routing_target: None,
+                        collected: self.collected_variables.clone(),
+                        trace: vec![],
+                        duration_ms: total_duration_ms,
+                        completion_time: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+            }
+        }
+
+        self.flow_completed = true;
+        self.state = IvrState::Done;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::app::ivr::config::MenuNode;
+    use crate::call::app::testing::MockCallStack;
+    use crate::call::app::{CallInfo, ExitReason};
+    use crate::config::Config;
+    use sea_orm::DatabaseConnection;
+    use std::collections::HashMap;
+
+    fn test_definition() -> IvrDefinition {
+        let mut def = IvrDefinition {
+            name: "test-ivr".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            ivr_mode: None,
+            provider: None,
+            business_hours: None,
+            tts: None,
+            root: Some(MenuNode::default()),
+            menus: HashMap::new(),
+        };
+        def.menus.insert("root".to_string(), MenuNode::default());
+        def
+    }
+
+    fn test_context() -> ApplicationContext {
+        ApplicationContext::new(
+            DatabaseConnection::default(),
+            CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "2000".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: HashMap::new(),
+                route_name: None,
+            },
+            Arc::new(Config::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_session_termination_records_node_and_emits_events() {
+        use crate::rwi::gateway::EventCacheEntry;
+
+        let mut ctx = test_context();
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(IvrApp::new(test_definition())),
+            ctx.clone(),
+        );
+        stack.enter().await;
+
+        // Simulate sip_session termination: the event loop's cancel token fires
+        // and drives IvrApp::on_exit(ExitReason::Cancelled).
+        stack.cancel();
+        stack.join().await.expect("cancel should stop app");
+
+        assert_eq!(
+            ctx.get_var("ivr_end_reason").as_deref(),
+            Some("cancelled"),
+            "ivr_end_reason must be published for the session"
+        );
+        assert_eq!(
+            ctx.get_var("ivr_status").as_deref(),
+            Some("cancelled"),
+            "ivr_status must be published for the session"
+        );
+
+        let mut saw_node_exited = false;
+        let mut saw_flow_completed = false;
+        for _ in 0..20 {
+            while let Ok(entry) = rx.try_recv() {
+                match entry.event.event_type {
+                    "ivr_node_exited" => saw_node_exited = true,
+                    "ivr_flow_completed" => saw_flow_completed = true,
+                    _ => {}
+                }
+            }
+            if saw_node_exited && saw_flow_completed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            saw_node_exited,
+            "session termination must emit ivr_node_exited"
+        );
+        assert!(
+            saw_flow_completed,
+            "session termination must emit ivr_flow_completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_hangup_reason_label() {
+        let mut ctx = test_context();
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, _rx) = tokio::sync::broadcast::channel::<crate::rwi::gateway::EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(IvrApp::new(test_definition())),
+            ctx.clone(),
+        );
+        stack.enter().await;
+
+        // A remote hangup pushes ControllerEvent::Hangup → on_exit(RemoteHangup).
+        stack.remote_hangup();
+        stack.join().await.expect("remote hangup should stop app");
+
+        assert_eq!(
+            ctx.get_var("ivr_end_reason").as_deref(),
+            Some("remote_hangup"),
+            "remote hangup must publish remote_hangup end reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flow_completed_guard_skips_duplicate_report() {
+        let mut app = IvrApp::new(test_definition());
+        app.flow_completed = true;
+        app.state = IvrState::WaitingDtmf {
+            menu_key: "root".to_string(),
+            retry_count: 0,
+        };
+        app.session_id = Some("test-session".to_string());
+        let vars = Arc::new(dashmap::DashMap::new());
+        app.runtime_vars = Some(vars.clone());
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, _rx) = tokio::sync::broadcast::channel::<crate::rwi::gateway::EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        app.on_exit(ExitReason::Cancelled)
+            .await
+            .expect("on_exit should succeed");
+
+        assert!(
+            vars.get("ivr_end_reason").is_none(),
+            "must not re-publish end reason when flow already completed"
+        );
     }
 }

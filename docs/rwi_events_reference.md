@@ -554,6 +554,8 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 
 呼叫退出 IVR 节点。
 
+> **会话终止时也会触发**：当 sip_session 在执行中被终止（主叫挂机、系统取消等），内置（tree 模式）IVR 也会 emit 本事件记录主叫当时所在的节点，此时 `hangup_reason` 被填充（取值：`cancelled`、`remote_hangup`、`hangup`、`error` 等），`call_result` 为 `"hangup"`。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
@@ -563,7 +565,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `duration_ms` | u32 | 节点停留时长（毫秒） |
 | `exit_time` | String | 退出时间 |
 | `next_node_id` | Option\<String\> | 下一个节点 ID |
-| `hangup_reason` | Option\<String\> | 挂机原因 |
+| `hangup_reason` | Option\<String\> | 挂机原因（会话终止时取值：`cancelled`/`remote_hangup`/`hangup` 等） |
 | `call_result` | Option\<String\> | 通话结果 |
 | *+ctx* | | 扁平化上下文 |
 
@@ -591,13 +593,15 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 
 IVR 流程完成（执行了终止动作：转接、排队、留言、挂机）。
 
+> **会话终止时也会触发**：内置（tree 模式）IVR 在 sip_session 执行中被终止（主叫挂机 `remote_hangup`、系统取消 `cancelled` 等）时会以 `final_result` 记录终止原因，并携带 `total_nodes_traversed` 统计信息。`final_result` 取值：`transferred`、`queue`、`voicemail`、`hangup`、`abandoned`、`cancelled`、`remote_hangup`、`error` 等。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `app_id` | String | IVR 应用 ID |
 | `total_nodes_traversed` | u32 | 经过的节点总数 |
 | `total_duration_ms` | u32 | IVR 总耗时（毫秒） |
-| `final_result` | String | 最终结果（`transferred`、`voicemail`、`abandoned` 等） |
+| `final_result` | String | 最终结果（`transferred`、`voicemail`、`abandoned`、`cancelled`、`remote_hangup` 等） |
 | `completion_time` | String | 完成时间 |
 | `final_routing_target` | Option\<String\> | 最终路由目标 |
 | *+ctx* | | 扁平化上下文 |
@@ -625,6 +629,8 @@ IVR 流程完成（执行了终止动作：转接、排队、留言、挂机）�
 
 Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时产生。
 
+> **会话终止条目（`session_end`）**：当 IVR 会话结束（含主叫挂机 `RemoteHangup`、系统取消 `Cancelled`）时，会额外 emit 一条 `trigger.type="session_end"` 的跟踪事件，`action_type`/`step_id`/`step_name` 记录最后执行的节点，并填充 `end_reason`/`end_detail` 表示整个会话的结束原因。外部 provider 的 `/end` webhook 在 `RemoteHangup`/`Cancelled` 时不会被调用（本地跟踪事件照常发出）。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
@@ -643,6 +649,8 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `step_start_time` | Option\<String\> | 当前步骤开始时间（ISO UTC） |
 | `step_end_time` | Option\<String\> | 当前步骤结束时间（ISO UTC）。仅步骤执行完成（terminal/error）时有值；等待用户输入（WaitFor）时为 null |
 | `extra` | Option\<JSON Object\> | Provider 透传的额外数据。Provider 在每次响应的 ActionNode.extra 中返回完整对象，RustPBX 透传存储并原样输出 |
+| `end_reason` | Option\<String\> | 仅会话终止（`session_end`）条目有值，标识整个 IVR 会话如何结束（`normal`、`transfer`、`transfer_to_queue`、`hangup`、`user_hangup`、`timeout`、`error` 等） |
+| `end_detail` | Option\<String\> | 与 `end_reason` 配套的详情（如转接目标、错误信息） |
 
 > **`trigger` 字段说明**：
 >
@@ -654,7 +662,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 >
 > | 子字段 | 类型 | 说明 |
 > |--------|------|------|
-> | `type` | String | 触发源类型：`session_start`、`dtmf`、`dtmf_menu`、`dtmf_menu_timeout`、`audio_complete`、`action_execute`、`chained`、`api_response`、`phone_collected`、`recording_complete`、`input_voice`、`error`、`dtmf_menu_invalid`、`unknown` |
+> | `type` | String | 触发源类型：`session_start`、`session_end`、`dtmf`、`dtmf_menu`、`dtmf_menu_timeout`、`audio_complete`、`action_execute`、`chained`、`api_response`、`phone_collected`、`recording_complete`、`input_voice`、`error`、`dtmf_menu_invalid`、`unknown` |
 > | `detail` | Option\<JSON Object\> | 触发详情对象，无详情时省略。常见取值：DTMF → `{"digit":"2"}`；API 响应 → `{"status":200}`；号码收集 → `{"number":"13800138000"}` |
 >
 > **时间字段说明**：

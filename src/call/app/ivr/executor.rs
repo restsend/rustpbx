@@ -1314,55 +1314,60 @@ impl CallApp for StepIvrApp {
             .cloned()
             .unwrap_or_default();
         let end_sr = end_reason.to_session_end_reason();
-        if !skip_provider_end {
-            let (last_action_type, last_step_id, last_step_name) = match &self.current_node {
-                Some(node) => (
-                    Self::action_type_label(&node.action).to_string(),
-                    node.step_id
-                        .clone()
-                        .or_else(|| self.current_step_id.clone()),
-                    node.step_name
-                        .clone()
-                        .or_else(|| self.current_step_name.clone()),
-                ),
-                None => (
-                    "session_end".to_string(),
-                    self.current_step_id.clone(),
-                    self.current_step_name.clone(),
-                ),
-            };
-            let caller = self
-                .sess
-                .variables
-                .get("caller")
-                .cloned()
-                .unwrap_or_default();
-            let callee = self
-                .sess
-                .variables
-                .get("callee")
-                .cloned()
-                .unwrap_or_default();
-            self.record_trace(IvrTraceEntry {
-                session_id: session_id.clone(),
-                caller,
-                callee,
-                step_index: self.step_index,
-                trigger: crate::rwi::TriggerInfo::new("session_end"),
-                provider_url: None,
-                action_type: last_action_type,
-                action_json: None,
-                error: None,
-                step_id: last_step_id,
-                step_name: last_step_name,
-                step_start_time: None,
-                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
-                duration_ms: 0,
-                extra: None,
-                end_reason: Some(end_sr.reason.clone()),
-                end_detail: end_sr.detail.clone(),
-            });
 
+        // Always record the session_end trace entry — including on
+        // RemoteHangup/Cancelled (caller hung up or system terminated the
+        // session) — so the last executed node is captured and surfaced as an
+        // `ivr_step_trace` event even when the session ends mid-flow.
+        let (last_action_type, last_step_id, last_step_name) = match &self.current_node {
+            Some(node) => (
+                Self::action_type_label(&node.action).to_string(),
+                node.step_id
+                    .clone()
+                    .or_else(|| self.current_step_id.clone()),
+                node.step_name
+                    .clone()
+                    .or_else(|| self.current_step_name.clone()),
+            ),
+            None => (
+                "session_end".to_string(),
+                self.current_step_id.clone(),
+                self.current_step_name.clone(),
+            ),
+        };
+        let caller = self
+            .sess
+            .variables
+            .get("caller")
+            .cloned()
+            .unwrap_or_default();
+        let callee = self
+            .sess
+            .variables
+            .get("callee")
+            .cloned()
+            .unwrap_or_default();
+        self.record_trace(IvrTraceEntry {
+            session_id: session_id.clone(),
+            caller,
+            callee,
+            step_index: self.step_index,
+            trigger: crate::rwi::TriggerInfo::new("session_end"),
+            provider_url: None,
+            action_type: last_action_type,
+            action_json: None,
+            error: None,
+            step_id: last_step_id,
+            step_name: last_step_name,
+            step_start_time: None,
+            step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+            duration_ms: 0,
+            extra: None,
+            end_reason: Some(end_sr.reason.clone()),
+            end_detail: end_sr.detail.clone(),
+        });
+
+        if !skip_provider_end {
             self.provider
                 .on_session_end(&end_reason, &session_id)
                 .await
@@ -3104,7 +3109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_end_trace_skipped_on_remote_hangup() {
+    async fn test_session_end_trace_recorded_on_remote_hangup() {
         use crate::call::app::ivr::trace::IvrTraceCollector;
 
         let trace = IvrTraceCollector::new();
@@ -3118,6 +3123,12 @@ mod tests {
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
         app.trace = Some(trace.clone());
         app.ivr_name = Some("test-ivr".to_string());
+        app.current_node = Some(ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_to_ivr: None,
+        }));
+        app.current_step_id = Some("step-7".to_string());
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
@@ -3129,14 +3140,96 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let entries = trace.query_by_session("test-session").await;
-        let has_session_end = entries.iter().any(|e| e.trigger.r#type == "session_end");
-        assert!(
-            !has_session_end,
-            "remote hangup must not record a session_end trace entry"
+        let session_end = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "session_end")
+            .expect("remote hangup must record a session_end trace entry");
+        assert_eq!(
+            session_end.step_id.as_deref(),
+            Some("step-7"),
+            "session_end trace must record the last executed node"
+        );
+        assert_eq!(
+            session_end.action_type, "Transfer",
+            "session_end trace must carry the last node action type"
+        );
+        assert_eq!(
+            session_end.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::UserHangup),
+            "session_end trace must carry the end reason"
         );
         assert!(
             !*provider.end_called.lock().unwrap(),
             "remote hangup must skip provider session end"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_hangup_emits_step_trace_event() {
+        use crate::rwi::gateway::EventCacheEntry;
+
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
+            EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_to_ivr: None,
+            },
+        )]));
+        let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+        app.ivr_name = Some("test-ivr".to_string());
+        app.current_node = Some(ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_to_ivr: None,
+        }));
+        app.current_step_id = Some("step-9".to_string());
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        app.sess
+            .variables
+            .insert("caller".into(), "1001".into());
+        app.sess
+            .variables
+            .insert("callee".into(), "2000".into());
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        app.on_exit(crate::call::app::ExitReason::Cancelled)
+            .await
+            .expect("cancel exit should succeed");
+
+        let mut saw_trace = false;
+        let mut saw_end_reason = false;
+        for _ in 0..20 {
+            while let Ok(entry) = rx.try_recv() {
+                if entry.event.event_type == "ivr_step_trace" {
+                    saw_trace = true;
+                    if entry.event.payload["end_reason"]
+                        .as_str()
+                        .map(|r| r == "hangup")
+                        .unwrap_or(false)
+                    {
+                        saw_end_reason = true;
+                    }
+                }
+            }
+            if saw_trace && saw_end_reason {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(saw_trace, "cancel must emit an ivr_step_trace event");
+        assert!(
+            saw_end_reason,
+            "cancel-emitted step trace must carry end_reason"
+        );
+        assert!(
+            !*provider.end_called.lock().unwrap(),
+            "cancel must skip provider session end"
         );
     }
 
