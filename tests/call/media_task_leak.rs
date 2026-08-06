@@ -13,13 +13,11 @@
 //! loop does not terminate after `call.hangup`, leaking one task per
 //! RWI-originated call. Kept `#[ignore]` as a canary: un-ignore once fixed.
 //!
-//! Usage: cargo test --test media_task_leak_test -- --nocapture
-
-mod helpers;
+//! Usage: cargo test --test call -- media_task_leak -- --nocapture
 
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use helpers::test_server::{TEST_TOKEN, TestPbx};
+use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use rustpbx::utils::{active_task_count, reset_task_metrics};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;

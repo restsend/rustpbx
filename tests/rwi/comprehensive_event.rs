@@ -12,13 +12,11 @@
 //!   — Conference:       conference_created, call_bridged
 //!   — DTMF:             dtmf
 //!
-//! Usage: cargo test --test rwi_comprehensive_event_test -- --nocapture
-
-mod helpers;
+//! Usage: cargo test --test rwi -- comprehensive_event -- --nocapture
 
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use helpers::test_server::{TEST_TOKEN, TestPbx};
+use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use rustpbx::config::{MediaProxyMode, ProxyConfig, RecordingPolicy};
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,7 +111,7 @@ impl TestCtx {
         let sip_port = portpicker::pick_unused_port().unwrap();
         let pbx = TestPbx::start_with_inject(
             sip_port,
-            helpers::test_server::TestPbxInject {
+            crate::helpers::test_server::TestPbxInject {
                 proxy_config: Some(ProxyConfig {
                     media_proxy: MediaProxyMode::All,
                     recording: Some(RecordingPolicy {

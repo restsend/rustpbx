@@ -1,7 +1,5 @@
 //! Trunk health check — end-to-end tests using a real SIP server + OPTIONS responder.
 
-#![cfg(feature = "addon-sbc")]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

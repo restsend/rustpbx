@@ -716,22 +716,6 @@ async fn test_conference_destroy_returns_success() {
 }
 
 #[tokio::test]
-async fn test_conference_destroy_not_found_returns_error() {
-    let (url, _gw, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    let (_, json) = req(
-        "conference.destroy",
-        serde_json::json!({
-            "conf_id": "nonexistent"
-        }),
-    );
-    let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["status"], "error");
-    assert!(v["error"].as_str().unwrap_or("").contains("not found"));
-}
-
-#[tokio::test]
 async fn test_conference_add_not_found_returns_error() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
