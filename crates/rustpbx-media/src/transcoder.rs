@@ -454,7 +454,10 @@ mod tests {
         timing.rewrite(&mut f1, 48000, 8000, 0);
         timing.rewrite(&mut f2, 48000, 8000, 0);
         let ts_delta = f2.rtp_timestamp.wrapping_sub(f1.rtp_timestamp);
-        assert_eq!(ts_delta, 160, "48kHz→8kHz: 960 tick delta should become 160");
+        assert_eq!(
+            ts_delta, 160,
+            "48kHz→8kHz: 960 tick delta should become 160"
+        );
     }
 
     #[test]

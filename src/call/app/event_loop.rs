@@ -192,7 +192,6 @@ impl AppEventLoop {
             }
         }
     }
-
 }
 enum WaitResult<T> {
     Completed(T),

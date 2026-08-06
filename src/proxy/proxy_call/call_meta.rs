@@ -1,3 +1,4 @@
+use crate::call::domain::RtpTimeoutSide;
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::state::SessionHangupMessage;
 use rsipstack::dialog::DialogId;
@@ -50,6 +51,21 @@ pub struct CallMeta {
     /// transfer → bridge → hold/resume → plays → hangup). Persisted into the
     /// call-record `metadata["trace"]` array by `record_snapshot`.
     pub trace: Vec<crate::call_errors::TraceEvent>,
+    /// Which side of the bridge fired the RTP-inactivity watchdog (if it did).
+    /// Set from the `HangupCommand.rtp_timeout_side` in `handle_hangup`.
+    pub rtp_timeout_side: Option<RtpTimeoutSide>,
+    /// Human-readable label of the leg that went silent (display name +
+    /// endpoint, or app name when an app drives the call). Persisted into the
+    /// call-record `metadata["rtpTimeoutLeg"]`.
+    pub rtp_timeout_leg: Option<String>,
+    /// Whether the RTP-inactivity watchdog fired at any point, even if a
+    /// higher-level reason (IVR end reason, caller hangup) eventually won the
+    /// CDR `hangup_reason`. Lets `resolve_final_hangup_reason` preserve the
+    /// RTP timeout trace without masking it.
+    pub rtp_timeout_fired: bool,
+    /// True while a blind transfer is in progress (new B-leg ringing / REFER
+    /// awaiting completion). The RTP watchdog is suppressed during this window.
+    pub transfer_in_progress: bool,
 }
 
 impl CallMeta {
@@ -75,6 +91,10 @@ impl CallMeta {
             transfer_return_to_ivr: None,
             transfer_return_params: HashMap::new(),
             trace: Vec::new(),
+            rtp_timeout_side: None,
+            rtp_timeout_leg: None,
+            rtp_timeout_fired: false,
+            transfer_in_progress: false,
         }
     }
 }

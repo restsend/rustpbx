@@ -374,6 +374,13 @@ pub struct OriginateRequest {
     /// apply_explicit_originate_trunk for the security/admission caveats.
     #[serde(default)]
     pub trunk: Option<String>,
+    /// Per-request override for routing the originate through the route table
+    /// (match/rewrite/trunk selection). Takes precedence over the session-level
+    /// dialplan flag and the global `ProxyConfig.route_originated_calls` default.
+    /// An explicit `trunk` wins over this field. `None` falls back to the global
+    /// default.
+    #[serde(default)]
+    pub route_originated_calls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

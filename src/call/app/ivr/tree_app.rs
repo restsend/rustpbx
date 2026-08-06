@@ -628,7 +628,8 @@ impl IvrApp {
                         .insert(format!("bridge_hdr_{}", k), v.clone());
                 }
                 if success.is_some() || failure.is_some() {
-                    ctx.session_vars.insert("bridge_branch".into(), "true".into());
+                    ctx.session_vars
+                        .insert("bridge_branch".into(), "true".into());
                 }
                 if let Some(ivr_name) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
                     let sep = if uri.contains('?') { "&" } else { "?" };

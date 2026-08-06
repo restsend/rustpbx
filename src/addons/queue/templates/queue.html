@@ -554,21 +554,15 @@
             },
             fallbackSummary(queue) {
                 const fallback = queue?.spec?.fallback;
-                if (!fallback) return this.tt('queue.fallback_continue');
+                if (!fallback) return this.tt('queue.fallback_fail').replace('{code}', 480);
                 if (fallback.redirect) {
                     return this.tt('queue.fallback_redirect').replace('{uri}', fallback.redirect);
-                }
-                if (fallback.failure_prompt) {
-                    const code = fallback.failure_code || 480;
-                    return this.tt('queue.fallback_play')
-                        .replace('{file}', fallback.failure_prompt)
-                        .replace('{code}', code);
                 }
                 if (fallback.failure_code) {
                     const base = this.tt('queue.fallback_fail').replace('{code}', fallback.failure_code);
                     return fallback.failure_reason ? `${base} · ${fallback.failure_reason}` : base;
                 }
-                return this.tt('queue.fallback_custom');
+                return this.tt('queue.fallback_fail').replace('{code}', 480);
             },
             confirmDelete(queue) {
                 if (!queue || !queue.id) return;

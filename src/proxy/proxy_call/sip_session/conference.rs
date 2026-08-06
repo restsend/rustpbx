@@ -185,37 +185,38 @@ impl SipSession {
         } else {
             crate::media::media_bridge::LegSide::A
         };
-        let injected: Option<tokio::sync::mpsc::Sender<MediaSample>> =
-            match self.bridge().and_then(|mb| mb.leg(side).is_some().then(|| mb)) {
-                Some(mb) => match mb.inject(side) {
-                    Ok(tx) => {
-                        info!(session_id = %self.id,
-                            conf_id = %conf_id,
-                            leg_id = %leg_id,
-                            side = ?side,
-                            "Conference output via MediaBridge leg Inject (P2.4)"
-                        );
-                        Some(tx)
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.id,
-                            conf_id = %conf_id,
-                            leg_id = %leg_id,
-                            error = %e,
-                            "MediaBridge inject unavailable; falling back to legacy track"
-                        );
-                        None
-                    }
-                },
-                None => None,
-            };
+        let injected: Option<tokio::sync::mpsc::Sender<MediaSample>> = match self
+            .bridge()
+            .and_then(|mb| mb.leg(side).is_some().then(|| mb))
+        {
+            Some(mb) => match mb.inject(side) {
+                Ok(tx) => {
+                    info!(session_id = %self.id,
+                        conf_id = %conf_id,
+                        leg_id = %leg_id,
+                        side = ?side,
+                        "Conference output via MediaBridge leg Inject (P2.4)"
+                    );
+                    Some(tx)
+                }
+                Err(e) => {
+                    warn!(session_id = %self.id,
+                        conf_id = %conf_id,
+                        leg_id = %leg_id,
+                        error = %e,
+                        "MediaBridge inject unavailable; falling back to legacy track"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         let tx = if let Some(tx) = injected {
             tx
         } else {
             // Legacy output: add a sample track to the independent peer PC.
-            let (audio_sender, track, _feedback_rx) =
-                sample_track(MediaKind::Audio, 100);
+            let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
 
             let mut pc = None;
             for attempt in 0..150 {
@@ -277,9 +278,8 @@ impl SipSession {
                 channels: 1,
             };
 
-            pc.add_track(track, params).map_err(|e| {
-                anyhow!("Failed to add conference track to peer connection: {}", e)
-            })?;
+            pc.add_track(track, params)
+                .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
 
             info!(session_id = %self.id,
                 conf_id = %conf_id,
@@ -718,10 +718,12 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for MediaBridg
                 if frame.silence {
                     continue;
                 }
-                return Some(crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
-                    frame.samples,
-                    frame.sample_rate,
-                ));
+                return Some(
+                    crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
+                        frame.samples,
+                        frame.sample_rate,
+                    ),
+                );
             }
         })
     }

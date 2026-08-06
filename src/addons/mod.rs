@@ -149,8 +149,14 @@ pub trait Addon: Send + Sync {
         builder
     }
 
-    /// Return a dialplan inspector for intercepting SIP INVITEs
-    fn dialplan_inspector(&self) -> Option<Box<dyn crate::proxy::call::DialplanInspector>> {
+    /// Return a dialplan inspector for intercepting SIP INVITEs.
+    ///
+    /// Receives the app config so addons can resolve file paths even though
+    /// this is invoked at server-build time, before addon `initialize` runs.
+    fn dialplan_inspector(
+        &self,
+        _config: &crate::config::Config,
+    ) -> Option<Box<dyn crate::proxy::call::DialplanInspector>> {
         None
     }
 

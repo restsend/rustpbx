@@ -34,20 +34,19 @@ impl FileAudioSource {
     /// construction, [`AudioSource::read_samples`] serves from the in-memory
     /// `pcm_cache`.
     pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
-        let (bytes, label) = if file_path.starts_with("http://")
-            || file_path.starts_with("https://")
-        {
-            debug!(file = %file_path, "Downloading audio file");
-            (Self::download_bytes(&file_path).await?, file_path.clone())
-        } else {
-            if !Path::new(&file_path).exists() {
-                return Err(anyhow!("Audio file not found: {}", file_path));
-            }
-            let b = tokio::fs::read(&file_path)
-                .await
-                .map_err(|e| anyhow!("Audio file read error {file_path}: {e}"))?;
-            (b, file_path.clone())
-        };
+        let (bytes, label) =
+            if file_path.starts_with("http://") || file_path.starts_with("https://") {
+                debug!(file = %file_path, "Downloading audio file");
+                (Self::download_bytes(&file_path).await?, file_path.clone())
+            } else {
+                if !Path::new(&file_path).exists() {
+                    return Err(anyhow!("Audio file not found: {}", file_path));
+                }
+                let b = tokio::fs::read(&file_path)
+                    .await
+                    .map_err(|e| anyhow!("Audio file read error {file_path}: {e}"))?;
+                (b, file_path.clone())
+            };
 
         let extension = Path::new(&file_path)
             .extension()

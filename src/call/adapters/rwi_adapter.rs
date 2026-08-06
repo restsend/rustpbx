@@ -265,6 +265,8 @@ pub fn rwi_to_call_command(
                 max_duration_secs: req.max_duration_secs,
                 beep: req.beep.unwrap_or(false),
                 format: None, // RWI doesn't have a format field in RecordStartRequest
+                channels: None,
+                mono_caller_only: None,
             },
         }),
 

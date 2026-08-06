@@ -117,7 +117,10 @@ impl ProxyDataContext {
     }
 
     pub fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
-        self.trunks.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
+        self.trunks
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
     }
 
     pub fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
@@ -163,7 +166,10 @@ impl ProxyDataContext {
     }
 
     pub fn queues_snapshot(&self) -> HashMap<String, RouteQueueConfig> {
-        self.queues.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
+        self.queues
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
     }
 
     pub fn acl_rules_snapshot(&self) -> Vec<String> {
@@ -915,7 +921,8 @@ impl ProxyDataContext {
             return Ok(None);
         };
         let store = self.config_store();
-        let trunk_lookup = self.trunks
+        let trunk_lookup = self
+            .trunks
             .iter()
             .filter_map(|entry| entry.id.map(|id| (id, entry.key().clone())))
             .collect::<HashMap<i64, String>>();

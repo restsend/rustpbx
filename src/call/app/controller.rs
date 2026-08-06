@@ -152,6 +152,14 @@ impl CallController {
         Ok(())
     }
 
+    /// Append an event to the session's call trace timeline.
+    ///
+    /// Allows call applications (voicemail, IVR, ...) to contribute entries
+    /// to the call-record `metadata["trace"]` JSON array.
+    pub fn record_trace(&self, event: crate::call_errors::TraceEvent) {
+        let _ = self.session.send_command(CallCommand::Trace { event });
+    }
+
     pub async fn hangup(
         &self,
         reason: Option<CallRecordHangupReason>,
@@ -283,12 +291,41 @@ impl CallController {
         max_duration: Option<Duration>,
         beep: bool,
     ) -> anyhow::Result<RecordingHandle> {
+        self.start_recording_with_layout(path, max_duration, beep, None, None)
+            .await
+    }
+
+    /// Start a **mono caller-only** recording.
+    ///
+    /// Writes a single-channel WAV containing only the caller's ingress at
+    /// full amplitude. Used by voicemail, where the egress leg is silence
+    /// during the message — roughly halves the file size vs stereo.
+    pub async fn start_recording_mono(
+        &self,
+        path: impl Into<String>,
+        max_duration: Option<Duration>,
+        beep: bool,
+    ) -> anyhow::Result<RecordingHandle> {
+        self.start_recording_with_layout(path, max_duration, beep, Some(1), Some(true))
+            .await
+    }
+
+    async fn start_recording_with_layout(
+        &self,
+        path: impl Into<String>,
+        max_duration: Option<Duration>,
+        beep: bool,
+        channels: Option<u16>,
+        mono_caller_only: Option<bool>,
+    ) -> anyhow::Result<RecordingHandle> {
         let p = path.into();
         let config = crate::call::domain::RecordConfig {
             path: p.clone(),
             max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
             beep,
             format: None,
+            channels,
+            mono_caller_only,
         };
         self.session
             .send_command(CallCommand::StartRecording { config })?;
@@ -493,10 +530,9 @@ impl CallController {
 
     /// Release a leg from hold.
     pub async fn unhold(&self, leg_id: impl Into<String>) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::Unhold {
-                leg_id: LegId::from(leg_id.into()),
-            })?;
+        self.session.send_command(CallCommand::Unhold {
+            leg_id: LegId::from(leg_id.into()),
+        })?;
         Ok(())
     }
 
@@ -506,12 +542,11 @@ impl CallController {
         supervisor_leg: impl Into<String>,
         target_leg: impl Into<String>,
     ) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::SupervisorListen {
-                supervisor_leg: LegId::from(supervisor_leg.into()),
-                target_leg: LegId::from(target_leg.into()),
-                supervisor_session_id: None,
-            })?;
+        self.session.send_command(CallCommand::SupervisorListen {
+            supervisor_leg: LegId::from(supervisor_leg.into()),
+            target_leg: LegId::from(target_leg.into()),
+            supervisor_session_id: None,
+        })?;
         Ok(())
     }
 
@@ -521,12 +556,11 @@ impl CallController {
         supervisor_leg: impl Into<String>,
         target_leg: impl Into<String>,
     ) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::SupervisorWhisper {
-                supervisor_leg: LegId::from(supervisor_leg.into()),
-                target_leg: LegId::from(target_leg.into()),
-                supervisor_session_id: None,
-            })?;
+        self.session.send_command(CallCommand::SupervisorWhisper {
+            supervisor_leg: LegId::from(supervisor_leg.into()),
+            target_leg: LegId::from(target_leg.into()),
+            supervisor_session_id: None,
+        })?;
         Ok(())
     }
 
@@ -536,12 +570,11 @@ impl CallController {
         supervisor_leg: impl Into<String>,
         target_leg: impl Into<String>,
     ) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::SupervisorBarge {
-                supervisor_leg: LegId::from(supervisor_leg.into()),
-                target_leg: LegId::from(target_leg.into()),
-                supervisor_session_id: None,
-            })?;
+        self.session.send_command(CallCommand::SupervisorBarge {
+            supervisor_leg: LegId::from(supervisor_leg.into()),
+            target_leg: LegId::from(target_leg.into()),
+            supervisor_session_id: None,
+        })?;
         Ok(())
     }
 
@@ -551,21 +584,19 @@ impl CallController {
         supervisor_leg: impl Into<String>,
         target_leg: impl Into<String>,
     ) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::SupervisorTakeover {
-                supervisor_leg: LegId::from(supervisor_leg.into()),
-                target_leg: LegId::from(target_leg.into()),
-                supervisor_session_id: None,
-            })?;
+        self.session.send_command(CallCommand::SupervisorTakeover {
+            supervisor_leg: LegId::from(supervisor_leg.into()),
+            target_leg: LegId::from(target_leg.into()),
+            supervisor_session_id: None,
+        })?;
         Ok(())
     }
 
     /// Stop supervisor mode for a leg.
     pub async fn supervisor_stop(&self, supervisor_leg: impl Into<String>) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::SupervisorStop {
-                supervisor_leg: LegId::from(supervisor_leg.into()),
-            })?;
+        self.session.send_command(CallCommand::SupervisorStop {
+            supervisor_leg: LegId::from(supervisor_leg.into()),
+        })?;
         Ok(())
     }
 
@@ -719,5 +750,38 @@ mod tests {
         assert_eq!(info.path, "/tmp/test2.wav");
         assert_eq!(info.duration, Duration::from_secs(10));
         assert_eq!(info.size_bytes, 2048);
+    }
+
+    /// Contract guard: `play_audio_with_options` must always emit
+    /// `await_completion: false`. Voicemail (and other apps) rely on
+    /// event-driven sequencing via `on_audio_complete`, NOT on the session
+    /// blocking on playback. If this ever flips to true, voicemail's
+    /// greeting→beep→record chain would break (the session would block the
+    /// event loop). This invariant must hold regardless of the `interruptible`
+    /// argument.
+    #[tokio::test]
+    async fn play_audio_with_options_always_emits_await_completion_false() {
+        let (controller, _event_tx, mut cmd_rx) = make_controller_with_channels();
+
+        controller
+            .play_audio_with_options("prompt.wav", None, false, true)
+            .await
+            .expect("play_audio_with_options should succeed");
+
+        let cmd = timeout(Duration::from_secs(1), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for Play command")
+            .expect("cmd channel closed");
+        match cmd {
+            CallCommand::Play { options, .. } => {
+                let opts = options.expect("Play must carry options");
+                assert!(
+                    !opts.await_completion,
+                    "app-originated playback must never request await_completion \
+                     (voicemail relies on event-driven sequencing)"
+                );
+            }
+            other => panic!("expected CallCommand::Play, got {other:?}"),
+        }
     }
 }

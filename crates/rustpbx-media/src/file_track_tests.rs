@@ -458,7 +458,6 @@ async fn test_file_track_stop_drives_interrupted_audio_complete() {
     let _ = fs::remove_file(&test_file).await;
 }
 */
-
 // ── RTP delivery via external PeerConnection ────────────────────────────────
 
 /// End-to-end test: verify that `start_playback_on(Some(caller_pc))` sends RTP

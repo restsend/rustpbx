@@ -50,9 +50,7 @@ pub enum OnAnswer {
     ExecuteFlow,
     /// Bridge the answered B-leg to an existing leg identified by
     /// `session_id` or `dialog_id`.
-    BridgeToLeg {
-        leg_id: String,
-    },
+    BridgeToLeg { leg_id: String },
     /// Place the answered leg into an ACD queue and wait for an agent.
     Enqueue {
         queue: String,

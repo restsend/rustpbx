@@ -107,7 +107,8 @@ impl AgentRegistry for MemoryRegistry {
         agent_id: &str,
         new_state: PresenceState,
     ) -> anyhow::Result<()> {
-        let mut agent = self.agents
+        let mut agent = self
+            .agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -130,7 +131,8 @@ impl AgentRegistry for MemoryRegistry {
     }
 
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut agent = self.agents
+        let mut agent = self
+            .agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -146,7 +148,8 @@ impl AgentRegistry for MemoryRegistry {
     }
 
     async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-        let mut agent = self.agents
+        let mut agent = self
+            .agents
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 

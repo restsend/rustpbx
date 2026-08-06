@@ -1081,9 +1081,7 @@ mod tests {
         let realm = Some("pbx.example.com");
 
         // Line 103 registers on port 6060 with the shared instance_id.
-        let aor_103: rsipstack::sip::Uri = "sip:103@lan.invalid"
-            .try_into()
-            .expect("valid aor 103");
+        let aor_103: rsipstack::sip::Uri = "sip:103@lan.invalid".try_into().expect("valid aor 103");
         let dest_103 = SipAddr {
             r#type: Some(Transport::Udp),
             addr: "192.168.10.50:6060".try_into().expect("valid dest 103"),
@@ -1104,9 +1102,7 @@ mod tests {
             .expect("register 103");
 
         // Line 104 registers on port 6062 with the SAME instance_id.
-        let aor_104: rsipstack::sip::Uri = "sip:104@lan.invalid"
-            .try_into()
-            .expect("valid aor 104");
+        let aor_104: rsipstack::sip::Uri = "sip:104@lan.invalid".try_into().expect("valid aor 104");
         let dest_104 = SipAddr {
             r#type: Some(Transport::Udp),
             addr: "192.168.10.50:6062".try_into().expect("valid dest 104"),
@@ -1127,10 +1123,7 @@ mod tests {
             .expect("register 104");
 
         // 103 must still point at 6060 — not have been overwritten by 104.
-        let locations_103 = locator
-            .lookup(&aor_103)
-            .await
-            .expect("lookup 103");
+        let locations_103 = locator.lookup(&aor_103).await.expect("lookup 103");
         assert_eq!(locations_103.len(), 1, "103 must still resolve");
         assert_eq!(
             locations_103[0]
@@ -1142,10 +1135,7 @@ mod tests {
         );
 
         // 104 must point at 6062.
-        let locations_104 = locator
-            .lookup(&aor_104)
-            .await
-            .expect("lookup 104");
+        let locations_104 = locator.lookup(&aor_104).await.expect("lookup 104");
         assert_eq!(locations_104.len(), 1, "104 must resolve");
         assert_eq!(
             locations_104[0]

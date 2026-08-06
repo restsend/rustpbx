@@ -1,12 +1,10 @@
 use super::SipSession;
 use crate::call::domain::{CallCommand, LegId, LegState};
-use crate::callrecord::CallRecordHangupReason;
 use crate::media::negotiate::MediaNegotiator;
 use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use rsipstack::dialog::dialog::DialogState;
-use rsipstack::sip::StatusCode;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
@@ -321,7 +319,34 @@ impl SipSession {
         Ok(())
     }
 
+    /// Blind transfer: suppress the RTP-inactivity watchdog for the transfer
+    /// window, then delegate to [`Self::handle_blind_transfer_inner`]. The
+    /// watchdog is re-armed when the new leg answers (see
+    /// `prepare_caller_answer_from_callee_sdp` / `accept_call`) or, on failure,
+    /// restored immediately here.
     pub(super) async fn handle_blind_transfer(
+        &mut self,
+        leg_id: LegId,
+        target: String,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Result<()> {
+        self.meta.transfer_in_progress = true;
+        self.sync_rtp_timeout_pause();
+
+        let result = self
+            .handle_blind_transfer_inner(leg_id, target, callee_state_rx)
+            .await;
+
+        if result.is_err() {
+            // Transfer failed — the existing bridge stays up, so normal
+            // (non-suppressed) monitoring resumes.
+            self.meta.transfer_in_progress = false;
+            self.sync_rtp_timeout_pause();
+        }
+        result
+    }
+
+    async fn handle_blind_transfer_inner(
         &mut self,
         leg_id: LegId,
         target: String,
@@ -341,7 +366,6 @@ impl SipSession {
                     return_to_ivr,
                     return_params,
                     target_overrides,
-                    callee_state_rx,
                 )
                 .await
             }
@@ -405,6 +429,7 @@ impl SipSession {
                         aor: refer_to_uri.clone(),
                         ..Default::default()
                     };
+                    let mut registered = false;
                     match self.server.locator.lookup(&refer_to_uri).await {
                         Ok(registered_locations) => {
                             if let Some(registered_location) =
@@ -418,6 +443,7 @@ impl SipSession {
                                     "Resolved B-leg transfer target through locator"
                                 );
                                 location = registered_location;
+                                registered = true;
                             }
                         }
                         Err(error) => {
@@ -426,6 +452,19 @@ impl SipSession {
                                 %error,
                                 "Failed to resolve B-leg transfer target through locator; using bare SIP target"
                             );
+                        }
+                    }
+                    // Not a registered internal contact — run the transfer target
+                    // through the route table (match/rewrite/trunk) if enabled.
+                    if !registered {
+                        match self.route_originated_leg(&location).await {
+                            Ok((routed, hints)) => {
+                                location = routed;
+                                self.track_routed_leg_hints(hints);
+                            }
+                            Err(e) => {
+                                warn!(session_id = %self.id, %leg_id, target = %uri, error = %e, "Route lookup failed for transfer target; dialing directly");
+                            }
                         }
                     }
                     let result = self
@@ -467,10 +506,7 @@ impl SipSession {
                         "REFER not supported without an inbound caller dialog; use B2BUA"
                     ));
                 };
-                match server_dialog
-                    .refer(refer_to_uri, Some(headers), None)
-                    .await
-                {
+                match server_dialog.refer(refer_to_uri, Some(headers), None).await {
                     Ok(Some(response)) => {
                         let status = response.status_code.code();
                         info!(session_id = %self.id, status = %status, "REFER response received");
@@ -546,7 +582,6 @@ impl SipSession {
         return_to_ivr: Option<String>,
         return_params: HashMap<String, String>,
         target_overrides: Vec<String>,
-        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         info!(session_id = %self.id, %leg_id, queue = %queue_name, ?return_to_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
 
@@ -607,20 +642,8 @@ impl SipSession {
             }
         }
 
-        let return_to_ivr_fallback_audio: Option<String> = if return_to_ivr.is_some() {
-            queue_plan.failure_audio.clone().or_else(|| {
-                if let Some(crate::call::QueueFallbackAction::Failure(
-                    crate::call::FailureAction::PlayThenHangup { ref audio_file, .. },
-                )) = queue_plan.fallback
-                {
-                    Some(audio_file.clone())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        // If return_to_ivr is set, override the fallback so that on queue
+        // failure the caller is transferred back to the IVR app.
         let ivr_name = return_to_ivr
             .as_ref()
             .and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
@@ -635,56 +658,19 @@ impl SipSession {
                     ivr_name.to_string(),
                 )),
             ));
-            queue_plan.failure_audio = return_to_ivr_fallback_audio;
         }
 
-        let queue_result = self.execute_queue(&queue_plan, callee_state_rx).await;
+        self.start_queue_app(queue_plan).await?;
 
-        match queue_result {
-            Ok(()) => {
-                // Store return_to_ivr on meta so that when the connected agent
-                // (B‑leg) hangs up, handle_callee_state returns the caller to
-                // the IVR instead of tearing down the session.
-                self.meta.transfer_return_to_ivr = return_to_ivr.filter(|s| !s.is_empty());
-                if self.meta.transfer_return_to_ivr.is_some() {
-                    self.meta.transfer_return_params = return_params;
-                }
-                info!(session_id = %self.id, queue = %queue_name, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Queue transfer completed successfully");
-                Ok(())
-            }
-            Err((code, text, reason)) => {
-                warn!(session_id = %self.id,
-                    queue = %queue_name,
-                    code = %code,
-                    text = %text,
-                    ?reason,
-                    "Queue transfer failed"
-                );
-                if self.caller_dialog.as_ref().is_some_and(|d| d.state().is_confirmed()) {
-                    self.meta.last_error =
-                        Some((StatusCode::Other(code, text.clone()), reason.clone()));
-                    self.meta
-                        .hangup_reason
-                        .get_or_insert(CallRecordHangupReason::Failed);
-                    self.pending_hangup.insert(self.caller_dialog_id());
-                    self.cancel_token.cancel();
-                    info!(session_id = %self.id,
-                        queue = %queue_name,
-                        code = %code,
-                        text = %text,
-                        ?reason,
-                        "Queue transfer failed after caller was answered; hanging up caller dialog"
-                    );
-                    return Ok(());
-                }
-                Err(anyhow!(
-                    "Queue transfer failed: {} {} {:?}",
-                    code,
-                    text,
-                    reason
-                ))
-            }
+        // Store return_to_ivr on meta so that when the connected agent
+        // (B‑leg) hangs up, the session returns the caller to the IVR
+        // instead of tearing down the call.
+        self.meta.transfer_return_to_ivr = return_to_ivr.filter(|s| !s.is_empty());
+        if self.meta.transfer_return_to_ivr.is_some() {
+            self.meta.transfer_return_params = return_params;
         }
+        info!(session_id = %self.id, queue = %queue_name, return_to_ivr = ?self.meta.transfer_return_to_ivr, "Queue transfer completed: queue app started");
+        Ok(())
     }
 
     pub(crate) async fn start_ivr_app(
@@ -702,8 +688,15 @@ impl SipSession {
             .await
     }
 
-    pub(crate) async fn start_voicemail_app(&self, extension: &str) -> Result<()> {
+    pub(crate) async fn start_voicemail_app(&mut self, extension: &str) -> Result<()> {
         info!(session_id = %self.id, extension = %extension, "Starting voicemail application");
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Voicemail,
+                format!("Voicemail: caller routed to mailbox '{}'", extension),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
         let params = Some(serde_json::json!({"extension": extension}));
         self.ensure_app_running(
             "voicemail",
@@ -1141,6 +1134,10 @@ impl SipSession {
         }
 
         info!(session_id = %self.id, %leg_id, endpoint = %endpoint, "Bridge established");
+        // A real media bridge is now active between caller and endpoint — the
+        // transfer window is over, restore normal RTP watchdog monitoring.
+        self.meta.transfer_in_progress = false;
+        self.sync_rtp_timeout_pause();
         Ok(())
     }
 

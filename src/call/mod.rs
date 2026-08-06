@@ -112,12 +112,6 @@ pub struct VoicePrompts {
     /// when all escalation timeouts are exhausted.
     #[serde(default)]
     pub final_destination_prompt: Option<String>,
-    /// Audio file played to offer the callback option (e.g. "Press 2 for a callback").
-    #[serde(default)]
-    pub callback_offer_prompt: Option<String>,
-    /// Audio file played after the caller confirms callback request.
-    #[serde(default)]
-    pub callback_confirm_prompt: Option<String>,
     /// Multi-stage comfort/reassurance prompts played during wait.
     #[serde(default)]
     pub comfort_prompts: Vec<ComfortPrompt>,
@@ -147,8 +141,6 @@ impl VoicePrompts {
             position_prompt: None,
             wait_time_prompt: None,
             final_destination_prompt: None,
-            callback_offer_prompt: None,
-            callback_confirm_prompt: None,
             comfort_prompts: Vec::new(),
         }
     }
@@ -162,8 +154,6 @@ impl VoicePrompts {
             position_prompt: None,
             wait_time_prompt: None,
             final_destination_prompt: None,
-            callback_offer_prompt: None,
-            callback_confirm_prompt: None,
             comfort_prompts: Vec::new(),
         }
     }
@@ -534,9 +524,6 @@ pub enum QueueFallbackAction {
     Failure(FailureAction),
     /// Redirect to a specific SIP URI (e.g., external voicemail)
     Redirect { target: rsipstack::sip::Uri },
-    /// Transfer caller to another named queue or skill group.
-    /// Skill groups are identified by the "skill-group:" prefix in the name.
-    Queue { name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -548,15 +535,8 @@ pub struct QueuePlan {
     pub dial_strategy: Option<DialStrategy>,
     pub ring_timeout: Option<Duration>,
     pub label: Option<String>,
-    pub retry_codes: Option<Vec<u16>>,
-    pub no_trying_timeout: Option<Duration>,
     pub voice_prompts: Option<VoicePrompts>,
     pub queue_name: String,
-    /// Optional audio file to play when the queue fails, before executing the
-    /// fallback action (hangup, return to IVR, redirect, etc.).
-    /// This separates the "notification audio" from the "final action" so that
-    /// any fallback type can still play a prompt before acting.
-    pub failure_audio: Option<String>,
 }
 
 impl Default for QueuePlan {
@@ -578,11 +558,8 @@ impl Default for QueuePlan {
             dial_strategy: None,
             ring_timeout: None,
             label: None,
-            retry_codes: None,
-            no_trying_timeout: None,
             voice_prompts: None,
             queue_name: String::new(),
-            failure_audio: None,
         }
     }
 }
@@ -956,6 +933,13 @@ pub struct Dialplan {
     pub allow_codecs: Vec<CodecType>,
     pub passthrough_failure: bool,
 
+    /// Per-session override for routing app/transfer/RWI-originated calls
+    /// through the route table. `None` falls back to the global
+    /// `ProxyConfig.route_originated_calls`. Stamped by dialplan inspectors /
+    /// routing rules; never set by the inbound routing path itself (which
+    /// already ran `match_invite`).
+    pub route_originated_calls: Option<bool>,
+
     /// Optional per-trunk ringback/early-media audio configuration
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
 
@@ -1029,6 +1013,7 @@ impl Dialplan {
             extensions: http::Extensions::new(),
             allow_codecs: vec![],
             passthrough_failure: false,
+            route_originated_calls: None,
             audio_profile: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
@@ -1109,6 +1094,24 @@ impl Dialplan {
 
     pub fn with_passthrough_failure(mut self, enabled: bool) -> Self {
         self.passthrough_failure = enabled;
+        self
+    }
+
+    /// Override whether app/transfer/RWI-originated calls on this session are
+    /// routed through the route table. `None` (default) falls back to the
+    /// global `ProxyConfig.route_originated_calls`.
+    pub fn with_route_originated_calls(mut self, enabled: Option<bool>) -> Self {
+        self.route_originated_calls = enabled;
+        self
+    }
+
+    /// Merge routing hints (concurrency holds + concurrent-call lease) into
+    /// the dialplan so the session releases them on teardown. Used by paths
+    /// that run `match_invite` outside the inbound `build_dialplan` flow (e.g.
+    /// RWI originate).
+    pub fn with_hints(mut self, hints: crate::config::DialplanHints) -> Self {
+        *self.concurrency_holds.lock() = hints.concurrency_holds;
+        self.concurrent_call_lease = hints.concurrent_call_lease;
         self
     }
 

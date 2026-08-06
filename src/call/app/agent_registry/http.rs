@@ -88,7 +88,8 @@ impl HttpRegistry {
         let record = Self::parse_agent_from_json(&data)?;
 
         // Update cache
-        self.cache.insert(agent_id.to_string(), (record.clone(), Instant::now()));
+        self.cache
+            .insert(agent_id.to_string(), (record.clone(), Instant::now()));
 
         Ok(Some(record))
     }

@@ -101,8 +101,10 @@ impl MixerRegistry {
         };
 
         self.mixers.insert(mixer_id.clone(), entry);
-        self.participants.insert(supervisor_session_id.clone(), mixer_id.clone());
-        self.participants.insert(target_session_id.clone(), mixer_id.clone());
+        self.participants
+            .insert(supervisor_session_id.clone(), mixer_id.clone());
+        self.participants
+            .insert(target_session_id.clone(), mixer_id.clone());
 
         info!(
             mixer_id = %mixer_id,
@@ -160,7 +162,8 @@ impl MixerRegistry {
         }
 
         if success {
-            self.participants.insert(session_id.clone(), mixer_id.to_string());
+            self.participants
+                .insert(session_id.clone(), mixer_id.to_string());
 
             info!(
                 mixer_id = %mixer_id,
@@ -268,7 +271,10 @@ impl MixerRegistry {
     }
 
     pub fn list_mixers(&self) -> Vec<(String, MixerRegistryEntry)> {
-        self.mixers.iter().map(|r| (r.key().clone(), r.value().clone())).collect()
+        self.mixers
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
     }
 
     pub fn participant_count(&self, mixer_id: &str) -> usize {

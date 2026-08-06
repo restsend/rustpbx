@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{info, warn};
 
-use std::borrow::Cow;
 use crate::backend::SipFlowBackend;
 use crate::config::SipFlowClusterNode;
 use crate::perf::PerfCounters;
@@ -22,6 +21,7 @@ use crate::protocol::{
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use arc_swap::ArcSwap;
 use rustpbx_http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
+use std::borrow::Cow;
 
 /// Jump Consistent Hash
 ///

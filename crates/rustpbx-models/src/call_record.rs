@@ -9,8 +9,6 @@ use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForei
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
-
-
 /// Update the recording URL and duration for a call record after it has been
 /// inserted. This is used by the async upload hook which runs in the background
 /// so it does not block the call flow.

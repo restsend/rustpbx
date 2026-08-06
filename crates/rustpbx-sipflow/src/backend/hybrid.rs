@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::borrow::Cow;
 
-use crate::config::{SipFlowEngine, SipFlowSubdirs};
 use crate::backend::SipFlowBackend;
 use crate::backend::local::LocalBackend;
+use crate::config::{SipFlowEngine, SipFlowSubdirs};
 use crate::flowdb_backend::FlowDbBackend;
 use crate::{SipFlowItem, SipFlowMediaStats};
 
@@ -295,7 +295,9 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
+            backend
+                .record(Cow::Borrowed(call_id), make_sip_item(ts, call_id))
+                .unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -324,7 +326,9 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
+            backend
+                .record(Cow::Borrowed(call_id), make_sip_item(ts, call_id))
+                .unwrap();
             backend.flush().await.unwrap();
         }
 
@@ -354,12 +358,16 @@ mod tests {
 
         {
             let backend = new_hybrid(&root, SipFlowEngine::Sqlite);
-            backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
+            backend
+                .record(Cow::Borrowed(call_id), make_sip_item(t0, call_id))
+                .unwrap();
             backend.flush().await.unwrap();
         }
         {
             let backend = new_hybrid(&root, SipFlowEngine::FlowDb);
-            backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
+            backend
+                .record(Cow::Borrowed(call_id), make_sip_item(t1, call_id))
+                .unwrap();
             backend.flush().await.unwrap();
         }
 

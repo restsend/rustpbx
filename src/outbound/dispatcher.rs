@@ -41,8 +41,61 @@ pub async fn dispatch(
         metadata,
         on_answer,
         webhook_timeout,
+        MAX_WEBHOOK_DEPTH,
     ))
     .await
+}
+
+/// Maximum recursion depth for webhook-returned actions (webhook → action →
+/// webhook → ...). Bounds the fallback chain so a misbehaving webhook cannot
+/// cause unbounded recursion.
+pub const MAX_WEBHOOK_DEPTH: u8 = 3;
+
+/// Notify the configured `on_failure` webhook that the call failed before
+/// answer. Fire-and-forget: the outcome is logged, never propagated (the SSE
+/// stream is already closing). Uses a failure payload (`answered_at` omitted,
+/// `failure_reason` set).
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_failure(
+    http_client: &reqwest::Client,
+    call_id: &str,
+    callee: &str,
+    caller: &str,
+    metadata: &std::collections::HashMap<String, String>,
+    on_failure: &crate::outbound::request::OnFailure,
+    reason: &str,
+    webhook_timeout: std::time::Duration,
+) {
+    let timeout = on_failure
+        .webhook
+        .timeout_secs
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(webhook_timeout);
+    let payload = WebhookPayload {
+        call_id,
+        leg_id: None,
+        caller,
+        callee,
+        answered_at: None,
+        failure_reason: Some(reason.to_string()),
+        metadata,
+    };
+    match call_sync_webhook(
+        http_client,
+        &on_failure.webhook.url,
+        &on_failure.webhook.headers,
+        timeout,
+        &payload,
+    )
+    .await
+    {
+        crate::outbound::webhook::WebhookOutcome::Ok(_) => {
+            warn!(%call_id, reason, "failure webhook acknowledged");
+        }
+        crate::outbound::webhook::WebhookOutcome::Err(msg) => {
+            warn!(%call_id, %msg, reason, "failure webhook failed");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -55,6 +108,7 @@ async fn dispatch_inner(
     metadata: &std::collections::HashMap<String, String>,
     on_answer: &OnAnswer,
     webhook_timeout: std::time::Duration,
+    depth: u8,
 ) -> DispatchOutcome {
     match on_answer {
         OnAnswer::ExecuteFlow => DispatchOutcome {
@@ -67,13 +121,11 @@ async fn dispatch_inner(
             detail: format!("app:{}", app_name),
         },
 
-        OnAnswer::BridgeToLeg { leg_id } => {
-            dispatch_bridge(processor, call_id, leg_id).await
-        }
+        OnAnswer::BridgeToLeg { leg_id } => dispatch_bridge(processor, call_id, leg_id).await,
 
-        OnAnswer::Enqueue { queue, priority, .. } => {
-            dispatch_enqueue(processor, call_id, queue, *priority).await
-        }
+        OnAnswer::Enqueue {
+            queue, priority, ..
+        } => dispatch_enqueue(processor, call_id, queue, *priority).await,
 
         OnAnswer::Webhook(action) => {
             dispatch_webhook(
@@ -85,6 +137,7 @@ async fn dispatch_inner(
                 metadata,
                 action,
                 webhook_timeout,
+                depth,
             )
             .await
         }
@@ -156,7 +209,18 @@ async fn dispatch_webhook(
     metadata: &std::collections::HashMap<String, String>,
     action: &WebhookAction,
     default_timeout: std::time::Duration,
+    depth: u8,
 ) -> DispatchOutcome {
+    // Depth guard: a webhook that keeps returning another webhook action is
+    // capped (its response action is ignored, treated as execute-flow).
+    if depth == 0 {
+        warn!(%call_id, "webhook recursion depth exceeded; treating as execute_flow");
+        return DispatchOutcome {
+            success: true,
+            detail: "execute_flow (webhook depth exceeded)".to_string(),
+        };
+    }
+
     let timeout = action
         .timeout_secs
         .map(std::time::Duration::from_secs)
@@ -167,14 +231,17 @@ async fn dispatch_webhook(
         leg_id: None,
         caller,
         callee,
-        answered_at: chrono::Utc::now(),
+        answered_at: Some(chrono::Utc::now()),
+        failure_reason: None,
         metadata,
     };
 
     match call_sync_webhook(http_client, &action.url, &action.headers, timeout, &payload).await {
         crate::outbound::webhook::WebhookOutcome::Ok(instr) => {
             let resolved = resolve_webhook_instruction(&instr);
-            dispatch(
+            // Recurse via `dispatch_inner` (boxed — async recursion) with a
+            // decremented depth so the webhook→action→webhook chain is bounded.
+            Box::pin(dispatch_inner(
                 processor,
                 http_client,
                 call_id,
@@ -183,14 +250,15 @@ async fn dispatch_webhook(
                 metadata,
                 &resolved,
                 default_timeout,
-            )
+                depth.saturating_sub(1),
+            ))
             .await
         }
         crate::outbound::webhook::WebhookOutcome::Err(msg) => {
             warn!(%call_id, %msg, "sync webhook failed, using fallback");
             match resolve_fallback(&action.fallback) {
                 Some(action) => {
-                    dispatch(
+                    Box::pin(dispatch_inner(
                         processor,
                         http_client,
                         call_id,
@@ -199,7 +267,8 @@ async fn dispatch_webhook(
                         metadata,
                         &action,
                         default_timeout,
-                    )
+                        depth.saturating_sub(1),
+                    ))
                     .await
                 }
                 None => DispatchOutcome {
@@ -212,9 +281,7 @@ async fn dispatch_webhook(
 }
 
 /// Convert the webhook instruction into an `OnAnswer`.
-fn resolve_webhook_instruction(
-    instr: &crate::outbound::webhook::WebhookInstruction,
-) -> OnAnswer {
+fn resolve_webhook_instruction(instr: &crate::outbound::webhook::WebhookInstruction) -> OnAnswer {
     match instr.action {
         WebhookActionType::Bridge => OnAnswer::BridgeToLeg {
             leg_id: instr.target.clone().unwrap_or_default(),

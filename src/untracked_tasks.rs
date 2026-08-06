@@ -1,15 +1,14 @@
 use dashmap::DashMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tracing::{field, span, Subscriber};
+use tracing::{Subscriber, field, span};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// Global map from spawn location (`file:line`) to current number of alive
 /// untracked tokio tasks. Populated by [`UntrackedTaskLayer`].
-static UNTRACKED_SPAWN_COUNTS: LazyLock<DashMap<String, AtomicI64>> =
-    LazyLock::new(DashMap::new);
+static UNTRACKED_SPAWN_COUNTS: LazyLock<DashMap<String, AtomicI64>> = LazyLock::new(DashMap::new);
 
 /// Returns a snapshot of currently-alive untracked task counts by spawn
 /// location, sorted descending by count.
@@ -46,8 +45,7 @@ struct UntrackedLoc(String);
 
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for UntrackedTaskLayer {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        if attrs.metadata().target() != "tokio::task"
-            || attrs.metadata().name() != "runtime.spawn"
+        if attrs.metadata().target() != "tokio::task" || attrs.metadata().name() != "runtime.spawn"
         {
             return;
         }

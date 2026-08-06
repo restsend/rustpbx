@@ -1,4 +1,5 @@
 use crate::call::domain::{CallCommand, LegId};
+use crate::call::cookie::TransactionCookie;
 
 use crate::call::runtime::ConferenceId;
 use crate::call::runtime::ConferenceManager;
@@ -23,7 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
-
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -73,7 +73,8 @@ impl CommandDeduplicationCache {
         // long-lived sessions without adding a background task.
         if self.entries.len() >= COMMAND_DEDUP_SOFT_CAP {
             let now = Instant::now();
-            self.entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+            self.entries
+                .retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
         }
         self.entries.insert(
             action_id.clone(),
@@ -87,7 +88,8 @@ impl CommandDeduplicationCache {
 
     async fn cleanup_expired(&self) {
         let now = Instant::now();
-        self.entries.retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
     }
 
     async fn len(&self) -> usize {
@@ -1227,6 +1229,73 @@ impl RwiCommandProcessor {
         )
         .map_err(CommandError::CommandFailed)?;
 
+        // Route-table consultation for originates without an explicit trunk.
+        // An explicit `trunk` (above) always wins and skips the route table.
+        // When enabled (request-level override → global default), the target is
+        // matched against outbound route rules so rewrite + trunk selection
+        // apply. Routing hints (concurrency holds / concurrent-call lease) are
+        // threaded into the session Dialplan below so they are released with the
+        // session on teardown.
+        let explicit_trunk = req
+            .trunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let routing_enabled = req
+            .route_originated_calls
+            .unwrap_or(server.proxy_config.route_originated_calls);
+        let routed_hints: Option<crate::config::DialplanHints> = if explicit_trunk
+            || !routing_enabled
+        {
+            None
+        } else {
+            let contact = invite_option.contact.clone();
+            match crate::proxy::proxy_call::sip_session::route_outbound_leg(
+                &server,
+                &destination_uri,
+                &caller_uri,
+                &contact,
+                None,
+                TransactionCookie::default(),
+            )
+            .await
+            {
+                Ok(Some(crate::config::RouteResult::Forward(
+                    routed_option,
+                    hints,
+                ))) => {
+                    invite_option.callee = routed_option.callee.clone();
+                    if let Some(dest) = routed_option.destination.clone() {
+                        invite_option.destination = Some(dest);
+                    }
+                    if let Some(cred) = routed_option.credential.clone() {
+                        invite_option.credential = Some(cred);
+                    }
+                    if let Some(headers) = routed_option.headers.clone() {
+                        invite_option
+                            .headers
+                            .get_or_insert_with(Vec::new)
+                            .extend(headers);
+                    }
+                    tracing::info!(
+                        call_id = %req.call_id,
+                        trunk_dest = ?invite_option.destination,
+                        "originate routed through route table"
+                    );
+                    hints
+                }
+                Ok(Some(crate::config::RouteResult::Abort(code, reason))) => {
+                    return Err(CommandError::CommandFailed(format!(
+                        "route aborted for originate: {} {}",
+                        code.code(),
+                        reason.unwrap_or_default()
+                    )));
+                }
+                _ => None, // NotHandled / Queue / Application / disabled → legacy direct dial
+            }
+        };
+
         let call_id = req.call_id.clone();
         let gateway = self.gateway.clone();
         let registry = self.call_registry.clone();
@@ -1243,11 +1312,9 @@ impl RwiCommandProcessor {
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         crate::utils::spawn(async move {
-            use crate::call::{DialDirection, Dialplan};
             use crate::call::cookie::TransactionCookie;
-            use crate::proxy::active_call_registry::{
-                ActiveProxyCallEntry, ActiveProxyCallStatus,
-            };
+            use crate::call::{DialDirection, Dialplan};
+            use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
             use crate::proxy::proxy_call::sip_session::SipSession;
             use crate::proxy::proxy_call::state::CallContext;
 
@@ -1284,7 +1351,11 @@ impl RwiCommandProcessor {
                         leg_timeline: crate::callrecord::LegTimeline::default(),
                         details: crate::callrecord::CallDetails {
                             direction: "outbound".to_string(),
-                            status: if answered { "answered".to_string() } else { "no_answer".to_string() },
+                            status: if answered {
+                                "answered".to_string()
+                            } else {
+                                "no_answer".to_string()
+                            },
                             from_number: Some(cdr_caller.clone()),
                             to_number: Some(cdr_callee.clone()),
                             ..Default::default()
@@ -1328,23 +1399,26 @@ impl RwiCommandProcessor {
             if let Some(t) = req.trunk.as_ref() {
                 metadata.insert("trunk".to_string(), t.clone());
             }
+            let mut dialplan =
+                Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
+                    .with_caller(caller_uri.clone());
+            if let Some(hints) = routed_hints {
+                dialplan = dialplan.with_hints(hints);
+            }
             let context = CallContext {
                 session_id: call_id.clone(),
-                dialplan: Arc::new(
-                    Dialplan::new(
-                        call_id.clone(),
-                        synthetic_request,
-                        DialDirection::Outbound,
-                    )
-                    .with_caller(caller_uri.clone()),
-                ),
+                dialplan: Arc::new(dialplan),
                 cookie: TransactionCookie::default(),
                 start_time: std::time::Instant::now(),
                 original_caller: caller_display.clone(),
                 original_callee: callee_display.clone(),
                 max_forwards: 70,
                 created_at: chrono::Utc::now().to_rfc3339(),
-                metadata: if metadata.is_empty() { None } else { Some(metadata) },
+                metadata: if metadata.is_empty() {
+                    None
+                } else {
+                    Some(metadata)
+                },
             };
 
             let use_media_proxy = true;
@@ -1454,7 +1528,11 @@ impl RwiCommandProcessor {
                         None
                     } else {
                         let body_str = String::from_utf8_lossy(resp.body()).to_string();
-                        if body_str.contains("v=0") { Some(body_str) } else { None }
+                        if body_str.contains("v=0") {
+                            Some(body_str)
+                        } else {
+                            None
+                        }
                     };
 
                     // Apply the first INVITE's SDP answer to the caller track (A leg).
@@ -1478,7 +1556,9 @@ impl RwiCommandProcessor {
                     // Also create the callee (B leg) in the MediaBridge so
                     // media_play(leg_id="callee"), hold, and comfort-noise
                     // can target it.
-                    session.ensure_originate_callee_leg(callee_sdp_for_b_leg.as_deref()).await;
+                    session
+                        .ensure_originate_callee_leg(callee_sdp_for_b_leg.as_deref())
+                        .await;
 
                     // Spawn the UAC command loop now that the callee is attached.
                     let session_cancel = cancel_token.clone();
@@ -1510,7 +1590,9 @@ impl RwiCommandProcessor {
                         gw.send_event_to_call_owner(
                             &call_id,
                             &crate::rwi::event::to_legacy_event(
-                                &crate::rwi::CallAnswered { call_id: call_id.clone() },
+                                &crate::rwi::CallAnswered {
+                                    call_id: call_id.clone(),
+                                },
                                 None,
                             ),
                         );
@@ -1550,7 +1632,9 @@ impl RwiCommandProcessor {
                             gw.send_event_to_call_owner(
                                 &call_id,
                                 &crate::rwi::event::to_legacy_event(
-                                    &crate::rwi::CallBusy { call_id: call_id.clone() },
+                                    &crate::rwi::CallBusy {
+                                        call_id: call_id.clone(),
+                                    },
                                     None,
                                 ),
                             );
@@ -1558,7 +1642,9 @@ impl RwiCommandProcessor {
                             gw.send_event_to_call_owner(
                                 &call_id,
                                 &crate::rwi::event::to_legacy_event(
-                                    &crate::rwi::CallNoAnswer { call_id: call_id.clone() },
+                                    &crate::rwi::CallNoAnswer {
+                                        call_id: call_id.clone(),
+                                    },
                                     None,
                                 ),
                             );
@@ -1607,7 +1693,9 @@ impl RwiCommandProcessor {
                         gw.send_event_to_call_owner(
                             &call_id,
                             &crate::rwi::event::to_legacy_event(
-                                &crate::rwi::CallNoAnswer { call_id: call_id.clone() },
+                                &crate::rwi::CallNoAnswer {
+                                    call_id: call_id.clone(),
+                                },
                                 None,
                             ),
                         );
@@ -1868,8 +1956,8 @@ impl RwiCommandProcessor {
         registry: Arc<ActiveProxyCallRegistry>,
         operation_id: &str,
     ) -> Result<String, String> {
-        use crate::call::{DialDirection, Dialplan};
         use crate::call::cookie::TransactionCookie;
+        use crate::call::{DialDirection, Dialplan};
         use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
         use crate::proxy::proxy_call::sip_session::SipSession;
         use crate::proxy::proxy_call::state::CallContext;
@@ -2005,7 +2093,11 @@ impl RwiCommandProcessor {
             original_callee: target_uri_str.clone(),
             max_forwards: 70,
             created_at: chrono::Utc::now().to_rfc3339(),
-            metadata: if metadata.is_empty() { None } else { Some(metadata) },
+            metadata: if metadata.is_empty() {
+                None
+            } else {
+                Some(metadata)
+            },
         };
 
         let (mut session, handle, cmd_rx) = SipSession::new_uac(
@@ -2042,28 +2134,26 @@ impl RwiCommandProcessor {
         let (callee_evt_tx, callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
         session.callee_event_tx = Some(callee_evt_tx);
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(60),
-            async {
-                loop {
-                    tokio::select! {
-                        res = &mut invitation => break res,
-                        state = state_rx.recv() => {
-                            if let Some(rsipstack::dialog::dialog::DialogState::Calling(_)) = state {
-                                let gw = gateway.read();
-                                gw.send_event_to_call_owner(
-                                    &call_id,
-                                    &crate::rwi::event::to_legacy_event(
-                                        &crate::rwi::CallRinging { call_id: call_id.clone() },
-                                        None,
-                                    ),
-                                );
-                            }
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                tokio::select! {
+                    res = &mut invitation => break res,
+                    state = state_rx.recv() => {
+                        if let Some(rsipstack::dialog::dialog::DialogState::Calling(_)) = state {
+                            let gw = gateway.read();
+                            gw.send_event_to_call_owner(
+                                &call_id,
+                                &crate::rwi::event::to_legacy_event(
+                                    &crate::rwi::CallRinging { call_id: call_id.clone() },
+                                    None,
+                                ),
+                            );
                         }
                     }
                 }
-            },
-        ).await;
+            }
+        })
+        .await;
 
         match result {
             Ok(Ok((dialog, Some(resp))))
@@ -2073,7 +2163,11 @@ impl RwiCommandProcessor {
                     None
                 } else {
                     let body_str = String::from_utf8_lossy(resp.body()).to_string();
-                    if body_str.contains("v=0") { Some(body_str) } else { None }
+                    if body_str.contains("v=0") {
+                        Some(body_str)
+                    } else {
+                        None
+                    }
                 };
 
                 // Apply callee SDP to the caller track (virtual A leg).
@@ -2120,7 +2214,9 @@ impl RwiCommandProcessor {
                 gw.send_event_to_call_owner(
                     &call_id,
                     &crate::rwi::event::to_legacy_event(
-                        &crate::rwi::CallAnswered { call_id: call_id.clone() },
+                        &crate::rwi::CallAnswered {
+                            call_id: call_id.clone(),
+                        },
                         None,
                     ),
                 );
@@ -2781,10 +2877,7 @@ impl RwiCommandProcessor {
 
     async fn queue_dequeue(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let _handle = self.get_handle(call_id).await?;
-        let queue_id = self
-            .queue_states
-            .get(call_id)
-            .map(|s| s.queue_id.clone());
+        let queue_id = self.queue_states.get(call_id).map(|s| s.queue_id.clone());
         self.queue_states.remove(call_id);
         if let Some(qid) = queue_id {
             let event = crate::rwi::event::to_legacy_event(
@@ -2806,9 +2899,10 @@ impl RwiCommandProcessor {
 
         let handle = self.get_handle(call_id).await?;
         {
-            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
-                CommandError::CommandFailed("Call not in queue".to_string())
-            })?;
+            let mut state = self
+                .queue_states
+                .get_mut(call_id)
+                .ok_or_else(|| CommandError::CommandFailed("Call not in queue".to_string()))?;
             state.is_hold = true;
         }
         handle
@@ -2838,9 +2932,10 @@ impl RwiCommandProcessor {
     async fn queue_unhold(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         {
-            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
-                CommandError::CommandFailed("Call not in queue".to_string())
-            })?;
+            let mut state = self
+                .queue_states
+                .get_mut(call_id)
+                .ok_or_else(|| CommandError::CommandFailed("Call not in queue".to_string()))?;
             state.is_hold = false;
         }
         handle
@@ -2886,9 +2981,10 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let queue_id = {
-            let state = self.queue_states.get(call_id).ok_or_else(|| {
-                CommandError::CommandFailed("Call not in queue".to_string())
-            })?;
+            let state = self
+                .queue_states
+                .get(call_id)
+                .ok_or_else(|| CommandError::CommandFailed("Call not in queue".to_string()))?;
             state.queue_id.clone()
         };
 
@@ -2916,9 +3012,10 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let old_queue_id = {
-            let mut state = self.queue_states.get_mut(call_id).ok_or_else(|| {
-                CommandError::CommandFailed("Call not in queue".to_string())
-            })?;
+            let mut state = self
+                .queue_states
+                .get_mut(call_id)
+                .ok_or_else(|| CommandError::CommandFailed("Call not in queue".to_string()))?;
             let old = state.queue_id.clone();
             state.queue_id = queue_id.to_string();
             if let Some(p) = priority {
@@ -3059,6 +3156,8 @@ impl RwiCommandProcessor {
                     max_duration_secs: req.max_duration_secs,
                     beep: req.beep.unwrap_or(false),
                     format: None,
+                    channels: None,
+                    mono_caller_only: None,
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
@@ -4474,6 +4573,7 @@ impl RwiCommandProcessor {
             ringback_target: None,
             extra_headers: Default::default(),
             trunk: None,
+            route_originated_calls: None,
         };
         // Fire-and-forget: origination runs in a background task
         let _ = self.originate_call(req).await;
@@ -5142,6 +5242,7 @@ mod tests {
                     ringback_target: None,
                     extra_headers: std::collections::HashMap::new(),
                     trunk: None,
+                    route_originated_calls: None,
                 },
             ))
             .await;
@@ -5170,6 +5271,7 @@ mod tests {
                     ringback_target: None,
                     extra_headers: std::collections::HashMap::new(),
                     trunk: None,
+                    route_originated_calls: None,
                 },
             ))
             .await;
@@ -5180,6 +5282,149 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("SIP server not available")
+        );
+    }
+
+    /// RWI originate consults the route table when `route_originated_calls` is
+    /// enabled (request-level) and no explicit trunk is given. A matching
+    /// Reject rule aborts the originate synchronously with the route status.
+    #[tokio::test]
+    async fn test_originate_routes_when_enabled_and_reject_aborts() {
+        use crate::config::ProxyConfig;
+        use crate::proxy::routing::{
+            DestConfig, MatchConditions, RejectConfig, RouteAction, RouteRule,
+        };
+        use crate::proxy::tests::common::create_test_server_with_config;
+
+        let mut config = ProxyConfig::default();
+        config.route_originated_calls = false; // rely on request-level override
+        config.routes = Some(vec![RouteRule {
+            name: "reject-9".to_string(),
+            priority: 100,
+            match_conditions: MatchConditions {
+                request_uri_user: Some("9.*".to_string()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                reject: Some(RejectConfig {
+                    code: 486,
+                    reason: Some("blocked".to_string()),
+                    headers: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+
+        let (server, _) = create_test_server_with_config(config).await;
+        let processor = RwiCommandProcessor::new(
+            Arc::new(ActiveProxyCallRegistry::new()),
+            Arc::new(RwLock::new(RwiGateway::new())),
+            Arc::new(ConferenceManager::new()),
+        )
+        .with_sip_server(server.clone());
+
+        let result = processor
+            .process_command(RwiCommandPayload::Originate(
+                crate::rwi::session::OriginateRequest {
+                    call_id: "route-reject".into(),
+                    destination: "sip:9001@rustpbx.com".into(),
+                    caller_id: None,
+                    timeout_secs: Some(5),
+                    hold_music: None,
+                    hold_music_target: None,
+                    ringback: None,
+                    ringback_target: None,
+                    extra_headers: std::collections::HashMap::new(),
+                    trunk: None,
+                    route_originated_calls: Some(true),
+                },
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "reject route must abort originate when routing is enabled"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("route aborted") && msg.contains("486"),
+            "unexpected abort error: {}",
+            msg
+        );
+    }
+
+    /// An explicit `trunk` wins over routing — the route table is not consulted
+    /// even when `route_originated_calls` is on, so a matching reject rule is
+    /// ignored and the originate proceeds (no synchronous abort).
+    #[tokio::test]
+    async fn test_originate_explicit_trunk_skips_route() {
+        use crate::config::ProxyConfig;
+        use crate::proxy::routing::TrunkConfig;
+        use crate::proxy::routing::{
+            DestConfig, MatchConditions, RejectConfig, RouteAction, RouteRule,
+        };
+        use crate::proxy::tests::common::create_test_server_with_config;
+
+        let mut config = ProxyConfig::default();
+        config.route_originated_calls = true;
+        config.routes = Some(vec![RouteRule {
+            name: "reject-9".to_string(),
+            priority: 100,
+            match_conditions: MatchConditions {
+                request_uri_user: Some("9.*".to_string()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                reject: Some(RejectConfig {
+                    code: 486,
+                    reason: Some("blocked".to_string()),
+                    headers: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let mut trunks = std::collections::HashMap::new();
+        trunks.insert(
+            "gw1".to_string(),
+            TrunkConfig {
+                dest: "sip:gateway.rustpbx.test:5060".to_string(),
+                ..Default::default()
+            },
+        );
+        config.trunks = trunks;
+
+        let (server, _) = create_test_server_with_config(config).await;
+        let processor = RwiCommandProcessor::new(
+            Arc::new(ActiveProxyCallRegistry::new()),
+            Arc::new(RwLock::new(RwiGateway::new())),
+            Arc::new(ConferenceManager::new()),
+        )
+        .with_sip_server(server.clone());
+
+        // Explicit trunk → route table skipped → synchronous Ok, then the
+        // spawned INVITE simply never gets a response (mock transport).
+        let result = processor
+            .process_command(RwiCommandPayload::Originate(
+                crate::rwi::session::OriginateRequest {
+                    call_id: "trunk-wins".into(),
+                    destination: "sip:9001@rustpbx.com".into(),
+                    caller_id: None,
+                    timeout_secs: Some(2),
+                    hold_music: None,
+                    hold_music_target: None,
+                    ringback: None,
+                    ringback_target: None,
+                    extra_headers: std::collections::HashMap::new(),
+                    trunk: Some("gw1".to_string()),
+                    route_originated_calls: Some(true),
+                },
+            ))
+            .await;
+        assert!(
+            result.is_ok(),
+            "explicit trunk must bypass the reject route, got: {:?}",
+            result.as_ref().err()
         );
     }
 

@@ -180,7 +180,9 @@ pub fn process_packet_with(packet: Packet, compress: Option<u32>) -> ProcessedPa
     } = packet;
     let src_addr = format!("{}:{}", src.0, src.1);
     let dst_addr = format!("{}:{}", dst.0, dst.1);
-    process_packet_with_addr(msg_type, src_addr, dst_addr, timestamp, call_id, leg, payload, compress)
+    process_packet_with_addr(
+        msg_type, src_addr, dst_addr, timestamp, call_id, leg, payload, compress,
+    )
 }
 
 async fn seek_or_read_through(
@@ -335,9 +337,11 @@ impl StorageManager {
 
     pub async fn check_flush(&mut self) -> Result<()> {
         if let Some(ref tx) = self.flusher_tx {
-            let _ = tx.send(FlushCommand::Flush {
-                enqueued_at: Instant::now(),
-            }).await;
+            let _ = tx
+                .send(FlushCommand::Flush {
+                    enqueued_at: Instant::now(),
+                })
+                .await;
         }
         Ok(())
     }
@@ -381,12 +385,13 @@ impl StorageManager {
                 // multi bucket; other workers ensure their own exists.
                 if self.shard_index == 0 {
                     for i in 0..self.shard_count {
-                        tokio::fs::create_dir_all(&bucket_dir.join(format!("shard-{i}")))
-                            .await?;
+                        tokio::fs::create_dir_all(&bucket_dir.join(format!("shard-{i}"))).await?;
                     }
                 } else {
-                    tokio::fs::create_dir_all(&bucket_dir.join(format!("shard-{}", self.shard_index)))
-                        .await?;
+                    tokio::fs::create_dir_all(
+                        &bucket_dir.join(format!("shard-{}", self.shard_index)),
+                    )
+                    .await?;
                 }
                 bucket_dir.join(format!("shard-{}", self.shard_index))
             }
@@ -468,11 +473,9 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn = SqliteConnection::connect(&format!(
-                    "sqlite:{}",
-                    db_path.to_string_lossy()
-                ))
-                .await?;
+                let mut conn =
+                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
+                        .await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(raw_path).await?;
                 let mut current_pos = None;
@@ -540,11 +543,9 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn = SqliteConnection::connect(&format!(
-                    "sqlite:{}",
-                    db_path.to_string_lossy()
-                ))
-                .await?;
+                let mut conn =
+                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
+                        .await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(raw_path).await?;
                 let mut current_pos = None;
@@ -632,11 +633,9 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn = SqliteConnection::connect(&format!(
-                    "sqlite:{}",
-                    db_path.to_string_lossy()
-                ))
-                .await?;
+                let mut conn =
+                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
+                        .await?;
                 Self::configure_read_conn(&mut conn).await;
 
                 let mut rows = sqlx::query_as::<_, MediaSourceRow>(
@@ -687,11 +686,9 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn = SqliteConnection::connect(&format!(
-                    "sqlite:{}",
-                    db_path.to_string_lossy()
-                ))
-                .await?;
+                let mut conn =
+                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
+                        .await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(&raw_path).await?;
                 let mut current_pos = None;
@@ -718,7 +715,12 @@ impl StorageManager {
                 if !rows.is_empty() {
                     tracing::info!(
                         "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
-                        callid, sub.display(), db_path.display(), rows.len(), start_ts, end_ts,
+                        callid,
+                        sub.display(),
+                        db_path.display(),
+                        rows.len(),
+                        start_ts,
+                        end_ts,
                     );
                 }
 
@@ -1560,8 +1562,7 @@ mod tests {
         let mut expected: Vec<(i32, u64, Vec<u8>)> = Vec::with_capacity(n);
         for i in 0..n {
             let len = 40 + (i % 200);
-            let payload: Vec<u8> =
-                (0..len).map(|j| ((i * 31 + j * 7) & 0xff) as u8).collect();
+            let payload: Vec<u8> = (0..len).map(|j| ((i * 31 + j * 7) & 0xff) as u8).collect();
             let ts = base + i as u64 * 1000;
             expected.push(((i % 2) as i32, ts, payload.clone()));
             storage
@@ -1615,12 +1616,17 @@ mod tests {
             assert_eq!(*leg, *eleg, "leg for packet {idx}");
             assert_eq!(*ts as u64, *ets, "timestamp for packet {idx}");
             assert_eq!(
-                payload, epayload.as_slice(),
+                payload,
+                epayload.as_slice(),
                 "physical payload bytes at recorded offset for packet {idx}"
             );
             prev_end = end as i64;
         }
-        assert_eq!(prev_end as usize, raw.len(), "no trailing bytes in data.raw");
+        assert_eq!(
+            prev_end as usize,
+            raw.len(),
+            "no trailing bytes in data.raw"
+        );
     }
 
     /// Sharded writers must land in `shard-{i}` subdirs and remain queryable
@@ -1678,7 +1684,8 @@ mod tests {
             "all shard dirs must be materialised"
         );
 
-        let mut reader = StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
+        let mut reader =
+            StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
         for i in 0..n_shards {
             let call_id = format!("shard-test-{i}");
             let media = reader
@@ -1732,7 +1739,8 @@ mod tests {
         // Data lives at the bucket root and is queryable.
         assert!(dir.path().join("sipflow.db").exists());
         assert!(dir.path().join("data.raw").exists());
-        let mut reader = StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
+        let mut reader =
+            StorageManager::new(dir.path(), SipFlowSubdirs::None, None, None, 0, 1, None);
         let media = reader
             .query_media(
                 call_id,

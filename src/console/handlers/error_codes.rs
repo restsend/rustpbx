@@ -7,7 +7,12 @@
 
 use crate::call_errors::CallErrInfo;
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use axum::{Json, Router, extract::{Query, State}, response::{IntoResponse, Response}, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use http::HeaderMap;
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
@@ -30,7 +35,10 @@ async fn error_codes_view() -> JsonValue {
     let mut groups: std::collections::BTreeMap<&'static str, Vec<JsonValue>> =
         std::collections::BTreeMap::new();
     for entry in reg.all() {
-        groups.entry(entry.app).or_default().push(entry_to_json(entry));
+        groups
+            .entry(entry.app)
+            .or_default()
+            .push(entry_to_json(entry));
     }
     let grouped: Vec<JsonValue> = groups
         .into_iter()

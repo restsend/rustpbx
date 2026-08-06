@@ -74,11 +74,7 @@ pub fn parse_packet(data: &[u8]) -> anyhow::Result<Packet> {
     };
     let dst_port = buf.try_get_u16()?;
     let timestamp = buf.try_get_u64()?;
-    let client_id = if version == 3 {
-        buf.try_get_u32()?
-    } else {
-        0
-    };
+    let client_id = if version == 3 { buf.try_get_u32()? } else { 0 };
     let metadata_len = buf.try_get_u32()? as usize;
     let (call_id, leg) = if metadata_len == 0 {
         (None, None)

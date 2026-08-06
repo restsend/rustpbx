@@ -21,11 +21,11 @@ pub mod webhook;
 pub use api::router;
 pub use request::{DialRequest, OnAnswer, OnFailure};
 
+use crate::call::runtime::ConferenceManager;
 use crate::config::OutboundConfig;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::RwiGatewayRef;
-use crate::call::runtime::ConferenceManager;
 use std::sync::Arc;
 
 /// Context holding all dependencies needed to execute an outbound dial.

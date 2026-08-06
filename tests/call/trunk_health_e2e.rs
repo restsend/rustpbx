@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
 use portpicker::pick_unused_port;
 use rsipstack::{
     EndpointBuilder,
     sip::{Method, StatusCode},
     transport::{TransportLayer, udp::UdpConnection},
 };
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 

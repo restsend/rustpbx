@@ -388,10 +388,7 @@ async fn download_call_record_sip_flow(
         response["flow"] = Value::Array(flow_json);
     }
 
-    let total_sip_msgs = response["flow"]
-        .as_array()
-        .map(|f| f.len())
-        .unwrap_or(0);
+    let total_sip_msgs = response["flow"].as_array().map(|f| f.len()).unwrap_or(0);
 
     response["diagnostics"] = json!({
         "backend_configured": true,
@@ -1857,11 +1854,13 @@ fn build_detail_payload(
         .and_then(|m| m.get("call_notes"))
         .and_then(|v| v.as_str())
         .filter(|t| !t.is_empty())
-        .map(|text| json!({
-            "text": text,
-            "updated_at": Value::Null,
-            "updated_by": Value::Null,
-        }));
+        .map(|text| {
+            json!({
+                "text": text,
+                "updated_at": Value::Null,
+                "updated_by": Value::Null,
+            })
+        });
 
     json!({
         "back_url": state.url_for("/call-records"),

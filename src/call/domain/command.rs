@@ -184,6 +184,16 @@ pub enum CallCommand {
     /// Stop recording
     StopRecording,
 
+    /// Append an event to the session's call trace timeline.
+    ///
+    /// Used by call applications (voicemail, IVR, ...) to contribute
+    /// diagnostic trace entries that end up in the call-record
+    /// `metadata["trace"]` JSON array.
+    Trace {
+        /// The trace event to append.
+        event: crate::call_errors::TraceEvent,
+    },
+
     /// Supervisor listen mode (monitoring only)
     SupervisorListen {
         /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
@@ -506,6 +516,15 @@ pub struct RecordConfig {
     pub beep: bool,
     /// Audio format
     pub format: Option<String>,
+    /// Output channel count. `None`/`2` = stereo (both legs interleaved),
+    /// `Some(1)` = mono.
+    #[serde(default)]
+    pub channels: Option<u16>,
+    /// When `Some(true)` and `channels == Some(1)`, write only the caller's
+    /// ingress (leg A) into the mono output at full amplitude. Used by
+    /// voicemail, where the egress leg is silence during the message.
+    #[serde(default)]
+    pub mono_caller_only: Option<bool>,
 }
 
 /// Conference options
@@ -563,6 +582,7 @@ impl CallCommand {
                 | CallCommand::Transfer { .. }
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
+                | CallCommand::Trace { .. }
         )
     }
 
@@ -652,6 +672,8 @@ mod tests {
                 max_duration_secs: None,
                 beep: false,
                 format: None,
+                channels: None,
+                mono_caller_only: None,
             },
         };
         assert!(start_recording.target_leg().is_none());

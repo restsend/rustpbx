@@ -371,13 +371,16 @@ impl ConferenceManager {
 
         // Add to conference room
         {
-            let mut conference = self.conferences.get_mut(conf_id)
+            let mut conference = self
+                .conferences
+                .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             conference.add_participant_with_role(leg_id.clone(), role)?;
         }
 
         // Add to local audio mixer
-        let mixer = self.audio_mixers
+        let mixer = self
+            .audio_mixers
             .get(conf_id)
             .ok_or_else(|| anyhow!("Audio mixer not found for conference {}", conf_id.0))?
             .value()
@@ -389,11 +392,14 @@ impl ConferenceManager {
         let channels = ParticipantChannels::new(input_tx);
 
         // Store channels and mapping
-        self.participant_channels.insert(leg_id.clone(), channels.clone());
-        self.leg_to_conference.insert(leg_id.clone(), conf_id.clone());
+        self.participant_channels
+            .insert(leg_id.clone(), channels.clone());
+        self.leg_to_conference
+            .insert(leg_id.clone(), conf_id.clone());
 
         // Store output_rx separately for media path integration
-        self.participant_output_rxs.insert(leg_id.clone(), output_rx);
+        self.participant_output_rxs
+            .insert(leg_id.clone(), output_rx);
 
         Ok(channels)
     }
@@ -409,7 +415,9 @@ impl ConferenceManager {
         // Remove from conference room
         let remaining;
         {
-            let mut conference = self.conferences.get_mut(conf_id)
+            let mut conference = self
+                .conferences
+                .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             conference.remove_participant(leg_id)?;
             remaining = conference.participant_count();
@@ -446,7 +454,9 @@ impl ConferenceManager {
     pub async fn mute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conference = self.conferences.get_mut(conf_id)
+            let mut conference = self
+                .conferences
+                .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             conference.mute_participant(leg_id)?;
         }
@@ -464,7 +474,9 @@ impl ConferenceManager {
     pub async fn unmute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conference = self.conferences.get_mut(conf_id)
+            let mut conference = self
+                .conferences
+                .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             conference.unmute_participant(leg_id)?;
         }
@@ -510,7 +522,8 @@ impl ConferenceManager {
 
     /// Get conference statistics
     pub async fn get_conference_stats(&self, conf_id: &ConferenceId) -> Result<ConferenceStats> {
-        let conference = self.conferences
+        let conference = self
+            .conferences
             .get(conf_id)
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
 
@@ -542,7 +555,8 @@ impl ConferenceManager {
         host_leg_id: &LegId,
     ) -> Result<Vec<LegId>> {
         let (is_host, participant_ids) = {
-            let conf = self.conferences
+            let conf = self
+                .conferences
                 .get(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
             (conf.is_host(host_leg_id), conf.participant_ids())

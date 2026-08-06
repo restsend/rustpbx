@@ -13,14 +13,18 @@ fn bench_mixer(c: &mut Criterion) {
     let mut g = c.benchmark_group("mix_20ms");
     for participants in [2usize, 4, 8, 16] {
         g.throughput(Throughput::Elements(160));
-        g.bench_with_input(BenchmarkId::new("n_participants", participants), &participants, |b, &n| {
-            b.iter(|| {
-                let frames = vec![frame.clone(); n];
-                let gains = vec![1.0 / n as f32; n];
-                let out = mixer.mix_frames(black_box(frames), black_box(&gains));
-                black_box(out.len());
-            })
-        });
+        g.bench_with_input(
+            BenchmarkId::new("n_participants", participants),
+            &participants,
+            |b, &n| {
+                b.iter(|| {
+                    let frames = vec![frame.clone(); n];
+                    let gains = vec![1.0 / n as f32; n];
+                    let out = mixer.mix_frames(black_box(frames), black_box(&gains));
+                    black_box(out.len());
+                })
+            },
+        );
     }
     g.finish();
 }

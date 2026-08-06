@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use rustpbx::rwi::event::to_legacy_event;
 use rustpbx::rwi::CallInitiated;
 use rustpbx::rwi::RwiGateway;
+use rustpbx::rwi::event::to_legacy_event;
 use tokio::time::timeout;
 
 #[tokio::test]

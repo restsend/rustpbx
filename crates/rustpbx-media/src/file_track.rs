@@ -5,8 +5,7 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use rustrtc::{
     Attribute, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
-    SessionDescription, TransceiverDirection, TransportMode,
-    config::BufferDropStrategy,
+    SessionDescription, TransceiverDirection, TransportMode, config::BufferDropStrategy,
 };
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
@@ -115,7 +114,7 @@ impl FileTrack {
 
         let pc = {
             let _handle = tokio::runtime::Handle::try_current();
-        let _guard = _handle.as_ref().ok().map(|h| h.enter());
+            let _guard = _handle.as_ref().ok().map(|h| h.enter());
             let pc = PeerConnection::new(config);
             pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
             pc
@@ -462,11 +461,7 @@ impl Track for FileTrack {
         &self.track_id
     }
 
-    async fn handshake(
-        &self,
-        remote_offer: String,
-        answer_type: SdpType,
-    ) -> Result<String> {
+    async fn handshake(&self, remote_offer: String, answer_type: SdpType) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
 
         match self.pc.signaling_state() {
@@ -487,10 +482,7 @@ impl Track for FileTrack {
         match answer_type {
             SdpType::Pranswer | SdpType::Answer => answer.sdp_type = answer_type,
             _ => {
-                return Err(anyhow!(
-                    "unsupported answer SDP type: {:?}",
-                    answer_type
-                ));
+                return Err(anyhow!("unsupported answer SDP type: {:?}", answer_type));
             }
         }
         self.pc.set_local_description(answer.clone())?;

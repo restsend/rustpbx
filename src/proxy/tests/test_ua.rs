@@ -322,11 +322,9 @@ impl TestUa {
                 let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
                 // Apply the remote answer to the WebRTC PeerConnection.
                 if let Some(pc) = self.webrtc_pc.as_ref() {
-                    let desc = rustrtc::SessionDescription::parse(
-                        rustrtc::SdpType::Answer,
-                        &answer_sdp,
-                    )
-                    .map_err(|e| anyhow!("parse answer SDP failed: {}", e))?;
+                    let desc =
+                        rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &answer_sdp)
+                            .map_err(|e| anyhow!("parse answer SDP failed: {}", e))?;
                     let _ = pc.set_remote_description(desc).await;
                 }
                 let mut sdps = self.negotiated_answer_sdps.lock().await;
@@ -1024,7 +1022,7 @@ mod tests {
         port: u16,
     ) -> Result<TestUa> {
         let config = TestUaConfig {
-        webrtc: false,
+            webrtc: false,
             username: username.to_string(),
             password: password.to_string(),
             realm: proxy_addr.ip().to_string(),
@@ -2803,10 +2801,9 @@ a=rtpmap:0 PCMU/8000"#;
         let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26040);
-        let alice =
-            create_test_ua_webrtc("alice", "password123", proxy_addr, alice_port)
-                .await
-                .unwrap();
+        let alice = create_test_ua_webrtc("alice", "password123", proxy_addr, alice_port)
+            .await
+            .unwrap();
         let bob_port = portpicker::pick_unused_port().unwrap_or(26041);
         let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
@@ -2819,9 +2816,8 @@ a=rtpmap:0 PCMU/8000"#;
         // Alice (real WebRTC PeerConnection) calls Bob; the PC generates a
         // genuine DTLS-SRTP offer.
         let alice_clone = alice.clone();
-        let caller_task = crate::utils::spawn(async move {
-            alice_clone.make_call("bob", None).await
-        });
+        let caller_task =
+            crate::utils::spawn(async move { alice_clone.make_call("bob", None).await });
 
         // Bob waits for the incoming call and answers it with an RTP answer
         // (single loop so the IncomingCall event isn't consumed elsewhere).
@@ -2831,8 +2827,7 @@ a=rtpmap:0 PCMU/8000"#;
             for ev in &evs {
                 if let TestUaEvent::IncomingCall(id, offer) = ev {
                     let offer = offer.clone().unwrap_or_default();
-                    let rtp_answer =
-                        create_test_sdp_answer(&offer, "127.0.0.1", bob_port + 1);
+                    let rtp_answer = create_test_sdp_answer(&offer, "127.0.0.1", bob_port + 1);
                     bob.answer_call(id, Some(rtp_answer)).await.unwrap();
                     answered = true;
                     break;

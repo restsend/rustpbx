@@ -8,7 +8,7 @@
 //!   - `call_answered` arrives and the post-answer dispatcher completes.
 
 use crate::outbound::OutboundContext;
-use crate::outbound::dispatcher::{DispatchOutcome, dispatch};
+use crate::outbound::dispatcher::{DispatchOutcome, dispatch, dispatch_failure};
 use crate::outbound::events::{SseEntry, encode_rwi_event, is_call_failure_event};
 use crate::outbound::request::DialRequest;
 use crate::rwi::processor::RwiCommandProcessor;
@@ -18,6 +18,10 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use tokio::sync::mpsc;
+
+/// Bounded SSE event queue. Bounded so a slow SSE consumer applies backpressure
+/// on the pump task instead of buffering unboundedly (memory growth / DoS risk).
+const SSE_EVENT_QUEUE_CAPACITY: usize = 128;
 
 /// Build the outbound sub-router. The caller is responsible for applying
 /// auth middleware (AMI IP allowlist).
@@ -39,9 +43,7 @@ pub async fn execute_dial_response(ctx: OutboundContext, req: DialRequest) -> Re
         Ok(rx) => {
             let stream = futures::stream::unfold(rx, |mut rx| async move {
                 rx.recv().await.map(|entry| {
-                    let sse = SseEvent::default()
-                        .event(&entry.event)
-                        .data(&entry.data);
+                    let sse = SseEvent::default().event(&entry.event).data(&entry.data);
                     (Ok::<_, std::convert::Infallible>(sse), rx)
                 })
             });
@@ -65,15 +67,13 @@ pub async fn execute_dial_response(ctx: OutboundContext, req: DialRequest) -> Re
 pub async fn execute_dial_core(
     ctx: OutboundContext,
     req: DialRequest,
-) -> Result<mpsc::UnboundedReceiver<SseEntry>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<mpsc::Receiver<SseEntry>, (StatusCode, Json<serde_json::Value>)> {
     let call_id = req
         .call_id
         .clone()
         .unwrap_or_else(|| format!("outbound-{}", uuid::Uuid::new_v4()));
 
-    let ring_timeout = req
-        .ring_timeout
-        .unwrap_or(ctx.config.default_ring_timeout);
+    let ring_timeout = req.ring_timeout.unwrap_or(ctx.config.default_ring_timeout);
     let webhook_timeout = std::time::Duration::from_secs(ctx.config.default_webhook_timeout);
 
     // Subscribe BEFORE originating so we don't miss early events.
@@ -110,6 +110,7 @@ pub async fn execute_dial_core(
         ringback_target: None,
         extra_headers: req.extra_headers.clone(),
         trunk: req.trunk.clone(),
+        route_originated_calls: None,
     };
 
     // Fire the originate — events arrive via the gateway tap.
@@ -127,9 +128,10 @@ pub async fn execute_dial_core(
         ));
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<SseEntry>();
+    let (tx, rx) = mpsc::channel::<SseEntry>(SSE_EVENT_QUEUE_CAPACITY);
 
     let on_answer = req.on_answer.clone();
+    let on_failure = req.on_failure.clone();
     let metadata = req.metadata.clone();
     let caller_for_dispatch = req.caller_id.clone().unwrap_or_default();
     let callee_for_dispatch = req.destination.clone();
@@ -146,13 +148,24 @@ pub async fn execute_dial_core(
 
     crate::utils::spawn(async move {
         let deadline = tokio::time::Instant::now() + answer_timeout;
-        let answered = false;
 
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
                     // Safety-net timeout — in normal operation the originate's
                     // own ring_timeout fires first and emits call_no_answer.
+                    if let Some(on_failure) = on_failure.as_ref() {
+                        dispatch_failure(
+                            &http_client,
+                            &call_id,
+                            &callee_for_dispatch,
+                            &caller_for_dispatch,
+                            &metadata,
+                            on_failure,
+                            "timeout",
+                            webhook_timeout,
+                        ).await;
+                    }
                     break;
                 }
                 recv = event_rx.recv() => {
@@ -164,10 +177,15 @@ pub async fn execute_dial_core(
 
                             let et = entry.event.event_type;
 
-                            // Pass through the RWI event verbatim.
-                            let _ = tx.send(encode_rwi_event(&entry));
+                            // Pass through the RWI event verbatim. Bounded send:
+                            // a slow SSE consumer parks the pump (backpressure)
+                            // instead of growing an unbounded buffer. A closed
+                            // channel means the client disconnected — stop.
+                            if tx.send(encode_rwi_event(&entry)).await.is_err() {
+                                break;
+                            }
 
-                            if et == "call_answered" && !answered {
+                            if et == "call_answered" {
                                 // Run the post-answer dispatcher (inline).
                                 let outcome: DispatchOutcome = dispatch(
                                     &dispatch_processor,
@@ -193,8 +211,10 @@ pub async fn execute_dial_core(
                                 // queue_joined, etc.) that are already in the
                                 // broadcast channel buffer.
                                 while let Ok(entry) = event_rx.try_recv() {
-                                    if entry.call_id == call_id {
-                                        let _ = tx.send(encode_rwi_event(&entry));
+                                    if entry.call_id == call_id
+                                        && tx.send(encode_rwi_event(&entry)).await.is_err()
+                                    {
+                                        break;
                                     }
                                 }
 
@@ -202,9 +222,22 @@ pub async fn execute_dial_core(
                                 break;
                             }
 
-                            if !answered && is_call_failure_event(et) {
+                            if is_call_failure_event(et)
+                                && let Some(on_failure) = on_failure.as_ref()
+                            {
                                 // Originate failed — the failure event has
-                                // already been passed through above.
+                                // already been passed through above. Notify the
+                                // failure webhook (if configured).
+                                dispatch_failure(
+                                    &http_client,
+                                    &call_id,
+                                    &callee_for_dispatch,
+                                    &caller_for_dispatch,
+                                    &metadata,
+                                    on_failure,
+                                    et,
+                                    webhook_timeout,
+                                ).await;
                                 break;
                             }
                         }
@@ -224,17 +257,82 @@ pub async fn execute_dial_core(
     Ok(rx)
 }
 
+/// Resolve the SIP realm for outbound URI construction (first configured realm,
+/// else the proxy's advertised address).
+fn resolve_realm(proxy_config: &crate::config::ProxyConfig) -> String {
+    proxy_config
+        .realms
+        .as_ref()
+        .and_then(|v| v.first().cloned())
+        .unwrap_or_else(|| proxy_config.addr.clone())
+}
+
+/// Convert a bare phone number into a SIP URI. Pure helper (realm supplied) —
+/// unit-testable without a full `OutboundContext`.
+fn normalize_destination_with_realm(dest: &str, realm: &str) -> String {
+    if dest.starts_with("sip:") {
+        return dest.to_string();
+    }
+    let user_param = if dest.chars().all(|c| c.is_ascii_digit()) && dest.len() >= 7 {
+        ";user=phone"
+    } else {
+        ""
+    };
+    format!("sip:{}@{}{}", dest, realm, user_param)
+}
+
 /// Convert a bare phone number into a SIP URI using the server's realm.
+///
+/// Numbers that look like E.164 / carrier numbers (7+ digits, no extension-ish
+/// ambiguity) are stamped with `;user=phone` so trunk carriers treat them as a
+/// phone number rather than a SIP user part. Short internal extensions are left
+/// untouched.
 fn normalize_destination(dest: &str, ctx: &OutboundContext) -> String {
     if dest.starts_with("sip:") {
         return dest.to_string();
     }
-    let realm = ctx
-        .sip_server
-        .proxy_config
-        .realms
-        .as_ref()
-        .and_then(|v| v.first().cloned())
-        .unwrap_or_else(|| ctx.sip_server.proxy_config.addr.clone());
-    format!("sip:{}@{}", dest, realm)
+    let realm = resolve_realm(&ctx.sip_server.proxy_config);
+    normalize_destination_with_realm(dest, &realm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_passthrough_sip_uri() {
+        assert_eq!(
+            normalize_destination_with_realm("sip:1002@10.0.0.1", "10.0.0.2"),
+            "sip:1002@10.0.0.1"
+        );
+        assert_eq!(
+            normalize_destination_with_realm("sip:1002@10.0.0.1;user=phone", "10.0.0.2"),
+            "sip:1002@10.0.0.1;user=phone"
+        );
+    }
+
+    #[test]
+    fn normalize_e164_number_gets_user_phone() {
+        assert_eq!(
+            normalize_destination_with_realm("13800000000", "pbx.example"),
+            "sip:13800000000@pbx.example;user=phone"
+        );
+    }
+
+    #[test]
+    fn normalize_short_extension_kept_plain() {
+        // Internal extensions (4-digit) must NOT be tagged user=phone.
+        assert_eq!(
+            normalize_destination_with_realm("1002", "pbx.example"),
+            "sip:1002@pbx.example"
+        );
+    }
+
+    #[test]
+    fn normalize_alphabetic_destination_kept_plain() {
+        assert_eq!(
+            normalize_destination_with_realm("sales", "pbx.example"),
+            "sip:sales@pbx.example"
+        );
+    }
 }

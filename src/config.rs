@@ -4,12 +4,12 @@ use crate::{
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
-use rustpbx_models::DatabasePoolConfig;
 use anyhow::{Error, Result};
 use clap::Parser;
 use ipnet::IpNet;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::StatusCode;
+use rustpbx_models::DatabasePoolConfig;
 use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::IpAddr, path::PathBuf};
@@ -92,6 +92,10 @@ fn default_latching_probation_max_packets() -> Option<u8> {
 
 fn default_rtp_timeout() -> Option<u64> {
     Some(15)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_generated_config_dir() -> String {
@@ -751,6 +755,12 @@ pub struct ProxyConfig {
     pub session_expires: Option<u64>,
     #[serde(default = "default_rtp_timeout")]
     pub rtp_timeout: Option<u64>,
+    /// When `true` (default), the RTP-inactivity watchdog is suppressed while an
+    /// app (IVR / voicemail / queue / conference) drives the session with no
+    /// real callee bridged, and during a blind transfer. Set to `false` to
+    /// always enforce per-leg silence detection.
+    #[serde(default = "default_true")]
+    pub pause_rtp_timeout_during_app: bool,
     #[serde(default = "default_session_cmd_channel_capacity")]
     pub session_cmd_channel_capacity: usize,
     #[serde(default = "default_session_state_channel_capacity")]
@@ -796,6 +806,12 @@ pub struct ProxyConfig {
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
     pub blind_transfer_use_refer: bool,
+    /// When enabled, app/transfer/RWI-originated calls whose target is not a
+    /// registered internal contact are routed through the route table
+    /// (match/rewrite/trunk selection) just like inbound calls. Default off —
+    /// legacy direct-dial behavior is preserved unless explicitly enabled.
+    #[serde(default)]
+    pub route_originated_calls: bool,
 
     #[serde(default)]
     pub dos_enabled: bool,
@@ -1246,6 +1262,7 @@ impl Default for ProxyConfig {
             session_timer_always: false,
             session_expires: None,
             rtp_timeout: default_rtp_timeout(),
+            pause_rtp_timeout_during_app: default_true(),
             session_cmd_channel_capacity: default_session_cmd_channel_capacity(),
             session_state_channel_capacity: default_session_state_channel_capacity(),
             media_cmd_channel_capacity: default_media_cmd_channel_capacity(),
@@ -1267,6 +1284,7 @@ impl Default for ProxyConfig {
             video_codecs: None,
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
+            route_originated_calls: false,
             dos_enabled: false,
             dos_max_cps_per_ip: default_dos_max_cps(),
             dos_max_concurrent_per_ip: default_dos_max_concurrent(),

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use chrono::{DateTime, Datelike, Local, Timelike};
 
@@ -200,11 +200,17 @@ mod tests {
         let base = dir.path();
 
         // Missing dir → Multi (new dirs get sharded).
-        assert_eq!(detect_bucket_layout(&base.join("nope")), BucketLayout::Multi);
+        assert_eq!(
+            detect_bucket_layout(&base.join("nope")),
+            BucketLayout::Multi
+        );
 
         // Empty dir → Multi.
         std::fs::create_dir_all(base.join("empty")).unwrap();
-        assert_eq!(detect_bucket_layout(&base.join("empty")), BucketLayout::Multi);
+        assert_eq!(
+            detect_bucket_layout(&base.join("empty")),
+            BucketLayout::Multi
+        );
 
         // Legacy files, no shard-* → Single.
         let legacy = base.join("legacy");

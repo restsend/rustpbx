@@ -14,9 +14,9 @@
 //!
 //! Usage: cargo test --test rwi -- comprehensive_event -- --nocapture
 
+use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use rustpbx::config::{MediaProxyMode, ProxyConfig, RecordingPolicy};
 use std::sync::Arc;
 use std::time::Duration;

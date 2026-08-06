@@ -7,11 +7,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use serde::Serialize;
 use rsipstack::{
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
 };
+use serde::Serialize;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},

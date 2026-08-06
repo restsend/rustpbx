@@ -120,7 +120,8 @@ impl AgentRegistry for DbRegistry {
         agent_id: &str,
         new_state: PresenceState,
     ) -> anyhow::Result<()> {
-        let mut agent = self.cache
+        let mut agent = self
+            .cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -143,7 +144,8 @@ impl AgentRegistry for DbRegistry {
     }
 
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut agent = self.cache
+        let mut agent = self
+            .cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
@@ -159,7 +161,8 @@ impl AgentRegistry for DbRegistry {
     }
 
     async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-        let mut agent = self.cache
+        let mut agent = self
+            .cache
             .get_mut(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 

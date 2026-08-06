@@ -88,10 +88,6 @@ fn normalize_queue_audio_paths(queue_config: &mut RouteQueueConfig) {
         }
     }
 
-    if let Some(fallback) = queue_config.fallback.as_mut() {
-        normalize_optional_audio_path(&mut fallback.failure_prompt);
-    }
-
     if let Some(prompts) = queue_config.voice_prompts.as_mut() {
         normalize_optional_audio_path(&mut prompts.transfer_prompt);
         normalize_optional_audio_path(&mut prompts.busy_prompt);

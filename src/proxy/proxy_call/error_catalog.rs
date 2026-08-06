@@ -296,6 +296,17 @@ pub const TRANSFER_INTERNAL_ERROR: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+pub const RTP_TIMEOUT: CallErrInfo = CallErrInfo {
+    app: "proxy",
+    code: "proxy.rtp_timeout",
+    message: "RTP inactivity timeout",
+    sip_status: None,
+    hangup_reason: CallRecordHangupReason::RtpTimeout,
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.proxy.rtp_timeout",
+    remediation_key: None,
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     QUEUE_ABANDONED,
     QUEUE_ALL_AGENTS_UNAVAILABLE,
@@ -323,4 +334,5 @@ pub const CATALOG: &[CallErrInfo] = &[
     TRANSFER_INVALID_STATE,
     TRANSFER_BRIDGE_FAILED,
     TRANSFER_INTERNAL_ERROR,
+    RTP_TIMEOUT,
 ];

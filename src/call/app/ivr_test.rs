@@ -10,8 +10,8 @@ mod tests {
         EntryAction, IvrDefinition, IvrFileConfig, MenuEntry, MenuNode,
     };
     use crate::call::app::testing::MockCallStack;
-    use crate::call::domain::{CallCommand, LegId};
     use crate::call::domain::MediaSource;
+    use crate::call::domain::{CallCommand, LegId};
     use crate::media::Track;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -924,15 +924,11 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("1");
 
         stack
-            .assert_cmd(
-                300,
-                "TransferTarget-bridge",
-                |c| {
-                    matches!(c, CallCommand::Transfer { target, .. }
+            .assert_cmd(300, "TransferTarget-bridge", |c| {
+                matches!(c, CallCommand::Transfer { target, .. }
                         if target.starts_with("bridge:wss://voip.example.com/ws")
                         && target.contains("return_to_ivr=test-bridge"))
-                },
-            )
+            })
             .await;
 
         stack

@@ -501,15 +501,15 @@ mod tests {
         stack.join().await.expect("should exit after redirect");
     }
 
-    // ── 11. Queue with queue-to-queue fallback ──
+    // ── 11. Queue with queue-to-queue fallback (via Transfer endpoint) ──
 
     #[tokio::test]
     async fn test_queue_to_queue_fallback() {
         let mut plan = build_simple_queue();
         plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
-        plan.fallback = Some(QueueFallbackAction::Queue {
-            name: "overflow".to_string(),
-        });
+        plan.fallback = Some(QueueFallbackAction::Failure(FailureAction::Transfer(
+            crate::call::TransferEndpoint::Queue("overflow".to_string()),
+        )));
 
         let config = build_simple_queue_config();
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
@@ -1560,213 +1560,18 @@ mod tests {
             other => panic!("expected second LegAdd, got {other:?}"),
         };
 
-        stack.custom(
-            "agent_busy",
-            serde_json::json!({"leg_id": first_leg.0}),
-        );
+        stack.custom("agent_busy", serde_json::json!({"leg_id": first_leg.0}));
         assert!(
             stack.next_cmd(50).await.is_none(),
             "one failed parallel agent must not trigger fallback"
         );
 
-        stack.custom(
-            "agent_busy",
-            serde_json::json!({"leg_id": second_leg.0}),
-        );
+        stack.custom("agent_busy", serde_json::json!({"leg_id": second_leg.0}));
         stack
             .assert_cmd(200, "FallbackHangup", |c| {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
-    }
-
-    // ── 按键回拨（Queue Callback on Request） ──
-
-    #[tokio::test]
-    async fn test_callback_dtmf_request() {
-        let mut config = build_simple_queue_config();
-        config.callback_request_enabled = true;
-        config.callback_offer_after_secs = 0;
-        config.callback_dtmf_key = "2".to_string();
-        config.voice_prompts = Some(VoicePrompts {
-            callback_confirm_prompt: Some("callback-confirm.wav".into()),
-            ..VoicePrompts::zh()
-        });
-        let plan = config.to_plan();
-
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
-
-        // Enter queue → answer → agents in parallel → hold music loop
-        stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
-            .await;
-
-        // Send DTMF "2"
-        stack.dtmf("2");
-
-        // Hold music is stopped before playing the callback confirmation prompt.
-        stack
-            .assert_cmd(200, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
-
-        // Should play callback confirmation prompt
-        stack
-            .assert_cmd(200, "PlayCallbackConfirm", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        // Confirm prompt completes → hangup
-        stack.audio_complete("default");
-        stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
-            .await;
-
-        stack.join().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_callback_dtmf_before_offer_time_ignored() {
-        let mut config = build_simple_queue_config();
-        config.callback_request_enabled = true;
-        config.callback_offer_after_secs = 60; // Must wait 60s
-        config.callback_dtmf_key = "2".to_string();
-        let plan = config.to_plan();
-
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
-
-        stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
-            .await;
-
-        // DTMF "2" pressed before offer time — should be ignored
-        stack.dtmf("2");
-
-        // Should NOT play callback confirm prompt, still in playing hold
-        // After an idle period, the hold music loop plays again
-        // We can't assert a specific Play since callback may not trigger,
-        // but we verify no Hangup happens
-        let timeout = tokio::time::sleep(Duration::from_millis(300));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                () = &mut timeout => break,
-                cmd = stack.next_cmd(100) => {
-                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
-                        panic!("Callback should not trigger before offer time");
-                    }
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_callback_disabled_ignores_dtmf() {
-        let mut config = build_simple_queue_config();
-        config.callback_request_enabled = false; // disabled
-        config.callback_dtmf_key = "2".to_string();
-        let plan = config.to_plan();
-
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
-
-        stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
-            .await;
-
-        stack.dtmf("2");
-
-        // Should NOT trigger callback (disabled)
-        let timeout = tokio::time::sleep(Duration::from_millis(300));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                () = &mut timeout => break,
-                cmd = stack.next_cmd(100) => {
-                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
-                        panic!("Callback disabled — Hangup should not occur");
-                    }
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_callback_wrong_dtmf_key_ignored() {
-        let mut config = build_simple_queue_config();
-        config.callback_request_enabled = true;
-        config.callback_dtmf_key = "2".to_string(); // key is "2"
-        let plan = config.to_plan();
-
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
-
-        stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
-            .await;
-
-        stack.dtmf("5"); // wrong key
-
-        // Should NOT trigger callback
-        let timeout = tokio::time::sleep(Duration::from_millis(300));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                () = &mut timeout => break,
-                cmd = stack.next_cmd(100) => {
-                    if matches!(cmd, Some(CallCommand::Hangup(_))) {
-                        panic!("Wrong DTMF key — Hangup should not occur");
-                    }
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_callback_no_confirm_prompt_hangs_up_immediately() {
-        let mut config = build_simple_queue_config();
-        config.callback_request_enabled = true;
-        config.callback_offer_after_secs = 0;
-        config.callback_dtmf_key = "2".to_string();
-        // No callback_confirm_prompt configured
-        let plan = config.to_plan();
-
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
-
-        stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(200, "PlayHold", |c| matches!(c, CallCommand::Play { .. }))
-            .await;
-
-        stack.dtmf("2");
-
-        // Hold music is stopped before the immediate hangup.
-        stack
-            .assert_cmd(200, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
-
-        // Without a confirm prompt, the hangup should come immediately
-        stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
-            .await;
-
-        stack.join().await.unwrap();
     }
 
     // ── 最终提示（Final Destination Prompt） ──
@@ -1902,7 +1707,9 @@ mod tests {
         let resolved = SipSession::resolve_audio_file_path(spec);
         let src = FileAudioSource::new(resolved.clone(), false)
             .await
-            .unwrap_or_else(|e| panic!("[{label}] {spec} did not resolve to a playable file ({resolved}): {e}"));
+            .unwrap_or_else(|e| {
+                panic!("[{label}] {spec} did not resolve to a playable file ({resolved}): {e}")
+            });
         assert!(
             src.has_data(),
             "[{label}] resolved file decoded to zero samples: {resolved}"
@@ -1939,14 +1746,12 @@ mod tests {
             return;
         }
         let (plan, config) = build_plan_and_config_with_default_audio();
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
-        );
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
 
         let hold_cmd = stack
@@ -2005,7 +1810,10 @@ mod tests {
             self.inner.unregister(agent_id).await
         }
 
-        async fn get_agent(&self, agent_id: &str) -> Option<crate::call::app::agent_registry::AgentRecord> {
+        async fn get_agent(
+            &self,
+            agent_id: &str,
+        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
             self.inner.get_agent(agent_id).await
         }
 
@@ -2029,7 +1837,10 @@ mod tests {
             self.inner.end_call(agent_id, talk_time_secs).await
         }
 
-        async fn find_available_agents(&self, required_skills: &[String]) -> Vec<crate::call::app::agent_registry::AgentRecord> {
+        async fn find_available_agents(
+            &self,
+            required_skills: &[String],
+        ) -> Vec<crate::call::app::agent_registry::AgentRecord> {
             self.inner.find_available_agents(required_skills).await
         }
 
@@ -2046,17 +1857,19 @@ mod tests {
         }
 
         async fn notify_call_abandoned(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
-            self.abandoned
-                .lock()
-                .unwrap()
-                .push((call_id.to_string(), queue_id.to_string(), waited_secs));
+            self.abandoned.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                waited_secs,
+            ));
         }
 
         async fn notify_call_timeout(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
-            self.timeouts
-                .lock()
-                .unwrap()
-                .push((call_id.to_string(), queue_id.to_string(), waited_secs));
+            self.timeouts.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                waited_secs,
+            ));
         }
 
         async fn notify_call_fallback(
@@ -2066,15 +1879,12 @@ mod tests {
             reason: &str,
             action: &str,
         ) {
-            self.fallbacks
-                .lock()
-                .unwrap()
-                .push((
-                    call_id.to_string(),
-                    queue_id.to_string(),
-                    reason.to_string(),
-                    action.to_string(),
-                ));
+            self.fallbacks.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                reason.to_string(),
+                action.to_string(),
+            ));
         }
     }
 
@@ -2100,12 +1910,16 @@ mod tests {
 
         let abandoned = registry.abandoned.lock().unwrap();
         assert!(
-            abandoned.iter().any(|(c, q, _)| c == "call-001" && q == "test-queue"),
+            abandoned
+                .iter()
+                .any(|(c, q, _)| c == "call-001" && q == "test-queue"),
             "notify_call_abandoned must be called for an abandoned skill-routed call, got {abandoned:?}"
         );
         let fallbacks = registry.fallbacks.lock().unwrap();
         assert!(
-            fallbacks.iter().any(|(c, q, _, _)| c == "call-001" && q == "test-queue"),
+            fallbacks
+                .iter()
+                .any(|(c, q, _, _)| c == "call-001" && q == "test-queue"),
             "notify_call_fallback must be called when the call could not be serviced, got {fallbacks:?}"
         );
     }
@@ -2142,7 +1956,14 @@ mod tests {
         use std::sync::Arc;
 
         let mut gw = crate::rwi::gateway::RwiGateway::new();
-        let sid = gw.create_session(RwiIdentity { token: "t".into(), scopes: vec![] }).read().id.clone();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
         let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, gws_tx);
         let gw = Arc::new(parking_lot::RwLock::new(gw));
@@ -2204,7 +2025,9 @@ mod tests {
             .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "OriginateCall", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(200, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
             .await;
         stack.timeout("agent_ring_timeout");
 
@@ -2221,7 +2044,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(saw, "queue_agent_no_answer event must be emitted on ring timeout");
+        assert!(
+            saw,
+            "queue_agent_no_answer event must be emitted on ring timeout"
+        );
 
         stack.cancel();
         let _ = stack.join().await;
@@ -2234,14 +2060,12 @@ mod tests {
             return;
         }
         let (plan, config) = build_plan_and_config_with_default_audio();
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
-        );
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         // discard hold music
         let _ = stack.next_cmd(200).await.expect("hold music");
@@ -2289,14 +2113,12 @@ mod tests {
         config.strategy = seq.strategy.clone();
         let plan = config.to_plan();
 
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
-        );
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         // discard hold music
         let _ = stack.next_cmd(200).await.expect("hold music");
@@ -2333,14 +2155,12 @@ mod tests {
         config.strategy = seq.strategy.clone();
         let plan = config.to_plan();
 
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
-        );
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         let _ = stack.next_cmd(200).await.expect("hold music");
 

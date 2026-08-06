@@ -112,20 +112,19 @@ impl CallApp for RwiApp {
 
         // Populate CallMetaStore for event enrichment
         let meta_store = self.gateway.read().meta_store.clone();
-        meta_store
-            .insert(
-                call_id.clone(),
-                crate::rwi::proto::CallMeta {
-                    caller: Some(context.call_info.caller.clone()),
-                    callee: Some(context.call_info.callee.clone()),
-                    direction: Some(context.call_info.direction.clone()),
-                    caller_name: extract_sip_username(&context.call_info.caller),
-                    callee_name: extract_sip_username(&context.call_info.callee),
-                    trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
-                    app_id: None,
-                    routing_target: None,
-                },
-            );
+        meta_store.insert(
+            call_id.clone(),
+            crate::rwi::proto::CallMeta {
+                caller: Some(context.call_info.caller.clone()),
+                callee: Some(context.call_info.callee.clone()),
+                direction: Some(context.call_info.direction.clone()),
+                caller_name: extract_sip_username(&context.call_info.caller),
+                callee_name: extract_sip_username(&context.call_info.callee),
+                trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
+                app_id: None,
+                routing_target: None,
+            },
+        );
 
         self.send_typed_event(&crate::rwi::CallIncoming {
             call_id: call_id.clone(),

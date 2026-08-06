@@ -203,7 +203,7 @@ async fn test_early_media_183_then_different_sdp_200ok_bridge_restarted() -> Res
         1000,
         60000,
         0xB2B2_B2B2u32,
-        0,  // PCMU
+        0, // PCMU
         160,
         160,
     );
@@ -215,7 +215,7 @@ async fn test_early_media_183_then_different_sdp_200ok_bridge_restarted() -> Res
         2000,
         50000,
         0xA1A1_A1A1u32,
-        0,  // PCMU
+        0, // PCMU
         160,
         160,
     );

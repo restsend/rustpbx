@@ -92,10 +92,32 @@ pub struct Recorder {
     /// When true, swap stereo channels: callee→left, caller→right.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
+
+    /// When true and `channels == 1`, write only leg A (the caller's ingress)
+    /// into the mono output instead of mixing both legs. Used by single-party
+    /// recordings (e.g. voicemail) where the egress leg is silence, avoiding
+    /// the amplitude loss that mixing with silence would cause.
+    pub mono_caller_only: bool,
 }
 
 impl Recorder {
+    /// Create a stereo (2-channel) recorder.
     pub fn new(path: &str, codec: CodecType) -> Result<Self> {
+        Self::new_with_channels(path, codec, 2, false)
+    }
+
+    /// Create a recorder with an explicit channel count.
+    ///
+    /// `channels == 2` interleaves both legs as stereo. `channels == 1` mixes
+    /// both legs to mono, unless `mono_caller_only` is set — then only leg A
+    /// (caller ingress) is written at full amplitude (used by voicemail where
+    /// the egress leg is silence).
+    pub fn new_with_channels(
+        path: &str,
+        codec: CodecType,
+        channels: u16,
+        mono_caller_only: bool,
+    ) -> Result<Self> {
         // ensure the directory exists
         if let Some(parent) = PathBuf::from(path).parent() {
             std::fs::create_dir_all(parent).ok();
@@ -116,9 +138,6 @@ impl Recorder {
             "Creating recorder: path={}, src_codec={:?} codec={:?}",
             path, src_codec, codec
         );
-        // PCMU/PCMA are mono codecs (1 channel), we force stereo (2 channels) for better separation
-        // of leg A and leg B audio in the recording.
-        let channels = 2;
         let mut writer = Box::new(CodecWavWriter::new(
             file,
             sample_rate,
@@ -149,6 +168,7 @@ impl Recorder {
             writer,
             ptime: Duration::from_millis(200),
             stereo_swap: false,
+            mono_caller_only,
             leg_a_started: false,
             leg_b_started: false,
         })
@@ -692,8 +712,15 @@ impl Recorder {
         self.next_flush_ts += flush_len;
 
         let output = if self.channels == 1 {
-            // Mono: mix both legs
-            self.mix(&data_a, &data_b)?
+            if self.mono_caller_only {
+                // Voicemail / single-party capture: caller ingress only, at
+                // full amplitude (the egress leg is silence, so mixing would
+                // halve the level).
+                data_a
+            } else {
+                // Mono: mix both legs
+                self.mix(&data_a, &data_b)?
+            }
         } else {
             // Stereo: interleave both legs.
             // Default: Leg A (caller) → left, Leg B (callee) → right.
@@ -749,7 +776,11 @@ impl Recorder {
         let data_b = self.get_leg_data(Leg::B, flush_len)?;
         self.next_flush_ts += flush_len;
         let output = if self.channels == 1 {
-            self.mix(&data_a, &data_b)?
+            if self.mono_caller_only {
+                data_a
+            } else {
+                self.mix(&data_a, &data_b)?
+            }
         } else if self.stereo_swap {
             self.interleave(&data_b, &data_a)?
         } else {
@@ -1280,6 +1311,7 @@ mod tests {
             writer: Box::new(TestWriter::new()),
             ptime: Duration::from_millis(20),
             stereo_swap: false,
+            mono_caller_only: false,
             leg_a_started: false,
             leg_b_started: false,
         }

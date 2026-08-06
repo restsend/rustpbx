@@ -37,7 +37,9 @@ fn codec_pt_clock(codec: CodecType) -> (u8, u32) {
 fn encoded_frame_for(codec: CodecType) -> AudioFrame {
     let rate = codec.samplerate();
     let n = rate / 50; // 20 ms
-    let pcm: Vec<i16> = (0..n).map(|i| (((i as i32 * 7) % 10000) - 5000) as i16).collect();
+    let pcm: Vec<i16> = (0..n)
+        .map(|i| (((i as i32 * 7) % 10000) - 5000) as i16)
+        .collect();
     let mut enc = create_encoder(codec);
     let data = enc.encode(&pcm);
     let (pt, clock) = codec_pt_clock(codec);

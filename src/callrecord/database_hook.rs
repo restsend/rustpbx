@@ -1,6 +1,4 @@
-use sea_orm::{
-    DatabaseConnection, EntityTrait, Set,
-};
+use sea_orm::{DatabaseConnection, EntityTrait, Set};
 
 use crate::callrecord::{CallRecord, CallRecordHook};
 
@@ -62,12 +60,13 @@ pub async fn persist_call_record(
     let queue = details.queue.clone();
     // Validate FK referents before insert so stale in-memory ids cannot fail
     // the write (see `fk_id_or_none`).
-    let department_id =
-        fk_id_or_none!(db, rustpbx_models::department::Entity, details.department_id)?;
-    let extension_id =
-        fk_id_or_none!(db, rustpbx_models::extension::Entity, details.extension_id)?;
-    let sip_trunk_id =
-        fk_id_or_none!(db, rustpbx_models::sip_trunk::Entity, details.sip_trunk_id)?;
+    let department_id = fk_id_or_none!(
+        db,
+        rustpbx_models::department::Entity,
+        details.department_id
+    )?;
+    let extension_id = fk_id_or_none!(db, rustpbx_models::extension::Entity, details.extension_id)?;
+    let sip_trunk_id = fk_id_or_none!(db, rustpbx_models::sip_trunk::Entity, details.sip_trunk_id)?;
     let route_id = fk_id_or_none!(db, rustpbx_models::routing::Entity, details.route_id)?;
     let sip_gateway = details.sip_gateway.clone();
 
@@ -141,10 +140,7 @@ pub async fn persist_call_record(
             let mut m = details.metadata.clone().unwrap_or_default();
             if !record.sip_leg_roles.is_empty() {
                 let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-                m.insert(
-                    "sip_leg_roles".to_string(),
-                    serde_json::Value::String(json),
-                );
+                m.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
             }
             // Remember the path the CDR file was actually written to so the
             // console can still locate it after the storage root is changed in

@@ -15,6 +15,11 @@
 //! This replaces the old `RecorderTap` (which implemented the post-bridge
 //! `RtpReceiverInterceptor` and missed relay packets). For NACK / RTCP
 //! feedback the existing `RtpReceiverInterceptor` is unaffected.
+//!
+//! DTMF telephone-event packets are detected (for the DTMF event bus) but
+//! still forwarded to the recorder's `write_sample` as raw RTP — this lets
+//! SipflowRecorder store them for WAV DTMF-tone synthesis and FileRecorder
+//! decode them via `Recorder::write_dtmf_payload`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -210,16 +215,16 @@ impl IngressTap {
                 };
                 // Broadcast (lagged subscribers dropped, never blocks).
                 let _ = self.dtmf_tx.send(event);
-                if !self.paused.load(Ordering::Acquire) {
-                    if let Some(rec) = self.recorder.read().as_ref() {
-                        rec.write_dtmf(event);
-                    }
-                }
             }
-            return;
+            // Fall through to write_sample: the raw telephone-event RTP packet
+            // must reach the recorder so it can be stored (SipflowRecorder →
+            // wav_utils synthesizes the tone during export) or decoded
+            // (FileRecorder → Recorder::write_sample detects DTMF by PT →
+            // write_dtmf_payload). We do NOT call write_dtmf separately to
+            // avoid double DTMF in the FileRecorder path.
         }
 
-        // Audio sample → recorder (skip entirely when paused).
+        // All packets (audio + telephone-event) → recorder (skip when paused).
         if self.paused.load(Ordering::Acquire) {
             return;
         }
@@ -294,7 +299,10 @@ mod tests {
 
         // Duplicate (same code+timestamp) — deduplicated, no second event.
         tap.on_ingress(&dtmf, test_addr());
-        assert!(rx.try_recv().is_err(), "duplicate DTMF event must be deduped");
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate DTMF event must be deduped"
+        );
     }
 
     /// A counting recorder backend used to verify the recording hook fires.
@@ -329,12 +337,22 @@ mod tests {
             let p = make_packet(0, seq, 160, 1, vec![1u8; 160]);
             tap.on_ingress(&p, test_addr());
         }
-        // 1 DTMF packet → 1 dtmf write.
+        // 1 DTMF packet → forwarded via write_sample (raw RTP for later tone
+        // synthesis), NOT via write_dtmf. This ensures SipflowRecorder stores
+        // the telephone-event packet for WAV DTMF synthesis.
         let dtmf = make_packet(101, 1, 0, 1, vec![1u8, 0x80, 10, 0xA0]);
         tap.on_ingress(&dtmf, test_addr());
 
-        assert_eq!(rec.samples.load(Ordering::Relaxed), 3);
-        assert_eq!(rec.dtmfs.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            rec.samples.load(Ordering::Relaxed),
+            4,
+            "3 audio + 1 DTMF packet → 4 write_sample calls"
+        );
+        assert_eq!(
+            rec.dtmfs.load(Ordering::Relaxed),
+            0,
+            "write_dtmf is no longer called; DTMF goes through write_sample"
+        );
     }
 
     #[test]
@@ -369,5 +387,44 @@ mod tests {
         tap.on_ingress(&p, test_addr()); // must not panic
         tap.finalize_recorder(); // no-op, must not panic
         assert_eq!(tap.ingress_packet_count(), 1);
+    }
+
+    /// Malformed / random telephone-event payloads must never panic the DTMF
+    /// detector or the recording path. Feeds 1000 pseudo-random payloads (varying
+    /// length and contents) on the DTMF PT and on the audio PT.
+    #[test]
+    fn malformed_rtp_packets_do_not_panic() {
+        let tap = IngressTap::new(64);
+        tap.set_dtmf_payload_types(vec![101]);
+        let mut rx = tap.subscribe_dtmf();
+        let mut seed = 0x1234_5678u32;
+        let mut next_u8 = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        for i in 0..1000u32 {
+            let pt = if i % 2 == 0 { 101 } else { 0 };
+            let len = (next_u8() as usize) % 32;
+            let payload: Vec<u8> = (0..len).map(|_| next_u8()).collect();
+            let pkt = make_packet(
+                pt,
+                (i as u16).wrapping_add(1),
+                i.wrapping_mul(160),
+                1,
+                payload,
+            );
+            tap.on_ingress(&pkt, test_addr());
+            tap.on_egress(&pkt, test_addr());
+            // The DTMF detector dedups; drain whatever fired to keep the
+            // broadcast buffer from filling on long runs.
+            while rx.try_recv().is_ok() {}
+        }
+        // Truncated RFC 4733 payloads (< 4 bytes) on the DTMF PT specifically.
+        for len in 0..4usize {
+            let payload: Vec<u8> = (0..len).map(|_| next_u8()).collect();
+            let pkt = make_packet(101, 1, 0, 1, payload);
+            tap.on_ingress(&pkt, test_addr());
+        }
+        // No panic reached == pass.
     }
 }

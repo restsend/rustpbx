@@ -436,11 +436,17 @@ impl CallModule {
                 Some(Arc::new(crate::call::policy::PolicyGuard::new(limiter)));
         }
 
+        let routing_state = Arc::new(routing_state);
+        // Share the routing state with the server so app/transfer/RWI-originated
+        // legs routed via `route_outbound_leg` use the same round-robin counters
+        // and policy guard as the inbound path.
+        *server.routing_state.write() = routing_state.clone();
+
         let inner = Arc::new(CallModuleInner {
             config,
             server,
             dialog_layer,
-            routing_state: Arc::new(routing_state),
+            routing_state,
         });
         Self { inner }
     }
@@ -452,8 +458,9 @@ impl CallModule {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let callee_uri = resolve_callee_uri(original)
-            .map_err(|e| RouteError::from((e, None)).with_code(&crate::proxy::error_catalog::CALLEE_URI_INVALID))?;
+        let callee_uri = resolve_callee_uri(original).map_err(|e| {
+            RouteError::from((e, None)).with_code(&crate::proxy::error_catalog::CALLEE_URI_INVALID)
+        })?;
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
@@ -1339,12 +1346,14 @@ impl CallModule {
                     self.inner.config.clone(),
                     self.inner.routing_state.clone(),
                 )
-                .map_err(|e| RouteError {
-                    error: e,
-                    status: None,
-                    extensions: None,
-                }
-                .with_code(&crate::proxy::error_catalog::CREATE_ROUTE_INVITE_FAILED))?
+                .map_err(|e| {
+                    RouteError {
+                        error: e,
+                        status: None,
+                        extensions: None,
+                    }
+                    .with_code(&crate::proxy::error_catalog::CREATE_ROUTE_INVITE_FAILED)
+                })?
             } else {
                 Box::new(DefaultRouteInvite {
                     routing_state: self.inner.routing_state.clone(),

@@ -157,7 +157,10 @@ mod ringback_audio_tests {
             Some("/sounds/busy.wav")
         );
         assert_eq!(
-            audio.for_status(&StatusCode::Other(480, "Temporarily Unavailable".to_string())),
+            audio.for_status(&StatusCode::Other(
+                480,
+                "Temporarily Unavailable".to_string()
+            )),
             Some("/sounds/offline.wav")
         );
         assert_eq!(

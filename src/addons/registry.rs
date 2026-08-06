@@ -344,7 +344,7 @@ impl AddonRegistry {
             }
             builder = addon.proxy_server_hook(builder, ctx.clone());
             // Register dialplan inspectors from addons
-            if let Some(inspector) = addon.dialplan_inspector() {
+            if let Some(inspector) = addon.dialplan_inspector(config) {
                 builder = builder.with_dialplan_inspector(inspector);
             }
             if let Some(enricher) = addon.queue_location_enricher() {

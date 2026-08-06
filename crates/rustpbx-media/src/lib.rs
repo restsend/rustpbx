@@ -3,8 +3,8 @@
 //! This crate provides all real-time media operations (bridging, playback,
 //! recording, DTMF, MCU mixing, transcoding) with zero SIP dependencies.
 
-pub mod audio_source;
 pub mod app_ingress;
+pub mod audio_source;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;

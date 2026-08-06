@@ -114,12 +114,8 @@ impl PresenceStatus {
             "wrapup" | "wrap-up" | "wrap_up" => PresenceStatus::Wrapup,
             "offline" | "closed" | "" => PresenceStatus::Offline,
             "away" => PresenceStatus::Away(String::new()),
-            s if s.starts_with("away:") => {
-                PresenceStatus::Away(s["away:".len()..].to_string())
-            }
-            s if s.starts_with("custom:") => {
-                PresenceStatus::Away(s["custom:".len()..].to_string())
-            }
+            s if s.starts_with("away:") => PresenceStatus::Away(s["away:".len()..].to_string()),
+            s if s.starts_with("custom:") => PresenceStatus::Away(s["custom:".len()..].to_string()),
             other => PresenceStatus::Away(other.to_string()),
         }
     }
@@ -1165,7 +1161,10 @@ mod tests {
     #[test]
     fn test_presence_status_display_canonical() {
         assert_eq!(PresenceStatus::Away(String::new()).to_string(), "away");
-        assert_eq!(PresenceStatus::Away("lunch".to_string()).to_string(), "away:lunch");
+        assert_eq!(
+            PresenceStatus::Away("lunch".to_string()).to_string(),
+            "away:lunch"
+        );
     }
 
     #[test]

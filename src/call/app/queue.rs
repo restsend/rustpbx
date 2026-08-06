@@ -27,10 +27,10 @@ use crate::call::{
 };
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
 use tracing::{debug, info, warn};
 
 // ===================================================================
@@ -126,8 +126,6 @@ pub struct QueueConfig {
     pub max_wait_secs: u64,
     /// Enable queue position announcements.
     pub announce_position: bool,
-    /// Enable estimated wait time announcements.
-    pub announce_wait_time: bool,
     /// Retry interval for no-answer.
     pub retry_interval_secs: u64,
     /// Max retry attempts.
@@ -144,24 +142,8 @@ pub struct QueueConfig {
     pub sla_monitoring: bool,
     /// Enable metrics collection.
     pub metrics_enabled: bool,
-    /// Enable callback scheduling.
-    pub callback_enabled: bool,
-    /// Callback retry interval in seconds.
-    pub callback_retry_secs: u64,
     /// Built-in voice prompts for queue events.
     pub voice_prompts: Option<VoicePrompts>,
-    // ── 按键回拨 (Queue Callback on Request) ──
-    /// Enable DTMF callback request feature.
-    pub callback_request_enabled: bool,
-    /// Seconds to wait before offering callback option.
-    pub callback_offer_after_secs: u64,
-    /// DTMF key to trigger callback (default "2").
-    pub callback_dtmf_key: String,
-    // ── EWT 播报 (Estimated Wait Time) ──
-    /// Interval between EWT announcements in seconds. 0 = once only.
-    pub ewt_announce_interval_secs: u64,
-    /// Maximum EWT cap in seconds (default 1800 = 30 min).
-    pub ewt_max_secs: u64,
     // ── 升级策略 (Escalation) ──
     /// Escalation mode: Replace or Cumulative.
     pub escalation_mode: EscalationMode,
@@ -209,7 +191,6 @@ impl Default for QueueConfig {
             sla_threshold_secs: 20,
             max_wait_secs: 300,
             announce_position: false,
-            announce_wait_time: false,
             retry_interval_secs: 5,
             max_retries: 2,
             autonomous_routing: false,
@@ -218,14 +199,7 @@ impl Default for QueueConfig {
             fallback_skill_group: None,
             sla_monitoring: false,
             metrics_enabled: false,
-            callback_enabled: false,
-            callback_retry_secs: 300,
             voice_prompts: None,
-            callback_request_enabled: false,
-            callback_offer_after_secs: 30,
-            callback_dtmf_key: "2".to_string(),
-            ewt_announce_interval_secs: 0,
-            ewt_max_secs: 1800,
             escalation_mode: EscalationMode::Replace,
             escalation_timeline: Vec::new(),
         }
@@ -243,11 +217,8 @@ impl QueueConfig {
             dial_strategy: Some(self.strategy.clone()),
             ring_timeout: self.ring_timeout,
             label: Some(self.name.clone()),
-            retry_codes: None,
-            no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone(),
-            failure_audio: None,
         }
     }
 }
@@ -277,12 +248,8 @@ pub enum QueueState {
     Connected { agent_uri: String },
     /// Executing fallback action.
     ExecutingFallback,
-    /// Playing the callback confirmation prompt after DTMF.
-    PlayingCallbackConfirm,
     /// Playing comfort/reassurance prompt during hold.
     PlayingComfortPrompt,
-    /// Playing EWT announcement during hold.
-    PlayingEwtAnnouncement,
     /// Playing final-destination prompt before fallback.
     PlayingFinalPrompt,
     /// Terminal state.
@@ -336,15 +303,7 @@ pub struct QueueApp {
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
-    // ── 回调/回拨 ──
-    /// Whether the caller has requested a callback via DTMF.
-    callback_requested: bool,
-    /// Already-offered the callback option (to avoid repeating).
-    #[allow(dead_code)]
-    callback_offered: bool,
-    // ── Comfort / EWT 播报 ──
-    /// Next EWT announcement time.
-    next_ewt_announce: Option<Instant>,
+    // ── Comfort 播报 ──
     /// Comfort prompt playback state.
     comfort_index: usize,
     last_comfort_played: Option<Instant>,
@@ -374,9 +333,6 @@ impl QueueApp {
             enqueued_at: None,
             stats: Arc::new(DashMap::new()),
             pending_agents: Vec::new(),
-            callback_requested: false,
-            callback_offered: false,
-            next_ewt_announce: None,
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
@@ -453,7 +409,8 @@ impl QueueApp {
 
     /// Update queue statistics.
     fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
-        let mut stat = self.stats
+        let mut stat = self
+            .stats
             .entry(queue_id.to_string())
             .or_insert_with(|| QueueStats {
                 queue_id: queue_id.to_string(),
@@ -474,16 +431,6 @@ impl QueueApp {
             Some(QueueFallbackAction::Redirect { target }) => {
                 info!(target = %target, "Queue: fallback redirect");
                 AppAction::Transfer(target.to_string())
-            }
-            Some(QueueFallbackAction::Queue { name }) => {
-                if name.starts_with("skill-group:") {
-                    let skill_group_id = name.strip_prefix("skill-group:").unwrap_or(name).trim();
-                    info!(skill_group = %skill_group_id, "Queue: fallback to skill group");
-                    AppAction::Transfer(format!("skill-group:{}", skill_group_id))
-                } else {
-                    info!(queue = %name, "Queue: fallback to another queue");
-                    AppAction::Transfer(format!("queue:{}", name))
-                }
             }
             None => AppAction::Hangup {
                 reason: Some(CallRecordHangupReason::ServerUnavailable),
@@ -643,30 +590,6 @@ impl QueueApp {
             warn!(
                 queue = %self.config.name,
                 "Queue: announce_position is enabled but voice_prompts.position_prompt \
-                 is not configured — skipping announcement"
-            );
-        }
-        Ok(())
-    }
-
-    /// Announce estimated wait time.
-    ///
-    /// Plays `voice_prompts.wait_time_prompt` if configured; otherwise emits a
-    /// warning so operators know the announcement was requested but unconfigured.
-    async fn announce_wait_time(&self, ctrl: &mut CallController) -> anyhow::Result<()> {
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-
-        if let Some(path) = prompts.and_then(|p| p.wait_time_prompt.as_ref()) {
-            debug!(file = %path, "Queue: playing wait-time announcement");
-            ctrl.play_audio(path.clone(), false).await?;
-        } else {
-            warn!(
-                queue = %self.config.name,
-                "Queue: announce_wait_time is enabled but voice_prompts.wait_time_prompt \
                  is not configured — skipping announcement"
             );
         }
@@ -834,60 +757,11 @@ impl QueueApp {
         self.execute_fallback().await
     }
 
-    /// Write callback metadata (notified as queue event; CDR hook captures externally).
-    async fn write_callback_metadata(&self) {
-        info!(
-            queue = %self.config.name,
-            "Queue: callback requested — emitting queue.callback_requested event"
-        );
-        // In production, the callback request is captured by the external CDR/webhook
-        // system via the queue.callback_requested event notification.
-        // The QueueApp does not have direct access to session extensions (that
-        // requires the production SipSession which owns the extensions type-map).
-    }
-
-    /// Check and play comfort prompts or EWT announcements between hold music loops.
+    /// Check and play comfort prompts between hold music loops.
     async fn maybe_play_comfort_or_ewt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
         let now = Instant::now();
 
-        // 1. EWT periodic announcement
-        if self.config.announce_wait_time && self.config.ewt_announce_interval_secs > 0 {
-            let should_announce = match self.next_ewt_announce {
-                Some(next) => now >= next,
-                None => {
-                    // First time: schedule and play immediately
-                    self.next_ewt_announce =
-                        Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
-                    true
-                }
-            };
-            if should_announce {
-                let ewt_secs = self.calculate_ewt();
-                debug!(
-                    ewt_secs,
-                    "Queue: playing EWT announcement (pre-recorded fallback)"
-                );
-                // Note: the production queue should wire a `TtsService` here to synthesize
-                // "Your estimated wait time is N minutes" dynamically. QueueApp is a
-                // testable harness; the real TTS integration belongs in the production
-                // SipSession::execute_queue which has access to the TTS configuration.
-                let prompts = self
-                    .plan
-                    .voice_prompts
-                    .as_ref()
-                    .or(self.config.voice_prompts.as_ref());
-                if let Some(path) = prompts.and_then(|p| p.wait_time_prompt.as_ref()) {
-                    self.state = QueueState::PlayingEwtAnnouncement;
-                    ctrl.play_audio(path.clone(), false).await?;
-                    return Ok(());
-                }
-                self.next_ewt_announce =
-                    Some(now + Duration::from_secs(self.config.ewt_announce_interval_secs));
-                return Ok(());
-            }
-        }
-
-        // 2. Comfort prompts
+        // 1. Comfort prompts
         let prompts = self
             .plan
             .voice_prompts
@@ -918,24 +792,6 @@ impl QueueApp {
         }
 
         Ok(())
-    }
-
-    /// Calculate a simple EWT estimate based on queue statistics.
-    fn calculate_ewt(&self) -> u64 {
-        if let Some(qs) = self.stats.get(&self.config.name) {
-            if qs.available_agents > 0 && qs.current_waiting > 0 {
-                let avg = if qs.calls_answered > 0 {
-                    qs.total_wait_secs / qs.calls_answered.max(1)
-                } else {
-                    60 // default 60s if no historical data
-                };
-                let ewt = (qs.current_waiting as u64 * avg) / qs.available_agents as u64;
-                // Round to nearest 10, cap at ewt_max_secs
-                let rounded = ((ewt + 5) / 10) * 10;
-                return rounded.min(self.config.ewt_max_secs);
-            }
-        }
-        self.config.ewt_max_secs
     }
 
     /// Dial the next agent in a sequential dialing strategy.
@@ -1125,11 +981,6 @@ impl CallApp for QueueApp {
             self.announce_position(ctrl).await?;
         }
 
-        // Announce wait time if enabled
-        if self.config.announce_wait_time {
-            self.announce_wait_time(ctrl).await?;
-        }
-
         // Start dialing agents if autonomous routing is enabled
         if self.config.autonomous_routing
             && let Some(ref registry) = self.agent_registry
@@ -1260,61 +1111,11 @@ impl CallApp for QueueApp {
 
     async fn on_dtmf(
         &mut self,
-        digit: String,
-        ctrl: &mut CallController,
+        _digit: String,
+        _ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        if !matches!(
-            self.state,
-            QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. }
-        ) {
-            return Ok(AppAction::Continue);
-        }
-
-        // Check callback eligibility
-        if !self.config.callback_request_enabled || digit != self.config.callback_dtmf_key {
-            return Ok(AppAction::Continue);
-        }
-
-        if let Some(enqueued) = self.enqueued_at {
-            let wait_secs = enqueued.elapsed().as_secs();
-            if wait_secs < self.config.callback_offer_after_secs {
-                debug!(
-                    "Queue: callback DTMF received but too early ({}s < {}s)",
-                    wait_secs, self.config.callback_offer_after_secs
-                );
-                return Ok(AppAction::Continue);
-            }
-        }
-
-        info!(
-            queue = %self.config.name,
-            digit = %digit,
-            "Queue: callback requested via DTMF"
-        );
-        self.callback_requested = true;
-        self._stop_hold_music(ctrl).await;
-
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-        if let Some(path) = prompts.and_then(|p| p.callback_confirm_prompt.as_ref()) {
-            info!("Queue: playing callback confirmation prompt");
-            self.state = QueueState::PlayingCallbackConfirm;
-            ctrl.play_audio(path.clone(), false).await?;
-        } else {
-            // No confirmation prompt configured — request callback directly
-            self.write_callback_metadata().await;
-            self.state = QueueState::Done;
-            info!("Queue: hanging up after callback request (no prompt)");
-            return Ok(AppAction::Hangup {
-                reason: Some(CallRecordHangupReason::BySystem),
-                code: None,
-            });
-        }
-
+        // DTMF during queue hold is ignored (callback feature removed).
         Ok(AppAction::Continue)
     }
 
@@ -1359,28 +1160,8 @@ impl CallApp for QueueApp {
             QueueState::PlayingNoAnswerPrompt => {
                 return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
-            QueueState::PlayingCallbackConfirm => {
-                // Write callback metadata to CDR
-                info!("Queue: callback confirmation done, logging to CDR");
-                self.write_callback_metadata().await;
-                self.state = QueueState::Done;
-                return Ok(AppAction::Hangup {
-                    reason: Some(CallRecordHangupReason::BySystem),
-                    code: None,
-                });
-            }
             QueueState::PlayingComfortPrompt => {
                 // Return to hold music; next comfort will be scheduled by maybe_play_comfort_or_ewt
-                self.start_hold_music(ctrl).await?;
-            }
-            QueueState::PlayingEwtAnnouncement => {
-                // Schedule next EWT announcement
-                if self.config.ewt_announce_interval_secs > 0 {
-                    self.next_ewt_announce = Some(
-                        Instant::now()
-                            + Duration::from_secs(self.config.ewt_announce_interval_secs),
-                    );
-                }
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingFinalPrompt => {
@@ -1670,9 +1451,9 @@ impl CallApp for QueueApp {
         ) {
             let queue_id = self.config.name.clone();
 
-        self.update_stats(&queue_id, |stats| {
-            stats.calls_abandoned += 1;
-        });
+            self.update_stats(&queue_id, |stats| {
+                stats.calls_abandoned += 1;
+            });
 
             // Notify the skill-group dispatcher that the call was abandoned
             // (e.g. caller hung up while waiting).

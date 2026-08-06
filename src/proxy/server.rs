@@ -65,6 +65,11 @@ pub struct SipServerInner {
     pub media_proxy: ArcSwap<MediaProxyMode>,
     pub proxy_config: Arc<ProxyConfig>,
     pub data_context: Arc<ProxyDataContext>,
+    /// Shared routing state (round-robin counters + policy guard) used by the
+    /// inbound route path and by app/transfer/RWI-originated legs that opt into
+    /// routing via `route_outbound_leg`. `CallModule::new` replaces the initial
+    /// value with the one it constructs (which carries the policy guard).
+    pub routing_state: Arc<parking_lot::RwLock<Arc<crate::call::RoutingState>>>,
     pub database: Option<DatabaseConnection>,
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
@@ -114,7 +119,6 @@ pub struct SipServerInner {
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
     pub rtc_cname: String,
-
 }
 
 fn random_hex() -> String {
@@ -902,6 +906,9 @@ impl SipServerBuilder {
             proxy_config: self.config.clone(),
             cancel_token,
             data_context,
+            routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
+                crate::call::RoutingState::new(),
+            ))),
             database: database.clone(),
             user_backend,
             auth_backend,

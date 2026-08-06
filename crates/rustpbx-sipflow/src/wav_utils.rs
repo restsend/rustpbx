@@ -46,7 +46,11 @@ fn extract_codecs_from_sdp(sdp: &str) -> Vec<CodecInfo> {
                             "telephone-event" => CodecType::TelephoneEvent,
                             _ => continue,
                         };
-                        codecs.push(CodecInfo { payload_type: pt, codec, clock_rate });
+                        codecs.push(CodecInfo {
+                            payload_type: pt,
+                            codec,
+                            clock_rate,
+                        });
                     }
                 }
             }
@@ -490,7 +494,16 @@ pub(crate) fn generate_wav_to_writer<W: Write + Seek>(
     stereo_swap: bool,
     writer: &mut W,
 ) -> Result<u64> {
-    generate_wav_to_writer_with_rate(call_id, packets, payload_map, leg_payload_map, force_pcm, 16000, stereo_swap, writer)
+    generate_wav_to_writer_with_rate(
+        call_id,
+        packets,
+        payload_map,
+        leg_payload_map,
+        force_pcm,
+        16000,
+        stereo_swap,
+        writer,
+    )
 }
 
 pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(

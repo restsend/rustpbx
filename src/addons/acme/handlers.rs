@@ -556,7 +556,9 @@ async fn solve_http01_challenge<'a>(
     let token = challenge.token.to_string();
     let key_auth = challenge.key_authorization();
     {
-        acme_state.challenges.insert(token.clone(), key_auth.as_str().to_string());
+        acme_state
+            .challenges
+            .insert(token.clone(), key_auth.as_str().to_string());
     }
     challenge.set_ready().await?;
     Ok(token)

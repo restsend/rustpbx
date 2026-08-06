@@ -246,7 +246,6 @@ async fn main() -> Result<()> {
     };
     let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
 
-
     println!("Sipflow Start at {}", Utc::now());
     println!("{}", rustpbx::version::get_version_info());
     println!("root: {}", args.root);

@@ -92,8 +92,7 @@ mod inner {
         pub reject_reason: Option<String>,
     }
 
-    pub(super) static LICENSE_CACHE: Lazy<DashMap<String, LicenseInfo>> =
-        Lazy::new(DashMap::new);
+    pub(super) static LICENSE_CACHE: Lazy<DashMap<String, LicenseInfo>> = Lazy::new(DashMap::new);
 
     /// Per-addon license results populated once at startup.
     pub(super) static STARTUP_LICENSE_RESULTS: Lazy<DashMap<String, LicenseStatus>> =

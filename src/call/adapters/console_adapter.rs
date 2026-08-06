@@ -123,6 +123,8 @@ pub fn console_to_call_command(
                 max_duration_secs: None,
                 beep: true,
                 format,
+                channels: None,
+                mono_caller_only: None,
             },
         }),
 

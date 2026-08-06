@@ -188,13 +188,7 @@ impl AppIngressAggregator {
             cancel_task,
         ));
 
-        self.legs.lock().insert(
-            leg_id,
-            AggLeg {
-                state,
-                cancel,
-            },
-        );
+        self.legs.lock().insert(leg_id, AggLeg { state, cancel });
         Ok(())
     }
 
@@ -212,11 +206,25 @@ impl AppIngressAggregator {
     }
 
     pub fn set_muted(&self, leg_id: &LegId, muted: bool) {
-        self.set_state(leg_id, if muted { IngestState::Muted } else { IngestState::Active });
+        self.set_state(
+            leg_id,
+            if muted {
+                IngestState::Muted
+            } else {
+                IngestState::Active
+            },
+        );
     }
 
     pub fn set_hold(&self, leg_id: &LegId, hold: bool) {
-        self.set_state(leg_id, if hold { IngestState::Hold } else { IngestState::Active });
+        self.set_state(
+            leg_id,
+            if hold {
+                IngestState::Hold
+            } else {
+                IngestState::Active
+            },
+        );
     }
 
     /// Snapshot of currently-attached leg ids.
@@ -360,7 +368,10 @@ mod tests {
                 _ => break,
             }
         }
-        assert!(saw_pcm, "must emit at least one non-silence PCM frame after feeding data");
+        assert!(
+            saw_pcm,
+            "must emit at least one non-silence PCM frame after feeding data"
+        );
 
         cancel.cancel();
     }
@@ -376,10 +387,22 @@ mod tests {
         let sr = codec.samplerate();
         let pf = (sr as u64 * DEFAULT_PTIME_MS / 1000) as usize;
 
-        tokio::spawn(decode_task(pkt_rx, pcm_bus, LegId::from("m"), codec, sr, pf, state, cancel.clone()));
+        tokio::spawn(decode_task(
+            pkt_rx,
+            pcm_bus,
+            LegId::from("m"),
+            codec,
+            sr,
+            pf,
+            state,
+            cancel.clone(),
+        ));
         // Feed data while muted.
         for i in 0..5 {
-            let _ = pkt_tx.try_send(RtpPacket::new(RtpHeader::new(0, i, i as u32 * 160, 1), vec![0xFFu8; 160]));
+            let _ = pkt_tx.try_send(RtpPacket::new(
+                RtpHeader::new(0, i, i as u32 * 160, 1),
+                vec![0xFFu8; 160],
+            ));
         }
         for _ in 0..3 {
             let f = rx.recv().await.unwrap();
@@ -411,13 +434,34 @@ mod tests {
         let sr = codec.samplerate();
         let pf = (sr as u64 * DEFAULT_PTIME_MS / 1000) as usize;
 
-        tokio::spawn(decode_task(pkt_rx_a, pcm_bus.clone(), LegId::from("a"), codec, sr, pf, Arc::new(AtomicU8::new(0)), cancel.clone()));
-        tokio::spawn(decode_task(pkt_rx_b, pcm_bus, LegId::from("b"), codec, sr, pf, Arc::new(AtomicU8::new(0)), cancel.clone()));
+        tokio::spawn(decode_task(
+            pkt_rx_a,
+            pcm_bus.clone(),
+            LegId::from("a"),
+            codec,
+            sr,
+            pf,
+            Arc::new(AtomicU8::new(0)),
+            cancel.clone(),
+        ));
+        tokio::spawn(decode_task(
+            pkt_rx_b,
+            pcm_bus,
+            LegId::from("b"),
+            codec,
+            sr,
+            pf,
+            Arc::new(AtomicU8::new(0)),
+            cancel.clone(),
+        ));
 
         // Feed leg A only → a LegPcmStream filtered to "a" should see PCM
         // frames, and never frames tagged "b".
         for i in 0..3 {
-            let _ = pkt_tx_a.try_send(RtpPacket::new(RtpHeader::new(0, i, (i as u32) * 160, 1), vec![0xFFu8; 160]));
+            let _ = pkt_tx_a.try_send(RtpPacket::new(
+                RtpHeader::new(0, i, (i as u32) * 160, 1),
+                vec![0xFFu8; 160],
+            ));
         }
         // Give decode tasks time to emit.
         let mut saw_pcm_a = false;

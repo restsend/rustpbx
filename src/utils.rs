@@ -252,9 +252,15 @@ pub fn tokio_runtime_metrics() -> serde_json::Value {
 
     let mut collect_metrics = |name: &str, m: &tokio::runtime::RuntimeMetrics| {
         let mut rt_map = serde_json::Map::new();
-        rt_map.insert("num_alive_tasks".into(), serde_json::json!(m.num_alive_tasks()));
+        rt_map.insert(
+            "num_alive_tasks".into(),
+            serde_json::json!(m.num_alive_tasks()),
+        );
         rt_map.insert("num_workers".into(), serde_json::json!(m.num_workers()));
-        rt_map.insert("global_queue_depth".into(), serde_json::json!(m.global_queue_depth()));
+        rt_map.insert(
+            "global_queue_depth".into(),
+            serde_json::json!(m.global_queue_depth()),
+        );
         map.insert(name.to_string(), serde_json::Value::Object(rt_map));
     };
 
@@ -327,10 +333,7 @@ pub fn validate_audio_payload(
     filename: &str,
 ) -> Result<(), String> {
     let content_type = content_type.to_lowercase();
-    if content_type != "audio/wav"
-        && content_type != "audio/mpeg"
-        && content_type != "audio/mp3"
-    {
+    if content_type != "audio/wav" && content_type != "audio/mpeg" && content_type != "audio/mp3" {
         return Err(format!(
             "Remote response Content-Type '{}' is not audio/wav or audio/mpeg",
             content_type

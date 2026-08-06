@@ -54,6 +54,16 @@ impl CallApp for VoicemailApp {
     ) -> anyhow::Result<AppAction> {
         info!(extension = %self.extension, "Voicemail app entered");
         ctrl.answer().await?;
+        ctrl.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Voicemail,
+                format!(
+                    "Voicemail: playing greeting for mailbox '{}'",
+                    self.extension
+                ),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
+        );
         ctrl.play_audio(&self.greeting_path, false).await?;
         Ok(AppAction::Continue)
     }
@@ -75,7 +85,7 @@ impl CallApp for VoicemailApp {
                 session_id = %ctx.call_info.session_id,
                 "Starting voicemail recording"
             );
-            ctrl.start_recording(&path, Some(Duration::from_secs(300)), true)
+            ctrl.start_recording_mono(&path, Some(Duration::from_secs(300)), true)
                 .await?;
             self.recording_path = Some(path);
         }
@@ -86,11 +96,15 @@ impl CallApp for VoicemailApp {
         &mut self,
         digit: String,
         ctrl: &mut CallController,
-        _ctx: &ApplicationContext,
+        ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         if digit == "#" && self.state == VoicemailState::Recording {
             info!("DTMF # received, stopping voicemail recording");
-            ctrl.stop_recording().await.ok();
+            // `stop_recording` consumes the RecordingComplete event, so invoke
+            // on_record_complete directly to finalize (state → Done → hangup).
+            if let Ok(info) = ctrl.stop_recording().await {
+                return self.on_record_complete(info, ctrl, ctx).await;
+            }
             self.state = VoicemailState::Done;
             return Ok(AppAction::Hangup {
                 reason: Some(CallRecordHangupReason::BySystem),
@@ -103,7 +117,7 @@ impl CallApp for VoicemailApp {
     async fn on_record_complete(
         &mut self,
         info: RecordingInfo,
-        _ctrl: &mut CallController,
+        ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         info!(
@@ -111,6 +125,17 @@ impl CallApp for VoicemailApp {
             duration = ?info.duration,
             size = info.size_bytes,
             "Voicemail recording completed"
+        );
+        ctrl.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Voicemail,
+                format!(
+                    "Voicemail: message recorded ({}s) for mailbox '{}'",
+                    info.duration.as_secs(),
+                    self.extension
+                ),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info),
         );
         if self.state != VoicemailState::Done {
             self.state = VoicemailState::Done;

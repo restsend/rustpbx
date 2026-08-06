@@ -13,7 +13,14 @@ pub struct WebhookPayload<'a> {
     pub leg_id: Option<&'a str>,
     pub caller: &'a str,
     pub callee: &'a str,
-    pub answered_at: chrono::DateTime<chrono::Utc>,
+    /// When the call was answered (post-answer payloads). `None` for failure
+    /// notifications, which carry `failure_reason` instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Machine-readable failure reason (e.g. `busy`, `no_answer`, `timeout`)
+    /// on failure notifications. Absent on successful post-answer payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     pub metadata: &'a HashMap<String, String>,
 }
 

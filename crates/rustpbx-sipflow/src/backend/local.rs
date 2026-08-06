@@ -11,13 +11,15 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::SipFlowSubdirs;
 use crate::backend::SipFlowBackend;
+use crate::config::SipFlowSubdirs;
 use crate::flusher::SipFlowFlusher;
 use crate::perf::{PerfCounters, PerfDumper};
 use crate::protocol::{MsgType, Packet};
 use crate::shard::{MODE_MULTI, RouterState};
-use crate::storage::{StorageManager, extract_callid, process_packet_with, process_packet_with_addr};
+use crate::storage::{
+    StorageManager, extract_callid, process_packet_with, process_packet_with_addr,
+};
 use crate::wav_utils::generate_wav_to_writer_with_rate;
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
@@ -358,7 +360,8 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let mut items = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
+            let mut storage =
+                StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
             storage.query_flow(&call_id, start_time, end_time).await
         })
         .await??;
@@ -379,7 +382,8 @@ impl SipFlowBackend for LocalBackend {
         let subdirs = self.subdirs.clone();
 
         let stats = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
+            let mut storage =
+                StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
             storage
                 .query_media_stats(&call_id, start_time, end_time)
                 .await
@@ -402,7 +406,8 @@ impl SipFlowBackend for LocalBackend {
         let pcm_sample_rate = self.pcm_sample_rate;
 
         let result = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
+            let mut storage =
+                StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
             let packets = storage.query_media(&call_id, start_time, end_time).await?;
             if packets.is_empty() {
                 return Ok(Vec::<u8>::new());
@@ -446,7 +451,8 @@ impl SipFlowBackend for LocalBackend {
         let pcm_sample_rate = self.pcm_sample_rate;
 
         let result = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
+            let mut storage =
+                StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
             let mut packets = storage.query_media(&call_id, start_time, end_time).await?;
             if let Some(leg) = stream_leg {
                 packets.retain(|(packet_leg, _, _)| *packet_leg == leg);
@@ -497,7 +503,8 @@ impl SipFlowBackend for LocalBackend {
         let pcm_sample_rate = self.pcm_sample_rate;
 
         let file = tokio::task::spawn(async move {
-            let mut storage = StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
+            let mut storage =
+                StorageManager::new(&PathBuf::from(&root), subdirs, None, None, 0, 1, None);
             let mut packets = storage.query_media(&call_id, start_time, end_time).await?;
             if let Some(leg) = stream_leg {
                 packets.retain(|(packet_leg, _, _)| *packet_leg == leg);
@@ -605,8 +612,8 @@ async fn build_payload_maps_filtered(
 mod tests {
     use super::*;
     use crate::shard::MODE_SINGLE;
-    use std::net::IpAddr;
     use crate::storage::DEFAULT_COMPRESS_LEVEL;
+    use std::net::IpAddr;
 
     fn local_dt_from_micros(ts_micros: i64) -> DateTime<Local> {
         chrono::TimeZone::timestamp_micros(&Local, ts_micros)
@@ -703,7 +710,10 @@ mod tests {
             let call_id = format!("sharded-call-{i:04}");
             let flow = backend.query_flow(&call_id, start, end).await.unwrap();
             assert_eq!(flow.len(), 2, "call {call_id} SIP must round-trip");
-            let stats = backend.query_media_stats(&call_id, start, end).await.unwrap();
+            let stats = backend
+                .query_media_stats(&call_id, start, end)
+                .await
+                .unwrap();
             let total: usize = stats.iter().map(|s| s.packet_count).sum();
             assert_eq!(total, 50, "call {call_id} RTP must round-trip");
         }
@@ -748,7 +758,10 @@ mod tests {
             .unwrap()
             .flatten()
             .any(|e| e.file_name().to_string_lossy().starts_with("shard-"));
-        assert!(!has_shards, "legacy bucket must not be sharded during upgrade");
+        assert!(
+            !has_shards,
+            "legacy bucket must not be sharded during upgrade"
+        );
         assert!(today.join("data.raw").exists(), "legacy raw file written");
 
         let stats = backend
@@ -798,7 +811,10 @@ mod tests {
             },
             Duration::ZERO,
         );
-        assert!(result.is_ok(), "full channel with zero timeout must drop, not block");
+        assert!(
+            result.is_ok(),
+            "full channel with zero timeout must drop, not block"
+        );
     }
 
     /// Backpressure must not lose records when the receiver drains promptly.
@@ -813,9 +829,6 @@ mod tests {
             Duration::from_millis(100),
         );
         assert!(result.is_ok());
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Command::RecordPacket { .. })
-        ));
+        assert!(matches!(rx.try_recv(), Ok(Command::RecordPacket { .. })));
     }
 }

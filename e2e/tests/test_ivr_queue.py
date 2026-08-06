@@ -252,3 +252,250 @@ async def test_queue_no_agent_plays_failure_audio(pbx, sipbot_pool):
     assert stats.rx_packets > 0, (
         f"caller RX=0 during queue wait (hold music expected): {stats}"
     )
+
+
+@pytest.mark.asyncio
+async def test_ivr_to_queue_no_agent_plays_busy_prompt_before_hangup(pbx, sipbot_pool, tmp_path):
+    """IVR → queue transfer (app path) with zero agents: the configured
+    busy_prompt must play in full before the call hangs up.
+
+    Regression for the bug where `handle_play` ignored `await_completion`, so
+    the busy prompt was cut off the instant it started and the caller heard
+    nothing before the 480 hangup. We assert via PBX log timestamps that the
+    gap between "Playback started <busy>" and the hangup is on the order of
+    the prompt duration (not ~0ms).
+    """
+    from helpers import generate_sine_wav
+
+    greeting = tmp_path / "g.wav"
+    generate_sine_wav(greeting, 440.0, 1.0, 8000, 0.4)
+    # ~2.0s busy prompt — long enough that a sub-second gap proves the bug.
+    busy = tmp_path / "busy.wav"
+    generate_sine_wav(busy, 330.0, 2.0, 8000, 0.5)
+
+    pbx.config_builder.add_ivr("ivr-noagent", f'''\
+[ivr]
+name = "ivr-noagent"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{greeting}"
+timeout_ms = 8000
+max_retries = 1
+max_retries_action = {{ type = "hangup" }}
+[[ivr.root.entries]]
+key = "1"
+[ivr.root.entries.action]
+type = "queue"
+target = "noagent"
+''')
+    # skill-group:nonexistent resolves to zero agents → app path plays
+    # busy_prompt then executes fallback (hangup).
+    pbx.config_builder.add_queue(
+        "noagent",
+        strategy_mode="sequential",
+        targets=["skill-group:nonexistent"],
+        voice_prompts={"busy_prompt": str(busy)},
+    )
+    pbx.config_builder.add_route(
+        "to-ivr-noagent",
+        match={"to.user": "ivr-noagent"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/ivr-noagent.toml"},
+        auto_answer=True,
+    )
+    h.boot_pbx(pbx)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:ivr-noagent@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=20, dtmf_flows="2s:1",
+    )
+    answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
+    assert answered, f"call not answered:\n{caller.output[-1500:]}"
+
+    # Caller should receive the busy prompt audio before being hung up.
+    await h.wait_rtp(caller, "caller", 15)
+    # Give the PBX time to play the ~2s prompt and hang up.
+    await asyncio.sleep(6)
+
+    log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
+    assert "playing busy prompt before fallback" in log, (
+        f"expected app-path busy prompt log in PBX log:\n{log[-2000:]}"
+    )
+
+    # Parse timestamps for "Playback started ... busy.wav" and the subsequent
+    # hangup fallback. With the fix the gap ≈ prompt duration (~2s);
+    # without the fix it was ~0ms (prompt cut off by instant hangup).
+    import re
+    from datetime import datetime
+
+    def _ts(line: str):
+        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)\+", line)
+        return datetime.fromisoformat(m.group(1)) if m else None
+
+    play_started = next(
+        (_ts(l) for l in log.splitlines() if "Playback started" in l and "busy.wav" in l),
+        None,
+    )
+    hangup_log = next(
+        (_ts(l) for l in log.splitlines() if "hangup fallback" in l.lower() or "Queue: hangup fallback" in l),
+        None,
+    )
+    assert play_started and hangup_log, (
+        f"could not find playback/hangup-fallback log lines:\n{log[-2000:]}"
+    )
+    gap = (hangup_log - play_started).total_seconds()
+    assert gap >= 1.5, (
+        f"busy prompt was cut off before hangup (gap={gap:.3f}s, expected ~2s). "
+        f"This means await_completion is not being honored.\n{log[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C4: Queue return_to_ivr — agent hangs up → caller returns to IVR
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_to_queue_agent_hangup_returns_to_ivr(pbx, sipbot_pool, tmp_path):
+    """IVR → queue(return_to_ivr) → agent answers → agent hangs up → caller
+    returns to the IVR app.
+
+    Verifies the B5 fix: when a connected dynamic-leg (queue agent) hangs up
+    and meta.transfer_return_to_ivr is set, the session restarts the IVR app
+    instead of hanging up the caller.
+    """
+    from helpers import generate_sine_wav
+
+    greeting = tmp_path / "g.wav"
+    generate_sine_wav(greeting, 440.0, 1.5, 8000, 0.4)
+
+    pbx.config_builder.add_ivr("ivr-return", f'''\
+[ivr]
+name = "ivr-return"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{greeting}"
+timeout_ms = 8000
+max_retries = 1
+max_retries_action = {{ type = "hangup" }}
+[[ivr.root.entries]]
+key = "1"
+[ivr.root.entries.action]
+type = "queue"
+target = "returnq?return_to_ivr=ivr-return"
+''')
+    pbx.config_builder.add_queue(
+        "returnq",
+        strategy_mode="sequential",
+        targets=[f"sip:1002@127.0.0.1:15450"],
+        accept_immediately=True,
+        wait_timeout_secs=20,
+    )
+    pbx.config_builder.add_route(
+        "to-ivr-return",
+        match={"to.user": "ivr-return"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/ivr-return.toml"},
+        auto_answer=True,
+    )
+    h.boot_pbx(pbx)
+
+    # Agent answers briefly then hangs up
+    agent = sipbot_pool.callee(
+        host=pbx.host, port=15450, username="1002", password="123456",
+        register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+        ring_secs=1, answer_mode="echo", hangup_after=3,
+    )
+    await asyncio.sleep(2)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:ivr-return@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=15, dtmf_flows="2s:1",
+    )
+    answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
+    assert answered, f"call not answered:\n{caller.output[-1500:]}"
+
+    # Wait for agent to hang up and IVR to restart
+    await asyncio.sleep(8)
+
+    log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
+    assert "returning caller to IVR" in log or "B‑leg hung up; returning caller to IVR" in log or "Connected dynamic leg ended; returning caller to IVR" in log, (
+        f"expected return-to-IVR log after agent hangup:\n{log[-3000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C5: Queue in 183 ringback phase — fallback transfer completes from early state
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_queue_early_media_fallback_redirect_completes(pbx, sipbot_pool, tmp_path):
+    """Route → queue (accept_immediately=false, trunk ringback) → caller in 183
+    → agents unreachable → fallback redirect completes the transfer from the
+    183 early-media state.
+
+    Asserts: caller receives 183 before 200 OK, and after fallback the redirect
+    target answers (200 OK + RTP).
+    """
+    from helpers import generate_sine_wav
+
+    pbx.config_builder.set_realms(["127.0.0.1"])
+    # Inbound trunk with ringback tone → proactive 183 early media
+    pbx.config_builder.add_trunk(
+        "ring-trunk", dest="127.0.0.1:15460", direction="inbound",
+        inbound_hosts=["127.0.0.1"],
+        ringback={"ring": "tone://440,3000"},
+    )
+    # Queue with unreachable agent + fallback redirect to a reachable echo callee
+    pbx.config_builder.add_queue(
+        "early-q",
+        strategy_mode="sequential",
+        targets=[f"sip:nobody@127.0.0.1:19999"],  # nothing listening
+        accept_immediately=False,
+        wait_timeout_secs=3,
+        fallback_redirect=f"sip:1003@127.0.0.1:15470",
+    )
+    pbx.config_builder.add_route(
+        "to-early-q",
+        match={"to.user": "early-q"},
+        priority=10,
+        action="queue",
+        queue="early-q",
+    )
+    h.boot_pbx(pbx)
+
+    # Register the fallback redirect target
+    fallback = sipbot_pool.callee(
+        host=pbx.host, port=15470, username="1003", password="123456",
+        register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+        ring_secs=1, answer_mode="echo",
+    )
+    await asyncio.sleep(2)
+
+    # Trunk-originated caller (From domain differs → classified as Inbound)
+    caller = sipbot_pool.caller(
+        target=f"sip:early-q@{pbx.sip_addr}", username="external", password="123456",
+        from_uri="sip:external@trunk.example.com", hangup=12,
+    )
+    answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
+    assert answered, f"call not answered (fallback redirect should complete):\n{caller.output[-2000:]}"
+
+    await h.wait_rtp(caller, "caller", 15)
+
+    # Verify 183 was received during the ringback phase
+    _wait_call_ended(caller)
+    codes = caller.get_status_counts()
+    assert codes.get(183, 0) >= 1, (
+        f"expected 183 early media (ringback) during queue wait, got: {codes}\n{caller.output[-2000:]}"
+    )
+    assert codes.get(200, 0) >= 1, (
+        f"expected 200 OK after fallback redirect, got: {codes}\n{caller.output[-2000:]}"
+    )
+
+
+def _wait_call_ended(ua, timeout: float = 30) -> None:
+    code = ua.wait(timeout=timeout)
+    assert code == 0, f"sipbot exited with {code}:\n{ua.output[-3000:]}"

@@ -18,10 +18,7 @@ pub struct SseEntry {
 /// RWI event types that indicate call failure when received before
 /// `call_answered`. Used by the SSE pump to decide stream closure.
 pub fn is_call_failure_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "call_busy" | "call_no_answer" | "call_hangup"
-    )
+    matches!(event_type, "call_busy" | "call_no_answer" | "call_hangup")
 }
 
 /// Encode a gateway event as an `SseEntry`, preserving the RWI event type

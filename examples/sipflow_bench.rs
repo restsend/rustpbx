@@ -16,7 +16,7 @@
 use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
-use metrics_util::debugging::{DebuggingRecorder, DebugValue, Snapshotter};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
 use rustpbx::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use std::path::PathBuf;
@@ -73,7 +73,9 @@ fn make_sip_item(ts_micros: u64, call_id: &str) -> SipFlowItem {
 /// Real G.711 audio is high-entropy; using all-`0x55` bytes would compress
 /// near-perfectly and unfairly exaggerate the disk-size gap between engines.
 fn random_audio(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0xBF58476D1CE4E5B9);
+    let mut state = seed
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(0xBF58476D1CE4E5B9);
     let mut out = Vec::with_capacity(len);
     while out.len() < len {
         state ^= state << 13;
@@ -237,7 +239,10 @@ fn write_call(backend: &dyn SipFlowBackend, args: &Args, call_idx: usize, base_t
     for sip_idx in 0..args.sip_per_call {
         let ts = base_ts + (call_idx as u64 * 1_000_000) + (sip_idx as u64 * 100_000);
         backend
-            .record(std::borrow::Cow::Borrowed(&call_id), make_sip_item(ts, &call_id))
+            .record(
+                std::borrow::Cow::Borrowed(&call_id),
+                make_sip_item(ts, &call_id),
+            )
             .unwrap();
     }
     for rtp_idx in 0..args.rtp_per_call {
@@ -281,10 +286,11 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         upload: None,
     };
 
-    let backend: std::sync::Arc<dyn SipFlowBackend> =
-        std::sync::Arc::from(rustpbx::sipflow::create_backend(&config, CancellationToken::new())
+    let backend: std::sync::Arc<dyn SipFlowBackend> = std::sync::Arc::from(
+        rustpbx::sipflow::create_backend(&config, CancellationToken::new())
             .await
-            .unwrap());
+            .unwrap(),
+    );
 
     let base_ts = chrono::Utc::now().timestamp_micros() as u64;
     let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);

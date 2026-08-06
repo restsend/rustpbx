@@ -35,12 +35,16 @@ pub(crate) struct FlushMeta {
 
 pub(crate) enum FlushCommand {
     Meta(FlushMeta),
-    Flush { enqueued_at: Instant },
+    Flush {
+        enqueued_at: Instant,
+    },
     FlushSync {
         done: oneshot::Sender<()>,
         enqueued_at: Instant,
     },
-    Rotate { db_path: PathBuf },
+    Rotate {
+        db_path: PathBuf,
+    },
 }
 
 pub(crate) struct SipFlowFlusher {
@@ -228,7 +232,8 @@ async fn handle_flush_command(
         FlushCommand::Meta(meta) => {
             batch.push(meta);
             let count_trigger = flush_count > 0 && batch.len() >= flush_count;
-            let time_trigger = flush_interval > Duration::ZERO && last_flush.elapsed() >= flush_interval;
+            let time_trigger =
+                flush_interval > Duration::ZERO && last_flush.elapsed() >= flush_interval;
             if count_trigger || time_trigger {
                 flush_to_db(
                     db_conn,
@@ -277,7 +282,9 @@ async fn handle_flush_command(
             }
             let _ = done.send(());
         }
-        FlushCommand::Rotate { db_path: new_db_path } => {
+        FlushCommand::Rotate {
+            db_path: new_db_path,
+        } => {
             if !batch.is_empty() {
                 flush_to_db(
                     db_conn,
@@ -480,12 +487,7 @@ struct RtpRow {
     size: i64,
 }
 
-fn push_row(
-    sip_rows: &mut Vec<SipRow>,
-    rtp_rows: &mut Vec<RtpRow>,
-    meta: FlushMeta,
-    call_id: i32,
-) {
+fn push_row(sip_rows: &mut Vec<SipRow>, rtp_rows: &mut Vec<RtpRow>, meta: FlushMeta, call_id: i32) {
     match meta.msg_type {
         MsgType::Sip => sip_rows.push(SipRow {
             call_id,

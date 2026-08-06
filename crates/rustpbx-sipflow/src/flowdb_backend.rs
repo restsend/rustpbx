@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::SipFlowSubdirs;
 use crate::flowdb_codec::{
-    decode_rtp_value, decode_sip_value, encode_rtp_value, encode_sip_value,
-    make_rtp_key, make_sip_key, rtp_call_leg_prefix, rtp_call_prefix, sip_call_prefix,
+    decode_rtp_value, decode_sip_value, encode_rtp_value, encode_sip_value, make_rtp_key,
+    make_sip_key, rtp_call_leg_prefix, rtp_call_prefix, sip_call_prefix,
 };
 use crate::flowdb_flusher::{EngineCache, FlowDbFlusher, FlushMsg};
 use crate::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
@@ -140,7 +140,6 @@ impl FlowDbBackend {
         }
     }
 
-
     fn next_counter(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
@@ -194,7 +193,6 @@ impl FlowDbQueryCtx {
     fn bucket_paths_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
         crate::storage::discover_data_dirs(&self.base_dir, &self.subdirs, start, end)
     }
-
 
     fn scan_rtp_packets(
         &self,
@@ -554,9 +552,7 @@ impl SipFlowBackend for FlowDbBackend {
                     }
                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
                         if Instant::now() >= deadline {
-                            tracing::warn!(
-                                "flowdb flush: shard {i} channel still full after 30s"
-                            );
+                            tracing::warn!("flowdb flush: shard {i} channel still full after 30s");
                             break;
                         }
                         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -725,17 +721,35 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_record_and_query_flow() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-flow-1";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t2, call_id)).unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t0, call_id))
+            .unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t1, call_id))
+            .unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t2, call_id))
+            .unwrap();
         backend.flush().await.unwrap();
 
         let items = backend
@@ -757,17 +771,35 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_flow_time_range() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-flow-range";
         let base = chrono::Utc::now().timestamp_micros();
         let t0 = (base + 1_000) as u64;
         let t1 = (base + 2_000) as u64;
         let t2 = (base + 3_000) as u64;
 
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t0, call_id)).unwrap();
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t1, call_id)).unwrap();
-        backend.record(Cow::Borrowed(call_id), make_sip_item(t2, call_id)).unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t0, call_id))
+            .unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t1, call_id))
+            .unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(t2, call_id))
+            .unwrap();
         backend.flush().await.unwrap();
 
         let items = backend
@@ -786,15 +818,30 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_record_rtp_and_query_media() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-rtp-1";
         let base = chrono::Utc::now().timestamp_micros();
 
         for i in 0..5u64 {
             let ts = (base + i as i64 * 20_000) as u64;
             backend
-                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 0, "127.0.0.1:4000"))
+                .record(
+                    Cow::Borrowed(call_id),
+                    make_rtp_item(ts, 0, "127.0.0.1:4000"),
+                )
                 .unwrap();
         }
         backend.flush().await.unwrap();
@@ -815,8 +862,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_media_stats() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-stats-1";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -847,8 +906,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_query_media_stats_with_loss() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-stats-loss";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -878,8 +949,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_media_stream_leg_filter() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "test-leg-filter";
         let base = chrono::Utc::now().timestamp_micros();
 
@@ -887,10 +970,16 @@ mod tests {
         for i in 0..3u64 {
             let ts = (base + i as i64 * 20_000) as u64;
             backend
-                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 0, "127.0.0.1:4000"))
+                .record(
+                    Cow::Borrowed(call_id),
+                    make_rtp_item(ts, 0, "127.0.0.1:4000"),
+                )
                 .unwrap();
             backend
-                .record(Cow::Borrowed(call_id), make_rtp_item(ts, 1, "127.0.0.1:4002"))
+                .record(
+                    Cow::Borrowed(call_id),
+                    make_rtp_item(ts, 1, "127.0.0.1:4002"),
+                )
                 .unwrap();
         }
         backend.flush().await.unwrap();
@@ -913,8 +1002,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_empty_query() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         let items = backend
@@ -943,15 +1044,33 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_isolation_between_calls() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros();
 
         backend
-            .record(Cow::Borrowed("call-a"), make_sip_item(base as u64, "call-a"))
+            .record(
+                Cow::Borrowed("call-a"),
+                make_sip_item(base as u64, "call-a"),
+            )
             .unwrap();
         backend
-            .record(Cow::Borrowed("call-b"), make_sip_item(base as u64, "call-b"))
+            .record(
+                Cow::Borrowed("call-b"),
+                make_sip_item(base as u64, "call-b"),
+            )
             .unwrap();
         backend.flush().await.unwrap();
 
@@ -981,8 +1100,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_flush_no_error() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         backend.flush().await.unwrap();
     }
 
@@ -994,8 +1125,20 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         {
-            let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::None,
+                None,
+                1,
+                16,
+                1000,
+                5,
+                false,
+                16000,
+                1,
+                flowdb::SyncMode::Always,
+            )
+            .unwrap();
             backend
                 .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
                 .unwrap();
@@ -1003,8 +1146,20 @@ mod tests {
         }
 
         {
-            let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::None,
+                None,
+                1,
+                16,
+                1000,
+                5,
+                false,
+                16000,
+                1,
+                flowdb::SyncMode::Always,
+            )
+            .unwrap();
             let items = backend
                 .query_flow(
                     call_id,
@@ -1020,11 +1175,25 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_skip_empty_call_id() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
 
         // Empty call_id should be silently skipped
-        backend.record(Cow::Borrowed(""), make_sip_item(1000, "")).unwrap();
+        backend
+            .record(Cow::Borrowed(""), make_sip_item(1000, ""))
+            .unwrap();
         backend.flush().await.unwrap();
     }
 
@@ -1033,13 +1202,27 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_subdirs_hourly_writes_to_current_hour_bucket() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Hourly,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
 
         let now = Local::now();
         let call_id = "subdirs-hourly";
         let ts = chrono::Utc::now().timestamp_micros() as u64;
-        backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
+        backend
+            .record(Cow::Borrowed(call_id), make_sip_item(ts, call_id))
+            .unwrap();
         backend.flush().await.unwrap();
 
         let expected_subdir = format!(
@@ -1066,15 +1249,29 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_subdirs_hourly_query_aggregates_buckets() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Hourly, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Hourly,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
 
         let call_id = "subdirs-hourly-multi";
         let base = chrono::Utc::now().timestamp_micros();
         // Write several SIP messages "now".
         for i in 0..3u64 {
             let ts = (base + i as i64) as u64;
-            backend.record(Cow::Borrowed(call_id), make_sip_item(ts, call_id)).unwrap();
+            backend
+                .record(Cow::Borrowed(call_id), make_sip_item(ts, call_id))
+                .unwrap();
         }
         backend.flush().await.unwrap();
 
@@ -1098,8 +1295,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_subdirs_daily_query_same_day() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Daily,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
 
         let call_id = "subdirs-daily";
         let base = chrono::Utc::now().timestamp_micros();
@@ -1126,8 +1335,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_subdirs_daily_no_leakage_into_other_day_bucket() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::Daily,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            1,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
 
         let call_id = "subdirs-daily-no-leak";
         let now = Local::now();
@@ -1163,8 +1384,20 @@ mod tests {
         let base = chrono::Utc::now().timestamp_micros();
 
         {
-            let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::Daily,
+                None,
+                1,
+                16,
+                1000,
+                5,
+                false,
+                16000,
+                1,
+                flowdb::SyncMode::Always,
+            )
+            .unwrap();
             backend
                 .record(Cow::Borrowed(call_id), make_sip_item(base as u64, call_id))
                 .unwrap();
@@ -1172,8 +1405,20 @@ mod tests {
         }
 
         {
-            let backend =
-                FlowDbBackend::new(&path, SipFlowSubdirs::Daily, None, 1, 16, 1000, 5, false, 16000, 1, flowdb::SyncMode::Always).unwrap();
+            let backend = FlowDbBackend::new(
+                &path,
+                SipFlowSubdirs::Daily,
+                None,
+                1,
+                16,
+                1000,
+                5,
+                false,
+                16000,
+                1,
+                flowdb::SyncMode::Always,
+            )
+            .unwrap();
             let items = backend
                 .query_flow(
                     call_id,
@@ -1191,15 +1436,30 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_sharded_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 4, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            4,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros() as u64;
 
         for i in 0..40usize {
             let call_id = format!("flowdb-shard-{i:04}");
             for s in 0..2u64 {
                 backend
-                    .record(Cow::Borrowed(&call_id), make_sip_item(base + s * 1000, &call_id))
+                    .record(
+                        Cow::Borrowed(&call_id),
+                        make_sip_item(base + s * 1000, &call_id),
+                    )
                     .unwrap();
             }
             for r in 0..50u64 {
@@ -1233,7 +1493,10 @@ mod tests {
             let call_id = format!("flowdb-shard-{i:04}");
             let flow = backend.query_flow(&call_id, start, end).await.unwrap();
             assert_eq!(flow.len(), 2, "call {call_id} SIP must round-trip");
-            let stats = backend.query_media_stats(&call_id, start, end).await.unwrap();
+            let stats = backend
+                .query_media_stats(&call_id, start, end)
+                .await
+                .unwrap();
             let total: usize = stats.iter().map(|s| s.packet_count).sum();
             assert_eq!(total, 50, "call {call_id} RTP must round-trip");
         }
@@ -1247,15 +1510,32 @@ mod tests {
         // Simulate a legacy bucket that already has SQLite files.
         std::fs::write(dir.path().join("sipflow.db"), b"").unwrap();
 
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 1000, 5, false, 16000, 4, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            1000,
+            5,
+            false,
+            16000,
+            4,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let call_id = "flowdb-legacy-call";
         let base = chrono::Utc::now().timestamp_micros() as u64;
         for r in 0..20u64 {
             backend
                 .record(
                     Cow::Borrowed(&call_id),
-                    make_rtp_item_with_seq(base + r * 1000, (r % 2) as i32, "127.0.0.1:5004", (1000 + r) as u16),
+                    make_rtp_item_with_seq(
+                        base + r * 1000,
+                        (r % 2) as i32,
+                        "127.0.0.1:5004",
+                        (1000 + r) as u16,
+                    ),
                 )
                 .unwrap();
         }
@@ -1286,8 +1566,20 @@ mod tests {
     #[tokio::test]
     async fn test_flowdb_prefix_query_middle_call_after_many_blocks() {
         let dir = tempfile::tempdir().unwrap();
-        let backend =
-            FlowDbBackend::new(dir.path(), SipFlowSubdirs::None, None, 1, 16, 50, 5, false, 16000, 4, flowdb::SyncMode::Always).unwrap();
+        let backend = FlowDbBackend::new(
+            dir.path(),
+            SipFlowSubdirs::None,
+            None,
+            1,
+            16,
+            50,
+            5,
+            false,
+            16000,
+            4,
+            flowdb::SyncMode::Always,
+        )
+        .unwrap();
         let base = chrono::Utc::now().timestamp_micros() as u64;
 
         let n_calls = 40usize;
@@ -1324,9 +1616,15 @@ mod tests {
             let call_id = format!("prefix-call-{qi:03}");
             let flow = backend.query_flow(&call_id, start, end).await.unwrap();
             assert_eq!(flow.len(), sip_per, "call {call_id} SIP must round-trip");
-            let stats = backend.query_media_stats(&call_id, start, end).await.unwrap();
+            let stats = backend
+                .query_media_stats(&call_id, start, end)
+                .await
+                .unwrap();
             let total: usize = stats.iter().map(|s| s.packet_count).sum();
-            assert_eq!(total, rtp_per as usize, "call {call_id} RTP must round-trip");
+            assert_eq!(
+                total, rtp_per as usize,
+                "call {call_id} RTP must round-trip"
+            );
         }
     }
 }

@@ -47,6 +47,15 @@ impl DtmfDetector {
             return None;
         }
 
+        // A digit press is carried by a start frame followed by an end frame
+        // (RFC 4733). Emitting on every packet would deliver each digit
+        // multiple times (sipbot/phones send start + end), which corrupts
+        // DTMF collection in call apps (e.g. check-voicemail extension/PIN).
+        // Only emit when the end-of-event bit is set, i.e. once per press.
+        if payload[1] & 0x80 == 0 {
+            return None;
+        }
+
         let digit_code = payload[0];
         let digit = crate::telephone_event::dtmf_code_to_char(digit_code)?;
 

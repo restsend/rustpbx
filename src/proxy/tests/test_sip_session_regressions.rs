@@ -2,9 +2,7 @@ use super::common::{
     create_test_request, create_test_server, create_test_server_with_config, create_transaction,
 };
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaCapability, MediaPathMode};
-use crate::call::runtime::{
-    AppDescriptor, AppRuntime, AppRuntimeError, AppStatus, BridgeConfig,
-};
+use crate::call::runtime::{AppDescriptor, AppRuntime, AppRuntimeError, AppStatus, BridgeConfig};
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
     QueuePlan, TransactionCookie,
@@ -357,6 +355,56 @@ async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
 }
 
 #[tokio::test]
+async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
+    // Regression: when meta.transfer_return_to_ivr is set and a connected
+    // dynamic leg (queue agent) hangs up, the caller should be returned to
+    // the IVR app instead of being hung up.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let caller_leg = LegId::from("caller");
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.bridge = BridgeConfig::bridge(caller_leg, agent_leg.clone());
+
+    // Simulate a queue-transfer that set return_to_ivr
+    session.meta.transfer_return_to_ivr = Some("main-menu".to_string());
+
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    // start_ivr_app -> ensure_app_running -> start_app("ivr") should have fired.
+    assert_eq!(
+        runtime.start_calls.load(Ordering::SeqCst),
+        1,
+        "IVR app should be started on agent hangup"
+    );
+    // transfer_return_to_ivr should be consumed
+    assert!(session.meta.transfer_return_to_ivr.is_none());
+    // Caller should NOT be in pending_hangup (IVR took over)
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    assert!(!session.pending_hangup.contains(&caller_dialog_id));
+}
+
+#[tokio::test]
 async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_targets(DialStrategy::Sequential(vec![]));
@@ -485,10 +533,9 @@ fn test_queue_fallback_without_prompt_maps_to_hangup() {
         fallback: Some(RouteQueueFallbackConfig {
             failure_code: Some(486),
             failure_reason: Some("All agents unavailable".to_string()),
-            failure_prompt: None,
             ..Default::default()
         }),
-        ..Default::default()
+        ..RouteQueueConfig::default()
     };
 
     let plan = queue.to_queue_plan().expect("queue plan should build");
@@ -498,30 +545,8 @@ fn test_queue_fallback_without_prompt_maps_to_hangup() {
     }
 }
 
-#[test]
-fn test_queue_fallback_with_prompt_maps_to_play_then_hangup() {
-    let queue = RouteQueueConfig {
-        name: Some("support".to_string()),
-        fallback: Some(RouteQueueFallbackConfig {
-            failure_code: Some(486),
-            failure_reason: Some("All agents unavailable".to_string()),
-            failure_prompt: Some("sounds/queue-fallback.wav".to_string()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let plan = queue.to_queue_plan().expect("queue plan should build");
-    match plan.fallback {
-        Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-            audio_file, ..
-        })) => assert_eq!(audio_file, "sounds/queue-fallback.wav"),
-        other => panic!("expected PlayThenHangup fallback, got {:?}", other),
-    }
-}
-
 #[tokio::test]
-async fn test_queue_transfer_without_return_to_ivr_keeps_hangup_fallback_when_no_agents() {
+async fn test_queue_transfer_without_return_to_ivr_starts_queue_app() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),
         None,
@@ -529,29 +554,25 @@ async fn test_queue_transfer_without_return_to_ivr_keeps_hangup_fallback_when_no
     );
     let config = make_queue_hangup_config("support");
     let mut session = build_session_with_config(dialplan, config).await;
-    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
-    session.callee_event_tx = Some(callee_tx);
 
-    let err = session
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
         .handle_queue_transfer(
             LegId::from("caller"),
             "support",
             None,
             HashMap::new(),
             Vec::new(),
-            &mut callee_rx,
         )
         .await
-        .expect_err("without return_to_ivr, hangup fallback should surface failure");
-    assert!(
-        err.to_string().contains("Queue transfer failed"),
-        "unexpected error: {}",
-        err
-    );
+        .expect("queue app should start");
+    assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn test_queue_transfer_return_to_ivr_overrides_hangup_fallback_when_no_agents() {
+async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),
         None,
@@ -559,8 +580,6 @@ async fn test_queue_transfer_return_to_ivr_overrides_hangup_fallback_when_no_age
     );
     let config = make_queue_hangup_config("support");
     let mut session = build_session_with_config(dialplan, config).await;
-    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
-    session.callee_event_tx = Some(callee_tx);
 
     let runtime = Arc::new(StartOnlyRuntime::new());
     session.app_runtime = runtime.clone();
@@ -572,12 +591,15 @@ async fn test_queue_transfer_return_to_ivr_overrides_hangup_fallback_when_no_age
             Some("hello".to_string()),
             HashMap::new(),
             Vec::new(),
-            &mut callee_rx,
         )
         .await
-        .expect("return_to_ivr should override hangup fallback and start IVR");
+        .expect("queue app should start with return_to_ivr");
 
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        session.meta.transfer_return_to_ivr,
+        Some("hello".to_string())
+    );
 }
 
 // ─── DTMF fix regression tests ───────────────────────────────────────────────
@@ -717,6 +739,134 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
     );
 }
 
+// ─── Call-trace answer/agent regression tests ────────────────────────────────
+
+/// A repeated self/app answer (e.g. `auto_answer` on app start combined with
+/// the app's own `ctrl.answer()` in `on_enter`) must not append a second
+/// "Call answered" trace event.
+#[tokio::test]
+async fn test_accept_call_duplicate_app_answer_records_single_answer_trace() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+
+    session
+        .accept_call(None, None, None)
+        .await
+        .expect("first app accept_call should succeed");
+    session
+        .accept_call(None, None, None)
+        .await
+        .expect("duplicate app accept_call should be a no-op");
+
+    let answers: Vec<_> = session
+        .meta
+        .trace
+        .iter()
+        .filter(|e| e.kind == crate::call_errors::TraceKind::Answer)
+        .collect();
+    assert_eq!(
+        answers.len(),
+        1,
+        "duplicate app answer must not append a second Answer trace"
+    );
+}
+
+/// An agent/callee answer must still record an Answer trace and enrich it with
+/// agent identity (resolved_agent_id or callee user-part) and queue context.
+#[tokio::test]
+async fn test_accept_call_agent_answer_trace_carries_agent_detail() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "queue".to_string(),
+        None,
+        false,
+    );
+    let mut session = build_session(dialplan).await;
+
+    session.meta.queue_name = Some("support".to_string());
+    {
+        let mut ext = session.extensions.write();
+        let mut map: HashMap<String, String> = HashMap::new();
+        map.insert("resolved_agent_id".to_string(), "1001".to_string());
+        ext.insert(map);
+    }
+
+    session
+        .accept_call(Some("sip:1001@rustpbx.com".to_string()), None, None)
+        .await
+        .expect("agent accept_call should succeed");
+
+    let answer = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| e.kind == crate::call_errors::TraceKind::Answer)
+        .expect("agent answer should record an Answer trace");
+    let detail = answer
+        .detail
+        .as_ref()
+        .expect("agent answer trace should carry detail");
+    assert_eq!(detail["agent_id"].as_str(), Some("1001"));
+    assert_eq!(detail["callee"].as_str(), Some("sip:1001@rustpbx.com"));
+    assert_eq!(detail["queue_name"].as_str(), Some("support"));
+}
+
+/// The terminal End trace event must carry a real elapsed timestamp, not the
+/// default 0 (which rendered as "+0ms" in the console UI).
+#[tokio::test]
+async fn test_record_snapshot_end_trace_has_real_timestamp() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut session = build_session(dialplan).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    session.meta.hangup_reason = Some(crate::callrecord::CallRecordHangupReason::ByCaller);
+
+    let snapshot = session.record_snapshot();
+    let trace = snapshot
+        .metadata
+        .get("trace")
+        .expect("snapshot should carry a trace array")
+        .as_array()
+        .expect("trace must be an array");
+    let end = trace
+        .iter()
+        .find(|e| e["kind"] == "end")
+        .expect("trace should contain an End event");
+    let ts = end["ts"].as_i64().expect("End event must have ts");
+    assert!(ts > 0, "End event ts must be non-zero, got {ts}");
+}
+
+/// Queue abandon refinement must fire even when the hangup reason was already
+/// normalized to `Abandoned` (e.g. by `execute_queue`), so the CDR carries
+/// `queue.abandoned` instead of a leaked "all agents unavailable" code.
+#[tokio::test]
+async fn test_resolve_final_hangup_reason_flags_queue_abandon_when_already_abandoned() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut session = build_session(dialplan).await;
+
+    session.meta.queue_name = Some("support".to_string());
+    session.meta.hangup_reason = Some(crate::callrecord::CallRecordHangupReason::Abandoned);
+
+    session.resolve_final_hangup_reason().await;
+
+    assert_eq!(
+        session.meta.error_code.map(|info| info.code),
+        Some("queue.abandoned"),
+        "queue abandon must set queue.abandoned error code"
+    );
+    assert!(
+        session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.code.as_deref() == Some("queue.abandoned")),
+        "abandon must append a queue.abandoned trace event"
+    );
+}
+
 // ── parse_info_command pure function tests ──
 
 #[test]
@@ -837,4 +987,286 @@ async fn test_session_drop_releases_all_grouped_concurrent_call_permits() {
 
     assert_eq!(first.current(), 0);
     assert_eq!(second.current(), 0);
+}
+
+// ─── handle_play await_completion regression ────────────────────────────────
+//
+// Regression for the bug where `handle_play` discarded `await_completion`,
+// causing queue transfer/failure prompts (and any awaited prompt) to be cut
+// off the instant playback started. We wire a REAL MediaBridge (negotiated
+// RTP legs playing a short temp WAV) into a test SipSession and verify the
+// await flag actually blocks until the file finishes.
+
+/// Write `num_samples` of 16-bit PCM mono silence at `sample_rate` Hz to a
+/// minimal WAV file and return its path.
+fn write_silence_wav(
+    dir: &std::path::Path,
+    name: &str,
+    sample_rate: u32,
+    num_samples: u32,
+) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.join(name);
+    let mut f = std::fs::File::create(&path).expect("create wav");
+    let data_size = num_samples * 2u32; // 16-bit mono
+    let riff_size = 36 + data_size;
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&riff_size.to_le_bytes()).unwrap();
+    f.write_all(b"WAVE").unwrap();
+    f.write_all(b"fmt ").unwrap();
+    f.write_all(&16u32.to_le_bytes()).unwrap(); // subchunk1 size
+    f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+    f.write_all(&1u16.to_le_bytes()).unwrap(); // mono
+    f.write_all(&sample_rate.to_le_bytes()).unwrap();
+    f.write_all(&(sample_rate * 2).to_le_bytes()).unwrap(); // byte rate
+    f.write_all(&2u16.to_le_bytes()).unwrap(); // block align
+    f.write_all(&16u16.to_le_bytes()).unwrap(); // bits per sample
+    f.write_all(b"data").unwrap();
+    f.write_all(&data_size.to_le_bytes()).unwrap();
+    f.write_all(&vec![0u8; data_size as usize]).unwrap();
+    path
+}
+
+/// Build a real, single-leg-A negotiated MediaBridge suitable for `play_file`.
+async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaBridge {
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::{BridgeOpts, LegSide, MediaBridge};
+    let mut mb = MediaBridge::new(session_id, BridgeOpts::default());
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).expect("leg a");
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).expect("leg b");
+    mb.replace_leg(LegSide::A, a).await;
+    mb.replace_leg(LegSide::B, b).await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply answer");
+    mb
+}
+
+#[tokio::test]
+async fn handle_play_awaits_completion_when_requested() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 300ms of silence @8kHz.
+    let wav = write_silence_wav(dir.path(), "prompt.wav", 8000, 8000 * 300 / 1000);
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    session.media.bridge = Some(playable_bridge("await-true").await);
+
+    let start = Instant::now();
+    session
+        .play_audio_file(wav.to_str().unwrap(), true, false)
+        .await
+        .expect("play should succeed");
+    let elapsed = start.elapsed();
+
+    // With the fix, the call blocks until the ~300ms prompt finishes.
+    // Without the fix this was ~0ms (prompt cut off instantly).
+    assert!(
+        elapsed >= std::time::Duration::from_millis(200),
+        "await_completion=true should block until the prompt finishes, took {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "playback should not take that long: {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn handle_play_returns_immediately_when_not_awaited() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav = write_silence_wav(dir.path(), "prompt.wav", 8000, 8000 * 300 / 1000);
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    session.media.bridge = Some(playable_bridge("await-false").await);
+
+    let start = Instant::now();
+    session
+        .play_audio_file(wav.to_str().unwrap(), false, false)
+        .await
+        .expect("play should succeed");
+    let elapsed = start.elapsed();
+
+    // Fire-and-forget: returns right away (the pacing task runs in background).
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "await_completion=false should return immediately, took {:?}",
+        elapsed
+    );
+}
+
+// ─── proxy queue fallback routing (no agents) ───────────────────────────────
+//
+// Covers the path the original bug report exercised: IVR → queue transfer →
+// skill-group with no registered agents → fallback. Verifies the configured
+// fallback action is taken. (MockMediaPeer has no media, so play_audio_file
+// errors out harmlessly inside the fallback — we assert on control flow.)
+
+/// Build a queue config whose skill-group target resolves to zero agents,
+/// plus a given fallback configuration.
+fn make_queue_config_with_fallback(
+    queue_name: &str,
+    fallback: RouteQueueFallbackConfig,
+) -> ProxyConfig {
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        queue_name.to_string(),
+        RouteQueueConfig {
+            name: Some(queue_name.to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:nonexistent".to_string(),
+                    label: Some("no-agents".to_string()),
+                }],
+                ..Default::default()
+            },
+            fallback: Some(fallback),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+#[tokio::test]
+async fn queue_no_agents_play_then_hangup_starts_queue_app() {
+    // Queue with no reachable agents and default fallback → queue app starts
+    // (the app handles the fallback asynchronously).
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "db-1".to_string(),
+        RouteQueueConfig {
+            name: Some("to-agent".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:nonexistent".to_string(),
+                    label: Some("no-agents".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer(
+            LegId::from("caller"),
+            "db-1",
+            None,
+            HashMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("queue app should start even with no agents");
+    assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
+}
+
+// ─── voicemail: finalize recording on caller hangup ─────────────────────────
+//
+// Regression for the bug where a caller hanging up during voicemail recording
+// lost the message: the BYE handler cancelled the app before `stop_recording`
+// ran, so `on_record_complete` (the only thing that persists) never fired.
+// We verify `finalize_recording_for_app_shutdown` finalizes an active
+// recording (state → Idle, i.e. stop_recording executed) and is a no-op when
+// nothing is recording.
+
+#[tokio::test]
+async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
+    use crate::proxy::proxy_call::media_state::RecordingPhase;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "voicemail".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    session.media.recording_state = RecordingPhase::Recording {
+        path: "/tmp/rustpbx-test-vm-does-not-need-to-exist.wav".to_string(),
+        started_at: Instant::now(),
+        max_duration: None,
+    };
+    assert!(session.media.recording_state.is_active());
+
+    session.finalize_recording_for_app_shutdown().await;
+
+    assert!(
+        !session.media.recording_state.is_active(),
+        "active recording must be finalized (stop_recording run) on shutdown"
+    );
+}
+
+#[tokio::test]
+async fn finalize_recording_for_app_shutdown_noop_when_idle() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "voicemail".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    // recording_state starts Idle.
+    let start = Instant::now();
+    session.finalize_recording_for_app_shutdown().await;
+    let elapsed = start.elapsed();
+    assert!(!session.media.recording_state.is_active());
+    // No-op path must skip the finalization grace sleep.
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "idle path must be a fast no-op, took {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn queue_no_agents_hangup_fallback_starts_queue_app() {
+    // Explicit Hangup fallback with a distinct failure code → queue app starts.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let config = make_queue_config_with_fallback(
+        "support",
+        RouteQueueFallbackConfig {
+            failure_code: Some(486),
+            failure_reason: Some("All agents unavailable".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer(
+            LegId::from("caller"),
+            "support",
+            None,
+            HashMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("queue app should start");
+    assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
 }

@@ -48,6 +48,20 @@ impl FileRecorder {
         path: impl Into<String>,
         profiles: [(Leg, NegotiatedLegProfile); 2],
     ) -> anyhow::Result<Arc<Self>> {
+        Self::start_with_channels(path, profiles, 2, false).await
+    }
+
+    /// Start recording to `path` with an explicit output layout.
+    ///
+    /// `channels == 1 && mono_caller_only` writes a mono WAV containing only
+    /// the caller's ingress (leg A) at full amplitude — used by voicemail,
+    /// where the egress leg is silence.
+    pub async fn start_with_channels(
+        path: impl Into<String>,
+        profiles: [(Leg, NegotiatedLegProfile); 2],
+        channels: u16,
+        mono_caller_only: bool,
+    ) -> anyhow::Result<Arc<Self>> {
         let path = path.into();
         let path_for_rec = path.clone();
         // Resolve the WAV output codec from the first leg's audio codec.
@@ -62,7 +76,12 @@ impl FileRecorder {
         let (ready_tx, ready_rx) = oneshot::channel();
         let profiles_move = profiles;
         std::thread::spawn(move || {
-            let mut recorder = match Recorder::new(&path_for_rec, out_codec) {
+            let mut recorder = match Recorder::new_with_channels(
+                &path_for_rec,
+                out_codec,
+                channels,
+                mono_caller_only,
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -144,7 +163,9 @@ impl MediaRecorder for FileRecorder {
             source_addr: None,
             raw_packet: Some(packet.clone()),
         };
-        let _ = self.cmd_tx.try_send(FileRecCmd::Sample(leg, MediaSample::Audio(frame), None));
+        let _ = self
+            .cmd_tx
+            .try_send(FileRecCmd::Sample(leg, MediaSample::Audio(frame), None));
     }
 
     fn write_dtmf(&self, event: DtmfEvent) {

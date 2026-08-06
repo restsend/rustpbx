@@ -15,15 +15,15 @@
 //! PC's rewrite bridge (transport-level, ICE exclusively owned) and all other
 //! sources to the always-alive [`EgressPipeline`].
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use parking_lot::Mutex;
 use rustrtc::{
-    PeerConnection, RtpCodecParameters, RtcConfiguration, SdpType, SessionDescription,
+    PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType, SessionDescription,
     TransportMode,
     config::BufferDropStrategy,
     media::MediaKind,
@@ -43,7 +43,6 @@ use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
 fn dtmf_event_duration_for_clock(clock_rate: u32) -> u16 {
     ((clock_rate * 20) / 1000) as u16
 }
-
 
 /// Configuration for creating a [`Leg`]'s PeerConnection.
 #[derive(Clone)]
@@ -107,6 +106,9 @@ pub struct LegInner {
     /// transport. The transport does not exist at construction, so the tap is
     /// (re)attached after the first SDP application.
     observer_attached: AtomicBool,
+    /// Handle of the background observer-attach task, so `stop` can abort it
+    /// (prevents a leaked task waiting on a transport that never appears).
+    observer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Outbound DTMF (RFC 2833) send state: the RTP payload type used for
     /// telephone-events and the next sequence number / timestamp. Only valid
     /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
@@ -141,6 +143,12 @@ struct DtmfSendState {
 pub struct RtpTimeoutState {
     /// Whether the timeout is currently armed and counting.
     pub active: AtomicBool,
+    /// App-level suppression flag: when set, the monitor never fires even if
+    /// `active` is true. Set by the session while an app (IVR/voicemail/queue)
+    /// drives the call or during a blind transfer — periods where a leg may
+    /// legitimately stay silent. Independent of `active` so `play()`'s
+    /// pause/resume (which toggles `active`) cannot re-arm a suppressed timer.
+    pub app_paused: AtomicBool,
     /// Timeout duration in milliseconds.
     pub duration_ms: AtomicU64,
     /// When the current countdown started (arm / last packet / resume).
@@ -155,6 +163,7 @@ impl Default for RtpTimeoutState {
     fn default() -> Self {
         Self {
             active: AtomicBool::new(false),
+            app_paused: AtomicBool::new(false),
             duration_ms: AtomicU64::new(0),
             armed_at: Mutex::new(None),
             fire_tx: Mutex::new(None),
@@ -231,6 +240,7 @@ impl LegInner {
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: AtomicBool::new(false),
+            observer_task: Mutex::new(None),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
             comfort_noise_level_db,
@@ -241,19 +251,29 @@ impl LegInner {
     /// is created lazily (async, after ICE connects) following the first
     /// `set_remote_description`, so the observer registered in
     /// `from_rtc_config` is a no-op until then. Call this after SDP is applied.
-    /// Spawns a background task so it never blocks SDP negotiation.
+    /// Spawns a background task so it never blocks SDP negotiation. The task
+    /// handle is stored so `stop` can abort it; a transport that never becomes
+    /// ready logs a warning instead of silently dropping stats/DTMF/recording.
     fn ensure_observer(&self) {
         if self.observer_attached.swap(true, Ordering::SeqCst) {
             return;
         }
         let pc = self.pc.clone();
         let tap = self.tap.clone();
-        tokio::spawn(async move {
-            let _ = pc
+        let handle = tokio::spawn(async move {
+            if pc
                 .wait_for_rtp_transport_ready(std::time::Duration::from_secs(5))
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "RTP transport never became ready; ingress tap NOT attached (no stats/DTMF/recording for this leg)"
+                );
+                return;
+            }
             pc.add_observer(tap);
         });
+        *self.observer_task.lock() = Some(handle);
     }
 
     /// Create a leg from a simplified [`LegConfig`] (builds the
@@ -362,7 +382,11 @@ impl LegInner {
         // R1 fix: sync the sender's codec/PT to the negotiated answer.
         // Extract the profile from the answer SDP: the local answer we just
         // produced (as UAS), or the remote answer we applied (as UAC).
-        let profile_sdp = if local_sdp.is_empty() { remote } else { local_sdp.as_str() };
+        let profile_sdp = if local_sdp.is_empty() {
+            remote
+        } else {
+            local_sdp.as_str()
+        };
         let profile = negotiate::MediaNegotiator::extract_leg_profile(profile_sdp);
 
         // If the negotiated audio codec changed (e.g. re-INVITE switches
@@ -386,7 +410,12 @@ impl LegInner {
                     })
                     .await?;
             }
-            sync_sender_codec(&self.pc, audio.payload_type, audio.clock_rate, audio.channels);
+            sync_sender_codec(
+                &self.pc,
+                audio.payload_type,
+                audio.clock_rate,
+                audio.channels,
+            );
         }
         self.apply_profile(&profile);
 
@@ -415,11 +444,7 @@ impl LegInner {
         // negotiated telephone-event payload type and clock rate.
         let mut dtmf = self.dtmf_send.lock();
         dtmf.dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
-        dtmf.dtmf_clock_rate = profile
-            .dtmf
-            .as_ref()
-            .map(|d| d.clock_rate)
-            .unwrap_or(8000);
+        dtmf.dtmf_clock_rate = profile.dtmf.as_ref().map(|d| d.clock_rate).unwrap_or(8000);
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -461,17 +486,15 @@ impl LegInner {
                     let peer = peer_pc.clone();
                     let params = *params;
                     tokio::spawn(async move {
-                        let result = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            async {
+                        let result =
+                            tokio::time::timeout(std::time::Duration::from_secs(5), async {
                                 pc.wait_for_rtp_transport_ready(timeout).await?;
                                 peer.wait_for_rtp_transport_ready(timeout).await?;
                                 pc.clear_rtp_rewrite_bridge();
                                 pc.bridge_rtp_with_rewrite_to(&peer, params)?;
                                 Ok::<_, anyhow::Error>(())
-                            },
-                        )
-                        .await;
+                            })
+                            .await;
                         match result {
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => {
@@ -522,7 +545,10 @@ impl LegInner {
     /// Put the leg on hold: play hold music (looping) or silence.
     /// Caller ([`crate::media_bridge::MediaBridge`]) must clear any rewrite
     /// bridge first so the remote peer hears only the hold source.
-    pub async fn hold(&self, music: Option<Box<dyn crate::audio_source::AudioSource>>) -> Result<()> {
+    pub async fn hold(
+        &self,
+        music: Option<Box<dyn crate::audio_source::AudioSource>>,
+    ) -> Result<()> {
         match music {
             Some(audio) => self.play(audio, true, None).await,
             None => self.mute().await,
@@ -632,7 +658,9 @@ impl LegInner {
         let (tx, rx) = oneshot::channel();
         let state = &self.rtp_timeout;
         state.active.store(true, Ordering::Release);
-        state.duration_ms.store(duration.as_millis() as u64, Ordering::Relaxed);
+        state
+            .duration_ms
+            .store(duration.as_millis() as u64, Ordering::Relaxed);
         *state.armed_at.lock() = Some(Instant::now());
         *state.fire_tx.lock() = Some(tx);
         rx
@@ -649,6 +677,15 @@ impl LegInner {
         let state = &self.rtp_timeout;
         state.active.store(true, Ordering::Release);
         *state.armed_at.lock() = Some(Instant::now());
+    }
+
+    /// Set the app-level suppression flag. When `true` the monitor never fires
+    /// regardless of `active`; used while an app drives the session or during a
+    /// blind transfer (both periods where a leg may legitimately stay silent).
+    pub fn set_app_paused(&self, paused: bool) {
+        self.rtp_timeout
+            .app_paused
+            .store(paused, Ordering::Release);
     }
 
     /// Disarm the timeout. Drops the fire sender → a pending receiver gets
@@ -674,6 +711,9 @@ impl LegInner {
     /// Stop the leg: cancel the egress pipeline and close the PeerConnection.
     pub fn stop(&self) {
         self.egress.stop();
+        if let Some(handle) = self.observer_task.lock().take() {
+            handle.abort();
+        }
         self.tap.finalize_recorder();
         self.pc.close();
     }
@@ -776,9 +816,14 @@ mod tests {
 
     #[test]
     fn detect_transport_picks_rtp_vs_webrtc() {
-        assert_eq!(negotiate::detect_transport("v=0\r\nm=audio 1234 RTP/AVP 0\r\n"), TransportMode::Rtp);
         assert_eq!(
-            negotiate::detect_transport("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 XX\r\n"),
+            negotiate::detect_transport("v=0\r\nm=audio 1234 RTP/AVP 0\r\n"),
+            TransportMode::Rtp
+        );
+        assert_eq!(
+            negotiate::detect_transport(
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 XX\r\n"
+            ),
             TransportMode::WebRtc
         );
     }
@@ -791,7 +836,6 @@ mod tests {
         assert_eq!(dtmf_event_duration_for_clock(16000), 320);
         assert_eq!(dtmf_event_duration_for_clock(48000), 960);
     }
-
 
     /// When a leg negotiates multiple telephone-event PTs (e.g. WebRTC answer
     /// with both 110 telephone-event/48000 and 126 telephone-event/8000), the
@@ -895,7 +939,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod p24_uac_test {
     use super::*;
@@ -910,12 +953,23 @@ mod p24_uac_test {
         assert!(!offer.is_empty());
 
         // Build a PCMU answer like the remote peer would produce.
-        let answer = format!("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n");
-        let local = leg.apply_sdp(&answer, SdpType::Answer).await.expect("apply answer");
+        let answer = format!(
+            "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+        );
+        let local = leg
+            .apply_sdp(&answer, SdpType::Answer)
+            .await
+            .expect("apply answer");
         assert!(local.is_empty());
         let p = leg.negotiated().expect("negotiated profile");
-        assert!(p.audio.is_some(), "audio profile must be set after apply answer");
-        assert_eq!(p.audio.as_ref().map(|a| a.codec), Some(audio_codec::CodecType::PCMU));
+        assert!(
+            p.audio.is_some(),
+            "audio profile must be set after apply answer"
+        );
+        assert_eq!(
+            p.audio.as_ref().map(|a| a.codec),
+            Some(audio_codec::CodecType::PCMU)
+        );
         // The outbound DTMF payload type must be synced from the negotiated
         // profile (RFC 4733 telephone-event on PT 101).
         let send_state = leg.dtmf_send.lock();

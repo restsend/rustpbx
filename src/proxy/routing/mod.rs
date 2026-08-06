@@ -20,8 +20,8 @@ use std::{
 };
 use tokio::net::lookup_host;
 
-pub mod http;
 pub mod error_catalog;
+pub mod http;
 pub mod http_error_catalog;
 #[cfg(test)]
 mod http_tests;
@@ -762,26 +762,14 @@ pub struct RouteQueueFallbackConfig {
     pub redirect: Option<String>,
     pub failure_code: Option<u16>,
     pub failure_reason: Option<String>,
-    pub failure_prompt: Option<String>,
-    pub queue_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill_group_ref: Option<String>,
 }
 
 impl RouteQueueConfig {
     pub fn to_queue_plan(&self) -> Result<crate::call::QueuePlan> {
-        let failure_audio = self
-            .voice_prompts
-            .as_ref()
-            .and_then(|prompts| prompts.busy_prompt.as_ref())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
         let mut plan = crate::call::QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
             hold: None,
-            failure_audio,
             ..Default::default()
         };
         if let Some(hold) = &self.hold {
@@ -864,34 +852,30 @@ impl RouteQueueConfig {
 
 impl RouteQueueFallbackConfig {
     fn to_action(&self) -> Result<crate::call::QueueFallbackAction> {
-        // Check queue_ref - can be either a queue name or skill-group:{id}
-        if let Some(queue) = self
-            .queue_ref
+        // redirect covers all transfer targets: plain SIP URI (Redirect) or
+        // ivr:/queue:/voicemail:/conference: prefixed targets (Transfer).
+        if let Some(target) = self
+            .redirect
             .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
         {
-            return Ok(crate::call::QueueFallbackAction::Queue {
-                name: queue.to_string(),
-            });
+            if let Some(endpoint) = crate::call::TransferEndpoint::parse(target) {
+                match endpoint {
+                    crate::call::TransferEndpoint::Uri(uri) => {
+                        let parsed = Uri::try_from(uri.as_str())?;
+                        return Ok(crate::call::QueueFallbackAction::Redirect { target: parsed });
+                    }
+                    other => {
+                        return Ok(crate::call::QueueFallbackAction::Failure(
+                            crate::call::FailureAction::Transfer(other),
+                        ));
+                    }
+                }
+            }
         }
-
-        // Check direct skill_group_ref field (stored as skill-group:{id} in queue_ref)
-        if let Some(skill_group_id) = self
-            .skill_group_ref
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        {
-            return Ok(crate::call::QueueFallbackAction::Queue {
-                name: format!("skill-group:{}", skill_group_id),
-            });
-        }
-        if let Some(target) = &self.redirect {
-            let uri = Uri::try_from(target.as_str())?;
-            return Ok(crate::call::QueueFallbackAction::Redirect { target: uri });
-        }
-        if self.failure_code.is_some() || self.failure_prompt.is_some() {
+        // Hangup with optional code/reason.
+        if self.failure_code.is_some() || self.failure_reason.is_some() {
             let status = match self.failure_code {
                 Some(code) => {
                     if !(100..=699).contains(&code) {
@@ -901,21 +885,12 @@ impl RouteQueueFallbackConfig {
                 }
                 None => StatusCode::TemporarilyUnavailable,
             };
-
-            let action = if let Some(prompt) = &self.failure_prompt {
-                crate::call::FailureAction::PlayThenHangup {
-                    audio_file: prompt.clone(),
-                    use_early_media: false, // Use 200 OK for routing failures
-                    status_code: status.clone(),
-                    reason: self.failure_reason.clone(),
-                }
-            } else {
+            return Ok(crate::call::QueueFallbackAction::Failure(
                 crate::call::FailureAction::Hangup {
                     code: Some(status),
                     reason: self.failure_reason.clone(),
-                }
-            };
-            return Ok(crate::call::QueueFallbackAction::Failure(action));
+                },
+            ));
         }
         Err(anyhow!(
             "Queue fallback must specify redirect or failure action"

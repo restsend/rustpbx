@@ -124,9 +124,7 @@ impl CallErrRegistry {
 
     fn rebuild_entries(&mut self) {
         let mut all: Vec<&'static CallErrInfo> = self.by_code.values().copied().collect();
-        all.sort_by(|a, b| {
-            (a.app, a.code).cmp(&(b.app, b.code))
-        });
+        all.sort_by(|a, b| (a.app, a.code).cmp(&(b.app, b.code)));
         self.entries = all;
     }
 
@@ -217,12 +215,16 @@ pub enum TraceKind {
     Resume,
     /// An IVR (or other application flow) started/ended.
     Ivr,
+    /// A voicemail flow event (routed to mailbox, recording, replay, delete).
+    Voicemail,
     /// Call entered a queue (or queue-related transition).
     Queue,
     /// A transfer was attempted (attended/blind) — success or failure.
     Transfer,
     /// An audio file / media playback started or finished.
     Play,
+    /// The RTP-inactivity watchdog fired (no media from one side).
+    RtpTimeout,
     /// The call ended (terminal event).
     End,
 }
@@ -297,7 +299,10 @@ impl TraceEvent {
 /// Called by core (reporter) and by addons in `CallRecordHook::on_record_enrich`
 /// so every subsystem can contribute to the diagnostic timeline. Creates the
 /// `trace` array on first use and preserves existing events.
-pub fn append_trace(metadata: &mut std::collections::HashMap<String, serde_json::Value>, event: TraceEvent) {
+pub fn append_trace(
+    metadata: &mut std::collections::HashMap<String, serde_json::Value>,
+    event: TraceEvent,
+) {
     let arr = metadata
         .entry("trace".to_string())
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -416,7 +421,13 @@ mod tests {
         assert_eq!(arr[1]["kind"], "end");
         // A pre-existing trace array is appended to, not replaced.
         append_trace(&mut metadata, TraceEvent::new(TraceKind::Play, "Prompt"));
-        assert_eq!(metadata.get("trace").and_then(|v| v.as_array()).map(|a| a.len()), Some(3));
+        assert_eq!(
+            metadata
+                .get("trace")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(3)
+        );
     }
 
     #[test]

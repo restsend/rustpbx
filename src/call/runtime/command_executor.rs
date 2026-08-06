@@ -328,6 +328,8 @@ mod tests {
                 max_duration_secs: None,
                 beep: false,
                 format: None,
+                channels: None,
+                mono_caller_only: None,
             },
         };
 
@@ -350,6 +352,8 @@ mod tests {
                 max_duration_secs: None,
                 beep: false,
                 format: None,
+                channels: None,
+                mono_caller_only: None,
             },
         };
 

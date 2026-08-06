@@ -112,11 +112,7 @@ impl Track for RtcTrack {
         &self.track_id
     }
 
-    async fn handshake(
-        &self,
-        remote_offer: String,
-        answer_type: SdpType,
-    ) -> Result<String> {
+    async fn handshake(&self, remote_offer: String, answer_type: SdpType) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
         match self.pc.signaling_state() {
             rustrtc::SignalingState::Stable => {
@@ -136,10 +132,7 @@ impl Track for RtcTrack {
         match answer_type {
             SdpType::Pranswer | SdpType::Answer => answer.sdp_type = answer_type,
             _ => {
-                return Err(anyhow!(
-                    "unsupported answer SDP type: {:?}",
-                    answer_type
-                ));
+                return Err(anyhow!("unsupported answer SDP type: {:?}", answer_type));
             }
         }
         let sdp = self.set_local(&self.pc, answer).await?;

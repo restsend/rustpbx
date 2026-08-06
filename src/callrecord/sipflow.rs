@@ -1,9 +1,9 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use std::borrow::Cow;
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -345,12 +345,13 @@ impl SipFlow {
             // Send to writer thread (non-blocking, drops if full)
             if let Some(ref tx) = self.inner.writer_tx {
                 // Use try_send to avoid blocking - drop if channel full
-                if tx.try_send(WriteCommand::Record {
-                    call_id,
-                    item,
-                    pool_idx,
-                })
-                .is_err()
+                if tx
+                    .try_send(WriteCommand::Record {
+                        call_id,
+                        item,
+                        pool_idx,
+                    })
+                    .is_err()
                 {
                     // Channel full or disconnected: count the drop so it can be
                     // surfaced in diagnostics instead of being completely silent.

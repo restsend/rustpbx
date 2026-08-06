@@ -50,8 +50,7 @@ impl DbBackend {
     ) -> Result<Self> {
         let default_cfg = DatabasePoolConfig::default();
         let cfg = pool_config.unwrap_or(&default_cfg);
-        let mut opts = sqlx::any::AnyPoolOptions::new()
-            .max_connections(cfg.max_connections);
+        let mut opts = sqlx::any::AnyPoolOptions::new().max_connections(cfg.max_connections);
         if let Some(v) = cfg.min_connections {
             opts = opts.min_connections(v);
         }

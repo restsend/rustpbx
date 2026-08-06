@@ -341,6 +341,11 @@ mod tests {
         assert_eq!(trace[0]["kind"], "end");
         assert_eq!(trace[0]["severity"], "error");
         assert_eq!(trace[0]["code"], "wholesale.insufficient_funds");
-        assert!(trace[0]["message"].as_str().unwrap().contains("Insufficient funds"));
+        assert!(
+            trace[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Insufficient funds")
+        );
     }
 }

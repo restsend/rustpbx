@@ -101,10 +101,7 @@ pub async fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_pool_config(
-    pool_config: Option<&DatabasePoolConfig>,
-    opt: &mut ConnectOptions,
-) {
+fn apply_pool_config(pool_config: Option<&DatabasePoolConfig>, opt: &mut ConnectOptions) {
     let cfg = match pool_config {
         Some(c) => c,
         None => return,
@@ -138,13 +135,11 @@ pub async fn connect_db(
 
     let mut opt = ConnectOptions::new(database_url.to_owned());
     apply_pool_config(pool_config, &mut opt);
-    Database::connect(opt)
-        .await
-        .map_err(|e: sea_orm::DbErr| {
-            tracing::error!("failed to connect to database {:?}", e);
-            let msg = format!("failed to connect to database {database_url}: {e}");
-            anyhow::anyhow!(msg)
-        })
+    Database::connect(opt).await.map_err(|e: sea_orm::DbErr| {
+        tracing::error!("failed to connect to database {:?}", e);
+        let msg = format!("failed to connect to database {database_url}: {e}");
+        anyhow::anyhow!(msg)
+    })
 }
 
 pub async fn create_db(
@@ -161,13 +156,11 @@ pub async fn create_db(
 
     let mut opt = ConnectOptions::new(database_url.to_owned());
     apply_pool_config(pool_config, &mut opt);
-    let db = Database::connect(opt)
-        .await
-        .map_err(|e: sea_orm::DbErr| {
-            tracing::error!("failed to connect to database {:?}", e);
-            let msg = format!("failed to connect to database {database_url}: {e}");
-            anyhow::anyhow!(msg)
-        })?;
+    let db = Database::connect(opt).await.map_err(|e: sea_orm::DbErr| {
+        tracing::error!("failed to connect to database {:?}", e);
+        let msg = format!("failed to connect to database {database_url}: {e}");
+        anyhow::anyhow!(msg)
+    })?;
 
     if let Err(e) = migration::Migrator::up(&db, None).await {
         let msg = e.to_string();
@@ -185,4 +178,3 @@ pub async fn create_db(
     }
     Ok(db)
 }
-

@@ -30,8 +30,8 @@ use rsipstack::dialog::{
     invitation::InviteOption,
     invite_dialog::InviteDialog,
 };
-use rsipstack::transaction::key::TransactionRole;
 use rsipstack::sip::{Header as SipHeader, Method, Scheme, Transport, Uri, Version};
+use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transport::SipAddr;
 use sea_orm::EntityTrait;
 use serde::{Deserialize, Serialize};
@@ -1754,16 +1754,6 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
             crate::call::QueueFallbackAction::Failure(_) => "failure".to_string(),
             crate::call::QueueFallbackAction::Redirect { target } => {
                 format!("redirect: {}", target)
-            }
-            crate::call::QueueFallbackAction::Queue { name } => {
-                if name.starts_with("skill-group:") {
-                    format!(
-                        "skill-group: {}",
-                        name.strip_prefix("skill-group:").unwrap_or(name)
-                    )
-                } else {
-                    format!("queue: {}", name)
-                }
             }
         });
         Self {

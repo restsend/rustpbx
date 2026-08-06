@@ -140,7 +140,8 @@ impl QueueManager {
         session_id: SessionId,
         priority: Option<u32>,
     ) -> Result<usize> {
-        let mut queue = self.queues
+        let mut queue = self
+            .queues
             .entry(queue_id.clone())
             .or_insert_with(|| CallQueue::new(queue_id));
 
@@ -159,7 +160,8 @@ impl QueueManager {
 
     /// Dequeue a leg from a queue
     pub async fn dequeue(&self, queue_id: &QueueId, leg_id: &LegId) -> Result<QueueEntry> {
-        let mut queue = self.queues
+        let mut queue = self
+            .queues
             .get_mut(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -178,7 +180,8 @@ impl QueueManager {
 
     /// Get position of a leg in a queue
     pub async fn get_position(&self, queue_id: &QueueId, leg_id: &LegId) -> Result<usize> {
-        let queue = self.queues
+        let queue = self
+            .queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -189,7 +192,8 @@ impl QueueManager {
 
     /// Get queue statistics
     pub async fn get_queue_stats(&self, queue_id: &QueueId) -> Result<QueueStats> {
-        let queue = self.queues
+        let queue = self
+            .queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
@@ -223,7 +227,8 @@ impl QueueManager {
 
     /// Get all entries in a queue
     pub async fn get_queue_entries(&self, queue_id: &QueueId) -> Result<Vec<QueueEntry>> {
-        let queue = self.queues
+        let queue = self
+            .queues
             .get(queue_id)
             .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 

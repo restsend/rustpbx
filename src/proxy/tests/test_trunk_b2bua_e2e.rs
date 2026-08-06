@@ -927,19 +927,34 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
         callee_bye
     );
 
-    // CDR must reflect the system-initiated teardown reason.
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
-    let record = &records[0];
-    if !matches!(
-        record.hangup_reason,
-        Some(CallRecordHangupReason::RtpTimeout)
-    ) {
-        warn!(
-            "Expected CDR hangup reason RtpTimeout, got {:?} (test may be flaky due to timing)",
-            record.hangup_reason
-        );
+    // CDR must reflect the system-initiated teardown reason. The record is
+    // finalized asynchronously after the BYEs, so poll briefly (instead of a
+    // single fixed sleep + non-asserting warn, which was flaky) until the
+    // hangup reason is `RtpTimeout`.
+    let cdr_deadline = Instant::now() + Duration::from_secs(5);
+    let mut rtp_timeout_cdr = false;
+    while Instant::now() < cdr_deadline {
+        let records = server.cdr_capture.get_all_records().await;
+        if let Some(record) = records.first() {
+            if matches!(
+                record.hangup_reason,
+                Some(CallRecordHangupReason::RtpTimeout)
+            ) {
+                rtp_timeout_cdr = true;
+                break;
+            }
+            info!(
+                call_id = %record.call_id,
+                hangup_reason = ?record.hangup_reason,
+                "CDR hangup reason not RtpTimeout yet; waiting"
+            );
+        }
+        sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        rtp_timeout_cdr,
+        "CDR hangup reason must be RtpTimeout after proxy-initiated teardown"
+    );
 
     caller_receiver.stop();
     callee_receiver.stop();

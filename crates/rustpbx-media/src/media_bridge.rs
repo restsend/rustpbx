@@ -99,6 +99,10 @@ pub struct MediaBridge {
     leg_b: Option<Leg>,
     route_active: bool,
     recorder: Option<Arc<dyn MediaRecorder>>,
+    /// Which leg(s) the recorder is attached to. `None` = both legs (legacy);
+    /// `Some(side)` = only that leg. Recording captures the first leg's
+    /// send+receive, so callers set this to `Some(LegSide::A)`.
+    recorder_side: Option<LegSide>,
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
@@ -120,6 +124,7 @@ impl MediaBridge {
             leg_b: None,
             route_active: false,
             recorder: None,
+            recorder_side: None,
             dtmf_bus,
             root_cancel: CancellationToken::new(),
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
@@ -142,10 +147,7 @@ impl MediaBridge {
     /// have the leg's negotiated profile ready (i.e. SDP already applied).
     /// Used as the conference / supervisor mixer data source: each leg's PCM
     /// flows into the mixer instead of being read from an independent PC.
-    pub fn leg_pcm_stream(
-        &self,
-        side: LegSide,
-    ) -> Result<crate::app_ingress::LegPcmStream> {
+    pub fn leg_pcm_stream(&self, side: LegSide) -> Result<crate::app_ingress::LegPcmStream> {
         let leg = self
             .leg(side)
             .ok_or_else(|| anyhow!("no leg on side {:?}", side))?;
@@ -198,8 +200,11 @@ impl MediaBridge {
                         Err(_) => break,
                     },
                     _ = interval.tick() => {
-                        if !timeout.active.load(Ordering::Relaxed) {
-                            // Idle / paused — keep the baseline in sync.
+                        if !timeout.active.load(Ordering::Relaxed)
+                            || timeout.app_paused.load(Ordering::Relaxed)
+                        {
+                            // Idle / paused / app-suppressed — keep the baseline
+                            // in sync.
                             last_count = tap.ingress_packet_count();
                             continue;
                         }
@@ -226,7 +231,13 @@ impl MediaBridge {
             }
         });
         if let Some(rec) = &self.recorder {
-            leg.set_recorder(Some(rec.clone()));
+            // Attach only when this leg matches the configured recorder side
+            // (or when no side filter is set → both legs, legacy behaviour).
+            // Recording is first-leg-only, so a B leg added later (e.g. after
+            // a transfer) must NOT pick up the recorder.
+            if self.recorder_side.is_none() || self.recorder_side == Some(side) {
+                leg.set_recorder(Some(rec.clone()));
+            }
         }
     }
 
@@ -257,7 +268,10 @@ impl MediaBridge {
 
     // ── Recording ────────────────────────────────────────────────────────
 
+    /// Attach the recorder to BOTH legs (legacy behaviour). Prefer
+    /// [`Self::set_recorder_for`] for first-leg-only recording.
     pub fn set_recorder(&mut self, recorder: Arc<dyn MediaRecorder>) {
+        self.recorder_side = None;
         if let Some(la) = self.leg_a.as_ref() {
             la.set_recorder(Some(recorder.clone()));
         }
@@ -265,6 +279,21 @@ impl MediaBridge {
             lb.set_recorder(Some(recorder.clone()));
         }
         self.recorder = Some(recorder);
+    }
+
+    /// Attach the recorder to a SINGLE leg (`side`). The stored side filter is
+    /// honoured by `wire_leg`, so a leg created later (e.g. the B leg after a
+    /// transfer) only receives the recorder when it matches `side`.
+    ///
+    /// Recording captures the first leg's send+receive, so callers pass
+    /// [`LegSide::A`]: ingress = caller voice, egress = what the caller hears
+    /// (IVR prompt / callee audio / hold music), all in the caller's codec.
+    pub fn set_recorder_for(&mut self, side: LegSide, recorder: Arc<dyn MediaRecorder>) {
+        self.recorder_side = Some(side);
+        self.recorder = Some(recorder.clone());
+        if let Some(leg) = self.leg(side) {
+            leg.set_recorder(Some(recorder));
+        }
     }
 
     pub fn set_recording_paused(&self, paused: bool) {
@@ -277,6 +306,7 @@ impl MediaBridge {
     }
 
     pub fn stop_recording(&mut self) {
+        self.recorder_side = None;
         if let Some(rec) = self.recorder.take() {
             rec.finalize();
         }
@@ -317,7 +347,7 @@ impl MediaBridge {
 
         if ca.codec == cb.codec {
             // ── fast-path: transport-level zero-copy relay ──
-            debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay");            // Rewrite the forwarded packet's header to the destination leg's
+            debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
             // destination is plain RTP.
             let a_transport = la.pc().config().transport_mode.clone();
@@ -499,7 +529,9 @@ impl MediaBridge {
         loop_playback: bool,
     ) -> Result<PlaybackHandle> {
         self.unbridge().await?;
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         // Pause the RTP inactivity timeout while playing: during playback the
         // peer may stay silent, so an armed timeout would fire spuriously.
         leg.pause_rtp_timeout();
@@ -543,11 +575,9 @@ impl MediaBridge {
         let handle = self
             .play(
                 side,
-                Box::new(crate::audio_source::FileAudioSource::new(
-                    path.clone(),
-                    loop_playback,
-                )
-                .await?),
+                Box::new(
+                    crate::audio_source::FileAudioSource::new(path.clone(), loop_playback).await?,
+                ),
                 loop_playback,
             )
             .await?;
@@ -574,7 +604,9 @@ impl MediaBridge {
     /// Stop a running playback on a leg. Fires the handle's `done` with
     /// `interrupted: true`. No-op if the leg is not currently playing Media.
     pub async fn stop_play(&mut self, side: LegSide) -> Result<()> {
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         // Switching away from an active Media source fires on_end(true) inside
         // the egress task; stop_play just sends Silence to trigger it.
         if self.active_play.lock().contains(&side) {
@@ -591,15 +623,18 @@ impl MediaBridge {
         music: Option<Box<dyn crate::audio_source::AudioSource>>,
     ) -> Result<()> {
         self.unbridge().await?;
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         match music {
-            Some(audio) => leg
-                .set_egress_source(EgressSource::Media {
+            Some(audio) => {
+                leg.set_egress_source(EgressSource::Media {
                     audio,
                     loop_playback: true,
                     on_end: None,
                 })
-                .await?,
+                .await?
+            }
             None => leg.set_egress_source(EgressSource::Silence).await?,
         }
         Ok(())
@@ -621,7 +656,9 @@ impl MediaBridge {
     /// Mute a leg's egress (send silence on that side only). The opposite leg
     /// keeps its current route/egress untouched.
     pub async fn mute(&mut self, side: LegSide) -> Result<()> {
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         leg.set_egress_source(EgressSource::Silence).await
     }
 
@@ -630,7 +667,9 @@ impl MediaBridge {
     /// negotiated telephone-event payload type, regardless of the active route
     /// (fast-path relay / transcode / hold all coexist with injected DTMF).
     pub async fn send_dtmf(&self, side: LegSide, digits: &str) -> Result<()> {
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         leg.send_dtmf(digits).await
     }
 
@@ -646,7 +685,9 @@ impl MediaBridge {
         &self,
         side: LegSide,
     ) -> Result<tokio::sync::mpsc::Sender<rustrtc::media::MediaSample>> {
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         // Spawn the switch so we don't block the session loop on the egress
         // command channel.
@@ -663,7 +704,11 @@ impl MediaBridge {
     /// Arm an RTP inactivity timeout for a leg. Returns a `oneshot::Receiver`
     /// that fires (`Ok(())`) when no ingress packet arrives within `timeout`.
     /// Monitored by the per-leg DTMF task (no dedicated spawn).
-    pub fn arm_rtp_timeout(&self, side: LegSide, timeout: Duration) -> Option<oneshot::Receiver<()>> {
+    pub fn arm_rtp_timeout(
+        &self,
+        side: LegSide,
+        timeout: Duration,
+    ) -> Option<oneshot::Receiver<()>> {
         self.leg(side).map(|leg| leg.arm_rtp_timeout(timeout))
     }
 
@@ -678,6 +723,15 @@ impl MediaBridge {
     pub fn resume_rtp_timeout(&self, side: LegSide) {
         if let Some(leg) = self.leg(side) {
             leg.resume_rtp_timeout();
+        }
+    }
+
+    /// Set the app-level suppression flag for a leg. When `true` the monitor
+    /// never fires regardless of arm/pause state — used while an app
+    /// (IVR/voicemail/queue) drives the session or during a blind transfer.
+    pub fn set_app_paused(&self, side: LegSide, paused: bool) {
+        if let Some(leg) = self.leg(side) {
+            leg.set_app_paused(paused);
         }
     }
 
@@ -762,26 +816,169 @@ mod tests {
     async fn set_recorder_attaches_to_legs() {
         struct Noop;
         impl MediaRecorder for Noop {
-            fn write_sample(&self, _: crate::ingress_tap::PacketDirection, _: &rustrtc::rtp::RtpPacket) {}
+            fn write_sample(
+                &self,
+                _: crate::ingress_tap::PacketDirection,
+                _: &rustrtc::rtp::RtpPacket,
+            ) {
+            }
             fn write_dtmf(&self, _: DtmfEvent) {}
             fn set_paused(&self, _: bool) {}
             fn finalize(&self) {}
         }
         let mut mb = MediaBridge::new("s3", BridgeOpts::default());
-        mb.replace_leg(LegSide::A, LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap())
-            .await;
+        mb.replace_leg(
+            LegSide::A,
+            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
         mb.set_recorder(Arc::new(Noop));
-        mb.replace_leg(LegSide::B, LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap())
-            .await;
+        mb.replace_leg(
+            LegSide::B,
+            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
         let _ = mb.leg(LegSide::B).unwrap().stats();
+        mb.close();
+    }
+
+    /// A recorder that counts samples per direction, used to verify which leg
+    /// received the recorder.
+    struct CountingRecorder {
+        ingress: std::sync::atomic::AtomicUsize,
+        egress: std::sync::atomic::AtomicUsize,
+    }
+    impl MediaRecorder for CountingRecorder {
+        fn write_sample(
+            &self,
+            direction: crate::ingress_tap::PacketDirection,
+            _: &rustrtc::rtp::RtpPacket,
+        ) {
+            use crate::ingress_tap::PacketDirection;
+            match direction {
+                PacketDirection::Ingress => self
+                    .ingress
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                PacketDirection::Egress => self
+                    .egress
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            };
+        }
+        fn write_dtmf(&self, _: DtmfEvent) {}
+        fn set_paused(&self, _: bool) {}
+        fn finalize(&self) {}
+    }
+
+    fn feed_packet(tap: &crate::ingress_tap::IngressTap, ingress: bool) {
+        use rustrtc::peer_connection::RtpObserver;
+        use rustrtc::rtp::{RtpHeader, RtpPacket};
+        let pkt = RtpPacket::new(RtpHeader::new(0, 1, 160, 1234), vec![0xFFu8; 80]);
+        let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        if ingress {
+            tap.on_ingress(&pkt, addr);
+        } else {
+            tap.on_egress(&pkt, addr);
+        }
+    }
+
+    /// `set_recorder_for(A)` mounts the recorder on the A leg only. Feeding
+    /// packets to A's tap (both directions) records them; feeding B's tap
+    /// records nothing. This is the core fix for the recording-stutter bug
+    /// where both legs were merged into the same channel.
+    #[tokio::test]
+    async fn set_recorder_for_attaches_only_to_a_leg() {
+        let rec = Arc::new(CountingRecorder {
+            ingress: std::sync::atomic::AtomicUsize::new(0),
+            egress: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut mb = MediaBridge::new("s-side-a", BridgeOpts::default());
+        // A leg created AFTER set_recorder_for (mirrors real timing: the
+        // recorder is configured at session construction, legs arrive later).
+        mb.set_recorder_for(LegSide::A, rec.clone());
+        mb.replace_leg(
+            LegSide::A,
+            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
+        mb.replace_leg(
+            LegSide::B,
+            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
+
+        let a_tap = mb.leg(LegSide::A).unwrap().ingress_tap().clone();
+        let b_tap = mb.leg(LegSide::B).unwrap().ingress_tap().clone();
+        // Feed A ingress + egress → both recorded.
+        feed_packet(&a_tap, true);
+        feed_packet(&a_tap, false);
+        // Feed B ingress + egress → must NOT be recorded.
+        feed_packet(&b_tap, true);
+        feed_packet(&b_tap, false);
+
+        assert_eq!(
+            rec.ingress.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only A-leg ingress must be recorded"
+        );
+        assert_eq!(
+            rec.egress.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only A-leg egress must be recorded (IVR / callee audio)"
+        );
+        mb.close();
+    }
+
+    /// After transfer replaces the B leg, the recorder must NOT migrate to the
+    /// new B leg — recording stays anchored to A.
+    #[tokio::test]
+    async fn set_recorder_for_survives_b_leg_replacement() {
+        let rec = Arc::new(CountingRecorder {
+            ingress: std::sync::atomic::AtomicUsize::new(0),
+            egress: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut mb = MediaBridge::new("s-xfer", BridgeOpts::default());
+        mb.replace_leg(
+            LegSide::A,
+            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
+        mb.replace_leg(
+            LegSide::B,
+            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
+        mb.set_recorder_for(LegSide::A, rec.clone());
+        // Simulate transfer: replace B.
+        mb.replace_leg(
+            LegSide::B,
+            LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
+
+        let b2_tap = mb.leg(LegSide::B).unwrap().ingress_tap().clone();
+        feed_packet(&b2_tap, true);
+        feed_packet(&b2_tap, false);
+        assert_eq!(
+            rec.ingress.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "replaced B leg must not be recorded"
+        );
+        assert_eq!(
+            rec.egress.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "replaced B leg must not be recorded"
+        );
         mb.close();
     }
 
     #[tokio::test]
     async fn dtmf_bus_forwarded_from_leg_tap() {
         let mut mb = MediaBridge::new("s4", BridgeOpts::default());
-        mb.replace_leg(LegSide::A, LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap())
-            .await;
+        mb.replace_leg(
+            LegSide::A,
+            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        )
+        .await;
         let rx = mb.dtmf_bus();
         // The tap has no dtmf payload types set, so we can't easily synthesize
         // an event here; this just ensures the bus subscription + forwarder
@@ -1021,7 +1218,10 @@ mod tests {
         a.apply_sdp(webrtc_offer, SdpType::Offer)
             .await
             .expect("a answers webrtc offer");
-        assert!(a.negotiated().is_some(), "leg A profile should be negotiated");
+        assert!(
+            a.negotiated().is_some(),
+            "leg A profile should be negotiated"
+        );
 
         // Leg B: RTP/opus — negotiated, transport ready.
         let b2 = LegInner::new("b2", &rtp_opus_cfg).unwrap();
@@ -1030,7 +1230,10 @@ mod tests {
         b.apply_sdp(&b_offer, SdpType::Offer)
             .await
             .expect("b answers rtp offer");
-        assert!(b.negotiated().is_some(), "leg B profile should be negotiated");
+        assert!(
+            b.negotiated().is_some(),
+            "leg B profile should be negotiated"
+        );
 
         let mut mb = MediaBridge::new("s-no-deadlock", BridgeOpts::default());
         mb.replace_leg(LegSide::A, a).await;
@@ -1124,13 +1327,15 @@ mod tests {
         assert!(mb.is_bridged(), "route should be active after both answer");
 
         // Subscribe to leg B's PCM before playing, so we catch frames early.
-        let mut stream = mb
-            .leg_pcm_stream(LegSide::B)
-            .expect("leg B PCM stream");
+        let mut stream = mb.leg_pcm_stream(LegSide::B).expect("leg B PCM stream");
 
         // Play a 440 Hz tone on leg A (egress → RTP → B ingress).
         let handle = mb
-            .play(LegSide::A, Box::new(SineSource::new(440.0, 8000, 1000)), false)
+            .play(
+                LegSide::A,
+                Box::new(SineSource::new(440.0, 8000, 1000)),
+                false,
+            )
             .await
             .expect("play tone on A");
         let _ = handle;
@@ -1139,13 +1344,11 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut saw_audio = false;
         while tokio::time::Instant::now() < deadline {
-            if let Some(frame) = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                stream.recv(),
-            )
-            .await
-            .ok()
-            .flatten()
+            if let Some(frame) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), stream.recv())
+                    .await
+                    .ok()
+                    .flatten()
             {
                 assert_eq!(frame.sample_rate, 8000, "PCMU leg decodes at 8 kHz");
                 if !frame.silence && frame.samples.iter().any(|&s| s != 0) {
@@ -1155,7 +1358,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(saw_audio, "leg B PCM stream must decode the tone played on A");
+        assert!(
+            saw_audio,
+            "leg B PCM stream must decode the tone played on A"
+        );
         mb.close();
     }
 }

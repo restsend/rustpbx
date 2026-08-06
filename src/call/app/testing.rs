@@ -174,14 +174,20 @@ impl MockCallStack {
 
     // ── Command observation ───────────────────────────────────────────────────
 
-    /// Wait up to `timeout_ms` milliseconds for the next [`CallCommand`] sent by the app.
+    /// Wait up to `timeout_ms` milliseconds for the next actionable
+    /// [`CallCommand`] sent by the app. Diagnostic `Trace` events are skipped
+    /// so existing command-sequence assertions keep working.
     ///
     /// Returns `None` on timeout.
     pub async fn next_cmd(&mut self, timeout_ms: u64) -> Option<CallCommand> {
-        tokio::time::timeout(Duration::from_millis(timeout_ms), self.cmd_rx.recv())
-            .await
-            .ok()
-            .flatten()
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            match tokio::time::timeout_at(deadline, self.cmd_rx.recv()).await {
+                Ok(Some(CallCommand::Trace { .. })) => continue,
+                Ok(Some(cmd)) => return Some(cmd),
+                Ok(None) | Err(_) => return None,
+            }
+        }
     }
 
     /// Assert the next command satisfies `matcher` within `timeout_ms` ms.

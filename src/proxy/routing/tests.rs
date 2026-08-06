@@ -673,9 +673,6 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
             redirect: Some("sip:voicemail@rustpbx.com".to_string()),
             failure_code: None,
             failure_reason: None,
-            failure_prompt: None,
-            queue_ref: None,
-            skill_group_ref: None,
         }),
         ..RouteQueueConfig::default()
     };
@@ -897,45 +894,10 @@ async fn test_source_trunks_filters_by_trunk_name() {
 }
 
 #[test]
-fn test_queue_fallback_play_then_hangup_action() {
-    let queue_cfg = RouteQueueConfig {
-        accept_immediately: true,
-        hold: None,
-        fallback: Some(RouteQueueFallbackConfig {
-            redirect: None,
-            failure_code: Some(486),
-            failure_reason: Some("Busy".to_string()),
-            failure_prompt: Some("prompts/busy.wav".to_string()),
-            queue_ref: None,
-            skill_group_ref: None,
-        }),
-        ..RouteQueueConfig::default()
-    };
-
-    let plan = queue_cfg
-        .to_queue_plan()
-        .expect("queue config should convert to plan");
-
-    match plan.fallback.expect("fallback missing") {
-        QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-            audio_file,
-            status_code,
-            reason,
-            ..
-        }) => {
-            assert_eq!(audio_file, "prompts/busy.wav");
-            assert_eq!(status_code, StatusCode::BusyHere);
-            assert_eq!(reason.as_deref(), Some("Busy"));
-        }
-        other => panic!("unexpected fallback action: {:?}", other),
-    }
-}
-
-#[test]
-fn test_queue_fallback_to_named_queue() {
+fn test_queue_fallback_redirect_to_queue_via_transfer() {
     let queue_cfg = RouteQueueConfig {
         fallback: Some(RouteQueueFallbackConfig {
-            queue_ref: Some("tier2".to_string()),
+            redirect: Some("queue:tier2".to_string()),
             ..RouteQueueFallbackConfig::default()
         }),
         ..RouteQueueConfig::default()
@@ -946,25 +908,21 @@ fn test_queue_fallback_to_named_queue() {
         .expect("queue config should convert to plan");
 
     match plan.fallback.expect("fallback missing") {
-        QueueFallbackAction::Queue { name } => assert_eq!(name, "tier2"),
+        QueueFallbackAction::Failure(FailureAction::Transfer(
+            crate::call::TransferEndpoint::Queue(name),
+        )) => {
+            assert_eq!(name, "tier2");
+        }
         other => panic!("unexpected fallback action: {:?}", other),
     }
 }
 
 #[test]
-fn test_queue_busy_prompt_maps_to_failure_audio() {
+fn test_queue_fallback_redirect_to_ivr_via_transfer() {
     let queue_cfg = RouteQueueConfig {
-        voice_prompts: Some(crate::call::VoicePrompts {
-            transfer_prompt: Some("config/sounds/queue-transfer-zh.wav".to_string()),
-            busy_prompt: Some("config/sounds/queue-busy-zh.wav".to_string()),
-            off_hours_prompt: None,
-            no_answer_prompt: None,
-            position_prompt: None,
-            wait_time_prompt: None,
-            final_destination_prompt: None,
-            callback_offer_prompt: None,
-            callback_confirm_prompt: None,
-            comfort_prompts: Vec::new(),
+        fallback: Some(RouteQueueFallbackConfig {
+            redirect: Some("ivr:main-menu".to_string()),
+            ..RouteQueueFallbackConfig::default()
         }),
         ..RouteQueueConfig::default()
     };
@@ -973,10 +931,38 @@ fn test_queue_busy_prompt_maps_to_failure_audio() {
         .to_queue_plan()
         .expect("queue config should convert to plan");
 
-    assert_eq!(
-        plan.failure_audio.as_deref(),
-        Some("config/sounds/queue-busy-zh.wav")
-    );
+    match plan.fallback.expect("fallback missing") {
+        QueueFallbackAction::Failure(FailureAction::Transfer(
+            crate::call::TransferEndpoint::Ivr(name),
+        )) => {
+            assert_eq!(name, "main-menu");
+        }
+        other => panic!("unexpected fallback action: {:?}", other),
+    }
+}
+
+#[test]
+fn test_queue_fallback_hangup_with_code() {
+    let queue_cfg = RouteQueueConfig {
+        fallback: Some(RouteQueueFallbackConfig {
+            failure_code: Some(486),
+            failure_reason: Some("Busy".to_string()),
+            ..RouteQueueFallbackConfig::default()
+        }),
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    match plan.fallback.expect("fallback missing") {
+        QueueFallbackAction::Failure(FailureAction::Hangup { code, reason }) => {
+            assert_eq!(code.as_ref().map(|c| c.code()), Some(486));
+            assert_eq!(reason.as_deref(), Some("Busy"));
+        }
+        other => panic!("unexpected fallback action: {:?}", other),
+    }
 }
 
 #[test]
@@ -1062,32 +1048,6 @@ fn test_queue_strategy_builds_skill_group_targets() {
             );
         }
         other => panic!("unexpected strategy: {:?}", other),
-    }
-}
-
-#[test]
-fn test_queue_fallback_with_skill_group() {
-    let queue_cfg = RouteQueueConfig {
-        fallback: Some(RouteQueueFallbackConfig {
-            redirect: None,
-            failure_code: None,
-            failure_reason: None,
-            failure_prompt: None,
-            queue_ref: Some("skill-group:support_l2".to_string()),
-            skill_group_ref: None,
-        }),
-        ..RouteQueueConfig::default()
-    };
-
-    let plan = queue_cfg
-        .to_queue_plan()
-        .expect("queue config should convert to plan");
-
-    match plan.fallback.expect("fallback missing") {
-        QueueFallbackAction::Queue { name } => {
-            assert_eq!(name, "skill-group:support_l2");
-        }
-        other => panic!("unexpected fallback action: {:?}", other),
     }
 }
 

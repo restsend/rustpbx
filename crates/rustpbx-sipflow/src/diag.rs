@@ -573,7 +573,19 @@ pub async fn run_diag(
     }
 
     // FlowDB pass
-    if let Ok(flowdb) = FlowDbBackend::new(&base, subdirs, None, 64, 128, 1000, 3600, false, 16000, 1, flowdb::SyncMode::Always) {
+    if let Ok(flowdb) = FlowDbBackend::new(
+        &base,
+        subdirs,
+        None,
+        64,
+        128,
+        1000,
+        3600,
+        false,
+        16000,
+        1,
+        flowdb::SyncMode::Always,
+    ) {
         let flowdb = Arc::new(flowdb);
 
         if let Ok(items) = flowdb.query_flow(call_id, start, end).await {
@@ -680,14 +692,16 @@ pub fn payload_analysis(payload: &[u8]) -> serde_json::Value {
     let sf_offset = payload.windows(2).position(|w| w == [0x53, 0x46]);
 
     let show_len = payload.len().min(128);
-    let hex_prefix: String = payload[..show_len]
-        .iter()
-        .enumerate()
-        .fold(String::with_capacity(show_len * 3), |mut acc, (i, b)| {
-            if i > 0 { acc.push(' '); }
+    let hex_prefix: String = payload[..show_len].iter().enumerate().fold(
+        String::with_capacity(show_len * 3),
+        |mut acc, (i, b)| {
+            if i > 0 {
+                acc.push(' ');
+            }
             acc.push_str(&format!("{:02x}", b));
             acc
-        });
+        },
+    );
 
     serde_json::json!({
         "length": payload.len(),
@@ -704,11 +718,7 @@ pub fn payload_analysis(payload: &[u8]) -> serde_json::Value {
 }
 
 /// Read raw bytes from a file at a given offset + size (diagnostic only).
-pub fn raw_read_range_sync(
-    path: &str,
-    offset: u64,
-    size: usize,
-) -> Result<Vec<u8>> {
+pub fn raw_read_range_sync(path: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; size];
@@ -717,11 +727,7 @@ pub fn raw_read_range_sync(
 }
 
 /// Read raw bytes from a file at a given offset + size (async version for use inside tokio context).
-pub async fn raw_read_range(
-    path: &str,
-    offset: u64,
-    size: usize,
-) -> Result<Vec<u8>> {
+pub async fn raw_read_range(path: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncSeekExt;
     let mut file = tokio::fs::File::open(path).await?;

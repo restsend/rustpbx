@@ -669,10 +669,7 @@ mod tests {
         // An unregistered code (e.g. from a newer build) must not panic; it
         // simply leaves error_severity absent for the renderer to default.
         let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
-        let route = HashMap::from([(
-            "error_code".to_string(),
-            "future.unknown".to_string(),
-        )]);
+        let route = HashMap::from([("error_code".to_string(), "future.unknown".to_string())]);
         enrich_error_metadata(&mut meta, Some(&route), 500, None, None);
         assert_eq!(meta_str(&meta, "error_code"), "future.unknown");
         assert!(meta.get("error_severity").is_none());
@@ -685,10 +682,7 @@ mod tests {
             "error_code".to_string(),
             serde_json::Value::String("wholesale.cps_limit".to_string()),
         );
-        let route = HashMap::from([(
-            "error_code".to_string(),
-            "proxy.route_aborted".to_string(),
-        )]);
+        let route = HashMap::from([("error_code".to_string(), "proxy.route_aborted".to_string())]);
         enrich_error_metadata(&mut meta, Some(&route), 503, None, None);
         // pre-existing value is preserved (entry().or_insert)
         assert_eq!(meta_str(&meta, "error_code"), "wholesale.cps_limit");

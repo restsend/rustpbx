@@ -82,6 +82,9 @@ pub async fn create_test_server_with_config(
         proxy_config: config.clone(),
         cancel_token: CancellationToken::new(),
         data_context,
+        routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
+            crate::call::RoutingState::new(),
+        ))),
         database: None,
         user_backend,
         auth_backend: Vec::new(),
@@ -118,7 +121,6 @@ pub async fn create_test_server_with_config(
         session_hooks: Arc::new(Vec::new()),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
-
     });
     // Add test users
     let enabled_user = SipUser {

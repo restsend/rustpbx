@@ -1463,4 +1463,87 @@ mod recorder_advanced_tests {
             let _ = std::fs::remove_file(&temp_path);
         }
     }
+
+    // ==================== Mono caller-only recording ====================
+
+    /// Voicemail-style capture: only the caller (leg A) is recorded to a mono
+    /// WAV at full amplitude. The egress leg B is silence, so the naive mix
+    /// path would halve the level; caller-only must preserve it.
+    #[test]
+    fn test_mono_caller_only_recording_keeps_full_amplitude() {
+        let temp_path = std::env::temp_dir().join("test_mono_caller_only.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new_with_channels(path_str, CodecType::PCMU, 1, true).unwrap();
+        let profile = NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::PCMU,
+                payload_type: 0,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+            ..Default::default()
+        };
+        recorder.set_leg_profile(Leg::A, profile.clone());
+        recorder.set_leg_profile(Leg::B, profile);
+
+        // Leg A: a loud constant signal (PCMU-encoded).
+        let mut enc_a = audio_codec::create_encoder(CodecType::PCMU);
+        let loud: Vec<i16> = vec![20000i16; 1600];
+        let encoded_loud = enc_a.encode(&loud);
+        let frame_a = AudioFrame {
+            data: encoded_loud.into(),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(0),
+            clock_rate: 8000,
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+            header_extension: None,
+        };
+        recorder
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .expect("write leg A");
+
+        // Leg B: silence (the voicemail egress leg).
+        let mut enc_b = audio_codec::create_encoder(CodecType::PCMU);
+        let silent: Vec<i16> = vec![0i16; 1600];
+        let encoded_sil = enc_b.encode(&silent);
+        let frame_b = AudioFrame {
+            data: encoded_sil.into(),
+            rtp_timestamp: 0,
+            sequence_number: Some(2),
+            payload_type: Some(0),
+            clock_rate: 8000,
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+            header_extension: None,
+        };
+        recorder
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .expect("write leg B");
+
+        recorder.finalize().expect("finalize");
+
+        // Header must declare a single (mono) channel.
+        let bytes = std::fs::read(&temp_path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF", "RIFF signature");
+        let channels = u16::from_le_bytes([bytes[22], bytes[23]]);
+        assert_eq!(channels, 1, "caller-only recording must be single-channel");
+
+        // Decoded amplitude must match leg A (~20000), not the ~10000 that
+        // mixing with the silent leg B would produce.
+        let data = &bytes[44..];
+        let mut decoder = audio_codec::create_decoder(CodecType::PCMU);
+        let pcm = decoder.decode(data);
+        let avg: i32 = pcm.iter().map(|s| s.abs() as i32).sum::<i32>() / pcm.len().max(1) as i32;
+        assert!(
+            avg > 15000,
+            "caller-only mono must keep full amplitude, got avg={avg}"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
 }

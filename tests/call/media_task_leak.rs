@@ -15,9 +15,9 @@
 //!
 //! Usage: cargo test --test call -- media_task_leak -- --nocapture
 
+use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use crate::helpers::test_server::{TEST_TOKEN, TestPbx};
 use rustpbx::utils::{active_task_count, reset_task_metrics};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -35,12 +35,18 @@ fn spawn_callee(username: &str, password: &str, addr: &str, register: &str) -> C
     Command::new("sipbot")
         .args([
             "wait",
-            "-a", addr,
-            "--username", username,
-            "--password", password,
-            "--register", register,
-            "--codecs", "pcmu",
-            "--ring-duration", "1",
+            "-a",
+            addr,
+            "--username",
+            username,
+            "--password",
+            password,
+            "--register",
+            register,
+            "--codecs",
+            "pcmu",
+            "--ring-duration",
+            "1",
             "--echo",
         ])
         .stdout(Stdio::null())
@@ -63,7 +69,11 @@ async fn rwi_cmd(
         "action": action,
         "params": params,
     });
-    tx.lock().await.send(Message::Text(req.to_string().into())).await.unwrap();
+    tx.lock()
+        .await
+        .send(Message::Text(req.to_string().into()))
+        .await
+        .unwrap();
     loop {
         let msg = timeout(Duration::from_secs(15), ws.next()).await;
         let msg = match msg {
@@ -89,7 +99,8 @@ async fn test_media_churn_no_task_or_session_leak() {
 
     // sipbot echo callee registered to the PBX.
     let mut callee = spawn_callee(
-        "1002", "123456",
+        "1002",
+        "123456",
         &format!("127.0.0.1:{callee_port}"),
         &format!("127.0.0.1:{sip_port}"),
     );
@@ -101,7 +112,8 @@ async fn test_media_churn_no_task_or_session_leak() {
     let tx = Arc::new(Mutex::new(sink));
 
     rwi_cmd(
-        &mut stream, &tx,
+        &mut stream,
+        &tx,
         "session.subscribe",
         serde_json::json!({"contexts": ["default"]}),
         "sub",
@@ -145,16 +157,11 @@ async fn test_media_churn_no_task_or_session_leak() {
 }
 
 /// One originate → answer → hold → resume → hangup cycle.
-async fn run_cycle(
-    stream: &mut WsRx,
-    tx: &WsTx,
-    callee_port: &u16,
-    i: usize,
-    prefix: &str,
-) {
+async fn run_cycle(stream: &mut WsRx, tx: &WsTx, callee_port: &u16, i: usize, prefix: &str) {
     let call_id = format!("{prefix}-{}-{i}", Uuid::new_v4().simple());
     let r = rwi_cmd(
-        stream, tx,
+        stream,
+        tx,
         "call.originate",
         serde_json::json!({
             "call_id": call_id,
@@ -166,13 +173,37 @@ async fn run_cycle(
         &format!("o{prefix}-{i}"),
     )
     .await;
-    assert_eq!(r.get("type").and_then(|s| s.as_str()), Some("command_completed"),
-               "originate {prefix} {i} failed: {r}");
+    assert_eq!(
+        r.get("type").and_then(|s| s.as_str()),
+        Some("command_completed"),
+        "originate {prefix} {i} failed: {r}"
+    );
     sleep(Duration::from_millis(600)).await;
 
-    rwi_cmd(stream, tx, "call.hold", serde_json::json!({"call_id": call_id}), &format!("h{prefix}-{i}")).await;
+    rwi_cmd(
+        stream,
+        tx,
+        "call.hold",
+        serde_json::json!({"call_id": call_id}),
+        &format!("h{prefix}-{i}"),
+    )
+    .await;
     sleep(Duration::from_millis(300)).await;
-    rwi_cmd(stream, tx, "call.unhold", serde_json::json!({"call_id": call_id}), &format!("u{prefix}-{i}")).await;
+    rwi_cmd(
+        stream,
+        tx,
+        "call.unhold",
+        serde_json::json!({"call_id": call_id}),
+        &format!("u{prefix}-{i}"),
+    )
+    .await;
     sleep(Duration::from_millis(300)).await;
-    rwi_cmd(stream, tx, "call.hangup", serde_json::json!({"call_id": call_id}), &format!("g{prefix}-{i}")).await;
+    rwi_cmd(
+        stream,
+        tx,
+        "call.hangup",
+        serde_json::json!({"call_id": call_id}),
+        &format!("g{prefix}-{i}"),
+    )
+    .await;
 }

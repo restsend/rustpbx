@@ -269,6 +269,7 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::DtmfCollect { .. }
         | CallCommand::AppExited
         | CallCommand::ResumeMedia
+        | CallCommand::Trace { .. }
         | CallCommand::SendInfo { .. } => {
             Err(AdapterError::NotSupported(format!("{:?}", cmd)).into())
         }
@@ -324,6 +325,8 @@ pub fn session_action_to_call_command(action: SessionAction) -> Result<CallComma
                 max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
                 beep,
                 format: None,
+                channels: None,
+                mono_caller_only: None,
             },
         }),
         SessionAction::PauseRecording => Ok(CallCommand::PauseRecording),
@@ -342,6 +345,7 @@ pub fn session_action_to_call_command(action: SessionAction) -> Result<CallComma
             },
             reason,
             code,
+            rtp_timeout_side: None,
         })),
         SessionAction::StopPlayback => Ok(CallCommand::StopPlayback { leg_id: None }),
         SessionAction::Hold { music_source } => Ok(CallCommand::Hold {

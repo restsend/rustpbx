@@ -2,11 +2,11 @@ use crate::{
     config::{CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_MAX_CONCURRENT},
     utils::sanitize_id,
 };
-use rustpbx_models::DatabasePoolConfig;
 use anyhow::Result;
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest;
+use rustpbx_models::DatabasePoolConfig;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection,
     prelude::DateTimeUtc,
@@ -613,7 +613,10 @@ impl CallRecordManagerBuilder {
                 rotate,
             }) => {
                 let (db, _db_url) = match &database_url {
-                    Some(url) => (crate::models::connect_db(url, pool_config.as_ref()).await?, url.clone()),
+                    Some(url) => (
+                        crate::models::connect_db(url, pool_config.as_ref()).await?,
+                        url.clone(),
+                    ),
                     None => (
                         main_db.clone().ok_or_else(|| {
                             anyhow::anyhow!("either database_url or main_db is required")
@@ -916,10 +919,7 @@ impl CallRecordRow {
         let mut metadata_map = details.metadata.clone().unwrap_or_default();
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-            metadata_map.insert(
-                "sip_leg_roles".to_string(),
-                serde_json::Value::String(json),
-            );
+            metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
         }
         let metadata = serde_json::to_value(&metadata_map).ok();
 

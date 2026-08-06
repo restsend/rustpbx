@@ -1026,7 +1026,10 @@ action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", heade
                 ..
             } => {
                 assert_eq!(create_room_uri, "wss://voip.example.com/ws");
-                assert_eq!(headers.get("Authorization"), Some(&"Bearer token".to_string()));
+                assert_eq!(
+                    headers.get("Authorization"),
+                    Some(&"Bearer token".to_string())
+                );
                 assert_eq!(*timeout_ms, Some(30000));
                 assert_eq!(return_to_ivr.as_deref(), Some("bridge-tree"));
             }

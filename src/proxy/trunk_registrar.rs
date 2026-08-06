@@ -90,9 +90,7 @@ impl TrunkRegistrar {
 
     /// Get the registration status of a specific trunk.
     pub fn get_status(&self, trunk_name: &str) -> Option<TrunkRegistrationStatus> {
-        self.statuses
-            .get(trunk_name)
-            .map(|r| r.value().clone())
+        self.statuses.get(trunk_name).map(|r| r.value().clone())
     }
 
     /// Reconcile registrations with the current set of trunks.
@@ -159,8 +157,7 @@ impl TrunkRegistrar {
     /// Spawn a background task for trunk registration.
     fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef) {
         let child_token = self.parent_cancel.child_token();
-        self.cancel_tokens
-            .insert(name.clone(), child_token.clone());
+        self.cancel_tokens.insert(name.clone(), child_token.clone());
 
         let statuses = self.statuses.clone();
 

@@ -97,6 +97,18 @@ impl std::fmt::Display for SystemHangupReason {
     }
 }
 
+/// Which leg of a bridged call caused an RTP inactivity timeout. This lets the
+/// CDR / call trace attribute a teardown to the caller or the callee side even
+/// though both legs share the `RtpTimeout` hangup reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RtpTimeoutSide {
+    /// The caller (LegSide::A) stopped sending RTP.
+    Caller,
+    /// The callee (LegSide::B) stopped sending RTP.
+    Callee,
+}
+
 /// Hangup command with full context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HangupCommand {
@@ -110,6 +122,9 @@ pub struct HangupCommand {
     pub reason: Option<CallRecordHangupReason>,
     /// SIP response code
     pub code: Option<u16>,
+    /// When `reason == RtpTimeout`, which side of the bridge caused it.
+    /// Only set for the RTP-inactivity watchdog; `None` otherwise.
+    pub rtp_timeout_side: Option<RtpTimeoutSide>,
 }
 
 impl HangupCommand {
@@ -124,6 +139,7 @@ impl HangupCommand {
             },
             reason,
             code,
+            rtp_timeout_side: None,
         }
     }
 
@@ -142,6 +158,7 @@ impl HangupCommand {
             },
             reason,
             code,
+            rtp_timeout_side: None,
         }
     }
 
@@ -162,6 +179,7 @@ impl HangupCommand {
             },
             reason: cdr_reason,
             code: Some(sip_code),
+            rtp_timeout_side: None,
         }
     }
 
@@ -173,6 +191,7 @@ impl HangupCommand {
             initiator: HangupInitiator::System { reason, details },
             reason: None,
             code: Some(500),
+            rtp_timeout_side: None,
         }
     }
 
@@ -190,6 +209,14 @@ impl HangupCommand {
                 command_id: Some(id.into()),
             };
         }
+        self
+    }
+
+    /// Attribute the hangup to the RTP-inactivity watchdog and record which
+    /// side of the bridge stopped sending RTP.
+    pub fn with_rtp_timeout_side(mut self, side: RtpTimeoutSide) -> Self {
+        self.reason = Some(CallRecordHangupReason::RtpTimeout);
+        self.rtp_timeout_side = Some(side);
         self
     }
 }

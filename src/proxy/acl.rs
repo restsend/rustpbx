@@ -182,11 +182,15 @@ impl AclModule {
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
         let cfg = &self.inner.config;
         let now = Instant::now();
-        let mut entry = self.inner.dos_data.entry(ip).or_insert_with(|| DosPerIpData {
-            recent: Vec::new(),
-            concurrent: 0,
-            blocked_until: None,
-        });
+        let mut entry = self
+            .inner
+            .dos_data
+            .entry(ip)
+            .or_insert_with(|| DosPerIpData {
+                recent: Vec::new(),
+                concurrent: 0,
+                blocked_until: None,
+            });
 
         if let Some(until) = entry.blocked_until {
             if now < until {

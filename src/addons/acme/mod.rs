@@ -5,9 +5,9 @@ use axum::{
     Extension, Router,
     routing::{get, post},
 };
+use dashmap::DashMap;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
-use dashmap::DashMap;
 use tokio::sync::RwLock as TokioRwLock;
 
 pub mod config;

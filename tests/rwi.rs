@@ -7,9 +7,15 @@
 
 mod helpers;
 
-#[path = "rwi/binary_pcm_e2e.rs"] mod binary_pcm_e2e;
-#[path = "rwi/comprehensive_event.rs"] mod comprehensive_event;
-#[path = "rwi/integration.rs"] mod integration;
-#[path = "rwi/leg_timeline_e2e.rs"] mod leg_timeline_e2e;
-#[path = "rwi/resume_e2e.rs"] mod resume_e2e;
-#[path = "rwi/server.rs"] mod server;
+#[path = "rwi/binary_pcm_e2e.rs"]
+mod binary_pcm_e2e;
+#[path = "rwi/comprehensive_event.rs"]
+mod comprehensive_event;
+#[path = "rwi/integration.rs"]
+mod integration;
+#[path = "rwi/leg_timeline_e2e.rs"]
+mod leg_timeline_e2e;
+#[path = "rwi/resume_e2e.rs"]
+mod resume_e2e;
+#[path = "rwi/server.rs"]
+mod server;

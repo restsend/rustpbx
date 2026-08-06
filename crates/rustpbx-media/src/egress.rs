@@ -36,8 +36,8 @@
 //! only holds the push side. This keeps the pipeline unit-testable without a
 //! real PeerConnection.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -45,9 +45,9 @@ use audio_codec::{CodecType, Decoder, Encoder, Resampler, create_encoder};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
+use rustrtc::media::MediaStreamTrack;
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::SampleStreamSource;
-use rustrtc::media::MediaStreamTrack;
 use rustrtc::{PeerConnection, RtpRewriteBridgeParams};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -271,7 +271,12 @@ struct EgressTask {
 }
 
 impl EgressTask {
-    async fn run(mut self, mut cmd_rx: mpsc::Receiver<EgressCmd>, ptime: Duration, cancel: CancellationToken) {
+    async fn run(
+        mut self,
+        mut cmd_rx: mpsc::Receiver<EgressCmd>,
+        ptime: Duration,
+        cancel: CancellationToken,
+    ) {
         let mut interval = tokio::time::interval(ptime);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -371,7 +376,13 @@ impl EgressTask {
         let mut source = std::mem::replace(&mut self.source, EgressSource::Silence);
 
         // Promote Media→Silence on terminal EOF; fire on_end callback.
-        if let EgressSource::Media { audio, loop_playback, on_end, .. } = &mut source {
+        if let EgressSource::Media {
+            audio,
+            loop_playback,
+            on_end,
+            ..
+        } = &mut source
+        {
             if !audio.has_data() && !*loop_playback {
                 if let Some(cb) = on_end.take() {
                     cb(false);
@@ -407,7 +418,12 @@ impl EgressTask {
                 self.encode_silence().into()
             }
             EgressSource::Silence => self.encode_silence().into(),
-            EgressSource::Media { audio, loop_playback, on_end, .. } => {
+            EgressSource::Media {
+                audio,
+                loop_playback,
+                on_end,
+                ..
+            } => {
                 let n = audio.read_samples(&mut self.pcm_buf);
                 if n == 0 {
                     if *loop_playback {
@@ -490,7 +506,9 @@ impl EgressTask {
     }
 
     fn advance_ts_seq(&mut self) {
-        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(self.codec_rtp_ticks_per_frame());
+        self.rtp_timestamp = self
+            .rtp_timestamp
+            .wrapping_add(self.codec_rtp_ticks_per_frame());
         self.sequence_number = self.sequence_number.wrapping_add(1);
     }
 
@@ -503,8 +521,8 @@ impl EgressTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustrtc::media::track::sample_track;
     use rustrtc::media::MediaKind;
+    use rustrtc::media::track::sample_track;
 
     /// A minimal AudioSource that emits a constant-amplitude PCM sine-ish ramp,
     /// looping forever.
@@ -590,7 +608,11 @@ mod tests {
         // deviation proves non-zero samples reached the encoder.
         let with_noise = task.next_frame().await.expect("frame").data;
         let zeros = vec![0u8; with_noise.len()];
-        assert_ne!(&with_noise[..], &zeros[..], "CNG must not be digital silence");
+        assert_ne!(
+            &with_noise[..],
+            &zeros[..],
+            "CNG must not be digital silence"
+        );
     }
 
     #[tokio::test]
@@ -716,7 +738,10 @@ mod tests {
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
         assert_eq!(f.payload_type, Some(0));
-        assert!(!f.data.is_empty(), "PCMU silence must encode to non-empty bytes");
+        assert!(
+            !f.data.is_empty(),
+            "PCMU silence must encode to non-empty bytes"
+        );
         // Timestamp advances by 160 ticks for 20ms @ 8kHz.
         assert_eq!(task.rtp_timestamp, 160);
         assert_eq!(task.sequence_number, 1);
@@ -730,18 +755,32 @@ mod tests {
 
         struct Empty;
         impl AudioSource for Empty {
-            fn read_samples(&mut self, _b: &mut [i16]) -> usize { 0 }
-            fn sample_rate(&self) -> u32 { 8000 }
-            fn channels(&self) -> u16 { 1 }
-            fn has_data(&self) -> bool { false }
-            fn reset(&mut self) -> Result<()> { Ok(()) }
+            fn read_samples(&mut self, _b: &mut [i16]) -> usize {
+                0
+            }
+            fn sample_rate(&self) -> u32 {
+                8000
+            }
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn has_data(&self) -> bool {
+                false
+            }
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
         }
 
         let mut task = EgressTask {
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
-            source: EgressSource::Media { audio: Box::new(Empty), loop_playback: false, on_end: None },
+            source: EgressSource::Media {
+                audio: Box::new(Empty),
+                loop_playback: false,
+                on_end: None,
+            },
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
@@ -753,7 +792,10 @@ mod tests {
             noise_lp: 0.0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
-        let f = task.next_frame().await.expect("EOF media yields silence frame");
+        let f = task
+            .next_frame()
+            .await
+            .expect("EOF media yields silence frame");
         assert!(matches!(task.source, EgressSource::Silence));
         assert!(!f.data.is_empty());
     }
@@ -761,9 +803,15 @@ mod tests {
     #[test]
     fn pcm_samples_per_frame_is_correct() {
         // PCMU @ 8kHz, 20ms → 160 samples
-        assert_eq!(pcm_samples_per_frame(CodecType::PCMU, Duration::from_millis(20)), 160);
+        assert_eq!(
+            pcm_samples_per_frame(CodecType::PCMU, Duration::from_millis(20)),
+            160
+        );
         // Opus @ 48kHz, 20ms → 960 samples
-        assert_eq!(pcm_samples_per_frame(CodecType::Opus, Duration::from_millis(20)), 960);
+        assert_eq!(
+            pcm_samples_per_frame(CodecType::Opus, Duration::from_millis(20)),
+            960
+        );
     }
 
     /// `media_source_for_codec` must wrap a 24 kHz source in a resampler that
@@ -806,7 +854,11 @@ mod tests {
             }),
             CodecType::Opus,
         );
-        assert_eq!(wrapped.sample_rate(), 48000, "resampled source reports codec rate");
+        assert_eq!(
+            wrapped.sample_rate(),
+            48000,
+            "resampled source reports codec rate"
+        );
 
         let mut buf = vec![0i16; 960];
         let read = wrapped.read_samples(&mut buf);

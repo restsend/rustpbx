@@ -107,9 +107,6 @@ pub enum FallbackConfig {
 
     /// Redirect to another SIP URI
     Redirect { target: String },
-
-    /// Transfer to another queue
-    Queue { name: String },
 }
 
 fn default_status_code() -> u16 {
@@ -147,13 +144,6 @@ impl QueueConfig {
 
     /// Convert to runtime QueuePlan
     pub fn to_queue_plan(&self) -> Result<QueuePlan> {
-        let failure_audio = self
-            .voice_prompts
-            .as_ref()
-            .and_then(|prompts| prompts.busy_prompt.as_ref())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
         let plan = QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback,
@@ -165,11 +155,8 @@ impl QueueConfig {
             dial_strategy: Some(self.strategy.to_dial_strategy()?),
             ring_timeout: self.ring_timeout_secs.map(Duration::from_secs),
             label: self.name.clone(),
-            retry_codes: None,
-            no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone().unwrap_or_default(),
-            failure_audio,
         };
 
         Ok(plan)
@@ -320,7 +307,6 @@ impl FallbackConfig {
                 let uri = Uri::try_from(target.as_str()).unwrap_or_else(|_| Uri::default());
                 QueueFallbackAction::Redirect { target: uri }
             }
-            FallbackConfig::Queue { name } => QueueFallbackAction::Queue { name: name.clone() },
         }
     }
 
@@ -353,11 +339,6 @@ impl FallbackConfig {
                 }
                 Uri::try_from(target.as_str())
                     .map_err(|e| anyhow!("Redirect target invalid URI '{}': {}", target, e))?;
-            }
-            FallbackConfig::Queue { name } => {
-                if name.is_empty() {
-                    return Err(anyhow!("Queue name cannot be empty"));
-                }
             }
         }
         Ok(())

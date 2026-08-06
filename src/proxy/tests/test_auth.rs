@@ -487,6 +487,9 @@ async fn test_guest_call_allowed_extension() {
         proxy_config: config,
         cancel_token: CancellationToken::new(),
         data_context,
+        routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
+            crate::call::RoutingState::new(),
+        ))),
         database: None,
         user_backend: Box::new(user_backend),
         auth_backend: Vec::new(),
@@ -523,7 +526,6 @@ async fn test_guest_call_allowed_extension() {
         session_hooks: Arc::new(Vec::new()),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
-
     });
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 

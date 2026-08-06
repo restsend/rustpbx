@@ -3,8 +3,8 @@ use dashmap::DashMap;
 use flowdb::{Config as FlowDbConfig, Engine, Record};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -168,7 +168,10 @@ impl EngineCache {
 
     /// Snapshot of every open engine (used to flush memtables on explicit flush).
     pub(crate) fn all_engines(&self) -> Vec<Arc<Engine>> {
-        self.engines.iter().map(|e| e.value().engine.clone()).collect()
+        self.engines
+            .iter()
+            .map(|e| e.value().engine.clone())
+            .collect()
     }
 }
 

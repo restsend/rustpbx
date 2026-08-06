@@ -186,9 +186,7 @@ async fn test_media_track_handshake() {
     let offer = track1.local_description().await.unwrap();
 
     // Track2 responds with answer
-    let answer = track2
-        .handshake(offer, rustrtc::SdpType::Answer)
-        .await;
+    let answer = track2.handshake(offer, rustrtc::SdpType::Answer).await;
     assert!(answer.is_ok(), "Handshake failed: {:?}", answer.err());
 
     let answer_sdp = answer.unwrap();
@@ -206,8 +204,7 @@ async fn test_media_track_pranswer_then_answer_reuses_rtp_transport() {
         .build();
 
     let offer = offerer.local_description().await.unwrap();
-    let offer_desc =
-        rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
+    let offer_desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
     let offerer_port = offer_desc.first_audio_section().unwrap().port;
 
     let pranswer = answerer
@@ -342,9 +339,7 @@ async fn test_file_track_handshake() {
     let offer = offerer.local_description().await.unwrap();
 
     // FileTrack should be able to respond
-    let answer = track
-        .handshake(offer, rustrtc::SdpType::Answer)
-        .await;
+    let answer = track.handshake(offer, rustrtc::SdpType::Answer).await;
     assert!(
         answer.is_ok(),
         "FileTrack handshake failed: {:?}",
