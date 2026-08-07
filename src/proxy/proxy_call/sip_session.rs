@@ -3777,18 +3777,14 @@ impl SipSession {
                     self.meta.connected_callee = None;
                     self.meta.connected_callee_dialog_id = None;
 
-                    // Defer to the unified post-disconnect handler (CSAT first,
-                    // then return_app, then hangup).
+                    // Run the unified post-disconnect handler directly (CSAT
+                    // hooks first, then return_app, then hangup).
                     if !self
                         .caller_dialog
                         .as_ref()
                         .is_none_or(|d| d.state().is_terminated())
                     {
-                        if let Some(ref cmd_tx) = self.cmd_tx {
-                            let _ = cmd_tx.try_send(CallCommand::StartReturnApp);
-                        } else {
-                            self.pending_hangup.insert(self.caller_dialog_id());
-                        }
+                        self.handle_start_return_app().await;
                     }
                 } else {
                     let (code, reason_str) = match reason {
@@ -8881,23 +8877,13 @@ impl SipSession {
                         .is_none_or(|d| !d.state().is_terminated())
                 {
                     // Defer to the unified post-disconnect handler (CSAT first,
-                    // then return_app, then hangup).  Mirrors the B2BUA callee-
-                    // dialog-termination path so dynamic-leg apps (e.g. queue)
-                    // get the same return-app and CSAT-hook treatment.
-                    if let Some(ref cmd_tx) = self.cmd_tx {
-                        let _ = cmd_tx.try_send(CallCommand::StartReturnApp);
-                    } else {
-                        self.meta
-                            .hangup_reason
-                            .get_or_insert(CallRecordHangupReason::ByCallee);
-                        if let Some(d) = self.caller_dialog.as_ref() {
-                            self.pending_hangup.insert(d.id());
-                        }
-                    }
+                    // then return_app, then hangup).  Call directly since we
+                    // are already inside execute_command.
+                    self.handle_start_return_app().await;
                     info!(
                         session_id = %self.id,
                         %leg_id,
-                        "Connected dynamic leg ended; deferred to StartReturnApp"
+                        "Connected dynamic leg ended; post-disconnect handler ran"
                     );
                 }
                 CommandResult::failure(reason)
