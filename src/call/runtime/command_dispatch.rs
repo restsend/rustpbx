@@ -1,7 +1,7 @@
 //! Unified Command Dispatch
 //!
-//! This module provides a unified entry point for dispatching commands to sessions.
-//! It supports both the legacy SessionAction path and the new unified CallCommand path.
+//! This module provides a unified entry point for dispatching commands to sessions
+//! via the `CallCommand` pipeline (RWI/console payloads are adapted into commands).
 //!
 //! ## Usage
 //!

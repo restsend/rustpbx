@@ -24,21 +24,6 @@ impl RecordingPhase {
         )
     }
 
-    #[allow(dead_code)]
-    pub fn is_recording(&self) -> bool {
-        matches!(self, RecordingPhase::Recording { .. })
-    }
-
-    #[allow(dead_code)]
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            RecordingPhase::Recording { path, .. } | RecordingPhase::Paused { path, .. } => {
-                Some(path)
-            }
-            _ => None,
-        }
-    }
-
     pub fn started_at(&self) -> Option<Instant> {
         match self {
             RecordingPhase::Recording { started_at, .. }
@@ -49,20 +34,6 @@ impl RecordingPhase {
 
     pub fn elapsed(&self) -> Option<Duration> {
         self.started_at().map(|t| t.elapsed())
-    }
-
-    #[allow(dead_code)]
-    pub fn check_max_duration(&self) -> bool {
-        if let RecordingPhase::Recording {
-            started_at,
-            max_duration: Some(max),
-            ..
-        } = self
-        {
-            started_at.elapsed() >= *max
-        } else {
-            false
-        }
     }
 }
 
@@ -101,10 +72,7 @@ mod tests {
     fn test_recording_phase_idle_default() {
         let state = RecordingPhase::Idle;
         assert!(!state.is_active());
-        assert!(!state.is_recording());
-        assert!(state.path().is_none());
         assert!(state.started_at().is_none());
-        assert!(!state.check_max_duration());
     }
 
     #[test]
@@ -115,10 +83,7 @@ mod tests {
             max_duration: Some(Duration::from_secs(30)),
         };
         assert!(state.is_active());
-        assert!(state.is_recording());
-        assert_eq!(state.path(), Some("/tmp/test.wav"));
         assert!(state.started_at().is_some());
-        assert!(!state.check_max_duration());
     }
 
     #[test]
@@ -129,28 +94,6 @@ mod tests {
             max_duration: None,
         };
         assert!(state.is_active());
-        assert!(!state.is_recording());
-        assert_eq!(state.path(), Some("/tmp/test.wav"));
-    }
-
-    #[test]
-    fn test_recording_phase_max_duration_not_expired() {
-        let state = RecordingPhase::Recording {
-            path: "/tmp/test.wav".to_string(),
-            started_at: Instant::now(),
-            max_duration: Some(Duration::from_secs(3600)),
-        };
-        assert!(!state.check_max_duration());
-    }
-
-    #[test]
-    fn test_recording_phase_no_max_duration() {
-        let state = RecordingPhase::Recording {
-            path: "/tmp/test.wav".to_string(),
-            started_at: Instant::now(),
-            max_duration: None,
-        };
-        assert!(!state.check_max_duration());
     }
 
     #[test]

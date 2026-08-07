@@ -43,8 +43,7 @@ struct CommandDeduplicationCache {
     ttl: Duration,
 }
 
-#[allow(dead_code)]
-#[allow(dead_code)]
+#[allow(dead_code)] // `len()` is only exercised by tests in non-test builds
 impl CommandDeduplicationCache {
     fn new(ttl_secs: u64) -> Self {
         Self {
@@ -137,18 +136,13 @@ pub struct QueueStats {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct RecordState {
-    _mode: String,
-    _path: String,
     is_paused: bool,
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct RingbackState {
-    _target_call_id: String,
-    _source_call_id: String,
+    source_call_id: String,
 }
 
 /// Soft cap that triggers opportunistic eviction of stale [`RingbackState`]
@@ -166,14 +160,6 @@ struct SupervisorState {
     agent_leg: Option<String>,
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
-struct MediaStreamState;
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct MediaInjectState;
-
 pub struct RwiCommandProcessor {
     call_registry: Arc<ActiveProxyCallRegistry>,
     gateway: RwiGatewayRef,
@@ -182,9 +168,6 @@ pub struct RwiCommandProcessor {
     record_states: Arc<DashMap<String, RecordState>>,
     ringback_states: Arc<DashMap<String, RingbackState>>,
     supervisor_states: Arc<DashMap<String, SupervisorState>>,
-    media_stream_states: Arc<DashMap<String, MediaStreamState>>,
-    media_inject_states: Arc<DashMap<String, MediaInjectState>>,
-    mixer_registry: Arc<crate::proxy::proxy_call::session_registry::MixerRegistry>,
     conference_manager: Arc<ConferenceManager>,
     transfer_controller: Arc<RwLock<TransferController>>,
     command_dedup_cache: CommandDeduplicationCache,
@@ -212,11 +195,6 @@ impl RwiCommandProcessor {
             record_states: Arc::new(DashMap::new()),
             ringback_states: Arc::new(DashMap::new()),
             supervisor_states: Arc::new(DashMap::new()),
-            media_stream_states: Arc::new(DashMap::new()),
-            media_inject_states: Arc::new(DashMap::new()),
-            mixer_registry: Arc::new(
-                crate::proxy::proxy_call::session_registry::MixerRegistry::new(),
-            ),
             conference_manager,
             transfer_controller,
             command_dedup_cache: CommandDeduplicationCache::with_default_ttl(),
@@ -3105,7 +3083,7 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::StartRecording {
                 config: RecordConfig {
-                    path: path.clone(),
+                    path,
                     max_duration_secs: req.max_duration_secs,
                     beep: req.beep.unwrap_or(false),
                     format: None,
@@ -3115,8 +3093,6 @@ impl RwiCommandProcessor {
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         let record_state = RecordState {
-            _mode: req.mode,
-            _path: path,
             is_paused: false,
         };
         self.record_states.insert(req.call_id.clone(), record_state);
@@ -3803,8 +3779,7 @@ impl RwiCommandProcessor {
         self.get_handle(target_call_id).await?;
         self.get_handle(source_call_id).await?;
         let ringback_state = RingbackState {
-            _target_call_id: target_call_id.to_string(),
-            _source_call_id: source_call_id.to_string(),
+            source_call_id: source_call_id.to_string(),
         };
         // Opportunistic GC: drop entries whose target/source call has already
         // left the registry. RingbackState has no explicit "stop" path, so
@@ -3814,7 +3789,7 @@ impl RwiCommandProcessor {
             let registry = self.call_registry.clone();
             self.ringback_states.retain(|id, state| {
                 registry.get_handle(id).is_some()
-                    || registry.get_handle(&state._source_call_id).is_some()
+                    || registry.get_handle(&state.source_call_id).is_some()
             });
         }
         self.ringback_states
@@ -3843,13 +3818,6 @@ impl RwiCommandProcessor {
             mixer_id,
             supervisor_call_id,
             target_call_id
-        );
-
-        self.mixer_registry.create_supervisor_mixer(
-            mixer_id.clone(),
-            supervisor_call_id.to_string(),
-            target_call_id.to_string(),
-            SupervisorMode::Listen,
         );
 
         if let Ok(handle) = self.get_handle(target_call_id).await {
@@ -3911,21 +3879,6 @@ impl RwiCommandProcessor {
             supervisor_call_id,
             target_call_id
         );
-
-        self.mixer_registry.create_supervisor_mixer(
-            mixer_id.clone(),
-            supervisor_call_id.to_string(),
-            target_call_id.to_string(),
-            SupervisorMode::Whisper,
-        );
-
-        if !agent_leg.is_empty() {
-            self.mixer_registry.add_participant(
-                &mixer_id,
-                agent_leg.to_string(),
-                crate::proxy::proxy_call::session_registry::MixerParticipantRole::Customer,
-            );
-        }
 
         if let Ok(handle) = self.get_handle(target_call_id).await {
             let _ = handle.send_command(CallCommand::SupervisorWhisper {
@@ -3997,21 +3950,6 @@ impl RwiCommandProcessor {
             target_call_id
         );
 
-        self.mixer_registry.create_supervisor_mixer(
-            mixer_id.clone(),
-            supervisor_call_id.to_string(),
-            target_call_id.to_string(),
-            SupervisorMode::Barge,
-        );
-
-        if !agent_leg.is_empty() {
-            self.mixer_registry.add_participant(
-                &mixer_id,
-                agent_leg.to_string(),
-                crate::proxy::proxy_call::session_registry::MixerParticipantRole::Customer,
-            );
-        }
-
         if let Ok(handle) = self.get_handle(target_call_id).await {
             let _ = handle.send_command(CallCommand::SupervisorBarge {
                 supervisor_leg: LegId::new(supervisor_call_id),
@@ -4081,13 +4019,6 @@ impl RwiCommandProcessor {
             target_call_id
         );
 
-        self.mixer_registry.create_supervisor_mixer(
-            mixer_id.clone(),
-            supervisor_call_id.to_string(),
-            target_call_id.to_string(),
-            SupervisorMode::Barge,
-        );
-
         if let Ok(handle) = self.get_handle(target_call_id).await {
             let _ = handle.send_command(CallCommand::SupervisorTakeover {
                 supervisor_leg: LegId::new(supervisor_call_id),
@@ -4139,16 +4070,6 @@ impl RwiCommandProcessor {
         supervisor_call_id: &str,
         target_call_id: &str,
     ) -> Result<CommandResult, CommandError> {
-        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
-        tracing::info!("supervisor_stop: removing mixer with id={}", mixer_id);
-
-        let removed = self.mixer_registry.remove_mixer(&mixer_id);
-        if removed {
-            tracing::info!("supervisor_stop: mixer stopped and removed");
-        } else {
-            tracing::warn!("supervisor_stop: mixer not found (may have already been removed)");
-        }
-
         if let Ok(handle) = self.get_handle(target_call_id).await {
             let _ = handle.send_command(CallCommand::SupervisorStop {
                 supervisor_leg: LegId::new(supervisor_call_id),
@@ -4190,12 +4111,9 @@ impl RwiCommandProcessor {
         _direction: &str,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        // State-tracking only: records that the stream is logically active and
-        // fires the event.  Actual bidirectional WebSocket/RTP wiring is handled
-        // by the caller after receiving MediaStreamStarted.
-        tracing::debug!(call_id, "media_stream_start: tracking state, firing event");
-        self.media_stream_states
-            .insert(call_id.to_string(), MediaStreamState);
+        // Actual bidirectional WebSocket/RTP wiring is handled by the caller
+        // after receiving MediaStreamStarted.
+        tracing::debug!(call_id, "media_stream_start: firing event");
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStarted {
                 call_id: call_id.to_string(),
@@ -4209,8 +4127,7 @@ impl RwiCommandProcessor {
 
     async fn media_stream_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        tracing::debug!(call_id, "media_stream_stop: clearing state, firing event");
-        self.media_stream_states.remove(call_id);
+        tracing::debug!(call_id, "media_stream_stop: firing event");
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStopped {
                 call_id: call_id.to_string(),
@@ -4229,12 +4146,9 @@ impl RwiCommandProcessor {
         _format: &crate::rwi::session::MediaFormat,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        // State-tracking only: records that injection is logically active and
-        // fires the event.  Actual PCM/RTP injection is handled by the caller
-        // via the WebSocket media stream after receiving MediaStreamStarted.
-        tracing::debug!(call_id, "media_inject_start: tracking state, firing event");
-        self.media_inject_states
-            .insert(call_id.to_string(), MediaInjectState);
+        // Actual PCM/RTP injection is handled by the caller via the WebSocket
+        // media stream after receiving MediaStreamStarted.
+        tracing::debug!(call_id, "media_inject_start: firing event");
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStarted {
                 call_id: call_id.to_string(),
@@ -4248,8 +4162,7 @@ impl RwiCommandProcessor {
 
     async fn media_inject_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        tracing::debug!(call_id, "media_inject_stop: clearing state, firing event");
-        self.media_inject_states.remove(call_id);
+        tracing::debug!(call_id, "media_inject_stop: firing event");
         let event = crate::rwi::event::to_legacy_event(
             &crate::rwi::MediaStreamStopped {
                 call_id: call_id.to_string(),
@@ -5809,8 +5722,7 @@ mod tests {
             processor.ringback_states.insert(
                 format!("stale-target-{i}"),
                 RingbackState {
-                    _target_call_id: format!("stale-target-{i}"),
-                    _source_call_id: format!("stale-source-{i}"),
+                    source_call_id: format!("stale-source-{i}"),
                 },
             );
         }

@@ -18,10 +18,10 @@
 //! │  ApplicationContext ─ shared resources                │
 //! │  AppEventLoop ─ event dispatch loop                   │
 //! └─────────────────────────────────────────────────────┘
-//!                          ▲ sends SessionAction
+//!                          ▲ sends CallCommand
 //! ┌─────────────────────────────────────────────────────┐
 //! │ Proxy Call Layer                                     │
-//! │  CallSession │ BridgeConfig │ FileTrack │ Recorder   │
+//! │  SipSession │ MediaBridge │ rustpbx-media            │
 //! └─────────────────────────────────────────────────────┘
 //! ```
 //!

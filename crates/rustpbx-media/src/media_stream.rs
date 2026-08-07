@@ -55,12 +55,6 @@ pub struct MediaStream {
 }
 
 impl MediaStream {
-    #[allow(dead_code)]
-    pub async fn serve(&self) -> Result<()> {
-        self.cancel_token.cancelled().await;
-        Ok(())
-    }
-
     pub async fn update_track(&self, track: Box<dyn Track>, play_id: Option<String>) {
         let id = track.id().to_string();
         let wrapped = Arc::new(AsyncMutex::new(track));

@@ -743,9 +743,6 @@ async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
         .with_targets(crate::call::DialStrategy::Sequential(vec![]));
     let mut session = build_session(dialplan).await;
 
-    // Simulate a P2P RTP↔RTP call: no bridge created, default false.
-    assert!(!session.has_active_caller_ingress_monitor());
-
     session
         .accept_call(Some("sip:bob@rustpbx.com".to_string()), None)
         .await
@@ -755,11 +752,6 @@ async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
         session.meta.connected_callee,
         Some("sip:bob@rustpbx.com".to_string()),
         "connected_callee must be set after accept_call"
-    );
-    // No ingress monitor task should be started for non-bridge P2P calls.
-    assert!(
-        !session.has_active_caller_ingress_monitor(),
-        "ingress monitor must not be started for non-bridge P2P call"
     );
 }
 
@@ -807,14 +799,6 @@ async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_targets(crate::call::DialStrategy::Sequential(vec![]));
     let mut session = build_session(dialplan).await;
-
-    // Simulate bridge-based wholesale call (WebRTC→bridge→RTP).
-    // We only set the flag; we do NOT set session.media.answer because accept_call
-    // would try to send a real 200 OK on the SIP dialog (unit tests have no
-    // transport), which would fail at the send step, not at the DTMF-setup step.
-    // The intent here is to verify that accept_call does not panic and that
-    // connected_callee is assigned correctly even when caller_uses_bridge = true.
-    session.set_caller_uses_bridge_for_test(true);
 
     session
         .accept_call(Some("sip:trunk@wholesale.example".to_string()), None)

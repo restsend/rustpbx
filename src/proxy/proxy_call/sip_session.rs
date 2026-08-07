@@ -35,7 +35,6 @@ use crate::media::media_bridge::MediaBridge;
 use crate::media::negotiate::MediaNegotiator;
 use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::call::parse_allowed_codecs;
-use crate::proxy::proxy_call::session_registry::SupervisorSession;
 use crate::proxy::proxy_call::{
     media_peer::{MediaPeer, VoiceEnginePeer},
     reporter::CallReporter,
@@ -118,7 +117,7 @@ mod conference;
 mod supervisor;
 mod transfer;
 
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use transfer::ReturnTargetSpec;
 
 #[derive(Debug)]
@@ -286,7 +285,6 @@ pub struct SipSession {
     /// outbound INVITE is attached via `attach_caller_dialog`.
     pub caller_dialog: Option<InviteDialog>,
     pub callee_dialogs: Arc<DashMap<DialogId, ()>>,
-    pub supervisor_mixer: Option<Arc<SupervisorSession>>,
 
     pub context: CallContext,
     /// Shared owner for every concurrent-call permit held by this
@@ -1365,7 +1363,6 @@ impl SipSession {
             server,
             caller_dialog: Some(server_dialog.clone()),
             callee_dialogs: Arc::new(DashMap::new()),
-            supervisor_mixer: None,
             legs: {
                 use crate::proxy::proxy_call::leg_registry::LegRegistry;
                 let mut lr = LegRegistry::new();
@@ -1549,7 +1546,6 @@ impl SipSession {
             snapshot_cache: snapshot_cache.clone(),            server,
             caller_dialog: None,
             callee_dialogs: Arc::new(DashMap::new()),
-            supervisor_mixer: None,
             legs: {
                 use crate::proxy::proxy_call::leg_registry::LegRegistry;
                 let mut lr = LegRegistry::new();
@@ -10671,11 +10667,10 @@ impl Drop for SipSession {
         self.timer_queue.clear();
         self.timer_keys.clear();
 
-        // Stop conference bridges and supervisor mixer (safety net — cancel only,
-        // since we can't .await in Drop)
+        // Stop conference bridges (safety net — cancel only, since we can't
+        // .await in Drop)
         self.conference_bridge.stop_bridge();
         self.legs.stop_all_conference_bridge_handles();
-        self.supervisor_mixer.take();
         self.media_path_strategy.shutdown();
 
         // Media bridge — torn down explicitly under catch_unwind so a teardown
@@ -10730,20 +10725,6 @@ impl Drop for SipSession {
                 debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }
         }
-    }
-}
-
-#[cfg(test)]
-impl SipSession {
-    /// Test-only: set caller_answer_uses_media_bridge without going through the full
-    /// media-bridge setup codepath.
-    pub fn set_caller_uses_bridge_for_test(&mut self, _value: bool) {
-        // No-op: legacy media-bridge flag removed in the A/B MediaBridge rewrite.
-    }
-
-    /// Test-only: returns true if a caller ingress monitor task is currently active.
-    pub fn has_active_caller_ingress_monitor(&self) -> bool {
-        false
     }
 }
 

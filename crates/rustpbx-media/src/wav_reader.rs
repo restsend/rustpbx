@@ -184,8 +184,6 @@ pub fn format_issues(format: WavFormat, spec: &WavSpec) -> Vec<String> {
 pub struct WavReader<R: Read> {
     reader: R,
     spec: WavSpec,
-    #[allow(dead_code)]
-    data_offset: u64,
     data_len: u32,
     bytes_read: u32,
     format: WavFormat,
@@ -238,7 +236,6 @@ impl<R: Read + Seek> WavReader<R> {
         let mut _byte_rate: u32 = 0;
         let mut _block_align: u16 = 0;
         let mut bits_per_sample: u16 = 0;
-        let mut _data_offset: u64 = 0;
         let mut data_len: u32 = 0;
         let mut fmt_found = false;
         let mut data_found = false;
@@ -282,7 +279,6 @@ impl<R: Read + Seek> WavReader<R> {
                 if !fmt_found {
                     return Err(anyhow!("data chunk found before fmt chunk"));
                 }
-                _data_offset = reader.stream_position()?;
                 data_len = chunk_len;
                 data_found = true;
                 break;
@@ -324,7 +320,6 @@ impl<R: Read + Seek> WavReader<R> {
                 bits_per_sample,
                 sample_format,
             },
-            data_offset: _data_offset,
             data_len,
             bytes_read: 0,
             format,
