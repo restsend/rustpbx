@@ -327,6 +327,11 @@ impl ConferenceAudioMixer {
     pub async fn stop(&self) {
         self.cancel_token.cancel();
 
+        // Clear the per-route gain table so it cannot retain entries after the
+        // mixer is torn down (defensive; remove_participant already prunes).
+        self.route_gains.clear();
+        self.participants.clear();
+
         // Take the task out of the mutex before awaiting
         let task = {
             let mut mixing_task = self.mixing_task.lock();
@@ -358,6 +363,7 @@ impl ConferenceAudioMixer {
 
         loop {
             tokio::select! {
+                biased;
                 _ = ctx.cancel_token.cancelled() => {
                     info!(conf_id = %ctx.conf_id, "Conference mixing loop cancelled");
                     break;
@@ -417,9 +423,14 @@ impl ConferenceAudioMixer {
                                     .get(output_leg)
                                     .map(|e| e.output_tx.clone());
 
-                                if let Some(tx) = output_tx
-                                    && tx.send(output_frame).await.is_err() {
-                                    }
+                                // try_send (never await) so a slow/saturated
+                                // output channel for ONE participant cannot
+                                // head-of-line-block the mix for everyone else.
+                                // A dropped frame is a single 20ms tick — loss
+                                // is preferable to stalling the whole room.
+                                if let Some(tx) = output_tx {
+                                    let _ = tx.try_send(output_frame);
+                                }
                             }
                         }
                     }

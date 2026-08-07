@@ -1081,7 +1081,6 @@ label_answer = "接听"
 label_end = "结束"
 label_duration = "通话时长"
 # Actions
-btn_metadata_json = "元数据 JSON"
 btn_sip_trace_json = "SIP 跟踪 JSON"
 # Tabs
 tab_overview = "概览"

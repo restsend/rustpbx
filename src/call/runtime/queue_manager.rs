@@ -158,22 +158,34 @@ impl QueueManager {
         Ok(position)
     }
 
-    /// Dequeue a leg from a queue
+    /// Dequeue a leg from a queue.
+    /// If the queue becomes empty it is removed from the map so empty queue
+    /// entries do not accumulate over time.
     pub async fn dequeue(&self, queue_id: &QueueId, leg_id: &LegId) -> Result<QueueEntry> {
-        let mut queue = self
-            .queues
-            .get_mut(queue_id)
-            .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
+        let entry = {
+            let mut queue = self
+                .queues
+                .get_mut(queue_id)
+                .ok_or_else(|| anyhow!("Queue not found: {}", queue_id.0))?;
 
-        let entry = queue
-            .dequeue(leg_id)
-            .ok_or_else(|| anyhow!("Leg {} not found in queue {}", leg_id, queue_id.0))?;
+            let entry = queue
+                .dequeue(leg_id)
+                .ok_or_else(|| anyhow!("Leg {} not found in queue {}", leg_id, queue_id.0))?;
 
-        info!(
-            queue_id = %queue.id.0,
-            leg_id = %leg_id,
-            "Leg dequeued successfully"
-        );
+            info!(
+                queue_id = %queue.id.0,
+                leg_id = %leg_id,
+                "Leg dequeued successfully"
+            );
+            entry
+        };
+
+        // Evict the queue object once empty so the DashMap does not grow
+        // unbounded with retired queue ids.
+        if self.queues.get(queue_id).map(|q| q.is_empty()).unwrap_or(false) {
+            self.queues.remove(queue_id);
+            info!(queue_id = %queue_id.0, "Empty queue removed");
+        }
 
         Ok(entry)
     }

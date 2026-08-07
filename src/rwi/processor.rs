@@ -19,8 +19,6 @@ use futures::FutureExt;
 use std::collections::HashMap;
 
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -45,6 +43,7 @@ struct CommandDeduplicationCache {
     ttl: Duration,
 }
 
+#[allow(dead_code)]
 #[allow(dead_code)]
 impl CommandDeduplicationCache {
     fn new(ttl_secs: u64) -> Self {
@@ -84,12 +83,6 @@ impl CommandDeduplicationCache {
                 result,
             },
         );
-    }
-
-    async fn cleanup_expired(&self) {
-        let now = Instant::now();
-        self.entries
-            .retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
     }
 
     async fn len(&self) -> usize {
@@ -198,8 +191,6 @@ pub struct RwiCommandProcessor {
 
     agent_skills: Arc<DashMap<String, AgentSkill>>,
     queue_overflow_configs: Arc<DashMap<String, QueueOverflowConfig>>,
-    #[cfg(test)]
-    force_seat_replace_rollback_failure: Arc<AtomicBool>,
 }
 
 #[allow(dead_code)]
@@ -232,8 +223,6 @@ impl RwiCommandProcessor {
 
             agent_skills: Arc::new(DashMap::new()),
             queue_overflow_configs: Arc::new(DashMap::new()),
-            #[cfg(test)]
-            force_seat_replace_rollback_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -263,12 +252,6 @@ impl RwiCommandProcessor {
             return;
         }
         self.command_dedup_cache.record(action_id, result).await;
-    }
-
-    #[cfg(test)]
-    fn force_next_seat_replace_rollback_failure(&self) {
-        self.force_seat_replace_rollback_failure
-            .store(true, Ordering::SeqCst);
     }
 
     fn conference_manager(&self) -> Arc<ConferenceManager> {
@@ -2608,36 +2591,6 @@ impl RwiCommandProcessor {
                 gw.send_event_to_call_owner(&call_id, &event);
             }
         });
-
-        Ok(CommandResult::Success)
-    }
-
-    async fn bridge_calls(&self, leg_a: &str, leg_b: &str) -> Result<CommandResult, CommandError> {
-        use crate::call::domain::P2PMode;
-
-        let handle_a = self.get_handle(leg_a).await?;
-        let _handle_b = self.get_handle(leg_b).await?;
-
-        let send_result = handle_a.send_command(CallCommand::Bridge {
-            leg_a: LegId::new(leg_a),
-            leg_b: LegId::new(leg_b),
-            mode: P2PMode::Audio,
-        });
-
-        let event = crate::rwi::event::to_legacy_event(
-            &crate::rwi::CallBridged {
-                leg_a: leg_a.to_string(),
-                leg_b: leg_b.to_string(),
-            },
-            None,
-        );
-        let gw = self.gateway.read();
-        gw.send_event_to_call_owner(&leg_a.to_string(), &event);
-        gw.send_event_to_call_owner(&leg_b.to_string(), &event);
-
-        if let Err(e) = &send_result {
-            tracing::warn!("bridge_calls: send_command error (may be expected): {}", e);
-        }
 
         Ok(CommandResult::Success)
     }
@@ -5292,7 +5245,7 @@ mod tests {
     async fn test_originate_routes_when_enabled_and_reject_aborts() {
         use crate::config::ProxyConfig;
         use crate::proxy::routing::{
-            DestConfig, MatchConditions, RejectConfig, RouteAction, RouteRule,
+            MatchConditions, RejectConfig, RouteAction, RouteRule,
         };
         use crate::proxy::tests::common::create_test_server_with_config;
 
@@ -5361,7 +5314,7 @@ mod tests {
         use crate::config::ProxyConfig;
         use crate::proxy::routing::TrunkConfig;
         use crate::proxy::routing::{
-            DestConfig, MatchConditions, RejectConfig, RouteAction, RouteRule,
+            MatchConditions, RejectConfig, RouteAction, RouteRule,
         };
         use crate::proxy::tests::common::create_test_server_with_config;
 

@@ -525,8 +525,6 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "jwt_auth": config.proxy.jwt_auth.clone(),
             "session_cmd_channel_capacity": config.proxy.session_cmd_channel_capacity,
             "session_state_channel_capacity": config.proxy.session_state_channel_capacity,
-            "media_cmd_channel_capacity": config.proxy.media_cmd_channel_capacity,
-            "media_event_channel_capacity": config.proxy.media_event_channel_capacity,
             "stats": proxy_stats_value.clone(),
         });
 
@@ -1536,8 +1534,6 @@ pub(crate) struct StorageSettingsPayload {
     #[serde(default)]
     recorder_path: Option<Option<String>>,
     #[serde(default)]
-    media_cache_path: Option<Option<String>>,
-    #[serde(default)]
     recorder_format: Option<Option<String>>,
     #[serde(default)]
     callrecord: Option<Option<CallRecordStoragePayload>>,
@@ -1627,8 +1623,6 @@ pub(crate) struct SecuritySettingsPayload {
     // Channel capacities
     session_cmd_channel_capacity: Option<usize>,
     session_state_channel_capacity: Option<usize>,
-    media_cmd_channel_capacity: Option<usize>,
-    media_event_channel_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1977,15 +1971,6 @@ pub(crate) async fn update_storage_settings(
         modified = true;
     }
 
-    if let Some(cache_opt) = payload.media_cache_path {
-        if let Some(path) = normalize_opt_string(cache_opt) {
-            doc["media_cache_path"] = value(path);
-        } else {
-            doc.remove("media_cache_path");
-        }
-        modified = true;
-    }
-
     if let Some(callrecord_opt) = payload.callrecord {
         match callrecord_opt {
             Some(CallRecordStoragePayload::Disabled) | None => {
@@ -2146,8 +2131,6 @@ pub(crate) async fn update_security_settings(
         // Channel capacities
         set_opt!(session_cmd_channel_capacity, i64);
         set_opt!(session_state_channel_capacity, i64);
-        set_opt!(media_cmd_channel_capacity, i64);
-        set_opt!(media_event_channel_capacity, i64);
 
         // URI normalization
         set_opt!(uri_max_length, i64);

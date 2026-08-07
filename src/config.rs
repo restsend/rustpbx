@@ -765,10 +765,6 @@ pub struct ProxyConfig {
     pub session_cmd_channel_capacity: usize,
     #[serde(default = "default_session_state_channel_capacity")]
     pub session_state_channel_capacity: usize,
-    #[serde(default = "default_media_cmd_channel_capacity")]
-    pub media_cmd_channel_capacity: usize,
-    #[serde(default = "default_media_event_channel_capacity")]
-    pub media_event_channel_capacity: usize,
     #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -795,7 +791,6 @@ pub struct ProxyConfig {
     pub generated_db: bool,
     #[serde(default = "default_nat_fix")]
     pub nat_fix: bool,
-    pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
     #[serde(default = "default_passthrough_failure")]
@@ -884,12 +879,6 @@ fn default_session_cmd_channel_capacity() -> usize {
 }
 fn default_session_state_channel_capacity() -> usize {
     256
-}
-fn default_media_cmd_channel_capacity() -> usize {
-    512
-}
-fn default_media_event_channel_capacity() -> usize {
-    1024
 }
 
 fn available_parallelism() -> usize {
@@ -1265,8 +1254,6 @@ impl Default for ProxyConfig {
             pause_rtp_timeout_during_app: default_true(),
             session_cmd_channel_capacity: default_session_cmd_channel_capacity(),
             session_state_channel_capacity: default_session_state_channel_capacity(),
-            media_cmd_channel_capacity: default_media_cmd_channel_capacity(),
-            media_event_channel_capacity: default_media_event_channel_capacity(),
             queues: HashMap::new(),
             queues_files: Vec::new(),
             trunks: HashMap::new(),
@@ -1278,7 +1265,6 @@ impl Default for ProxyConfig {
             generated_dir: default_generated_config_dir(),
             generated_db: false,
             nat_fix: true,
-            sip_flow_max_items: None,
             addons: None,
             passthrough_failure: true,
             video_codecs: None,

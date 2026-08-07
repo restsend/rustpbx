@@ -12,7 +12,6 @@ pub mod tests {
 
     /// Enhanced MockMediaPeer for comprehensive testing
     pub struct MockMediaPeer {
-        pub stop_called: Arc<AtomicUsize>,
         pub cancel_token: CancellationToken,
         pub get_tracks_call_count: Arc<AtomicUsize>,
         pub update_track_call_count: Arc<AtomicUsize>,
@@ -22,23 +21,11 @@ pub mod tests {
     impl MockMediaPeer {
         pub fn new() -> Self {
             Self {
-                stop_called: Arc::new(AtomicUsize::new(0)),
                 cancel_token: CancellationToken::new(),
                 get_tracks_call_count: Arc::new(AtomicUsize::new(0)),
                 update_track_call_count: Arc::new(AtomicUsize::new(0)),
                 tracks: Arc::new(Mutex::new(Vec::new())),
             }
-        }
-
-        /// Creates a MockMediaPeer that tracks stop() call count
-        #[allow(dead_code)]
-        pub fn new_with_stop_tracking() -> Self {
-            Self::new()
-        }
-
-        /// Returns how many times stop() was called
-        pub fn stop_count(&self) -> usize {
-            self.stop_called.load(Ordering::SeqCst)
         }
 
         /// Returns how many times get_tracks() was called
@@ -82,15 +69,6 @@ pub mod tests {
             Ok(())
         }
 
-        async fn serve(&self) -> Result<()> {
-            Ok(())
-        }
-
-        fn stop(&self) {
-            self.stop_called.fetch_add(1, Ordering::SeqCst);
-            self.cancel_token.cancel();
-        }
-
         async fn mute_track(&self, _track_id: &str) -> bool {
             true
         }
@@ -105,19 +83,6 @@ pub mod tests {
     #[cfg(test)]
     mod mock_media_peer_tests {
         use super::*;
-
-        #[tokio::test]
-        async fn test_mock_media_peer_stop_increments_counter() {
-            let peer = MockMediaPeer::new();
-
-            assert_eq!(peer.stop_count(), 0);
-
-            peer.stop();
-            assert_eq!(peer.stop_count(), 1);
-
-            peer.stop();
-            assert_eq!(peer.stop_count(), 2);
-        }
 
         #[tokio::test]
         async fn test_mock_media_peer_get_tracks_increments_counter() {
@@ -142,13 +107,6 @@ pub mod tests {
             // but we can verify the counter mechanism works via the trait implementation
             let _ = peer.update_track_call_count();
             assert_eq!(peer.update_track_call_count(), 0); // not called yet
-        }
-
-        #[tokio::test]
-        async fn test_mock_media_peer_cancel_token_works() {
-            let peer = MockMediaPeer::new();
-            peer.stop();
-            assert!(peer.cancel_token.is_cancelled());
         }
     }
 }

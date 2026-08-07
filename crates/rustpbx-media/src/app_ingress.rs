@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -129,6 +129,11 @@ pub struct AppIngressAggregator {
 struct AggLeg {
     state: Arc<AtomicU8>,
     cancel: CancellationToken,
+    /// Shared with the installed `PacketForwarder` observer; set to `false` on
+    /// detach so the observer stops forwarding packets even though rustrtc
+    /// does not expose a "remove observer" API. Prevents observer accumulation
+    /// from calling `try_send` on a dead channel forever.
+    observer_active: Arc<AtomicBool>,
 }
 
 impl AppIngressAggregator {
@@ -168,10 +173,14 @@ impl AppIngressAggregator {
         let (pkt_tx, pkt_rx) = mpsc::channel::<RtpPacket>(256);
         let state = Arc::new(AtomicU8::new(IngestState::Active as u8));
         let cancel = parent_token.child_token();
+        let observer_active = Arc::new(AtomicBool::new(true));
 
         // Install a forwarding observer on the PC (fires on every ingress
         // plaintext packet, including relay fast-path).
-        pc.add_observer(Arc::new(PacketForwarder { tx: pkt_tx }));
+        pc.add_observer(Arc::new(PacketForwarder {
+            tx: pkt_tx,
+            active: observer_active.clone(),
+        }));
 
         let bus = self.pcm_bus.clone();
         let state_task = state.clone();
@@ -188,13 +197,21 @@ impl AppIngressAggregator {
             cancel_task,
         ));
 
-        self.legs.lock().insert(leg_id, AggLeg { state, cancel });
+        self.legs.lock().insert(
+            leg_id,
+            AggLeg {
+                state,
+                cancel,
+                observer_active,
+            },
+        );
         Ok(())
     }
 
-    /// Detach a leg (cancels its decode task).
+    /// Detach a leg (cancels its decode task and stops its forwarding observer).
     pub fn detach_leg(&self, leg_id: &LegId) {
         if let Some(agg) = self.legs.lock().remove(leg_id) {
+            agg.observer_active.store(false, Ordering::Release);
             agg.cancel.cancel();
         }
     }
@@ -236,11 +253,15 @@ impl AppIngressAggregator {
 /// Forwards ingress RTP packets into a channel for the decode task.
 struct PacketForwarder {
     tx: mpsc::Sender<RtpPacket>,
+    /// Set to `false` on detach so the observer stops forwarding.
+    active: Arc<AtomicBool>,
 }
 
 impl RtpObserver for PacketForwarder {
     fn on_ingress(&self, packet: &RtpPacket, _src_addr: std::net::SocketAddr) {
-        let _ = self.tx.try_send(packet.clone());
+        if self.active.load(Ordering::Acquire) {
+            let _ = self.tx.try_send(packet.clone());
+        }
     }
     // Egress not needed for ingress aggregation.
 }

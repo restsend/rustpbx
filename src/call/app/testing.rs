@@ -23,7 +23,7 @@
 
 use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInfo};
 use crate::call::app::{ApplicationContext, CallInfo};
-use crate::call::domain::{CallCommand, LegId};
+use crate::call::domain::CallCommand;
 use crate::config::Config;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::Utc;

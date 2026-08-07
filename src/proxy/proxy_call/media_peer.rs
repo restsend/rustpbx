@@ -17,10 +17,6 @@ pub trait MediaPeer: Send + Sync {
         remote: &str,
         sdp_type: SdpType,
     ) -> Result<()>;
-    #[allow(dead_code)]
-    async fn serve(&self) -> Result<()>;
-    #[allow(dead_code)]
-    fn stop(&self);
 
     /// Mute a track by ID
     /// Returns true if the track was found and muted
@@ -64,14 +60,6 @@ impl MediaPeer for VoiceEnginePeer {
         self.stream
             .update_remote_description(track_id, remote, sdp_type)
             .await
-    }
-
-    async fn serve(&self) -> Result<()> {
-        self.stream.serve().await
-    }
-
-    fn stop(&self) {
-        self.stream.cancel_token.cancel();
     }
 
     async fn mute_track(&self, track_id: &str) -> bool {

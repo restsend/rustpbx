@@ -50,7 +50,6 @@ pub trait AppFactory: Send + Sync {
         context: &ApplicationContext,
     ) -> Option<Box<dyn CallApp>>;
 }
-
 impl DefaultAppRuntime {
     pub fn new(config: AppRuntimeConfig) -> Self {
         Self {
@@ -61,7 +60,6 @@ impl DefaultAppRuntime {
             app_factory: None,
         }
     }
-
     pub fn with_factory(mut self, factory: Arc<dyn AppFactory>) -> Self {
         self.app_factory = Some(factory);
         self
@@ -74,6 +72,22 @@ impl DefaultAppRuntime {
             "voicemail" => AppDescriptor::voicemail(),
             "queue" => AppDescriptor::queue(),
             _ => AppDescriptor::new(app_name).with_capabilities(vec![MediaCapability::Full]),
+        }
+    }
+}
+
+impl Drop for DefaultAppRuntime {
+    fn drop(&mut self) {
+        // Best-effort cancel of any running app so its spawned AppEventLoop
+        // task stops promptly instead of leaking when the runtime is dropped
+        // without an explicit `stop_app()`. The RwLock is a tokio lock, so we
+        // use try_write() here (Drop cannot await). If the lock is contended
+        // the app's event channel will still close when the session handle is
+        // dropped, which also terminates the loop.
+        if let Ok(mut running) = self.running.try_write() {
+            if let Some(app) = running.take() {
+                app.cancel_token.cancel();
+            }
         }
     }
 }

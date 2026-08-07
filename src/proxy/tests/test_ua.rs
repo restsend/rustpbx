@@ -551,10 +551,6 @@ impl TestUa {
                     .refer(refer_to_uri, None, None)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                Dialog::Invite(d) => d
-                    .refer(refer_to_uri, None, None)
-                    .await
-                    .map_err(|e| e.into_anyhow())?,
                 _ => return Err(anyhow!("Dialog does not support REFER request")),
             };
             Ok(resp.map(|r| r.status_code().code()).unwrap_or(408))
@@ -591,11 +587,6 @@ impl TestUa {
                         .await
                         .map_err(|e| e.into_anyhow())?;
                 }
-                Dialog::Invite(d) => {
-                    d.info(Some(headers), Some(body))
-                        .await
-                        .map_err(|e| e.into_anyhow())?;
-                }
                 _ => return Err(anyhow!("Dialog does not support INFO request")),
             }
         }
@@ -621,11 +612,6 @@ impl TestUa {
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
-                Dialog::Invite(d) => {
-                    d.info(Some(headers), Some(body))
-                        .await
-                        .map_err(|e| e.into_anyhow())?;
-                }
                 Dialog::Invite(d) => {
                     d.info(Some(headers), Some(body))
                         .await
@@ -661,14 +647,6 @@ impl TestUa {
             let resp = match (method, &mut dialog) {
                 (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
                     .update(Some(headers), body)
-                    .await
-                    .map_err(|e| e.into_anyhow())?,
-                (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
-                    .update(Some(headers), body)
-                    .await
-                    .map_err(|e| e.into_anyhow())?,
-                (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
-                    .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
                 (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
@@ -2805,7 +2783,7 @@ a=rtpmap:0 PCMU/8000"#;
             .await
             .unwrap();
         let bob_port = portpicker::pick_unused_port().unwrap_or(26041);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 

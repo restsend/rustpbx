@@ -1,6 +1,5 @@
 //! CommandExecutor trait - unified command execution interface
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::call::domain::{CallCommand, LegId, MediaRuntimeProfile};
@@ -225,34 +224,6 @@ impl std::fmt::Display for CommandSource {
             CommandSource::Sip => write!(f, "sip"),
         }
     }
-}
-
-/// Unified command executor trait
-///
-/// This trait provides a single interface for executing commands on sessions.
-/// Implementations can wrap existing session logic or provide new unified runtime.
-#[async_trait]
-pub trait CommandExecutor: Send + Sync {
-    /// Execute a command on a session
-    ///
-    /// # Arguments
-    /// * `ctx` - Execution context (session ID, media profile, etc.)
-    /// * `command` - The command to execute
-    ///
-    /// # Returns
-    /// * `Ok(CommandResult)` - Command execution result
-    /// * `Err` - System error (not command failure)
-    async fn execute(
-        &self,
-        ctx: ExecutionContext,
-        command: CallCommand,
-    ) -> anyhow::Result<CommandResult>;
-
-    /// Check if a session exists
-    async fn session_exists(&self, session_id: &str) -> bool;
-
-    /// Get the media profile for a session
-    async fn get_media_profile(&self, session_id: &str) -> Option<MediaRuntimeProfile>;
 }
 
 #[cfg(test)]

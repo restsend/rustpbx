@@ -38,7 +38,6 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
-use urlencoding::encode;
 
 use crate::media::wav_reader::{WavReader, WavSpec, WavWriter};
 
@@ -72,12 +71,6 @@ struct QueryCallRecordFilters {
     caller: Option<String>,
     #[serde(default)]
     callee: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct DownloadRequest {
-    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -122,10 +115,6 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
                 .delete(delete_call_record),
         )
         .route(
-            "/call-records/{id}/metadata",
-            get(download_call_record_metadata),
-        )
-        .route(
             "/call-records/{id}/sip-flow",
             get(download_call_record_sip_flow),
         )
@@ -141,10 +130,6 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/call-records/{id}",
             patch(update_call_record).delete(delete_call_record),
-        )
-        .route(
-            "/call-records/{id}/metadata",
-            get(download_call_record_metadata),
         )
         .route(
             "/call-records/{id}/sip-flow",
@@ -659,97 +644,6 @@ fn parse_range_header(range: &str, file_len: u64) -> Option<(u64, u64)> {
     }
 
     Some((start_pos, end_pos))
-}
-
-fn safe_download_filename(path: &str, fallback: &str) -> String {
-    let candidate = Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback);
-
-    let sanitized: String = candidate
-        .chars()
-        .map(|ch| match ch {
-            '"' | '\\' | '\n' | '\r' | '\t' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-
-    if sanitized.trim().is_empty() {
-        fallback.to_string()
-    } else {
-        sanitized
-    }
-}
-
-async fn download_call_record_metadata(
-    AxumPath(pk): AxumPath<i64>,
-    Query(params): Query<DownloadRequest>,
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-) -> Response {
-    let db = state.db();
-    let model =
-        crate::console::config_helpers::find_or_404!(CallRecordEntity, pk, db, "Call record");
-
-    let cdr_data = match load_cdr_data(&state, &model).await {
-        Some(data) => data,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Metadata file not found" })),
-            )
-                .into_response();
-        }
-    };
-
-    if let Some(requested) = params
-        .path
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        && requested != cdr_data.cdr_path
-    {
-        warn!(
-            id = pk,
-            requested_path = requested,
-            actual_path = %cdr_data.cdr_path,
-            "metadata download path mismatch"
-        );
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "message": "Metadata file not found" })),
-        )
-            .into_response();
-    }
-
-    let filename = safe_download_filename(&cdr_data.cdr_path, &format!("call-record-{}.json", pk));
-
-    let raw = cdr_data.raw_content;
-    let len_header = raw.len().to_string();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
-    headers.insert(
-        http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, max-age=0"),
-    );
-    if let Ok(value) = HeaderValue::from_str(&len_header) {
-        headers.insert(http::header::CONTENT_LENGTH, value);
-    }
-    if let Ok(disposition) =
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
-    {
-        headers.insert(http::header::CONTENT_DISPOSITION, disposition);
-    }
-
-    (headers, Body::from(raw)).into_response()
 }
 
 async fn page_call_records(
@@ -1830,16 +1724,6 @@ fn build_detail_payload(
         });
     }
 
-    let metadata_download = if let Some(data) = cdr {
-        Value::String(state.url_for(&format!(
-            "/call-records/{}/metadata?path={}",
-            record.id,
-            encode(&data.cdr_path)
-        )))
-    } else {
-        Value::Null
-    };
-
     let sip_flow_download =
         state.url_for(&format!("/call-records/{}/sip-flow?detail=true", record.id));
 
@@ -1875,7 +1759,6 @@ fn build_detail_payload(
         "rewrite": rewrite,
         "actions": json!({
             "download_recording": download_recording,
-            "download_metadata": metadata_download,
             "download_sip_flow": sip_flow_download,
             "transcript_url": state.api_url_for(&format!("/call-records/{}/transcript", record.id)),
             "update_record": state.api_url_for(&format!("/call-records/{}", record.id)),

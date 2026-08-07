@@ -19,7 +19,7 @@
 //! needed. Hot-path state (taps, egress pipelines) lives inside each `Leg` and
 //! is lock-free.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -106,6 +106,10 @@ pub struct MediaBridge {
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
+    /// Per-leg cancel tokens for the `wire_leg` monitoring tasks. Cancelled
+    /// when the leg is replaced (`replace_leg`) or the bridge is closed, so
+    /// old monitoring tasks never leak across transfers / REFERs.
+    leg_wire_cancels: HashMap<LegSide, CancellationToken>,
     /// Legs currently playing a Media source. `play` inserts; the egress
     /// `on_end` callback removes.
     active_play: Arc<parking_lot::Mutex<HashSet<LegSide>>>,
@@ -127,6 +131,7 @@ impl MediaBridge {
             recorder_side: None,
             dtmf_bus,
             root_cancel: CancellationToken::new(),
+            leg_wire_cancels: HashMap::new(),
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             last_bridged: None,
         }
@@ -180,13 +185,19 @@ impl MediaBridge {
     /// spawns). The timeout check runs on a fixed 100ms interval and uses the
     /// leg's ingress packet counter + `armed_at` timestamp: when armed and no
     /// new packets arrive within the duration, the oneshot receiver is fired.
-    fn wire_leg(&self, side: LegSide, leg: &Leg) {
+    fn wire_leg(&mut self, side: LegSide, leg: &Leg) {
+        // Cancel any prior monitor task for this side first (e.g. after a
+        // transfer / REFER replaced the leg) so old tasks don't leak and keep
+        // the old PeerConnection / IngressTap / RTP timeout state alive.
+        if let Some(old) = self.leg_wire_cancels.insert(side, self.root_cancel.child_token()) {
+            old.cancel();
+        }
+        let cancel = self.leg_wire_cancels.get(&side).cloned().expect("just inserted");
         let mut rx = leg.subscribe_dtmf();
         let tap = leg.ingress_tap().clone();
         let timeout = leg.rtp_timeout_state();
         let leg_ref = leg.clone();
         let bus = self.dtmf_bus.clone();
-        let cancel = self.root_cancel.child_token();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -745,6 +756,9 @@ impl MediaBridge {
     /// Tear down everything (called on session end; also via Drop).
     pub fn close(&mut self) {
         self.root_cancel.cancel();
+        for (_, cancel) in self.leg_wire_cancels.drain() {
+            cancel.cancel();
+        }
         self.route_active = false;
         if let Some(la) = self.leg_a.take() {
             la.stop();
@@ -761,6 +775,9 @@ impl Drop for MediaBridge {
         // Stop legs synchronously (rustrtc close path has no tokio::spawn, so
         // this never panics during runtime teardown).
         self.root_cancel.cancel();
+        for (_, cancel) in self.leg_wire_cancels.drain() {
+            cancel.cancel();
+        }
         if let Some(la) = self.leg_a.take() {
             la.stop();
         }

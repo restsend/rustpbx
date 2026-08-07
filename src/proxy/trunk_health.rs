@@ -51,21 +51,6 @@ pub type HealthStateMap = Arc<RwLock<HashMap<String, TrunkHealthState>>>;
 
 /// Probe a single trunk via rsipstack transaction.
 /// Returns `Ok(rtt_ms)` on success, `Err(message)` on failure.
-#[allow(dead_code)]
-async fn probe_trunk(
-    dest: &str,
-    endpoint_inner: &EndpointInnerRef,
-    local_sip_addr: &str,
-) -> Result<u64, String> {
-    probe_trunk_with_timeout(
-        dest,
-        endpoint_inner,
-        local_sip_addr,
-        Duration::from_secs(10),
-    )
-    .await
-}
-
 pub async fn probe_trunk_with_timeout(
     dest: &str,
     endpoint_inner: &EndpointInnerRef,
@@ -508,8 +493,6 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     struct OptionsResponder {
-        #[allow(dead_code)]
-        cancel: CancellationToken,
         port: u16,
     }
 
@@ -560,13 +543,9 @@ mod tests {
             });
 
             sleep(Duration::from_millis(300)).await;
-            Self { cancel, port }
+            Self { port }
         }
 
-        #[allow(dead_code)]
-        fn stop(&self) {
-            self.cancel.cancel();
-        }
         fn addr(&self) -> String {
             format!("127.0.0.1:{}", self.port)
         }

@@ -191,6 +191,14 @@ cargo run --bin rustpbx -- --conf config.toml.example
 
 > Cross-compile via [cross](https://github.com/cross-rs/cross): `cargo install cross && cross build --release --target aarch64-unknown-linux-gnu`
 
+### Development workflow
+
+- **Toolchain**: pinned via `rust-toolchain.toml` to stable (1.96) — the codebase uses no nightly features. Delete that file to use your default toolchain.
+- **Caching**: `.cargo/config.toml` wraps builds in `sccache` (50 GiB) — install with `cargo install sccache`. Local cache-hit rate is ~90%.
+- **Convenience aliases**: `cargo run-dev`, `cargo test-dev`, `cargo test-all`, `cargo check-dev` (see `.cargo/config.toml`).
+- **Disk**: dev artifacts can grow to 100+ GiB in `target/`. When space is tight: `cargo clean -p <heavy-crate>` to drop just one crate, or `cargo install cargo-sweep && cargo sweep --days 30` to drop stale artifacts. The incremental cache and sccache are the two things that make rebuilds fast — don't `cargo clean` casually.
+
+
 ### Submodules
 
 Commerce addons are managed as git submodules under `src/addons/`:

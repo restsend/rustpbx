@@ -75,6 +75,11 @@ pub async fn create_test_server_with_config(
 
     let (locator_events_tx, _) = tokio::sync::broadcast::channel(100);
 
+    // Share ONE ConferenceManager between the conference_manager field and the
+    // ConferenceServer so tests that cross between them observe the same state.
+    let conf_mgr = Arc::new(crate::call::runtime::ConferenceManager::new());
+    let conf_server = Arc::new(crate::call::runtime::ConferenceServer::new(conf_mgr.clone()));
+
     let server_inner = Arc::new(SipServerInner {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
@@ -110,7 +115,8 @@ pub async fn create_test_server_with_config(
         ivr_trace: None,
         tls_listener: None,
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
-        conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
+        conference_manager: conf_mgr,
+        conference_server: conf_server,
         agent_registry: None,
         queue_location_enricher: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),

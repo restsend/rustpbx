@@ -100,31 +100,6 @@ pub fn dispatch_console_command(
     dispatch_command(registry, session_id, command)
 }
 
-/// Dispatch a unified CallCommand directly
-pub fn dispatch_call_command(
-    registry: &Arc<ActiveProxyCallRegistry>,
-    session_id: &str,
-    command: CallCommand,
-    source: CommandSource,
-) -> anyhow::Result<CommandResult> {
-    // Step 1: Create execution context
-    let ctx = ExecutionContext::new(session_id).with_source(source);
-
-    // Step 2: Check media capabilities
-    match ctx.check_media_capability(&command) {
-        MediaCapabilityCheck::Denied { reason } => {
-            return Ok(CommandResult::not_supported(reason));
-        }
-        MediaCapabilityCheck::Degraded { reason: _ } => {
-            // Continue with degraded functionality
-        }
-        MediaCapabilityCheck::Allowed => {}
-    }
-
-    // Step 3: Dispatch to session
-    dispatch_command(registry, session_id, command)
-}
-
 /// Internal: Dispatch a CallCommand to a session
 fn dispatch_command(
     registry: &Arc<ActiveProxyCallRegistry>,

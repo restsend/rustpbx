@@ -27,6 +27,11 @@ use crate::recorder::{Leg, Recorder};
 /// internally). The hot path only `try_send`s into the channel — never blocks.
 pub struct FileRecorder {
     cmd_tx: mpsc::Sender<FileRecCmd>,
+    /// Handle to the dedicated WAV-writer OS thread. Joined on Drop so the WAV
+    /// header is always finalized (rewritten with the true data size) before
+    /// the recorder is released — preventing truncated/corrupt recordings when
+    /// the process exits mid-recording.
+    thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 enum FileRecCmd {
@@ -75,7 +80,7 @@ impl FileRecorder {
         // are sync IO — kept off the async runtime entirely).
         let (ready_tx, ready_rx) = oneshot::channel();
         let profiles_move = profiles;
-        std::thread::spawn(move || {
+        let thread_handle = std::thread::spawn(move || {
             let mut recorder = match Recorder::new_with_channels(
                 &path_for_rec,
                 out_codec,
@@ -101,7 +106,22 @@ impl FileRecorder {
         }
 
         debug!(path = %path, "FileRecorder started");
-        Ok(Arc::new(Self { cmd_tx }))
+        Ok(Arc::new(Self {
+            cmd_tx,
+            thread_handle: Some(thread_handle),
+        }))
+    }
+}
+
+impl Drop for FileRecorder {
+    fn drop(&mut self) {
+        // Drop cmd_tx first so the writer thread's blocking_recv() returns None
+        // and it exits promptly; then join to guarantee the WAV header is
+        // finalized before the file is released.
+        self.cmd_tx = mpsc::channel(1).0;
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 

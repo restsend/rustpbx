@@ -59,10 +59,6 @@ impl LegRegistry {
         Some((state, tasks))
     }
 
-    pub fn active_count(&self) -> usize {
-        self.states.values().filter(|l| l.is_active()).count()
-    }
-
     pub fn set_dialog(&mut self, id: LegId, dialog: Dialog) {
         self.dialogs.insert(id, dialog);
     }

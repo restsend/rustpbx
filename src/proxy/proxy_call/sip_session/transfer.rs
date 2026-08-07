@@ -1294,13 +1294,13 @@ impl SipSession {
             "Found leg for cross-session migration"
         );
 
-        let conference_manager = &self.server.conference_manager;
+        let conference_server = &self.server.conference_server;
         let conf_id = crate::call::runtime::ConferenceId::from(into_conference.as_str());
 
         // Use a consistent composite leg_id for both conference registration and
         // media bridge start — previously the two used different IDs causing a mismatch.
         let participant_leg = LegId::new(format!("{}-{}", from_session, leg_id));
-        conference_manager
+        conference_server
             .add_participant(&conf_id, participant_leg.clone())
             .await
             .map_err(|e| anyhow!("Failed to add leg to conference: {}", e))?;

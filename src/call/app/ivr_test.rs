@@ -11,7 +11,7 @@ mod tests {
     };
     use crate::call::app::testing::MockCallStack;
     use crate::call::domain::MediaSource;
-    use crate::call::domain::{CallCommand, LegId};
+    use crate::call::domain::CallCommand;
     use crate::media::Track;
     use std::collections::HashMap;
     use std::time::Duration;

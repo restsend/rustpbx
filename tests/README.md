@@ -1,5 +1,28 @@
 # RustPBX E2E Testing
 
+## Running locally
+
+```bash
+cargo test-dev            # full local suite: --features addon-cc,addon-sbc
+                          #   (covers cc_openapi_contract_test + trunk_health_e2e)
+cargo test                # subset only: feature-gated integration tests are skipped
+cargo test --test call -- ringback_mode   # single test from the call suite
+cargo test --test rwi  -- --nocapture      # RWI suite, full output
+```
+
+- Test binaries are consolidated into `tests/call.rs` and `tests/rwi.rs` (one link each)
+  plus `tests/cc_openapi_contract_test.rs`. Each binary runs its tests in parallel threads.
+- Feature-gated tests are skipped by a bare `cargo test`:
+  - `cc_openapi_contract_test.rs` → requires `addon-cc`
+  - `tests/call/trunk_health_e2e.rs` → requires `addon-sbc`
+  Use `cargo test-dev` (`--features addon-cc,addon-sbc`) or `cargo test-all`
+  (`--features commerce,wholesale,contact-center,addon-sbc`) for the full local suite.
+- Ports are randomized via `portpicker` (`tests/helpers/test_server.rs`), so tests can
+  run concurrently; flaky SIP/RTP tests can be re-run with the same `--test <name>` filter.
+- Coverage (optional): `cargo install cargo-llvm-cov && cargo llvm-cov --features addon-cc,addon-sbc`.
+
+## Python E2E (sipbot)
+
 Python + sipbot end-to-end testing for RustPBX. There are two pytest suites:
 
 | Suite | Path | Focus |
@@ -16,9 +39,12 @@ Both suites spawn `sipbot` as a subprocess (the external CLI) and drive a real
 cd e2e
 python3 -m pip install -r requirements.txt
 ./run.sh                  # all tests
+./run.sh fast             # everything except `slow`-marked tests
 ./run.sh p2p              # p2p-marked tests
 ./run.sh -m "queue or ivr"
+./run.sh all -- -n 2      # forward extra pytest args (e.g. -n for xdist; PBX uses fixed ports so keep `-n 1`)
 ```
+Runs default to `--tb=short --durations=15` and write an HTML report to `$RUSTPBX_E2E_REPORT_DIR/index.html` when `pytest-html` is installed.
 
 Feature areas (pytest markers): `p2p`, `queue`, `ivr`, `cdr`, `record`,
 `sipflow`, `voicemail`, `wholesale`, `http_router`, `sbc`.

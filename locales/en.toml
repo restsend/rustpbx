@@ -1083,7 +1083,6 @@ label_end = "End"
 label_duration = "Duration"
 
 # Actions
-btn_metadata_json = "Metadata JSON"
 btn_sip_trace_json = "SIP trace JSON"
 
 # Tabs

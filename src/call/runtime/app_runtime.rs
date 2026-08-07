@@ -37,7 +37,6 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::call::domain::MediaCapability;
 
@@ -307,17 +306,6 @@ pub trait AppRuntime: Send + Sync {
     fn get_queue_name(&self) -> Option<String> {
         None
     }
-}
-
-/// Application factory trait - creates AppRuntime instances
-#[async_trait]
-pub trait AppRuntimeFactory: Send + Sync {
-    /// Create a new AppRuntime instance for a session
-    fn create_runtime(
-        &self,
-        session_id: &str,
-        handle: crate::proxy::proxy_call::state::SipSessionHandle,
-    ) -> Arc<dyn AppRuntime>;
 }
 
 #[cfg(test)]

@@ -16,5 +16,5 @@ pub use self::config::{
     MenuEntry, MenuNode, WebhookResponse,
 };
 pub use self::provider::{
-    ActionProvider, ProviderContext, ProviderEvent, RetryConfig, StepProvider, TreeProvider,
+    ActionProvider, ProviderContext, ProviderEvent, RetryConfig, StepProvider,
 };

@@ -433,64 +433,6 @@ impl std::fmt::Display for DialStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum RingbackMode {
-    Local,
-    Passthrough,
-    #[default]
-    Auto,
-    None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RingbackConfig {
-    #[serde(default)]
-    pub mode: RingbackMode,
-    pub audio_file: Option<String>,
-    #[serde(default = "default_ringback_loop")]
-    pub loop_playback: bool,
-    #[serde(default)]
-    pub wait_for_completion: bool,
-}
-
-fn default_ringback_loop() -> bool {
-    true
-}
-
-impl Default for RingbackConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RingbackConfig {
-    pub fn new() -> Self {
-        Self {
-            mode: RingbackMode::Auto,
-            audio_file: None,
-            loop_playback: true,
-            wait_for_completion: false,
-        }
-    }
-
-    pub fn with_mode(mut self, mode: RingbackMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn with_audio_file(mut self, file: String) -> Self {
-        self.audio_file = Some(file);
-        self
-    }
-
-    pub fn with_loop(mut self, loop_playback: bool) -> Self {
-        self.loop_playback = loop_playback;
-        self
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueHoldConfig {
     pub audio_file: Option<String>,
@@ -777,10 +719,6 @@ pub struct MediaConfig {
     pub probation_max_packets: Option<u8>,
     /// Video policy: pass-through or strip video from SDP
     pub video_policy: Option<VideoPolicy>,
-    /// Per-side audio ring-buffer capacity (in RTP frames) for the bridge's
-    /// egress sample_track. 500 ≈ 10 s @ 20 ms ptime. None ⇒ use the
-    /// bridge's built-in default (`BRIDGE_AUDIO_RING_CAPACITY_DEFAULT`).
-    pub bridge_audio_buffer_frames: Option<usize>,
     /// Emit low-level comfort noise instead of digital silence when a leg's
     /// egress has no source (defaults to true). Disable to keep true digital
     /// silence (e.g. for `is_silence`/tone tests).
@@ -810,7 +748,6 @@ impl MediaConfig {
             enable_latching: true,
             probation_max_packets: None,
             video_policy: None,
-            bridge_audio_buffer_frames: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         }
@@ -908,8 +845,6 @@ pub struct Dialplan {
     pub recording: CallRecordingConfig,
     /// Optional route/trunk-specific recording policy override.
     pub recording_policy: Option<RecordingPolicy>,
-    /// Ringback configuration
-    pub ringback: RingbackConfig,
     /// Media configuration
     pub media: MediaConfig,
     /// Maximum call duration
@@ -1000,7 +935,6 @@ impl Dialplan {
             max_ring_time: Duration::from_secs(60), // 60 seconds for ringback
             recording: CallRecordingConfig::default(),
             recording_policy: None,
-            ringback: RingbackConfig::default(),
             media: MediaConfig::default(),
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
             rtp_timeout: None,
@@ -1047,11 +981,6 @@ impl Dialplan {
 
     pub fn with_recording(mut self, recording: CallRecordingConfig) -> Self {
         self.recording = recording;
-        self
-    }
-
-    pub fn with_ringback(mut self, ringback: RingbackConfig) -> Self {
-        self.ringback = ringback;
         self
     }
 

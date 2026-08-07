@@ -8,11 +8,6 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl SipSession {
-    pub(super) async fn setup_conference_mixer(&mut self) {
-        self.join_conference_mixer(&format!("conf-{}", self.id.0))
-            .await;
-    }
-
     /// Join all active legs into the given conference room.
     /// Creates the room if it does not already exist.
     pub(super) async fn join_conference_mixer(&mut self, conf_id_str: &str) {
@@ -20,14 +15,14 @@ impl SipSession {
 
         if self
             .server
-            .conference_manager
+            .conference_server
             .get_conference(&conf_id)
             .await
             .is_none()
         {
             if let Err(e) = self
                 .server
-                .conference_manager
+                .conference_server
                 .create_conference(conf_id.clone(), None)
                 .await
             {
@@ -48,24 +43,15 @@ impl SipSession {
             .collect();
 
         for (leg_id, peer) in active_legs {
-            let participant_leg = self.participant_leg(&leg_id);
-
-            if let Err(e) = self
-                .server
-                .conference_manager
-                .add_participant(&conf_id, participant_leg.clone())
-                .await
-            {
-                warn!(session_id = %self.id, %leg_id, "Failed to add participant: {}", e);
-                continue;
-            }
-
-            info!(session_id = %self.id, %leg_id, "Added participant to conference");
-
+            // NOTE: the participant is NOT explicitly registered here.
+            // `start_conference_media_bridge[_for_peer]` → `start_bridge_full_duplex`
+            // registers the participant internally (exactly once). Pre-registering
+            // with a different composite leg_id caused a duplicate participant
+            // entry (one bridged, one orphaned).
             if let Some(peer) = peer {
                 if let Err(e) = self
                     .start_conference_media_bridge_for_peer(
-                        &conf_id_str,
+                        conf_id_str,
                         &leg_id,
                         &peer,
                         None,
@@ -77,7 +63,7 @@ impl SipSession {
                 }
             } else {
                 if let Err(e) = self
-                    .start_conference_media_bridge(&conf_id_str, &leg_id)
+                    .start_conference_media_bridge(conf_id_str, &leg_id)
                     .await
                 {
                     warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge: {}", e);
@@ -135,7 +121,7 @@ impl SipSession {
             .map_err(|e| anyhow!("Failed to create audio receiver for dynamic leg: {}", e))?;
 
         let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_manager.clone(),
+            self.server.conference_server.manager_raw().clone(),
         );
         let leg_codec = self.leg_negotiated_codec(leg_id);
         bridge
@@ -312,7 +298,7 @@ impl SipSession {
         .map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
 
         let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_manager.clone(),
+            self.server.conference_server.manager_raw().clone(),
         );
         let leg_codec = self.leg_negotiated_codec(leg_id);
         bridge
@@ -443,7 +429,7 @@ impl SipSession {
 
         let max_participants = options.max_participants.map(|m| m as usize);
         self.server
-            .conference_manager
+            .conference_server
             .create_conference(conf_id.into(), max_participants)
             .await?;
 
@@ -479,7 +465,7 @@ impl SipSession {
                 let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
                 let _ = self
                     .server
-                    .conference_manager
+                    .conference_server
                     .remove_participant(&conf_id_obj, &leg_id)
                     .await;
                 Err(e)
@@ -500,7 +486,7 @@ impl SipSession {
         }
 
         self.server
-            .conference_manager
+            .conference_server
             .remove_participant(&conf_id.into(), &leg_id)
             .await?;
 
@@ -534,12 +520,12 @@ impl SipSession {
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
         if mute {
             self.server
-                .conference_manager
+                .conference_server
                 .mute_participant(&conf_id_obj, &leg_id)
                 .await?;
         } else {
             self.server
-                .conference_manager
+                .conference_server
                 .unmute_participant(&conf_id_obj, &leg_id)
                 .await?;
         }
@@ -552,7 +538,7 @@ impl SipSession {
         self.legs.stop_all_conference_bridge_handles();
 
         self.server
-            .conference_manager
+            .conference_server
             .destroy_conference(&conf_id.into())
             .await?;
 
@@ -572,7 +558,7 @@ impl SipSession {
 
         let removed = self
             .server
-            .conference_manager
+            .conference_server
             .end_by_host(&conf_id_obj, &host_leg_id)
             .await?;
 
@@ -601,7 +587,7 @@ impl SipSession {
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
         let conf = self
             .server
-            .conference_manager
+            .conference_server
             .get_conference(&conf_id_obj)
             .await
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id))?;
@@ -609,7 +595,7 @@ impl SipSession {
         for leg_id in conf.participant_ids() {
             let _ = self
                 .server
-                .conference_manager
+                .conference_server
                 .mute_participant(&conf_id_obj, &leg_id)
                 .await;
         }
@@ -623,7 +609,7 @@ impl SipSession {
     ) -> Result<crate::call::runtime::ConferenceRoom> {
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
         self.server
-            .conference_manager
+            .conference_server
             .get_conference(&conf_id_obj)
             .await
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id))
@@ -631,7 +617,7 @@ impl SipSession {
 
     pub(super) async fn handle_conference_list(&self) -> Vec<crate::call::runtime::ConferenceRoom> {
         self.server
-            .conference_manager
+            .conference_server
             .list_conferences_detail()
             .await
     }
@@ -643,7 +629,7 @@ impl SipSession {
 
         if self
             .server
-            .conference_manager
+            .conference_server
             .get_conference(&conf_id_obj)
             .await
             .is_none()
@@ -671,7 +657,7 @@ impl SipSession {
 
             let _ = self
                 .server
-                .conference_manager
+                .conference_server
                 .remove_participant(&conf_id_obj, &participant_leg)
                 .await;
 

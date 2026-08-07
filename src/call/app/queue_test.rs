@@ -165,12 +165,6 @@ mod tests {
         }
     }
 
-    /// Build a queue plan with parallel dialing.
-    #[allow(dead_code)]
-    fn build_parallel_queue() -> QueuePlan {
-        build_parallel_queue_config().to_plan()
-    }
-
     // ── 1. Basic queue enter with immediate answer and hold music ──
 
     #[tokio::test]

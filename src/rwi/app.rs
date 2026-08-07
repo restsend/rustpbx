@@ -59,12 +59,6 @@ pub struct RwiApp {
     owned: bool,
     /// The call_id of the call this app is handling, set in `on_enter`.
     owned_call_id: Option<String>,
-    /// Track ID of the currently playing audio, if any.
-    #[allow(dead_code)]
-    current_track_id: Option<String>,
-    /// If `true`, the next DTMF digit will interrupt the current playback.
-    #[allow(dead_code)]
-    interrupt_on_dtmf: bool,
 }
 
 impl RwiApp {
@@ -79,8 +73,6 @@ impl RwiApp {
             gateway,
             owned: false,
             owned_call_id: None,
-            current_track_id: None,
-            interrupt_on_dtmf: false,
         }
     }
 

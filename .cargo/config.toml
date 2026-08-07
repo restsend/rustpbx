@@ -12,3 +12,10 @@ check-dev = "check --features commerce,wholesale,contact-center,addon-sbc"
 
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
+# Faster-linking experiment (ld64.lld): uncomment + run `cargo build --timings`
+# before/after to measure. Note: -Wl,-no_compact_unwind above is an ld64-only
+# flag; lld ignores/warns on it, and switching invalidates the whole cache.
+# rustflags = [
+#     "-C", "link-arg=-Wl,-no_compact_unwind",
+#     "-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld",
+# ]

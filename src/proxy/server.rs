@@ -98,6 +98,7 @@ pub struct SipServerInner {
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
     pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
+    pub conference_server: Arc<crate::call::runtime::ConferenceServer>,
     pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     /// Optional hook for enriching resolved agent locations before dialing (e.g. injecting
     /// CC / CRM headers for screen-pop).  Registered by the cc addon via proxy_server_hook.
@@ -893,6 +894,9 @@ impl SipServerBuilder {
 
         // Create conference manager with in-server audio mixing
         let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
+        let conference_server = Arc::new(crate::call::runtime::ConferenceServer::new(
+            conference_manager.clone(),
+        ));
 
         // Create trunk health state map BEFORE inner so inner.trunk_health is populated
         // (the health loop itself is spawned after inner since it needs endpoint/cancel_token).
@@ -936,6 +940,7 @@ impl SipServerBuilder {
             tls_listener: tls_listener_clone,
             queue_manager,
             conference_manager,
+            conference_server,
             agent_registry: self.agent_registry,
             queue_location_enricher: self.queue_location_enricher,
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),

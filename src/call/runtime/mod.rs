@@ -24,13 +24,12 @@
 //!              ▼                         ▼
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                  CommandExecutor                                 │
-//! │   execute(session_id, command) -> Result<CommandResult>         │
+//! │   dispatch_command(session_id, command) -> Result<CommandResult>│
 //! └────────────┬────────────────┴────────┬────────┴────────────────┘
 //!              │                         │
 //!              ▼                         ▼
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │               Session Runtime                                    │
-//! │   SessionActionExecutor ──► CallSession::apply_session_action   │
 //! │   SipSession             ──► Direct command handling            │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -40,11 +39,13 @@ mod command_dispatch;
 mod command_executor;
 mod conference_manager;
 pub mod conference_media_bridge;
+mod conference_server;
+mod conference_strategy;
 mod default_app_runtime;
+mod media_path_strategy;
 mod queue_manager;
-mod registry_runtime;
-mod session_action_executor;
 mod session_runtime;
+pub mod test_utils;
 
 #[cfg(test)]
 mod app_runtime_contract_tests;
@@ -57,8 +58,9 @@ pub use command_dispatch::*;
 pub use command_executor::*;
 pub use conference_manager::*;
 pub use conference_media_bridge::*;
+pub use conference_server::*;
+pub use conference_strategy::*;
 pub use default_app_runtime::*;
+pub use media_path_strategy::*;
 pub use queue_manager::*;
-pub use registry_runtime::*;
-pub use session_action_executor::*;
 pub use session_runtime::*;

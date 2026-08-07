@@ -8,7 +8,7 @@ use crate::call::domain::{Leg, SessionState};
 use crate::call::runtime::BridgeConfig;
 use crate::call::runtime::{
     AppFactory, AppRuntime, AppRuntimeConfig, CommandResult, DefaultAppRuntime, ExecutionContext,
-    MediaCapabilityCheck, SessionId,
+    MediaCapabilityCheck, MediaPathDecision, SessionId,
 };
 use crate::call::{DialStrategy, Location};
 use crate::models::call_record::extract_sip_username;
@@ -28,7 +28,6 @@ pub struct SessionSnapshot {
     #[serde(skip)]
     pub callee_dialogs: Vec<DialogId>,
 }
-use crate::call::domain::SessionPolicy;
 use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
@@ -273,8 +272,6 @@ pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
     pub legs: crate::proxy::proxy_call::leg_registry::LegRegistry,
-    #[allow(dead_code)]
-    pub policy: SessionPolicy,
     pub bridge: BridgeConfig,
     pub media_profile: MediaRuntimeProfile,
     pub app_runtime: Arc<dyn AppRuntime>,
@@ -325,6 +322,11 @@ pub struct SipSession {
     pub extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions,
 
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
+
+    /// Strategy that decides how to route media as the active leg set changes
+    /// (P2P direct bridge vs. multi-party conference). Hides MCU knowledge
+    /// from this session.
+    pub media_path_strategy: Arc<dyn crate::call::runtime::MediaPathStrategy>,
 
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
@@ -1002,14 +1004,14 @@ impl SipSession {
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
         if self
             .server
-            .conference_manager
+            .conference_server
             .get_conference(&conf_id_obj)
             .await
             .is_none()
         {
             info!(session_id = %self.id, conf_id = %conf_id, "Creating conference");
             self.server
-                .conference_manager
+                .conference_server
                 .create_conference(conf_id_obj, max)
                 .await
                 .map_err(|e| anyhow!("Failed to create conference '{}': {}", conf_id, e))?;
@@ -1177,7 +1179,6 @@ impl SipSession {
         };
 
         let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
-        let state_capacity = server.proxy_config.session_state_channel_capacity;
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
@@ -1252,18 +1253,9 @@ impl SipSession {
         // Create a shared handle for app event delivery (send_app_event).
         // The old SessionAction→CallCommand bridge has been removed — the
         // unified SipSessionHandle speaks CallCommand natively.
-        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new(
-            session_id_str.clone(),
-            crate::call::DialDirection::Inbound,
-            Some(original_caller.clone()),
-            Some(original_callee.clone()),
-            None,
-        );
-        let (bridge_handle, _action_rx) =
-            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(
-                bridge_shared,
-                state_capacity,
-            );
+        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new();
+        let bridge_handle =
+            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
 
         // Wire the bridge into the sip handle so send_app_event forwards events.
         let mut slot = app_event_bridge.write();
@@ -1290,10 +1282,11 @@ impl SipSession {
         let initial = server_dialog.initial_request();
         let caller_offer = Self::extract_sdp(initial.body());
 
+        let conference_server = server.conference_server.clone();
+
         let mut session = Self {
             id: session_id.clone(),
             state: SessionState::Initializing,
-            policy: SessionPolicy::inbound_sip(),
             bridge: BridgeConfig::new(),
             media_profile: media_profile.clone(),
             app_runtime,
@@ -1337,6 +1330,9 @@ impl SipSession {
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
+            media_path_strategy: Arc::new(crate::call::runtime::ConferenceStrategy::new(
+                conference_server.clone(),
+            ).with_session_id(session_id_str.clone())),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
@@ -1391,7 +1387,6 @@ impl SipSession {
         };
 
         let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
-        let state_capacity = server.proxy_config.session_state_channel_capacity;
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
@@ -1448,18 +1443,9 @@ impl SipSession {
             gw.read().meta_store.insert(session_id_str.clone(), meta);
         }
 
-        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new(
-            session_id_str.clone(),
-            crate::call::DialDirection::Outbound,
-            Some(original_caller.clone()),
-            Some(original_callee.clone()),
-            None,
-        );
-        let (bridge_handle, _action_rx) =
-            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(
-                bridge_shared,
-                state_capacity,
-            );
+        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new();
+        let bridge_handle =
+            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
         let mut slot = app_event_bridge.write();
         *slot = Some(bridge_handle.clone());
 
@@ -1481,15 +1467,15 @@ impl SipSession {
             .first_target()
             .map(|target| target.aor.to_string());
 
+        let conference_server = server.conference_server.clone();
+
         let mut session = Self {
             id: session_id.clone(),
             state: SessionState::Initializing,
-            policy: SessionPolicy::rwi_originate(false),
             bridge: BridgeConfig::new(),
             media_profile: media_profile.clone(),
             app_runtime,
-            snapshot_cache: snapshot_cache.clone(),
-            server,
+            snapshot_cache: snapshot_cache.clone(),            server,
             caller_dialog: None,
             callee_dialogs: Arc::new(DashMap::new()),
             supervisor_mixer: None,
@@ -1527,6 +1513,9 @@ impl SipSession {
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
+            media_path_strategy: Arc::new(crate::call::runtime::ConferenceStrategy::new(
+                conference_server.clone(),
+            ).with_session_id(session_id_str.clone())),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
@@ -4501,21 +4490,19 @@ impl SipSession {
     /// Send 183 Session Progress with early media audio played to the caller.
     /// Supports file paths and `tone://frequency,duration_ms` format.
     async fn send_early_media_tone(&mut self, audio_path: &str) -> Result<()> {
-        self.send_early_media(audio_path, true).await
+        self.send_early_media(audio_path).await
     }
 
     /// Play a one-shot early-media cue (e.g. a failure/beep tone) through the
     /// caller media bridge. Unlike [`send_early_media_tone`], the asset is
     /// played exactly once and is never looped — see issue #249.
     async fn send_early_media_cue(&mut self, audio_path: &str) -> Result<()> {
-        self.send_early_media(audio_path, false).await
+        self.send_early_media(audio_path).await
     }
 
     /// Build (if needed) the caller media bridge, send 183 Session Progress,
-    /// and play `audio_path` as early media. `loop_playback` controls whether
-    /// the asset repeats until the call answers (ringback) or plays once
-    /// (short cues/beeps).
-    async fn send_early_media(&mut self, audio_path: &str, loop_playback: bool) -> Result<()> {
+    /// and play `audio_path` as early media (ringback tone or short cue).
+    async fn send_early_media(&mut self, audio_path: &str) -> Result<()> {
         if self.media.early_media_sent {
             return Ok(());
         }
@@ -7216,6 +7203,13 @@ impl SipSession {
     async fn cleanup(&mut self) {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
 
+        // Cancel the session's token FIRST so every child token (leg forwarders,
+        // dialog monitors, conference bridges, DTMF forwarders, bridge loops)
+        // is signalled to stop immediately. Otherwise those tasks keep running
+        // until the session object is dropped — a leak window between cleanup
+        // and Drop.
+        self.cancel_token.cancel();
+
         // Flush any in-flight media plays that finished naturally (without an
         // explicit stop) so the trace shows their full duration + completion.
         let leftover: Vec<String> = self.active_plays.keys().cloned().collect();
@@ -7385,6 +7379,11 @@ impl SipSession {
         }
 
         // MediaBridge teardown is handled by the session Drop / cleanup path.
+        // Close it eagerly so per-leg wire_leg monitor tasks and the DTMF
+        // forwarder stop now, not only when the session object drops.
+        if let Some(mut mb) = self.media.bridge.take() {
+            mb.close();
+        }
     }
 
     /// Enrich `meta.hangup_reason` with higher-level context before emitting
@@ -9474,59 +9473,108 @@ impl SipSession {
 
     /// Update media path based on number of active legs.
     async fn update_media_path(&mut self) {
-        let active_count = self.legs.active_count();
+        let active_legs: Vec<LegId> = self
+            .legs
+            .iter()
+            .filter(|(_, leg)| leg.is_active())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let active_count = active_legs.len();
 
         info!(session_id = %self.id, active_legs = active_count, "Updating media path");
 
-        match active_count {
-            2 => {
+        let strategy = self.media_path_strategy.clone();
+        let ctx = crate::call::runtime::MediaPathContext {
+            session_id: self.id.clone(),
+            active_legs: active_legs.clone(),
+            cancel_token: self.cancel_token.clone(),
+        };
+
+        let decision = match strategy.decide(&active_legs) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(session_id = %self.id, error = %e, "Strategy cannot route this leg set; stopping all bridges");
+                if let Err(le) = strategy.leave_multi_party(&ctx, &mut *self).await {
+                    warn!(session_id = %self.id, error = %le, "leave_multi_party failed");
+                }
+                self.stop_direct_bridge().await;
+                return;
+            }
+        };
+
+        match decision {
+            MediaPathDecision::Direct(legs) => {
                 // Direct bridge: caller ↔ callee (or caller ↔ target)
                 info!(session_id = %self.id, "Switching to direct bridge mode");
-                // Clean up conference bridges if any
-                self.stop_conference_bridges().await;
+                // Tear down multi-party routing if any (strategy manages MCU).
+                if let Err(e) = strategy.leave_multi_party(&ctx, &mut *self).await {
+                    warn!(session_id = %self.id, error = %e, "Failed to leave multi-party routing");
+                }
                 // Setup direct bridge between the two active legs
-                let active_legs: Vec<LegId> = self
-                    .legs
-                    .iter()
-                    .filter(|(_, leg)| leg.is_active())
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                if active_legs.len() == 2 {
-                    self.setup_bridge(active_legs[0].clone(), active_legs[1].clone())
-                        .await;
+                if legs.len() == 2 {
+                    self.setup_bridge(legs[0].clone(), legs[1].clone()).await;
                     info!(session_id = %self.id,
-                        leg_a = %active_legs[0],
-                        leg_b = %active_legs[1],
+                        leg_a = %legs[0],
+                        leg_b = %legs[1],
                         "Direct bridge configured"
                     );
                 }
             }
-            n if n >= 3 => {
-                // Conference mixer: all legs mixed together
+            MediaPathDecision::Conference => {
+                // Conference mixer: all legs mixed together (strategy-owned MCU)
                 info!(session_id = %self.id,
-                    leg_count = n,
+                    leg_count = active_count,
                     "Switching to conference mixer mode"
                 );
                 // Clean up direct bridge if any
                 self.stop_direct_bridge().await;
-                // Setup conference mixer
-                self.setup_conference_mixer().await;
+                if let Err(e) = strategy.apply_multi_party(&ctx, &mut *self).await {
+                    warn!(session_id = %self.id, error = %e, "Failed to apply multi-party routing");
+                }
             }
-            _ => {
+            MediaPathDecision::None => {
                 // Single leg or none - no bridging needed
-                self.stop_all_bridges().await;
+                if let Err(e) = strategy.leave_multi_party(&ctx, &mut *self).await {
+                    warn!(session_id = %self.id, error = %e, "Failed to leave multi-party routing");
+                }
+                self.stop_direct_bridge().await;
+                debug!(session_id = %self.id, "All bridges stopped");
             }
         }
     }
+}
 
-    /// Stop all conference bridges for this session.
-    async fn stop_conference_bridges(&mut self) {
-        if self.conference_bridge.is_active() {
-            info!(session_id = %self.id, "Stopping conference bridges");
-            self.conference_bridge.stop_bridge();
-        }
+/// Bridges a session's legs into a multi-party conference. Delegates the
+/// per-leg audio wiring to the session's existing media-bridge glue and lets
+/// [`crate::call::runtime::ConferenceServer`] own the participant lifecycle.
+#[async_trait::async_trait]
+impl crate::call::runtime::LegMediaBridger for SipSession {
+    async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
+        let peer = self.legs.peers.get(leg_id).cloned();
+        let handle = if let Some(peer) = peer {
+            self.start_conference_media_bridge_for_peer(conf_id, leg_id, &peer, None, None)
+                .await?
+        } else {
+            self.start_conference_media_bridge(conf_id, leg_id).await?
+        };
+        self.legs.set_conference_bridge_handle(leg_id.clone(), handle);
+        Ok(())
     }
 
+    async fn unbridge(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
+        if let Some(handle) = self.legs.remove_conference_bridge_handle(leg_id) {
+            handle.stop();
+        }
+        let _ = self
+            .server
+            .conference_server
+            .leave_conference(conf_id, leg_id)
+            .await;
+        Ok(())
+    }
+}
+
+impl SipSession {
     /// Stop direct bridge if active.
     async fn stop_direct_bridge(&mut self) {
         if self.bridge.active {
@@ -9535,11 +9583,14 @@ impl SipSession {
         }
     }
 
-    /// Stop all bridges (both direct and conference).
-    async fn stop_all_bridges(&mut self) {
-        self.stop_conference_bridges().await;
-        self.stop_direct_bridge().await;
-        debug!(session_id = %self.id, "All bridges stopped");
+    /// Append DTMF digits to the session's digit history, bounded so a very
+    /// long call cannot grow this Vec without limit.
+    fn record_dtmf_digits(&mut self, digits: &[char]) {
+        const MAX_DTMF_DIGITS: usize = 512;
+        let room = MAX_DTMF_DIGITS.saturating_sub(self.dtmf_digits.len());
+        if room > 0 {
+            self.dtmf_digits.extend(digits.iter().take(room));
+        }
     }
 
     /// Map a session leg to its MediaBridge side, if it is one of the two
@@ -9980,9 +10031,7 @@ impl SipSession {
             let rtp_sent = match self.media.bridge.as_ref() {
                 Some(mb) if mb.leg(side).is_some() => match mb.send_dtmf(side, &digit_str).await {
                     Ok(()) => {
-                        for digit in &valid_digits {
-                            self.dtmf_digits.push(*digit);
-                        }
+                        self.record_dtmf_digits(&valid_digits);
                         info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via RTP RFC 2833 telephone-events");
                         true
                     }
@@ -10050,9 +10099,7 @@ impl SipSession {
 
         match info_result {
             Ok(()) => {
-                for digit in &valid_digits {
-                    self.dtmf_digits.push(*digit);
-                }
+                self.record_dtmf_digits(&valid_digits);
                 info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via SIP INFO");
             }
             Err(e) => {
@@ -10435,6 +10482,7 @@ impl Drop for SipSession {
         self.conference_bridge.stop_bridge();
         self.legs.stop_all_conference_bridge_handles();
         self.supervisor_mixer.take();
+        self.media_path_strategy.shutdown();
 
         // Media bridge — torn down explicitly under catch_unwind so a teardown
         // panic during an already-unwinding (failed) test cannot double-panic.
@@ -10691,56 +10739,6 @@ mod tests {
     }
 
     // ---- helpers for codec / audio-content verification ----
-
-    #[allow(dead_code)]
-    fn cross_correlate(signal: &[i16], reference: &[i16]) -> f64 {
-        if signal.is_empty() || reference.is_empty() || signal.len() < reference.len() {
-            return 0.0;
-        }
-        let n = reference.len();
-        let ref_mean: f64 = reference.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
-        let ref_var: f64 = reference
-            .iter()
-            .map(|&s| {
-                let d = s as f64 - ref_mean;
-                d * d
-            })
-            .sum::<f64>()
-            / n as f64;
-        if ref_var < 1e-20 {
-            return 0.0;
-        }
-        let ref_std = ref_var.sqrt();
-        let max_offset = signal.len() - n;
-        let step = std::cmp::max(1, max_offset / 200);
-        let mut best = 0.0;
-        for offset in (0..=max_offset).step_by(step) {
-            let w = &signal[offset..offset + n];
-            let wm: f64 = w.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
-            let wv: f64 = w
-                .iter()
-                .map(|&s| {
-                    let d = s as f64 - wm;
-                    d * d
-                })
-                .sum::<f64>()
-                / n as f64;
-            if wv < 1e-20 {
-                continue;
-            }
-            let ws = wv.sqrt();
-            let num: f64 = w
-                .iter()
-                .zip(reference.iter())
-                .map(|(&a, &b)| (a as f64 - wm) * (b as f64 - ref_mean))
-                .sum();
-            let c = num / (n as f64 * ws * ref_std);
-            if c > best {
-                best = c;
-            }
-        }
-        best
-    }
 
     #[test]
     fn test_sdp_transport_mode_classification() {
@@ -13099,7 +13097,6 @@ max_retries = 3
     #[tokio::test]
     async fn route_outbound_leg_applies_forward_trunk() {
         use crate::call::cookie::TransactionCookie;
-        use crate::config::RouteResult;
         use crate::proxy::tests::common::create_test_server_with_config;
 
         let (server, _) = create_test_server_with_config(test_forward_route_config()).await;
@@ -13421,7 +13418,7 @@ max_retries = 3
         // A non-empty lease is tracked into transient_leases.
         let limiter = crate::call::concurrent_call_limiter::ConcurrentCallLimiter::new(1);
         let permit = limiter.try_acquire().expect("slot available");
-        let mut lease = crate::call::concurrent_call_limiter::ConcurrentCallLease::default();
+        let lease = crate::call::concurrent_call_limiter::ConcurrentCallLease::default();
         lease.push(permit);
         assert_eq!(limiter.current(), 1);
         session.track_routed_leg_hints(Some(crate::config::DialplanHints {

@@ -4,15 +4,10 @@
 
 use crate::call::domain::*;
 use crate::callrecord::CallRecordHangupReason;
-use crate::rwi::session::{MediaSource as RwiMediaSource, RwiCommandPayload};
+use crate::rwi::session::RwiCommandPayload;
 use anyhow::Result;
 
 use super::AdapterError;
-
-/// Convert RWI MediaSource to domain MediaSource
-fn convert_media_source(source: RwiMediaSource) -> Option<MediaSource> {
-    source.uri.as_ref().map(MediaSource::file)
-}
 
 /// Convert RWI hangup reason string to CallRecordHangupReason
 fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
