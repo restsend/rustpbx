@@ -177,13 +177,59 @@ pub struct RingbackAudio {
     /// No-answer tone — played as 183 early media before sending 408
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noanswer: Option<String>,
-    /// How many seconds to play the tone before sending the final rejection.
-    /// Defaults to 2 seconds when not set (backward compatible).
+    /// Server-error tone — played as 183 early media before a 5xx rejection
+    /// (e.g. when an IVR/app fails to start due to a missing config). Map this
+    /// to a "service unavailable" announcement so a caller never
+    /// hears dead air on a misconfiguration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub play_duration_secs: Option<u32>,
+    pub error: Option<String>,
 }
 
 impl RingbackAudio {
+    /// Built-in failure-tone defaults, applied to every call unless a global
+    /// `[proxy.audio]` or a per-trunk `ringback` overrides them. `ring` is left
+    /// `None` (custom ringback is operator-specific); every failure status gets
+    /// a `tone://` beep, and 5xx (app/IVR start failures) announce the shipped
+    /// English `sounds/service_unavailable_en.mp3`.
+    pub fn builtin_defaults() -> Self {
+        Self {
+            ring: None,
+            busy: Some("tone://480,3000".to_string()),
+            reject: Some("tone://480,2000".to_string()),
+            offline: Some("tone://480,2000".to_string()),
+            notfound: Some("tone://480,1500".to_string()),
+            noanswer: Some("tone://480,3000".to_string()),
+            error: Some("sounds/service_unavailable_en.mp3".to_string()),
+        }
+    }
+
+    /// Overlay `other` onto `self`: every field `Some` in `other` wins. Used to
+    /// layer a global default with per-trunk overrides so an operator only has
+    /// to configure the tones they want to change.
+    pub fn merge_from(&mut self, other: Self) {
+        if other.ring.is_some() {
+            self.ring = other.ring;
+        }
+        if other.busy.is_some() {
+            self.busy = other.busy;
+        }
+        if other.reject.is_some() {
+            self.reject = other.reject;
+        }
+        if other.offline.is_some() {
+            self.offline = other.offline;
+        }
+        if other.notfound.is_some() {
+            self.notfound = other.notfound;
+        }
+        if other.noanswer.is_some() {
+            self.noanswer = other.noanswer;
+        }
+        if other.error.is_some() {
+            self.error = other.error;
+        }
+    }
+
     /// Get the audio file for a specific SIP status code.
     ///
     /// Matching is done on the numeric status code so that `StatusCode::Other(486, ..)`
@@ -196,32 +242,19 @@ impl RingbackAudio {
             404 => self.notfound.as_deref(),
             486 => self.busy.as_deref(),
             603 => self.reject.as_deref(),
+            500..=599 => self.error.as_deref(),
             _ => None,
         }
     }
 
-    /// Returns `true` if any failure tone (busy/reject/offline/notfound/noanswer) is configured
+    /// Returns `true` if any failure tone (busy/reject/offline/notfound/noanswer/error) is configured
     pub fn has_failure_tone(&self) -> bool {
         self.busy.is_some()
             || self.reject.is_some()
             || self.offline.is_some()
             || self.notfound.is_some()
             || self.noanswer.is_some()
-    }
-
-    /// Get the play duration before rejection for a given status code.
-    /// Returns `None` if no tone is configured for the given status code.
-    pub fn play_duration_for(
-        &self,
-        code: &rsipstack::sip::StatusCode,
-    ) -> Option<std::time::Duration> {
-        if self.for_status(code).is_some() {
-            Some(std::time::Duration::from_secs(
-                self.play_duration_secs.unwrap_or(2) as u64,
-            ))
-        } else {
-            None
-        }
+            || self.error.is_some()
     }
 }
 

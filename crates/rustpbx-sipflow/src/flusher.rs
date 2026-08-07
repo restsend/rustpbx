@@ -216,7 +216,7 @@ async fn run(
                 .await;
             }
             _ = status_interval.tick() => {
-                tracing::info!(
+                tracing::trace!(
                     shard,
                     queue_depth = rx.len(),
                     batch_len = batch.len(),
@@ -489,7 +489,7 @@ async fn flush_to_db(
                 metrics::gauge!("sipflow_db_file_bytes", "component" => "sipflow")
                     .set(md.len() as f64);
             }
-            tracing::info!(
+            tracing::trace!(
                 batch_size,
                 elapsed_ms = elapsed.as_millis() as u64,
                 n_sip,
@@ -554,8 +554,6 @@ struct SipRow {
 #[derive(sqlx::FromRow)]
 struct WalCheckpointRow {
     busy: i64,
-    log: i64,
-    checkpointed: i64,
 }
 
 struct RtpRow {

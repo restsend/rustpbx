@@ -26,8 +26,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
-use rustrtc::RtpRewriteBridgeParams;
-use rustrtc::{MediaKind, media::MediaStreamTrack};
+use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -115,8 +114,11 @@ pub struct MediaBridge {
     active_play: Arc<parking_lot::Mutex<HashSet<LegSide>>>,
     /// Codecs of the last successful bridge activation. Used to make
     /// `bridge()` idempotent: re-bridging the same codec pair on an already
-    /// active route is a no-op (avoids rebuilding decoders/relay).
-    last_bridged: Option<(audio_codec::CodecType, audio_codec::CodecType)>,
+    /// active route is a no-op (avoids rebuilding decoders/relay). The third
+    /// element captures the relayed video codec identity (name + PT per leg),
+    /// so a mid-call video codec change re-arms the relay rules.
+    last_bridged:
+        Option<(audio_codec::CodecType, audio_codec::CodecType, Option<(String, u8, String, u8)>)>,
 }
 
 impl MediaBridge {
@@ -349,22 +351,39 @@ impl MediaBridge {
             return Ok(());
         };
 
+        // Video relay match: a codec common to both legs (by case-insensitive
+        // name). Relayed at the transport level (no transcoding); `None` when
+        // the legs share no video codec → audio-only.
+        let video_match =
+            crate::negotiate::MediaNegotiator::find_common_video_codec(&pa.video, &pb.video);
+
         // Idempotent re-bridge: same codec pair on an already-active route is
         // a no-op (avoid rebuilding decoders / re-arming the relay).
-        if self.route_active && self.last_bridged == Some((ca.codec, cb.codec)) {
+        let bridged_key = (
+            ca.codec,
+            cb.codec,
+            video_match
+                .as_ref()
+                .map(|(va, vb)| (va.name.clone(), va.payload_type, vb.name.clone(), vb.payload_type)),
+        );
+        if self.route_active && self.last_bridged.as_ref() == Some(&bridged_key) {
             return Ok(());
         }
-        self.last_bridged = Some((ca.codec, cb.codec));
+        self.last_bridged = Some(bridged_key);
 
         if ca.codec == cb.codec {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
-            // destination is plain RTP.
+            // destination is plain RTP. Audio, DTMF and video m-lines each get
+            // their own payload-type-scoped rewrite rule so video is relayed
+            // with the correct (video) SSRC and PT.
             let a_transport = la.pc().config().transport_mode.clone();
             let b_transport = lb.pc().config().transport_mode.clone();
             let a_ssrc = sender_ssrc(la.pc());
             let b_ssrc = sender_ssrc(lb.pc());
+            let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
+            let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
 
             // RFC 4733 DTMF payload-type remap (only when the two legs
             // negotiated different telephone-event payload types).
@@ -412,41 +431,82 @@ impl MediaBridge {
                 }
             }
 
-            let params_a_to_b = RtpRewriteBridgeParams {
-                ssrc_offset: 0,
+            // ── A→B rules: audio catch-all + DTMF + video ──
+            let mut rules_a_to_b = vec![RtpRewriteRule {
+                match_payload_type: None,
                 fixed_out_ssrc: Some(b_ssrc),
-                payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
-                dtmf_payload_type: dtmf_a_to_b,
-                initial_sequence_number: None,
-                initial_timestamp_offset: None,
-                strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
-            };
-            let params_b_to_a = RtpRewriteBridgeParams {
                 ssrc_offset: 0,
+                out_payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
+            }];
+            if let Some((a_pt, b_pt)) = dtmf_a_to_b {
+                rules_a_to_b.push(RtpRewriteRule {
+                    match_payload_type: Some(a_pt),
+                    fixed_out_ssrc: Some(b_ssrc),
+                    ssrc_offset: 0,
+                    out_payload_type: Some(b_pt),
+                });
+            }
+            if let Some((va, vb)) = &video_match {
+                rules_a_to_b.push(RtpRewriteRule {
+                    match_payload_type: Some(va.payload_type),
+                    fixed_out_ssrc: Some(b_video_ssrc),
+                    ssrc_offset: 0,
+                    out_payload_type: Some(vb.payload_type),
+                });
+            }
+
+            // ── B→A rules (mirror) ──
+            let mut rules_b_to_a = vec![RtpRewriteRule {
+                match_payload_type: None,
                 fixed_out_ssrc: Some(a_ssrc),
-                payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
-                dtmf_payload_type: dtmf_b_to_a,
-                initial_sequence_number: None,
-                initial_timestamp_offset: None,
+                ssrc_offset: 0,
+                out_payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
+            }];
+            if let Some((a_pt, b_pt)) = dtmf_b_to_a {
+                rules_b_to_a.push(RtpRewriteRule {
+                    match_payload_type: Some(b_pt),
+                    fixed_out_ssrc: Some(a_ssrc),
+                    ssrc_offset: 0,
+                    out_payload_type: Some(a_pt),
+                });
+            }
+            if let Some((va, vb)) = &video_match {
+                rules_b_to_a.push(RtpRewriteRule {
+                    match_payload_type: Some(vb.payload_type),
+                    fixed_out_ssrc: Some(a_video_ssrc),
+                    ssrc_offset: 0,
+                    out_payload_type: Some(va.payload_type),
+                });
+            }
+
+            let options_a_to_b = RtpRewriteBridgeOptions {
+                strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
+                ..Default::default()
+            };
+            let options_b_to_a = RtpRewriteBridgeOptions {
                 strip_extensions: a_transport == rustrtc::TransportMode::Rtp,
+                ..Default::default()
             };
 
             la.set_egress_source(EgressSource::RewriteRelay {
                 peer_pc: lb.pc().clone(),
-                params: params_a_to_b,
+                options: options_a_to_b,
+                rules: rules_a_to_b,
             })
             .await?;
             lb.set_egress_source(EgressSource::RewriteRelay {
                 peer_pc: la.pc().clone(),
-                params: params_b_to_a,
+                options: options_b_to_a,
+                rules: rules_b_to_a,
             })
             .await?;
             info!(
                 session = %self.session_id,
                 codec = ?ca.codec,
                 a_ssrc, b_ssrc,
-                strip_a_to_b = params_a_to_b.strip_extensions,
-                strip_b_to_a = params_b_to_a.strip_extensions,
+                video = ?video_match.as_ref().map(|(v, _)| v.name.as_str()),
+                strip_a_to_b = options_a_to_b.strip_extensions,
+                strip_b_to_a = options_b_to_a.strip_extensions,
                 "fast-path relay activated"
             );
         } else {
@@ -766,7 +826,6 @@ impl MediaBridge {
         if let Some(lb) = self.leg_b.take() {
             lb.stop();
         }
-        info!(session = %self.session_id, "media bridge closed");
     }
 }
 
@@ -1073,6 +1132,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -1121,6 +1181,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -1193,6 +1254,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -1209,6 +1271,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,

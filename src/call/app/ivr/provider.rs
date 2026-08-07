@@ -489,12 +489,6 @@ impl ActionProvider for StepProvider {
                 duration_ms = %start.elapsed().as_millis(),
                 "StepProvider on_session_end failed"
             );
-        } else {
-            info!(
-                url = %url,
-                duration_ms = %start.elapsed().as_millis(),
-                "StepProvider on_session_end response"
-            );
         }
         Ok(())
     }

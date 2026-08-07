@@ -809,7 +809,7 @@ impl CallModule {
             .map(|r| r.new_recording_config())
             .unwrap_or_default();
 
-        let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
+        let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
             .with_caller(
                 preview_forward
                     .as_ref()
@@ -843,6 +843,19 @@ impl CallModule {
         let fallback_codecs = trunk_codecs
             .as_deref()
             .or(self.inner.config.audio_codecs.as_deref());
+
+        // Failure-tone audio profile: the global `[proxy.audio]` default (or
+        // built-in tones) as the base, applied to EVERY call regardless of
+        // whether routing produced hints. A per-trunk `ringback` (carried in
+        // `hints`) overrides individual fields. This guarantees
+        // `reject_with_tone` always has a cue (e.g. an IVR/app start failure
+        // plays the service-unavailable prompt) even with zero configuration.
+        let mut audio_profile = self
+            .inner
+            .config
+            .audio_profile
+            .clone()
+            .unwrap_or_else(crate::proxy::routing::RingbackAudio::builtin_defaults);
 
         if let Some(mut hints) = dialplan_hints {
             let mut recording_policy = hints.recording.take();
@@ -894,7 +907,7 @@ impl CallModule {
                 fallback_codecs,
             );
             if let Some(ringback) = hints.ringback.take() {
-                dialplan.audio_profile = Some(ringback);
+                audio_profile.merge_from(ringback);
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
@@ -902,6 +915,8 @@ impl CallModule {
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }
+
+        dialplan.audio_profile = Some(audio_profile);
 
         if callee_is_same_realm && internal_lookup_empty {
             dialplan.extensions.insert(CalleeOfflineMarker);

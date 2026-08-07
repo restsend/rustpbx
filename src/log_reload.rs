@@ -67,7 +67,8 @@ pub fn set_log_filter_handle(handle: FilterHandle) {
 
 /// Apply a new log level at runtime without restarting the service.
 /// Preserves the same noisy-crate suppression as startup (`hyper_util=warn`,
-/// `rustls=warn`, `sqlx=warn`).
+/// `rustls=warn`, `sqlx=warn`) and keeps rustrtc at `info` (silences its
+/// DEBUG lifecycle noise while keeping the INFO media milestones).
 pub fn apply_log_level(level: &str) -> Result<(), String> {
     let mut filter: EnvFilter = level
         .parse()
@@ -76,6 +77,9 @@ pub fn apply_log_level(level: &str) -> Result<(), String> {
         if let Ok(d) = format!("{}=warn", noisy).parse() {
             filter = filter.add_directive(d);
         }
+    }
+    if let Ok(d) = "rustrtc=info".parse() {
+        filter = filter.add_directive(d);
     }
     let handle = LOG_FILTER_HANDLE
         .get()

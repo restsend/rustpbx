@@ -728,10 +728,14 @@ async fn match_invite_impl(
                     .as_ref()
                     .ok_or_else(|| anyhow!("application action requires 'app' field"))?;
 
-                let mut app_hints = None;
-                attach_holds(&mut app_hints, std::mem::take(&mut concurrency_holds));
+                // Reuse `hints` (already seeded from the source trunk's media
+                // hints — ringback, codecs, etc.) so application routes inherit
+                // them just like forward/queue routes do. Previously a fresh
+                // `app_hints = None` dropped the source trunk's ringback, so a
+                // 5xx reject-with-tone (e.g. IVR config missing) played no cue.
+                attach_holds(&mut hints, std::mem::take(&mut concurrency_holds));
                 attach_concurrent_call_lease(
-                    &mut app_hints,
+                    &mut hints,
                     std::mem::take(&mut concurrent_call_lease),
                 );
                 return Ok(RouteResult::Application {
@@ -739,7 +743,7 @@ async fn match_invite_impl(
                     app_name: app_name.clone(),
                     app_params: rule.action.app_params.clone(),
                     auto_answer: rule.action.auto_answer,
-                    hints: app_hints,
+                    hints,
                 });
             }
         }

@@ -52,6 +52,12 @@ pub enum AppRuntimeError {
     #[error("unknown application: {0}")]
     UnknownApp(String),
 
+    /// Application is known but could not start because of a configuration
+    /// problem (e.g. a missing or parse-invalid IVR config file). Carries the
+    /// detailed, operator-actionable reason.
+    #[error("application configuration error: {0}")]
+    ConfigError(String),
+
     #[error("media capability not satisfied: {0:?}")]
     CapabilityNotSatisfied(Vec<MediaCapability>),
 

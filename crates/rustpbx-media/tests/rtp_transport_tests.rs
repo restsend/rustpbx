@@ -36,6 +36,7 @@ struct TestPeer {
     pc: PeerConnection,
     tx: rustrtc::media::track::SampleStreamSource,
     codec: CodecInfo,
+    video_tx: Option<rustrtc::media::track::SampleStreamSource>,
 }
 
 impl TestPeer {
@@ -44,7 +45,7 @@ impl TestPeer {
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
         pc.add_track(track, codec.to_params()).unwrap();
-        Self { pc, tx, codec }
+        Self { pc, tx, codec, video_tx: None }
     }
 
     /// Build a peer with an explicit media capability list (e.g. to also offer
@@ -59,8 +60,32 @@ impl TestPeer {
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
         pc.add_track(track, codec.to_params()).unwrap();
-        Self { pc, tx, codec }
+        Self { pc, tx, codec, video_tx: None }
     }
+
+    /// Add a video sender track (so the peer can relay video end-to-end). The
+    /// PC is rebuilt with video capabilities so the offer carries a video m-line.
+    fn with_video(mut self, caps: &[rustrtc::config::VideoCapability]) -> Self {
+        let mut cfg = rtc_config(self.pc.config().transport_mode.clone(), &self.codec);
+        cfg.media_capabilities.as_mut().unwrap().video = caps.to_vec();
+        self.pc.close();
+        self.pc = PeerConnection::new(cfg);
+        let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
+        self.pc.add_track(track, self.codec.to_params()).unwrap();
+        self.tx = tx;
+        if let Some(first) = caps.first() {
+            let (vtx, vtrack, _) = sample_track(rustrtc::media::MediaKind::Video, 100);
+            let vparams = rustrtc::RtpCodecParameters {
+                payload_type: first.payload_type,
+                clock_rate: first.clock_rate,
+                channels: 0,
+            };
+            self.pc.add_track(vtrack, vparams).unwrap();
+            self.video_tx = Some(vtx);
+        }
+        self
+    }
+
     /// Push an audio frame (already encoded in `codec`) to the remote peer.
     fn send_audio(&self, payload: Vec<u8>, ts: u32) {
         self.tx
@@ -89,6 +114,47 @@ impl TestPeer {
             .ok()
             .and_then(|s| match s {
                 MediaSample::Audio(f) => Some(f),
+                _ => None,
+            })
+    }
+
+    /// Push a raw H264 access-unit frame to the remote peer (via the bridge).
+    fn send_video(&self, payload: Vec<u8>, ts: u32) {
+        if let Some(vtx) = &self.video_tx {
+            vtx.send(MediaSample::Video(rustrtc::media::frame::VideoFrame {
+                data: bytes::Bytes::from(payload),
+                payload_type: Some(96),
+                rtp_timestamp: ts,
+                width: 640,
+                height: 480,
+                format: rustrtc::media::frame::VideoPixelFormat::I420,
+                rotation_deg: 0,
+                is_last_packet: true,
+                header_extension: None,
+                csrcs: Vec::new(),
+                sequence_number: None,
+                source_addr: None,
+                raw_packet: None,
+            }))
+            .unwrap();
+        }
+    }
+
+    /// Receive one video frame from the remote peer (via the bridge).
+    async fn recv_video(&self, timeout_ms: u64) -> Option<rustrtc::media::frame::VideoFrame> {
+        let track = self
+            .pc
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Video)?
+            .receiver()?
+            .track();
+        tokio::time::timeout(Duration::from_millis(timeout_ms), track.recv())
+            .await
+            .ok()?
+            .ok()
+            .and_then(|s| match s {
+                MediaSample::Video(f) => Some(f),
                 _ => None,
             })
     }
@@ -506,6 +572,201 @@ async fn fast_path_webrtc_opus_webrtc_opus() {
     // Let background tasks (ICE/DTLS/sender loops) drain before the test
     // runtime drops — sync close() cannot await task completion.
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+}
+
+// ── Video fast-path (relay-only) ─────────────────────────────────────────
+
+fn h264_caps(pt: u8) -> Vec<rustrtc::config::VideoCapability> {
+    vec![rustrtc::config::VideoCapability {
+        payload_type: pt,
+        codec_name: "H264".to_string(),
+        clock_rate: 90000,
+        fmtp: Some("packetization-mode=1;profile-level-id=42e01f".to_string()),
+        rtcp_fbs: vec![],
+        rtx_payload_type: None,
+    }]
+}
+
+fn vp8_caps(pt: u8) -> Vec<rustrtc::config::VideoCapability> {
+    vec![rustrtc::config::VideoCapability {
+        payload_type: pt,
+        codec_name: "VP8".to_string(),
+        clock_rate: 90000,
+        fmtp: None,
+        rtcp_fbs: vec![],
+        rtx_payload_type: None,
+    }]
+}
+
+/// B2BUA harness for video: two legs (each with audio PCMU + the given video
+/// caps) bridged in a MediaBridge, each faced by a video-capable TestPeer.
+struct VideoTestHarness {
+    mb: MediaBridge,
+    test_a: TestPeer,
+    test_b: TestPeer,
+}
+
+async fn create_video_harness(
+    transport_a: TransportMode,
+    transport_b: TransportMode,
+    caps_a: Vec<rustrtc::config::VideoCapability>,
+    caps_b: Vec<rustrtc::config::VideoCapability>,
+) -> VideoTestHarness {
+    let codec = MediaNegotiator::codec_info_for_type(CodecType::PCMU);
+    let mk_leg = |name: &str, t: TransportMode, caps: Vec<rustrtc::config::VideoCapability>| {
+        let mut cfg = rtc_config(t, &codec);
+        cfg.media_capabilities.as_mut().unwrap().video = caps;
+        LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0).unwrap()
+    };
+    let leg_a = mk_leg("a", transport_a.clone(), caps_a.clone());
+    let leg_b = mk_leg("b", transport_b.clone(), caps_b.clone());
+
+    let test_a = TestPeer::new(transport_a.clone(), codec.clone()).with_video(&caps_a);
+    let test_b = TestPeer::new(transport_b.clone(), codec.clone()).with_video(&caps_b);
+    negotiate(&test_a, &leg_a).await;
+    negotiate(&test_b, &leg_b).await;
+
+    // Both legs must have negotiated video (a common codec) for relay to arm.
+    assert!(!leg_a.negotiated().map(|p| p.video.is_empty()).unwrap_or(true));
+    assert!(!leg_b.negotiated().map(|p| p.video.is_empty()).unwrap_or(true));
+
+    // Ensure both legs' RTP transports (and DTLS for WebRTC) are ready before
+    // bridging so the deferred relay arming succeeds promptly.
+    for leg in [&leg_a, &leg_b] {
+        let _ = leg
+            .pc()
+            .wait_for_rtp_transport_ready(Duration::from_secs(10))
+            .await;
+        if leg.pc().config().transport_mode == rustrtc::TransportMode::WebRtc {
+            let _ =
+                tokio::time::timeout(Duration::from_secs(10), leg.pc().wait_for_connected()).await;
+        }
+    }
+
+    let mut mb = MediaBridge::new("video-harness", BridgeOpts::default());
+    mb.replace_leg(LegSide::A, leg_a.clone()).await;
+    mb.replace_leg(LegSide::B, leg_b.clone()).await;
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged(), "route must be active after both accept");
+
+    VideoTestHarness { mb, test_a, test_b }
+}
+
+impl VideoTestHarness {
+    /// Feed video frames from `sender` until `receiver` gets one, or timeout.
+    async fn relay_video(&self, sender: &TestPeer, receiver: &TestPeer) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(8000);
+        let mut ts = 1000u32;
+        while tokio::time::Instant::now() < deadline {
+            sender.send_video(vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x00, 0x00, 0x00], ts);
+            ts = ts.wrapping_add(3000);
+            if let Some(frame) = receiver.recv_video(100).await {
+                return !frame.data.is_empty();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// Assert video does NOT cross the bridge within the window (codec mismatch
+    /// → relay-only degradation), while audio still does.
+    async fn assert_video_not_relayed(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        let mut ts = 5000u32;
+        while tokio::time::Instant::now() < deadline {
+            self.test_a
+                .send_video(vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88], ts);
+            ts = ts.wrapping_add(3000);
+            if self.test_b.recv_video(50).await.is_some() {
+                panic!("video must NOT cross the bridge when codecs mismatch");
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    fn close(&mut self) {
+        self.mb.close();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                self.test_a.pc.close();
+                self.test_b.pc.close();
+            }
+        }));
+    }
+}
+
+/// H264 video relay over RTP: both legs negotiate audio + video, and the
+/// bridge's payload-type-aware rewrite relay must carry video to the far peer
+/// with the destination leg's video SSRC/PT. This is what eliminates the
+/// browser's 2–3 s unsignaled-SSRC demux delay.
+#[tokio::test]
+async fn fast_path_rtp_h264_rtp_h264_video_relay() {
+    let mut h = create_video_harness(
+        TransportMode::Rtp,
+        TransportMode::Rtp,
+        h264_caps(96),
+        h264_caps(96),
+    )
+    .await;
+    assert!(h.relay_video(&h.test_a, &h.test_b).await, "B must receive A's video");
+    assert!(h.relay_video(&h.test_b, &h.test_a).await, "A must receive B's video");
+    h.close();
+    // Let background tasks (ICE/DTLS/sender loops) drain before the test
+    // runtime drops — sync close() cannot await task completion.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// WebRTC (DTLS-SRTP) video relay: the same payload-type-aware rewrite relay
+/// must carry video over SRTP once ICE+DTLS complete, and the deferred relay
+/// arming (background task waiting for the SRTP transport) must come up.
+#[tokio::test]
+async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
+    let mut h = create_video_harness(
+        TransportMode::WebRtc,
+        TransportMode::WebRtc,
+        h264_caps(96),
+        h264_caps(96),
+    )
+    .await;
+    assert!(h.relay_video(&h.test_a, &h.test_b).await, "B must receive A's WebRTC video");
+    assert!(h.relay_video(&h.test_b, &h.test_a).await, "A must receive B's WebRTC video");
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// Cross-transport video relay (browser → SIP phone): WebRTC leg to RTP leg.
+/// Exercises the SRTP→plaintext direction and `strip_extensions` (WebRTC
+/// extension headers must be stripped before the RTP peer sees them).
+#[tokio::test]
+async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
+    let mut h = create_video_harness(
+        TransportMode::WebRtc,
+        TransportMode::Rtp,
+        h264_caps(96),
+        h264_caps(96),
+    )
+    .await;
+    assert!(h.relay_video(&h.test_a, &h.test_b).await, "RTP peer must receive WebRTC peer's video");
+    assert!(h.relay_video(&h.test_b, &h.test_a).await, "WebRTC peer must receive RTP peer's video");
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// Relay-only degradation: when the legs share no video codec (H264 vs VP8),
+/// video must NOT cross the bridge while audio still flows.
+#[tokio::test]
+async fn video_codec_mismatch_degrades_to_audio_only() {
+    let mut h = create_video_harness(
+        TransportMode::Rtp,
+        TransportMode::Rtp,
+        h264_caps(96),
+        vp8_caps(98),
+    )
+    .await;
+    h.assert_video_not_relayed().await;
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
 // ── C2: Transcoding (different codec, TranscodePeer) ─────────────────────

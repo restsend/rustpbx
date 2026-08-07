@@ -87,7 +87,7 @@ async def test_cng_custom_level_config_parses(pbx, sipbot_pool, rwi):
     await h.wait_rtp(caller, "caller", 15)
 
 
-@pytest.mark.xfail(reason="WIP: originate bridge relay has no internal RTP source; CNG/Silence egress not forwarded through relay")
+@pytest.mark.xfail(reason="WIP: RWI hold on originated (UAC) calls fails 'Leg not found: callee' — the originate registers the 1002 dialog as 'caller' with media on LegSide::B but no 'callee' leg in self.legs, so handle_hold returns before the media switch")
 @pytest.mark.asyncio
 async def test_cng_rtp_flows_during_hold(pbx, sipbot_pool, rwi):
     """RTP packets keep flowing during hold (ptime-paced egress).

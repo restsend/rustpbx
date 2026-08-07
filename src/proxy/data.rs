@@ -2068,8 +2068,7 @@ mod tests {
             "sbc": {
                 "ringback": {
                     "busy": "/sounds/busy.wav",
-                    "reject": "/sounds/reject.wav",
-                    "play_duration_secs": 5
+                    "reject": "/sounds/reject.wav"
                 }
             }
         }"#,
@@ -2079,7 +2078,6 @@ mod tests {
         let rb = cfg.ringback.as_ref().expect("ringback should be parsed");
         assert_eq!(rb.busy, Some("/sounds/busy.wav".to_string()));
         assert_eq!(rb.reject, Some("/sounds/reject.wav".to_string()));
-        assert_eq!(rb.play_duration_secs, Some(5));
     }
 
     #[test]

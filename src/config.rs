@@ -94,10 +94,6 @@ fn default_rtp_timeout() -> Option<u64> {
     Some(15)
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_generated_config_dir() -> String {
     "./config".to_string()
 }
@@ -729,6 +725,12 @@ pub struct ProxyConfig {
     pub locator_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
+    /// Global failure-tone defaults (`[proxy.audio]`): the base `RingbackAudio`
+    /// applied to every call. Per-trunk `ringback` overrides individual fields.
+    /// When unset, built-in defaults (busy/offline/etc. → `tone://`, 5xx →
+    /// `sounds/service_unavailable_en.mp3`) are used so calls always get a tone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
     pub audio_codecs: Option<Vec<String>>,
     #[serde(default)]
     pub frequency_limiter: Option<String>,
@@ -755,12 +757,6 @@ pub struct ProxyConfig {
     pub session_expires: Option<u64>,
     #[serde(default = "default_rtp_timeout")]
     pub rtp_timeout: Option<u64>,
-    /// When `true` (default), the RTP-inactivity watchdog is suppressed while an
-    /// app (IVR / voicemail / queue / conference) drives the session with no
-    /// real callee bridged, and during a blind transfer. Set to `false` to
-    /// always enforce per-leg silence detection.
-    #[serde(default = "default_true")]
-    pub pause_rtp_timeout_during_app: bool,
     #[serde(default = "default_session_cmd_channel_capacity")]
     pub session_cmd_channel_capacity: usize,
     #[serde(default = "default_session_state_channel_capacity")]
@@ -1236,6 +1232,7 @@ impl Default for ProxyConfig {
             locator: LocatorConfig::default(),
             locator_webhook: None,
             media_proxy: MediaProxyMode::default(),
+            audio_profile: None,
             audio_codecs: None,
             frequency_limiter: None,
             realms: Some(vec![]),
@@ -1251,7 +1248,6 @@ impl Default for ProxyConfig {
             session_timer_always: false,
             session_expires: None,
             rtp_timeout: default_rtp_timeout(),
-            pause_rtp_timeout_during_app: default_true(),
             session_cmd_channel_capacity: default_session_cmd_channel_capacity(),
             session_state_channel_capacity: default_session_state_channel_capacity(),
             queues: HashMap::new(),

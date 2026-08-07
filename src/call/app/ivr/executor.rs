@@ -7,7 +7,7 @@ use crate::call::app::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -16,6 +16,10 @@ const IVR_STATUS_KEY: &str = "ivr_status";
 const IVR_NAME_KEY: &str = "ivr_name";
 const IVR_END_REASON_KEY: &str = "ivr_end_reason";
 const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
+
+/// Default number of consecutive no-input prompt cycles before the step IVR
+/// asks the provider to resolve (DtmfMenuTimeout). 0 disables the runaway guard.
+const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
 
 pub struct StepIvrApp {
     provider: Box<dyn ActionProvider>,
@@ -82,6 +86,17 @@ pub struct StepIvrApp {
     /// Session extensions clone stashed in on_enter for use in on_exit.
     /// Only populated when the IVR was started via `ivr.exec`.
     session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
+    /// DTMF digits received while the current step is non-interruptible (or the
+    /// step provider response is in flight). Delivered to the provider on the
+    /// next step instead of being silently dropped, so caller input is never lost.
+    pending_dtmf: VecDeque<String>,
+    /// Runaway guard: consecutive `audio_complete` cycles with no caller input
+    /// after which the app probes the provider with `DtmfMenuTimeout`. 0 disables.
+    max_repeat_prompts: u32,
+    /// Consecutive no-input prompt cycles (reset on any real input / terminal step).
+    no_input_prompts: u32,
+    /// Whether a `DtmfMenuTimeout` probe was already sent and ignored.
+    probe_pending: bool,
 }
 
 #[derive(Clone)]
@@ -129,6 +144,10 @@ impl StepIvrApp {
             runtime_vars: None,
             ivr_params: None,
             session_extensions: None,
+            pending_dtmf: VecDeque::new(),
+            max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
+            no_input_prompts: 0,
+            probe_pending: false,
         }
     }
 
@@ -165,6 +184,10 @@ impl StepIvrApp {
             runtime_vars: None,
             ivr_params: None,
             session_extensions: None,
+            pending_dtmf: VecDeque::new(),
+            max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
+            no_input_prompts: 0,
+            probe_pending: false,
         }
     }
 
@@ -226,6 +249,14 @@ impl StepIvrApp {
     /// Mark this session as re-entered from agent or queue.
     pub fn with_transferred_from(mut self, from: Option<String>) -> Self {
         self.transferred_from = from;
+        self
+    }
+
+    /// Configure the runaway-loop guard: after `n` consecutive no-input prompt
+    /// cycles the app probes the provider with `DtmfMenuTimeout`, and hangs up
+    /// if it is still ignored. `0` disables the guard.
+    pub fn with_max_repeat_prompts(mut self, n: u32) -> Self {
+        self.max_repeat_prompts = n;
         self
     }
 
@@ -633,7 +664,58 @@ impl StepIvrApp {
         }
     }
 
-    async fn request_next(&mut self, event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
+    async fn request_next(&mut self, mut event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
+        // A digit buffered during a non-interruptible step (or while the
+        // previous provider response was in flight) is delivered before the
+        // natural event, so caller input is never silently lost. An explicit
+        // in-band DTMF (interruptible barge-in / provider-driven menu) always
+        // wins; the buffered digit stays queued for a later step.
+        if let Some(digit) = self.pending_dtmf.pop_front() {
+            if matches!(event, Some(ProviderEvent::Dtmf { .. })) {
+                self.pending_dtmf.push_front(digit);
+            } else {
+                tracing::info!(digit = %digit, "StepIvrApp: delivering buffered DTMF to provider");
+                event = Some(ProviderEvent::Dtmf { digit });
+            }
+        }
+
+        // Runaway-loop guard: a provider that keeps re-offering the same
+        // non-terminal prompt on every audio_complete (with no caller input)
+        // would keep the call alive forever. After N consecutive no-input
+        // cycles, probe once with DtmfMenuTimeout; if that is still ignored,
+        // hang up so the app is always terminated and cleaned up.
+        if self.max_repeat_prompts > 0
+            && self.probe_pending
+            && matches!(&event, Some(ProviderEvent::AudioComplete { .. }))
+        {
+            tracing::warn!("StepIvrApp: provider ignored DtmfMenuTimeout probe, hanging up");
+            self.probe_pending = false;
+            self.no_input_prompts = 0;
+            return Ok(ActionNode::new(EntryAction::Hangup {
+                prompt: None,
+                prompt_text: None,
+                prompt_voice: None,
+            }));
+        }
+        match &event {
+            Some(ProviderEvent::AudioComplete { .. }) => {
+                self.no_input_prompts += 1;
+            }
+            _ => {
+                self.no_input_prompts = 0;
+                self.probe_pending = false;
+            }
+        }
+        if self.max_repeat_prompts > 0 && self.no_input_prompts > self.max_repeat_prompts {
+            tracing::warn!(
+                cycles = self.no_input_prompts,
+                "StepIvrApp: no input for too many prompts, probing provider with DtmfMenuTimeout"
+            );
+            self.probe_pending = true;
+            self.no_input_prompts = 0;
+            event = Some(ProviderEvent::DtmfMenuTimeout);
+        }
+
         let now_rfc3339 = chrono::Utc::now().to_rfc3339();
         let prev_step_duration_ms = self.step_prev_duration_ms;
         let ctx = ProviderContext {
@@ -1054,16 +1136,6 @@ impl CallApp for StepIvrApp {
         // DTMF received — clear any stale timeout flag so a later hangup is
         // not misclassified as timeout-induced.
         self.timeout_induced = false;
-        // Ignore DTMF that arrives before the IVR is ready to accept input
-        // (e.g. a key pressed during a plain Prompt/Play step).  Forwarding
-        // such early digits to the provider would derail the flow.
-        if self.pending_menu.is_none() && !self.awaiting_dtmf && !self.interrupt_on_dtmf {
-            tracing::info!(
-                digit = %digit,
-                "StepIvrApp: ignoring early DTMF (not awaiting input)"
-            );
-            return Ok(AppAction::Continue);
-        }
 
         // A local DtmfMenu owns its own DTMF resolution: the digit must NEVER
         // be forwarded to the provider. Otherwise a single unexpected key
@@ -1135,24 +1207,38 @@ impl CallApp for StepIvrApp {
             return Ok(AppAction::Continue);
         }
 
-        // Interruptible Prompt barge-in: forward the digit to the provider
-        // (this is the explicit, intended interruption path).
-        self.awaiting_dtmf = false;
-        if self.interrupt_on_dtmf {
-            ctrl.stop_audio().await.ok();
-            self.current_track_id = None;
-            self.interrupt_on_dtmf = false;
+        // Interruptible Prompt barge-in (or a provider-driven menu awaiting
+        // input): stop playback and forward the digit to the provider now.
+        if self.interrupt_on_dtmf || self.awaiting_dtmf {
+            self.awaiting_dtmf = false;
+            if self.interrupt_on_dtmf {
+                ctrl.stop_audio().await.ok();
+                self.current_track_id = None;
+                self.interrupt_on_dtmf = false;
+            }
+
+            if let Some(ref mut t) = self.pending_trace {
+                t.trigger = crate::rwi::TriggerInfo::with_detail(
+                    "dtmf",
+                    serde_json::json!({ "digit": digit }),
+                );
+            }
+            self.current_node = Some(
+                self.request_next(Some(ProviderEvent::Dtmf { digit }))
+                    .await?,
+            );
+            return self.__exec_node(ctrl, context).await;
         }
 
-        if let Some(ref mut t) = self.pending_trace {
-            t.trigger =
-                crate::rwi::TriggerInfo::with_detail("dtmf", serde_json::json!({ "digit": digit }));
-        }
-        self.current_node = Some(
-            self.request_next(Some(ProviderEvent::Dtmf { digit }))
-                .await?,
+        // The current step is non-interruptible (e.g. an announcement) or the
+        // provider response is still in flight. Do NOT drop the digit — buffer
+        // it so it is delivered to the provider on the next step.
+        tracing::info!(
+            digit = %digit,
+            "StepIvrApp: buffering DTMF during non-interruptible step"
         );
-        self.__exec_node(ctrl, context).await
+        self.pending_dtmf.push_back(digit);
+        Ok(AppAction::Continue)
     }
 
     async fn on_audio_complete(
@@ -2082,7 +2168,8 @@ mod tests {
             .await;
         stack
             .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("toivr:"))
+                matches!(c, CallCommand::Transfer { target, .. }
+                    if target == "toivr:39290?businessType=7")
             })
             .await;
     }
@@ -2106,7 +2193,65 @@ mod tests {
             .await;
         stack
             .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("bridge:"))
+                matches!(c, CallCommand::Transfer { target, .. }
+                    if target == "bridge:https://voip.example.com/rooms")
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_bridge_with_return_to_ivr() {
+        // Bridge with return_to_ivr must append the resume marker as a query
+        // string (common.rs execute_action: sep '?' when uri has no '?').
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![ActionNode::new(EntryAction::Bridge {
+                create_room_uri: "wss://voip.example.com/room1".into(),
+                headers: HashMap::new(),
+                timeout_ms: None,
+                return_to_ivr: Some("main".into()),
+                success: Some(Box::new(ActionNode::new(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }))),
+                failure: None,
+            })])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { target, .. }
+                    if target == "bridge:wss://voip.example.com/room1?return_to_ivr=main")
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_route_to_agent() {
+        // RouteToAgent is terminal: it substitutes the target and emits a plain
+        // Transfer. The skill_group_id/key_id/channel_code are written to
+        // internal session variables consumed by downstream routing (verified
+        // end-to-end in the tier3 step-mode test).
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![ActionNode::new(EntryAction::RouteToAgent {
+                target: "1001".into(),
+                skill_group_id: Some("support".into()),
+                key_id: Some("night".into()),
+                channel_code: Some("chat".into()),
+            })])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { target, .. } if target == "1001")
             })
             .await;
     }
@@ -3546,58 +3691,111 @@ mod tests {
             .await;
     }
 
-    // ── True E2E: HTTP → Python provider ─────────────────────────────────
+    // ── StepProvider ↔ HTTP contract test ────────────────────────────────
     //
-    // Validates the FULL IVR protocol chain:
-    //   StepIvrApp → StepProvider (HTTP) → step_ivr_provider.py
+    // Exercises the StepProvider HTTP client end-to-end against an in-process
+    // mock provider (no external Python/example dependency): request bodies are
+    // POSTed to /ivr/step, responses parsed into ActionNodes, and
+    // session_start/end notifications are delivered.
 
-    /// Start the Python step provider server and return the base URL.
-    /// Panics if python3 is not on PATH or the server fails to start.
-    struct PythonProvider {
+    /// Minimal in-process step provider. Accepts keep-alive HTTP/1.1
+    /// connections and answers `/ivr/step` based on the event type — mirroring
+    /// what a real step provider (e.g. `examples/unified_ivr_provider.py`)
+    /// returns.
+    struct MockStepProviderServer {
         url: String,
-        child: std::process::Child,
+        _listener: std::net::TcpListener,
     }
 
-    impl Drop for PythonProvider {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-
-    async fn start_python_provider(port: u16) -> PythonProvider {
-        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples")
-            .join("step_ivr_provider.py");
-        let child = std::process::Command::new("python3")
-            .arg(&script)
-            .arg(port.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start Python provider (python3 required)");
-
-        // Wait for server to be ready
-        let url = format!("http://127.0.0.1:{}/ivr/step", port);
-        for _ in 0..30 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                return PythonProvider { url, child };
+    fn start_mock_step_provider() -> MockStepProviderServer {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
+        let url = format!(
+            "http://{}/ivr/step",
+            listener.local_addr().expect("mock provider addr")
+        );
+        let accept_listener = listener.try_clone().expect("clone mock provider listener");
+        std::thread::spawn(move || {
+            for stream in accept_listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                std::thread::spawn(|| {
+                    let _ = serve_connection(stream);
+                });
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        MockStepProviderServer {
+            url,
+            _listener: listener,
         }
-        panic!("Python provider did not start on port {port}");
+    }
+
+    fn serve_connection(mut stream: std::net::TcpStream) -> std::io::Result<()> {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        loop {
+            // Request line: `POST /ivr/step HTTP/1.1`
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                return Ok(());
+            }
+            let path = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_string();
+            // Headers
+            let mut content_length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header)? == 0 {
+                    return Ok(());
+                }
+                if header.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = header.trim_start().strip_prefix("Content-Length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body)?;
+            let payload = mock_step_response(&path, &body);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                payload.len()
+            );
+            stream.write_all(head.as_bytes())?;
+            stream.write_all(&payload)?;
+            stream.flush()?;
+        }
+    }
+
+    fn mock_step_response(path: &str, body: &[u8]) -> Vec<u8> {
+        if path != "/ivr/step" {
+            // /ivr/step/start and /ivr/step/end are fire-and-forget.
+            return br#"{"status":"ok"}"#.to_vec();
+        }
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+            let event_type = value["event"]["type"].as_str().unwrap_or("");
+            if event_type == "session_start" {
+                return br#"{"type":"prompt","tts_text":"IVR step, press 1 or 2.","interruptible":true}"#
+                    .to_vec();
+            }
+            if event_type == "dtmf" && value["event"]["digit"].as_str() == Some("2") {
+                return br#"{"type":"queue","target":"sales"}"#.to_vec();
+            }
+        }
+        br#"{"type":"hangup"}"#.to_vec()
     }
 
     #[tokio::test]
-    async fn test_python_provider_direct_http() {
+    async fn test_step_provider_http_contract() {
         use crate::call::app::ivr::provider::StepProvider;
-        use portpicker::pick_unused_port;
 
-        let provider_port = pick_unused_port().expect("no free port");
-        let provider = start_python_provider(provider_port).await;
+        let provider = start_mock_step_provider();
         let step_provider = StepProvider::new(&provider.url);
 
         let session = SessionContext {
@@ -3665,8 +3863,8 @@ mod tests {
             }
         };
         let action = step_provider.next_action(ctx).await.unwrap();
-        // Latest step_ivr_provider.py maps DTMF "2" to a queue action targeting
-        // "sales" (see examples/step_ivr_provider.py::IvrSession.next_action).
+        // The mock maps DTMF "2" → queue "sales", matching the documented
+        // step-provider menu flow (see examples/unified_ivr_provider.py).
         assert!(
             matches!(action.action, EntryAction::Queue { ref target, .. } if target == "sales")
         );
@@ -3675,5 +3873,234 @@ mod tests {
             .on_session_end(&EndReason::Normal, "test-session")
             .await
             .unwrap();
+    }
+
+    // ── DTMF delivery in step-provider mode ──────────────────────────────
+    //
+    // Regression: a digit pressed while the current step is a non-interruptible
+    // prompt (or the provider response is in flight) used to be silently
+    // dropped by `on_dtmf` ("ignoring early DTMF"), so "press 2 → transfer"
+    // never reached the provider. It must now be buffered and delivered on the
+    // next step.
+
+    fn event_label(ev: &Option<ProviderEvent>) -> String {
+        match ev {
+            Some(ProviderEvent::SessionStart) => "session_start".to_string(),
+            Some(ProviderEvent::AudioComplete { .. }) => "audio_complete".to_string(),
+            Some(ProviderEvent::Dtmf { digit }) => format!("dtmf:{digit}"),
+            Some(ProviderEvent::DtmfMenuTimeout) => "dtmf_menu_timeout".to_string(),
+            Some(ProviderEvent::Error { .. }) => "error".to_string(),
+            _ => "other".to_string(),
+        }
+    }
+
+    /// Provider that records every event it is called with, and answers:
+    /// session_start → interruptible welcome; audio_complete → non-interruptible
+    /// announcement; dtmf "2" → transfer to 2001; anything else → hangup.
+    struct ScriptedProvider {
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ActionProvider for ScriptedProvider {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.log.lock().unwrap().push(event_label(&ctx.event));
+            match &ctx.event {
+                Some(ProviderEvent::SessionStart) => Ok(ActionNode::new(EntryAction::Prompt {
+                    file: Some("welcome.wav".into()),
+                    tts_text: None,
+                    tts_voice: None,
+                    record_name_list: None,
+                    interruptible: true,
+                    tts_api_url: None,
+                })),
+                Some(ProviderEvent::AudioComplete { .. }) => {
+                    Ok(ActionNode::new(EntryAction::Prompt {
+                        file: Some("announce.wav".into()),
+                        tts_text: None,
+                        tts_voice: None,
+                        record_name_list: None,
+                        interruptible: false,
+                        tts_api_url: None,
+                    }))
+                }
+                Some(ProviderEvent::Dtmf { digit }) if digit == "2" => {
+                    Ok(ActionNode::new(EntryAction::Transfer {
+                        target: "2001".into(),
+                        params: HashMap::new(),
+                        return_to_ivr: None,
+                    }))
+                }
+                _ => Ok(ActionNode::new(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                })),
+            }
+        }
+
+        async fn on_session_start(&self, _ctx: &SessionContext) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn on_session_end(
+            &self,
+            _reason: &EndReason,
+            _session_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn play_file_cmd(cmd: &CallCommand, path: &str) -> bool {
+        matches!(
+            cmd,
+            CallCommand::Play {
+                source: crate::call::domain::MediaSource::File { path: p }, ..
+            } if p == path
+        )
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_buffers_dtmf_during_non_interruptible_prompt() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider { log: log.clone() }));
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
+            .await;
+
+        // welcome (interruptible) completes → announcement (non-interruptible).
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "play-announce", |c| play_file_cmd(c, "announce.wav"))
+            .await;
+
+        // Press 2 during the non-interruptible announcement — must be buffered,
+        // not dropped.
+        stack.dtmf("2");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Announcement completes → buffered digit is delivered to the provider
+        // (as a dtmf event) → provider returns transfer.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter().any(|e| e == "dtmf:2"),
+            "provider never received the buffered dtmf:2 — got {log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_barges_in_interruptible_prompt() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider { log: log.clone() }));
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
+            .await;
+
+        // Press 2 during the interruptible welcome → immediate barge-in.
+        stack.dtmf("2");
+        stack
+            .assert_cmd(500, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let log = log.lock().unwrap();
+        assert!(
+            log.iter().any(|e| e == "dtmf:2"),
+            "provider never received dtmf:2 — got {log:?}"
+        );
+    }
+
+    // ── Runaway-loop guard ────────────────────────────────────────────────
+
+    /// Provider that answers every event with the same interruptible prompt,
+    /// simulating a broken/looping provider that never terminates.
+    struct LoopingProvider;
+
+    #[async_trait]
+    impl ActionProvider for LoopingProvider {
+        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            Ok(ActionNode::new(EntryAction::Prompt {
+                file: Some("menu.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: true,
+                tts_api_url: None,
+            }))
+        }
+
+        async fn on_session_start(&self, _ctx: &SessionContext) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn on_session_end(
+            &self,
+            _reason: &EndReason,
+            _session_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_runaway_loop_guard_hangs_up() {
+        let app = StepIvrApp::with_provider(Box::new(LoopingProvider))
+            .with_max_repeat_prompts(2);
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(500, "play-menu", |c| play_file_cmd(c, "menu.wav"))
+            .await;
+
+        // Cycle 1..2: no input → still re-offered by the provider.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "play-menu-2", |c| play_file_cmd(c, "menu.wav"))
+            .await;
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "play-menu-3", |c| play_file_cmd(c, "menu.wav"))
+            .await;
+
+        // Cycle 3: probe with DtmfMenuTimeout; a looping provider ignores it.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "play-menu-4", |c| play_file_cmd(c, "menu.wav"))
+            .await;
+
+        // Cycle 4: probe already ignored → hang up.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .await;
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
-use crate::wav_reader::WavReader;
+use crate::wav_reader::{WavFormat, WavReader, format_issues};
 pub trait AudioSource: Send + Sync {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize;
     fn sample_rate(&self) -> u32;
@@ -36,7 +36,6 @@ impl FileAudioSource {
     pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
         let (bytes, label) =
             if file_path.starts_with("http://") || file_path.starts_with("https://") {
-                debug!(file = %file_path, "Downloading audio file");
                 (Self::download_bytes(&file_path).await?, file_path.clone())
             } else {
                 if !Path::new(&file_path).exists() {
@@ -56,13 +55,6 @@ impl FileAudioSource {
         let (pcm, channels, sample_rate) = decode_bytes(&bytes, &extension, &label)?;
         // An empty PCM buffer is valid (e.g. a 0-sample WAV): the source acts
         // as silence / loops silence. Don't reject it.
-        debug!(
-            file = %label,
-            samples = pcm.len(),
-            channels,
-            rate = sample_rate,
-            "FileAudioSource ready (pre-decoded)"
-        );
         Ok(Self {
             loop_playback,
             eof_reached: false,
@@ -86,7 +78,6 @@ impl FileAudioSource {
             .bytes()
             .await
             .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-        debug!(bytes = bytes.len(), "Downloaded audio file");
         Ok(bytes.to_vec())
     }
 }
@@ -97,13 +88,25 @@ fn decode_bytes(bytes: &[u8], extension: &str, label: &str) -> Result<(Vec<i16>,
     match extension {
         "wav" => {
             let mut reader = WavReader::new(std::io::Cursor::new(bytes.to_vec()))?;
-            let (channels, sample_rate) = {
+            let (channels, sample_rate, format) = {
                 let spec = reader.spec();
-                (spec.channels, spec.sample_rate)
+                (spec.channels, spec.sample_rate, reader.format())
             };
+            let bits = reader.spec().bits_per_sample;
+            for issue in format_issues(format, reader.spec()) {
+                warn!(file = %label, format_tag = ?format, bits_per_sample = bits, issue = %issue,
+                    "WAV header inconsistent with data — playback may sound like static/noise");
+            }
             let pcm: Vec<i16> = reader.samples().filter_map(|s| s.ok()).collect();
             let pcm = mix_stereo_to_mono(&pcm, channels as usize);
-            debug!(file = %label, samples = pcm.len(), rate = sample_rate, "Decoded WAV");
+            if looks_like_pcm_bytes_under_g711(format, &pcm) {
+                warn!(
+                    file = %label,
+                    "G.711 WAV whose even/odd samples have mismatched noise — the data is \
+                     likely 16-bit PCM bytes mislabeled as μ-law/a-law (classic loud-static symptom)"
+                );
+            }
+            debug!(file = %label, samples = pcm.len(), rate = sample_rate, channels, format_tag = ?format, bits_per_sample = bits, "Decoded WAV");
             Ok((pcm, 1, sample_rate))
         }
         "mp3" => {
@@ -169,6 +172,57 @@ pub(crate) fn mix_stereo_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
         mono.push((sum / channels as i32) as i16);
     }
     mono
+}
+
+/// Zero-crossing rate of the first difference: fraction of non-zero adjacent
+/// steps that change sign. Smooth band-limited signals (speech / tones) have a
+/// low rate; high-frequency or random content approaches 1.0.
+fn zero_crossing_rate(samples: &[i16]) -> f64 {
+    let mut sign_changes = 0usize;
+    let mut prev: Option<bool> = None;
+    let mut non_zero = 0usize;
+    for w in samples.windows(2) {
+        let d = w[1] as i32 - w[0] as i32;
+        if d == 0 {
+            continue;
+        }
+        let pos = d > 0;
+        if let Some(p) = prev
+            && p != pos
+        {
+            sign_changes += 1;
+        }
+        prev = Some(pos);
+        non_zero += 1;
+    }
+    if non_zero < 2 {
+        return 0.0;
+    }
+    sign_changes as f64 / (non_zero - 1) as f64
+}
+
+/// Heuristic that flags a G.711 (μ-law / a-law) WAV whose payload is actually
+/// *16-bit linear PCM bytes* stored under a companding header (format tag 7/6) —
+/// the "decoded as loud static" case.
+///
+/// Reading 16-bit PCM little-endian bytes one byte at a time, the even-indexed
+/// samples decode the PCM *low* bytes (essentially quantization noise) while the
+/// odd-indexed samples decode the PCM *high* bytes (the real signal). The two
+/// subsequences therefore have very different spectral density. A genuine G.711
+/// stream interleaves two samples of the *same* smooth signal, so its even/odd
+/// subsequences have nearly identical zero-crossing rates.
+pub(crate) fn looks_like_pcm_bytes_under_g711(format: WavFormat, samples: &[i16]) -> bool {
+    if !matches!(format, WavFormat::Pcmu | WavFormat::Pcma) || samples.len() < 512 {
+        return false;
+    }
+    let even: Vec<i16> = samples.iter().step_by(2).copied().collect();
+    let odd: Vec<i16> = samples.iter().skip(1).step_by(2).copied().collect();
+    let (rate_even, rate_odd) = (zero_crossing_rate(&even), zero_crossing_rate(&odd));
+    let (hi, lo) = (rate_even.max(rate_odd), rate_even.min(rate_odd));
+    // The noisier subsequence must be clearly noisier (>1.5x), and the cleaner
+    // one must actually be smooth (<50% zero crossings) — otherwise both halves
+    // are just legitimately high-frequency audio and we stay quiet.
+    hi > 1.5 * lo && lo < 0.5
 }
 
 impl AudioSource for FileAudioSource {
@@ -415,13 +469,33 @@ pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
             }
         }
         "mp3" => {
-            if let Ok(meta) = std::fs::metadata(file_path) {
-                let bits = meta.len() * 8;
-                let secs = bits as f64 / 128_000.0;
-                std::time::Duration::from_secs_f64(secs.max(0.1))
-            } else {
-                std::time::Duration::from_secs(5)
+            // Decode and count samples for an accurate duration — the old
+            // 128 kbps file-size heuristic is wrong for low-bitrate/VBR MP3s
+            // (e.g. the shipped trilingual announcement is ~32 kbps, so a
+            // bitrate estimate would cut the prompt to ~1/4 of its length).
+            if let Ok(bytes) = std::fs::read(file_path) {
+                let mut decoder = minimp3::Decoder::new(std::io::Cursor::new(bytes));
+                let mut total_samples = 0u64;
+                let mut sample_rate = 44100u32;
+                let mut channels = 2u16;
+                loop {
+                    match decoder.next_frame() {
+                        Ok(frame) => {
+                            sample_rate = frame.sample_rate as u32;
+                            channels = frame.channels as u16;
+                            total_samples += frame.data.len() as u64;
+                        }
+                        Err(minimp3::Error::Eof) => break,
+                        Err(_) => break,
+                    }
+                }
+                let rate = sample_rate.max(1) as f64 * channels.max(1) as f64;
+                if total_samples > 0 {
+                    let secs = total_samples as f64 / rate;
+                    return std::time::Duration::from_secs_f64(secs.max(0.1));
+                }
             }
+            std::time::Duration::from_secs(5)
         }
         "pcmu" | "ulaw" | "u" | "pcma" | "alaw" | "a" => {
             if let Ok(meta) = std::fs::metadata(file_path) {
@@ -461,6 +535,7 @@ pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
 mod tests {
     use super::*;
     use crate::wav_reader::{SampleFormat, WavSpec, WavWriter};
+    use audio_codec::create_encoder;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -481,6 +556,48 @@ mod tests {
             writer.finalize().expect("finalize");
         }
         tmp
+    }
+
+    fn write_bytes_wav(bytes: &[u8]) -> NamedTempFile {
+        let mut tmp = NamedTempFile::with_suffix(".wav").expect("tempfile");
+        tmp.write_all(bytes).expect("write bytes");
+        tmp
+    }
+
+    fn build_wav(
+        format_tag: u16,
+        sample_rate: u32,
+        channels: u16,
+        bits_per_sample: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * channels as u32 * (bits_per_sample as u32 / 8);
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&format_tag.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(data);
+        wav
+    }
+
+    fn sine_pcm(n: usize, rate: u32, freq: f32, amp: f32) -> Vec<i16> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                (amp * (2.0 * std::f32::consts::PI * freq * t).sin()) as i16
+            })
+            .collect()
     }
 
     #[test]
@@ -831,6 +948,24 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_duration_mp3_decodes_actual_length() {
+        // The shipped English service-unavailable announcement (~5 s, low
+        // bitrate). A bitrate-based estimate would undercount it; decoding must
+        // return the real duration so the prompt plays in full before a reject.
+        let path = Path::new("config/sounds/service_unavailable_en.mp3");
+        if !path.exists() {
+            eprintln!("skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)");
+            return;
+        }
+        let dur = estimate_audio_duration(path.to_str().unwrap());
+        assert!(
+            (dur.as_secs_f64() - 5.18).abs() < 0.5,
+            "service_unavailable_en.mp3: expected ~5.18 s, got {:.2}s",
+            dur.as_secs_f64()
+        );
+    }
+
+    #[test]
     fn test_estimate_duration_missing_file_returns_default() {
         let dur = estimate_audio_duration("/nonexistent/phantom.wav");
         assert_eq!(
@@ -851,6 +986,82 @@ mod tests {
             "Unknown extension 16000-byte file: expected ~1000 ms, got {} ms",
             dur.as_millis()
         );
+    }
+
+    #[tokio::test]
+    async fn test_pcmu_wav_round_trip() {
+        // A genuine μ-law WAV (format tag 7, 8-bit, mono, 8 kHz) must decode to
+        // the same linear PCM that was encoded, so playback is always correct
+        // regardless of what codec the RTP leg negotiates afterwards.
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let ulaw = create_encoder(CodecType::PCMU).encode(&pcm);
+        let wav = build_wav(0x0007, 8000, 1, 8, &ulaw);
+        let tmp = write_bytes_wav(&wav);
+
+        let mut src = FileAudioSource::new(tmp.path().to_str().unwrap().to_string(), false)
+            .await
+            .expect("FileAudioSource::new for μ-law wav");
+        assert_eq!(src.sample_rate(), 8000);
+        assert_eq!(src.channels(), 1);
+
+        let mut buf = vec![0i16; pcm.len()];
+        let read = src.read_samples(&mut buf);
+        assert_eq!(read, pcm.len(), "μ-law wav should decode all samples");
+
+        for (decoded, original) in buf.iter().zip(pcm.iter()) {
+            assert!(
+                (*decoded as i32 - *original as i32).abs() <= 600,
+                "μ-law round-trip drifted too far: {decoded} vs {original}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_g711_wav_with_pcm_payload_is_flagged() {
+        // Linear 16-bit PCM bytes stored under a μ-law header (tag 7) — the
+        // "decode garbage to loud static" mislabel. Decoding each 16-bit PCM
+        // byte as a μ-law code produces wildly jumping samples that must be
+        // detected.
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let mut pcm_bytes = Vec::new();
+        for s in &pcm {
+            pcm_bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let mislabeled = build_wav(0x0007, 8000, 1, 8, &pcm_bytes);
+        let mut reader = WavReader::new(std::io::Cursor::new(mislabeled)).unwrap();
+        let samples: Vec<i16> = reader.samples().filter_map(|s| s.ok()).collect();
+        assert!(
+            looks_like_pcm_bytes_under_g711(reader.format(), &samples),
+            "linear PCM bytes under a μ-law header must be detected as static-prone"
+        );
+    }
+
+    #[test]
+    fn test_genuine_g711_wav_not_flagged() {
+        // A real μ-law WAV (encoded then decoded) must NOT be flagged: its
+        // decoded PCM is smooth, so the heuristic must stay quiet.
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let ulaw = create_encoder(CodecType::PCMU).encode(&pcm);
+        let genuine = build_wav(0x0007, 8000, 1, 8, &ulaw);
+        let mut reader = WavReader::new(std::io::Cursor::new(genuine)).unwrap();
+        let samples: Vec<i16> = reader.samples().filter_map(|s| s.ok()).collect();
+        assert!(
+            !looks_like_pcm_bytes_under_g711(reader.format(), &samples),
+            "genuine μ-law audio must not be flagged as a PCM mislabel"
+        );
+    }
+
+    #[test]
+    fn test_g711_heuristic_ignores_non_g711_profiles() {
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let ulaw = create_encoder(CodecType::PCMU).encode(&pcm);
+        let mislabeled = build_wav(0x0007, 8000, 1, 8, &ulaw);
+        let mut reader = WavReader::new(std::io::Cursor::new(mislabeled)).unwrap();
+        let samples: Vec<i16> = reader.samples().filter_map(|s| s.ok()).collect();
+        // Non-G.711 format tag → never flagged.
+        assert!(!looks_like_pcm_bytes_under_g711(WavFormat::Pcm, &samples));
+        // Too few samples → never flagged.
+        assert!(!looks_like_pcm_bytes_under_g711(WavFormat::Pcmu, &samples[..100]));
     }
 }
 

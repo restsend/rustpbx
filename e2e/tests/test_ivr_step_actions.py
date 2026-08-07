@@ -1,0 +1,325 @@
+"""Step-mode IVR action E2E tests.
+
+These complement test_ivr_step_dtmf.py (prompt/transfer/hangup/dtmf_menu/bridge)
+by exercising the remaining step-mode-only actions end-to-end via a scripted
+HTTP provider:
+
+  - api           : provider returns an `api` node -> PBX fires HTTP to the URL
+  - route_to_agent: provider returns route_to_agent -> registered agent answers
+  - queue         : provider returns queue -> queue dials agent -> agent answers
+  - input_phone   : provider returns input_phone -> digits collected -> transfer
+  - jump_ivr      : provider returns jump_ivr -> target tree IVR runs -> transfers
+
+Each test wires `app = "ivr"` with `app_params = {mode = "step", url = ...}`
+(the unified step wiring) and asserts a real SIP-observable outcome.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+import helpers as h
+
+pytestmark = [pytest.mark.ivr]
+
+
+def _start_step_provider(handler):
+    """Start a scripted step-mode provider on an ephemeral port.
+
+    ``handler(body) -> dict`` maps each provider POST to an ActionNode JSON
+    response. Returns ``(runner, hits, start, cleanup)`` where ``start`` is an
+    async fn returning the provider URL and ``hits`` collects every request body.
+    """
+    from aiohttp import web
+
+    hits: list[dict] = []
+
+    async def handle(request):
+        body = await request.json()
+        hits.append(body)
+        return web.json_response(handler(body))
+
+    app = web.Application()
+    app.router.add_post("/ivr/step", handle)
+    runner = web.AppRunner(app)
+
+    async def start():
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        return f"http://127.0.0.1:{port}/ivr/step"
+
+    async def cleanup():
+        await runner.cleanup()
+
+    return runner, hits, start, cleanup
+
+
+def _add_step_route(pbx, route_name, match_user, url):
+    pbx.config_builder.add_route(
+        route_name,
+        match={"to.user": match_user},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"mode": "step", "url": url},
+        auto_answer=True,
+    )
+
+
+async def _reg_callee(sipbot_pool, pbx, port, username):
+    ua = sipbot_pool.callee(
+        host=pbx.host,
+        port=port,
+        username=username,
+        password="123456",
+        register=True,
+        proxy=f"{pbx.host}:{pbx.sip_port}",
+        domain=pbx.host,
+        ring_secs=1,
+        answer_mode="echo",
+        audio_quality=True,
+    )
+    await asyncio.sleep(2)
+    return ua
+
+
+# ---------------------------------------------------------------------------
+# api
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_api_action_fires_http(pbx, sipbot_pool, tmp_path):
+    """`api` action (step mode) — PBX must call the action's HTTP URL."""
+    from aiohttp import web
+
+    api_hits: list[dict] = []
+
+    async def _start_api():
+        async def handle(request):
+            api_hits.append({"method": request.method})
+            return web.json_response({"ok": True})
+
+        app = web.Application()
+        app.router.add_get("/", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+
+        async def cleanup():
+            await runner.cleanup()
+
+        return f"http://127.0.0.1:{port}/", cleanup
+
+    api_url, api_cleanup = await _start_api()
+
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {"type": "api", "url": api_url, "method": "GET", "timeout": 5}
+        return {"type": "hangup"}
+
+    _runner, _hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-api", "ivr-api", url)
+        h.boot_pbx(pbx)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-api@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=8,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        # The Api action must fire its HTTP request to the mock endpoint.
+        await asyncio.sleep(3)
+        assert api_hits, f"api action did not reach its URL: {api_hits}"
+    finally:
+        await cleanup()
+        await api_cleanup()
+
+
+# ---------------------------------------------------------------------------
+# route_to_agent
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_route_to_agent_transfers(pbx, sipbot_pool, tmp_path):
+    """`route_to_agent` action (step mode) — registered agent receives the call."""
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {
+                "type": "route_to_agent",
+                "target": "1002",
+                "skill_group_id": "support",
+                "channel_code": "web",
+            }
+        return {"type": "hangup"}
+
+    _runner, _hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-rta", "ivr-rta", url)
+        h.boot_pbx(pbx)
+
+        agent = await _reg_callee(sipbot_pool, pbx, 15140, "1002")
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-rta@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=14,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=25), (
+            f"agent 1002 never received the routed call:\n{agent.output[-1500:]}"
+        )
+    finally:
+        await cleanup()
+
+
+# ---------------------------------------------------------------------------
+# queue
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_queue_action_routes_to_agent(pbx, sipbot_pool, tmp_path):
+    """`queue` action (step mode) — queue dials the agent which answers."""
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {"type": "queue", "target": "support"}
+        return {"type": "hangup"}
+
+    _runner, _hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        pbx.config_builder.add_queue(
+            "support",
+            strategy_mode="sequential",
+            targets=[f"sip:1002@127.0.0.1:15141"],
+            accept_immediately=True,
+            wait_timeout_secs=15,
+        )
+        _add_step_route(pbx, "to-ivr-queue", "ivr-q", url)
+        h.boot_pbx(pbx)
+
+        agent = await _reg_callee(sipbot_pool, pbx, 15141, "1002")
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-q@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=20,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=30), (
+            f"agent 1002 never received the queued call:\n{agent.output[-1500:]}"
+        )
+    finally:
+        await cleanup()
+
+
+# ---------------------------------------------------------------------------
+# input_phone
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_input_phone_collects_and_transfers(pbx, sipbot_pool, tmp_path):
+    """`input_phone` action (step mode) — collects digits then provider transfers."""
+    from helpers import generate_sine_wav
+
+    prompt = tmp_path / "enter_phone.wav"
+    generate_sine_wav(prompt, 440.0, 1.0, 8000, 0.4)
+
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {
+                "type": "input_phone",
+                "prompt": str(prompt),
+                "min_digits": 11,
+                "max_digits": 11,
+            }
+        if ev.get("type") == "phone_collected":
+            return {"type": "transfer", "target": "1002"}
+        return {"type": "hangup"}
+
+    _runner, _hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-phone", "ivr-phone", url)
+        h.boot_pbx(pbx)
+
+        agent = await _reg_callee(sipbot_pool, pbx, 15142, "1002")
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-phone@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=20,
+            dtmf_flows="3s:12345678901#",
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=30), (
+            f"agent 1002 never received the transferred call:\n{agent.output[-1500:]}"
+        )
+    finally:
+        await cleanup()
+
+
+# ---------------------------------------------------------------------------
+# jump_ivr
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_jump_ivr_runs_target(pbx, sipbot_pool, tmp_path):
+    """`jump_ivr` action (step mode) — jumps to a target tree IVR which transfers."""
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {"type": "jump_ivr", "route_point": "ivr-target"}
+        return {"type": "hangup"}
+
+    _runner, _hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        # Target tree IVR: empty greeting -> immediate DTMF wait -> timeout ->
+        # max_retries=0 fires max_retries_action (transfer to 1002).
+        pbx.config_builder.add_ivr(
+            "ivr-target",
+            """\
+[ivr]
+name = "ivr-target"
+ivr_mode = "tree"
+
+[ivr.root]
+greeting = ""
+greeting_text = ""
+timeout_ms = 1000
+max_retries = 0
+max_retries_action = { type = "transfer", target = "1002" }
+entries = []
+""",
+        )
+        _add_step_route(pbx, "to-ivr-jump", "ivr-jump", url)
+        h.boot_pbx(pbx)
+
+        agent = await _reg_callee(sipbot_pool, pbx, 15143, "1002")
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-jump@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=22,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        # jump_ivr -> ivr-target -> timeout -> transfer to 1002.
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=30), (
+            f"agent 1002 never received the jumped call:\n{agent.output[-1500:]}"
+        )
+    finally:
+        await cleanup()

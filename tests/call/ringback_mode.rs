@@ -166,51 +166,60 @@ mod ringback_audio_tests {
     }
 
     #[test]
-    fn test_ringback_audio_play_duration_default() {
-        let audio = RingbackAudio {
-            busy: Some("/sounds/busy.wav".to_string()),
-            ..Default::default()
-        };
-        let dur = audio
-            .play_duration_for(&StatusCode::BusyHere)
-            .expect("should have duration");
-        assert_eq!(dur.as_secs(), 2, "default play_duration should be 2s");
+    fn test_ringback_audio_builtin_defaults() {
+        let audio = RingbackAudio::builtin_defaults();
+        assert_eq!(audio.ring, None, "ring is operator-specific");
+        assert_eq!(audio.busy, Some("tone://480,3000".to_string()));
+        assert_eq!(audio.offline, Some("tone://480,2000".to_string()));
+        assert_eq!(audio.noanswer, Some("tone://480,3000".to_string()));
+        assert_eq!(audio.notfound, Some("tone://480,1500".to_string()));
+        assert_eq!(audio.reject, Some("tone://480,2000".to_string()));
+        assert_eq!(
+            audio.error,
+            Some("sounds/service_unavailable_en.mp3".to_string()),
+            "5xx (IVR/app start failure) must default to the English service-unavailable prompt"
+        );
+        assert!(audio.has_failure_tone());
+        // Every failure status resolves to a built-in cue.
+        assert_eq!(audio.for_status(&StatusCode::BusyHere), Some("tone://480,3000"));
+        assert_eq!(audio.for_status(&StatusCode::Decline), Some("tone://480,2000"));
+        assert_eq!(audio.for_status(&StatusCode::TemporarilyUnavailable), Some("tone://480,2000"));
+        assert_eq!(audio.for_status(&StatusCode::NotFound), Some("tone://480,1500"));
+        assert_eq!(audio.for_status(&StatusCode::RequestTimeout), Some("tone://480,3000"));
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(500, "Failed to start ivr application".to_string())),
+            Some("sounds/service_unavailable_en.mp3")
+        );
     }
 
     #[test]
-    fn test_ringback_audio_play_duration_custom() {
-        let audio = RingbackAudio {
-            busy: Some("/sounds/busy.wav".to_string()),
-            play_duration_secs: Some(5),
+    fn test_ringback_audio_merge_from_overrides_fields() {
+        let mut audio = RingbackAudio::builtin_defaults();
+        audio.merge_from(RingbackAudio {
+            busy: Some("/sounds/custom-busy.wav".to_string()),
+            error: None, // None fields must NOT clear the global value
             ..Default::default()
-        };
-        let dur = audio
-            .play_duration_for(&StatusCode::BusyHere)
-            .expect("should have duration");
-        assert_eq!(dur.as_secs(), 5);
+        });
+        assert_eq!(audio.busy, Some("/sounds/custom-busy.wav".to_string()));
+        assert_eq!(
+            audio.error,
+            Some("sounds/service_unavailable_en.mp3".to_string()),
+            "unset override field keeps the base value"
+        );
+        assert_eq!(audio.offline, Some("tone://480,2000".to_string()));
     }
 
     #[test]
-    fn test_ringback_audio_play_duration_zero() {
-        let audio = RingbackAudio {
-            busy: Some("/sounds/busy.wav".to_string()),
-            play_duration_secs: Some(0),
+    fn test_ringback_audio_merge_from_clears_with_explicit_none_ignored() {
+        // Merging a config that only sets `ring` keeps all failure tones.
+        let mut audio = RingbackAudio::default();
+        audio.merge_from(RingbackAudio {
+            ring: Some("/sounds/ring.wav".to_string()),
             ..Default::default()
-        };
-        let dur = audio
-            .play_duration_for(&StatusCode::BusyHere)
-            .expect("should have duration");
-        assert_eq!(dur.as_secs(), 0, "0 means no playback");
-    }
-
-    #[test]
-    fn test_ringback_audio_play_duration_none_for_unconfigured_code() {
-        let audio = RingbackAudio {
-            busy: Some("/sounds/busy.wav".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(audio.play_duration_for(&StatusCode::NotFound), None);
-        assert_eq!(audio.play_duration_for(&StatusCode::Decline), None);
+        });
+        assert_eq!(audio.ring, Some("/sounds/ring.wav".to_string()));
+        assert_eq!(audio.busy, None);
+        assert_eq!(audio.error, None);
     }
 } // mod ringback_audio_tests
 

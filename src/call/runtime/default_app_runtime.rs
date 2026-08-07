@@ -40,7 +40,12 @@ pub struct DefaultAppRuntime {
     app_factory: Option<Arc<dyn AppFactory>>,
 }
 
-/// Factory trait for creating CallApp instances
+/// Factory trait for creating CallApp instances.
+///
+/// `Ok(None)` means the factory does not handle `app_name` (→ "unknown
+/// application"). `Err(detail)` means the app is known but failed to start for
+/// a concrete reason (e.g. a missing IVR config file) — the detail is surfaced
+/// to the caller via [`AppRuntimeError::ConfigError`].
 #[async_trait::async_trait]
 pub trait AppFactory: Send + Sync {
     async fn create_app(
@@ -48,7 +53,7 @@ pub trait AppFactory: Send + Sync {
         app_name: &str,
         params: Option<serde_json::Value>,
         context: &ApplicationContext,
-    ) -> Option<Box<dyn CallApp>>;
+    ) -> Result<Option<Box<dyn CallApp>>, anyhow::Error>;
 }
 impl DefaultAppRuntime {
     pub fn new(config: AppRuntimeConfig) -> Self {
@@ -127,9 +132,18 @@ impl AppRuntime for DefaultAppRuntime {
 
         // Get the app from factory
         let app = if let Some(factory) = &self.app_factory {
-            factory
+            match factory
                 .create_app(app_name, params.clone(), &self.context)
                 .await
+            {
+                Ok(app) => app,
+                // The app is known but failed to start (e.g. missing IVR config).
+                // Surface the specific reason instead of a generic "unknown app".
+                Err(e) => {
+                    self.handle.set_app_event_sender(None);
+                    return Err(AppRuntimeError::ConfigError(e.to_string()));
+                }
+            }
         } else {
             None
         };
@@ -196,12 +210,6 @@ impl AppRuntime for DefaultAppRuntime {
                     e
                 );
             }
-
-            tracing::info!(
-                "App {} exited for session {}",
-                app_name_owned,
-                session_id_for_log
-            );
         });
 
         tracing::info!("App {} started for session {}", app_name, self.session_id);

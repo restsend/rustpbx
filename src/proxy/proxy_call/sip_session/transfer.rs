@@ -290,8 +290,6 @@ impl SipSession {
         attended: bool,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        info!(session_id = %self.id, %leg_id, %target, %attended, "Handling transfer");
-
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {
             return Err(anyhow!(
@@ -361,7 +359,6 @@ impl SipSession {
             } => {
                 info!(session_id = %self.id, %leg_id, queue = %name, ?return_to_ivr, overrides = %target_overrides.len(), "Handling queue transfer");
                 self.handle_queue_transfer(
-                    leg_id,
                     &name,
                     return_to_ivr,
                     return_params,
@@ -577,14 +574,11 @@ impl SipSession {
 
     pub(crate) async fn handle_queue_transfer(
         &mut self,
-        leg_id: LegId,
         queue_name: &str,
         return_to_ivr: Option<String>,
         return_params: HashMap<String, String>,
         target_overrides: Vec<String>,
     ) -> Result<()> {
-        info!(session_id = %self.id, %leg_id, queue = %queue_name, ?return_to_ivr, overrides = %target_overrides.len(), "Starting queue transfer");
-
         let queue_config = self
             .server
             .data_context
@@ -595,7 +589,51 @@ impl SipSession {
         let queue_config = match queue_config {
             Some(config) => config,
             None => {
-                return Err(anyhow!("Queue '{}' not found", queue_name));
+                // Queue configuration could not be resolved (e.g. a DB-backed
+                // queue id that is not loaded). Returning a bare error here
+                // leaves the caller in dead air — the session loop only logs it
+                // as a WARN and the IVR app has already exited. Apply a graceful
+                // fallback instead: record a trace event, then either return to
+                // the IVR named by `return_to_ivr`, or play the service-
+                // unavailable announcement and hang up (mirroring the queue
+                // app's own fallback).
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Queue,
+                        format!("Queue '{}' not found — using fallback", queue_name),
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Error)
+                    .code("queue.not_found"),
+                );
+
+                let ivr_name = return_to_ivr
+                    .as_ref()
+                    .and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
+
+                if let Some(ivr_name) = ivr_name {
+                    info!(
+                        session_id = %self.id,
+                        queue = %queue_name,
+                        ivr = %ivr_name,
+                        "Queue not found; returning to IVR"
+                    );
+                    return self.start_ivr_app(ivr_name, return_params).await;
+                }
+
+                warn!(
+                    session_id = %self.id,
+                    queue = %queue_name,
+                    "Queue not found; playing service-unavailable announcement and hanging up"
+                );
+                let fallback_plan = crate::call::QueuePlan {
+                    queue_name: queue_name.to_string(),
+                    voice_prompts: Some(crate::call::VoicePrompts {
+                        busy_prompt: Some(crate::call::DEFAULT_QUEUE_FAILURE_AUDIO.to_string()),
+                        ..crate::call::VoicePrompts::default()
+                    }),
+                    ..crate::call::QueuePlan::default()
+                };
+                return self.start_queue_app(fallback_plan).await;
             }
         };
 

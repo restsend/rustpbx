@@ -1040,7 +1040,7 @@ mod tests {
                 clock_rate: 8000,
                 channels: 1,
             }),
-            video: None,
+            video: Vec::new(),
             dtmf: None,
             dtmf_pts: Vec::new(),
             transport: rustrtc::TransportMode::Rtp,

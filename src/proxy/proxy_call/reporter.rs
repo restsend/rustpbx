@@ -128,7 +128,6 @@ impl CallReporter {
 
         let sip_leg_roles = build_sip_leg_roles(&snapshot);
 
-        let has_sipflow_backend = self.server.sip_flow.as_ref().is_some();
         let direction = self.context.dialplan.direction.to_string();
 
         // Helper to resolve call status (copied from proxy_call.rs logic)
@@ -185,13 +184,6 @@ impl CallReporter {
                 extra: None,
             });
         }
-        tracing::info!(
-            recording = ?self.context.dialplan.recording,
-            has_sipflow_backend = ?has_sipflow_backend,
-            call_was_accepted,
-            "Call recording files collected: {:?}",
-            recorder
-        );
         // Copy values from cookie to extras_map
         // (Removed as TransactionCookie no longer has values)
 

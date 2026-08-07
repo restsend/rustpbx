@@ -468,7 +468,10 @@ impl AppStateBuilder {
                     .register_module("auth", AuthModule::create)
                     .register_module("presence", PresenceModule::create)
                     .register_module("registrar", RegistrarModule::create)
-                    .register_module("call", CallModule::create);
+                    .register_module("call", CallModule::create)
+                    .with_session_hook(Arc::new(
+                        crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook,
+                    ));
 
                 // Pass RWI gateway to the SIP server so call lifecycle events can be emitted.
                 if let Some(ref gw) = core.rwi_gateway {

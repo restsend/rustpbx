@@ -371,11 +371,17 @@ fn main() -> Result<()> {
         };
 
         // Suppress noisy third-party crates to warn level by default when
-        // the user did not provide an explicit RUST_LOG override.
+        // the user did not provide an explicit RUST_LOG override. rustrtc is
+        // pinned to info (not warn) so its media milestone INFO logs — first
+        // inbound RTP/RTCP, both-directions confirmed — still surface while
+        // its per-connection DEBUG lifecycle noise is silenced.
         for noisy in &["hyper_util", "rustls", "sqlx"] {
             if let Ok(d) = format!("{}=warn", noisy).parse() {
                 env_filter = env_filter.add_directive(d);
             }
+        }
+        if let Ok(d) = "rustrtc=info".parse() {
+            env_filter = env_filter.add_directive(d);
         }
 
         env_filter

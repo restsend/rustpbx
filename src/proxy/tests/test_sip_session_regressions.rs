@@ -205,6 +205,71 @@ impl AppRuntime for StartOnlyRuntime {
     }
 }
 
+/// Test runtime that records the name of every app started, so tests can
+/// assert which app (e.g. "ivr" vs "queue") a fallback path launched.
+struct NameCapturingRuntime {
+    started_apps: std::sync::Mutex<Vec<String>>,
+}
+
+impl NameCapturingRuntime {
+    fn new() -> Self {
+        Self {
+            started_apps: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn started_apps(&self) -> Vec<String> {
+        self.started_apps.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AppRuntime for NameCapturingRuntime {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    async fn start_app(
+        &self,
+        app_name: &str,
+        _params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        self.started_apps
+            .lock()
+            .unwrap()
+            .push(app_name.to_string());
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn status(&self) -> AppStatus {
+        AppStatus::Idle
+    }
+
+    fn current_app(&self) -> Option<String> {
+        None
+    }
+
+    fn required_capabilities(&self) -> Vec<MediaCapability> {
+        vec![]
+    }
+
+    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
+        None
+    }
+}
+
 async fn build_session(dialplan: Dialplan) -> SipSession {
     let (server, _) = create_test_server().await;
     build_session_on_server(server, dialplan).await
@@ -501,6 +566,63 @@ async fn test_start_ivr_app_propagates_non_retryable_start_error() {
     );
 }
 
+/// When `start_app` fails in the Application flow (e.g. a missing IVR config
+/// file makes the factory return `None`), `execute_dialplan` must surface a
+/// structured failure: set the standardized `ivr.start_failed` error code,
+/// append an Error-level Ivr trace event, and return a 5xx rejection so the
+/// caller hears the configured failure tone (`RingbackAudio::error`) instead
+/// of ringing until the ring-timeout. Regression for the silent-Ok bug where
+/// the failure was swallowed and the caller hung for 60s on a 408.
+#[tokio::test]
+async fn test_execute_dialplan_application_start_failure_sets_error_code_and_trace() {
+    use rsipstack::dialog::dialog::DialogState;
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    session.app_runtime = Arc::new(AlwaysFailStartRuntime);
+
+    let (_tx, mut rx) = mpsc::unbounded_channel::<DialogState>();
+    let err = session
+        .execute_dialplan(&mut rx)
+        .await
+        .expect_err("application start failure should surface as a dialplan error");
+    assert_eq!(
+        err.0, 500,
+        "expected 500 rejection for IVR start failure, got {}",
+        err.0
+    );
+
+    assert_eq!(
+        session.meta.error_code.map(|i| i.code),
+        Some("ivr.start_failed"),
+        "IVR start failure must record the ivr.start_failed error code"
+    );
+
+    let ivr_err = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| {
+            e.kind == crate::call_errors::TraceKind::Ivr
+                && e.severity == Some(crate::call_errors::ErrSeverity::Error)
+        })
+        .expect("an Error-level Ivr trace event must be appended on start failure");
+    assert_eq!(ivr_err.code.as_deref(), Some("ivr.start_failed"));
+
+    assert!(
+        !session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.message.contains("started")),
+        "the misleading 'Application started' Info trace must NOT be recorded on failure"
+    );
+}
+
 #[tokio::test]
 async fn test_start_ivr_app_reports_restart_failure_when_second_start_fails() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
@@ -560,7 +682,6 @@ async fn test_queue_transfer_without_return_to_ivr_starts_queue_app() {
 
     session
         .handle_queue_transfer(
-            LegId::from("caller"),
             "support",
             None,
             HashMap::new(),
@@ -586,7 +707,6 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
 
     session
         .handle_queue_transfer(
-            LegId::from("caller"),
             "support",
             Some("hello".to_string()),
             HashMap::new(),
@@ -621,7 +741,7 @@ async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
     assert!(!session.has_active_caller_ingress_monitor());
 
     session
-        .accept_call(Some("sip:bob@rustpbx.com".to_string()), None, None)
+        .accept_call(Some("sip:bob@rustpbx.com".to_string()), None)
         .await
         .expect("accept_call should succeed for P2P call");
 
@@ -652,7 +772,7 @@ async fn test_accept_call_sets_connected_callee_for_application_ivr_flow() {
     let mut session = build_session(dialplan).await;
 
     session
-        .accept_call(Some("sip:agent@rustpbx.com".to_string()), None, None)
+        .accept_call(Some("sip:agent@rustpbx.com".to_string()), None)
         .await
         .expect("accept_call should succeed for IVR flow");
 
@@ -691,7 +811,7 @@ async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
     session.set_caller_uses_bridge_for_test(true);
 
     session
-        .accept_call(Some("sip:trunk@wholesale.example".to_string()), None, None)
+        .accept_call(Some("sip:trunk@wholesale.example".to_string()), None)
         .await
         .expect("accept_call should succeed for bridge-based wholesale call");
 
@@ -718,7 +838,7 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
 
     // First accept — callee A
     session
-        .accept_call(Some("sip:a@example.com".to_string()), None, None)
+        .accept_call(Some("sip:a@example.com".to_string()), None)
         .await
         .expect("first accept_call should succeed");
     assert_eq!(
@@ -730,7 +850,7 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
     // The guard inside start_caller_ingress_monitor_if_needed must see
     // connected_callee = Some and skip re-setup.
     session
-        .accept_call(Some("sip:b@example.com".to_string()), None, None)
+        .accept_call(Some("sip:b@example.com".to_string()), None)
         .await
         .expect("second accept_call should not panic or fail");
     assert_eq!(
@@ -754,11 +874,11 @@ async fn test_accept_call_duplicate_app_answer_records_single_answer_trace() {
     let mut session = build_session(dialplan).await;
 
     session
-        .accept_call(None, None, None)
+        .accept_call(None, None)
         .await
         .expect("first app accept_call should succeed");
     session
-        .accept_call(None, None, None)
+        .accept_call(None, None)
         .await
         .expect("duplicate app accept_call should be a no-op");
 
@@ -795,7 +915,7 @@ async fn test_accept_call_agent_answer_trace_carries_agent_detail() {
     }
 
     session
-        .accept_call(Some("sip:1001@rustpbx.com".to_string()), None, None)
+        .accept_call(Some("sip:1001@rustpbx.com".to_string()), None)
         .await
         .expect("agent accept_call should succeed");
 
@@ -1062,7 +1182,17 @@ async fn handle_play_awaits_completion_when_requested() {
 
     let start = Instant::now();
     session
-        .play_audio_file(wav.to_str().unwrap(), true, false)
+        .handle_play(
+            None,
+            crate::call::domain::MediaSource::File {
+                path: wav.to_str().unwrap().to_string(),
+            },
+            Some(crate::call::domain::PlayOptions {
+                await_completion: true,
+                loop_playback: false,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("play should succeed");
     let elapsed = start.elapsed();
@@ -1096,7 +1226,17 @@ async fn handle_play_returns_immediately_when_not_awaited() {
 
     let start = Instant::now();
     session
-        .play_audio_file(wav.to_str().unwrap(), false, false)
+        .handle_play(
+            None,
+            crate::call::domain::MediaSource::File {
+                path: wav.to_str().unwrap().to_string(),
+            },
+            Some(crate::call::domain::PlayOptions {
+                await_completion: false,
+                loop_playback: false,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("play should succeed");
     let elapsed = start.elapsed();
@@ -1172,15 +1312,109 @@ async fn queue_no_agents_play_then_hangup_starts_queue_app() {
 
     session
         .handle_queue_transfer(
-            LegId::from("caller"),
-            "db-1",
+            "support",
             None,
             HashMap::new(),
             Vec::new(),
         )
         .await
-        .expect("queue app should start even with no agents");
+        .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
+}
+
+// ─── IVR → queue transfer when the queue does not exist ─────────────────────
+//
+// Regression for the dead-air bug: when an IVR's Queue action points at a
+// queue whose config cannot be resolved (e.g. a DB-backed id that isn't
+// loaded), `handle_queue_transfer` used to return a bare error that the
+// session loop only logged as a WARN. The caller heard nothing and the call
+// was never torn down. The fix records a `queue.not_found` trace event and
+// applies a graceful fallback: start the `return_to_ivr` IVR if set, else
+// start the queue app with a service-unavailable announcement + hangup plan.
+
+#[tokio::test]
+async fn queue_not_found_with_return_to_ivr_starts_ivr_app() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    // No queues configured → "asdf-queue" cannot be resolved.
+    let mut session = build_session(dialplan).await;
+
+    let runtime = Arc::new(NameCapturingRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer(
+            "asdf-queue",
+            Some("asdf".to_string()),
+            HashMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("missing-queue fallback with return_to_ivr should start the IVR app");
+
+    // The IVR app (not the queue app) must be started.
+    assert_eq!(
+        runtime.started_apps(),
+        vec!["ivr".to_string()],
+        "return_to_ivr should restart the IVR, not the queue app"
+    );
+
+    // A queue.not_found trace event must be recorded.
+    let has_trace = session.meta.trace.iter().any(|ev| {
+        ev.kind == crate::call_errors::TraceKind::Queue
+            && ev.code.as_deref() == Some("queue.not_found")
+    });
+    assert!(
+        has_trace,
+        "expected a queue.not_found trace event; trace = {:?}",
+        session.meta.trace
+    );
+}
+
+#[tokio::test]
+async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    // No queues configured → "missing-queue" cannot be resolved.
+    let mut session = build_session(dialplan).await;
+
+    let runtime = Arc::new(NameCapturingRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer(
+            "missing-queue",
+            None,
+            HashMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("missing-queue fallback should start the queue app (announcement + hangup)");
+
+    // Without return_to_ivr, the synthesized fallback plan starts the queue app
+    // (which plays the service-unavailable announcement then hangs up).
+    assert_eq!(
+        runtime.started_apps(),
+        vec!["queue".to_string()],
+        "no return_to_ivr should start the queue app fallback, not IVR"
+    );
+
+    // A queue.not_found trace event must be recorded.
+    let has_trace = session.meta.trace.iter().any(|ev| {
+        ev.kind == crate::call_errors::TraceKind::Queue
+            && ev.code.as_deref() == Some("queue.not_found")
+    });
+    assert!(
+        has_trace,
+        "expected a queue.not_found trace event; trace = {:?}",
+        session.meta.trace
+    );
 }
 
 // ─── voicemail: finalize recording on caller hangup ─────────────────────────
@@ -1260,7 +1494,6 @@ async fn queue_no_agents_hangup_fallback_starts_queue_app() {
 
     session
         .handle_queue_transfer(
-            LegId::from("caller"),
             "support",
             None,
             HashMap::new(),

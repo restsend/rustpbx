@@ -10,7 +10,7 @@
 
 ```bash
 # 1. Start the reference Python provider
-python3 examples/step_ivr_provider.py 8080
+python3 examples/unified_ivr_provider.py 8080
 
 # 2. Simulate a call entering the IVR
 curl -X POST http://localhost:8080/ivr/step \
@@ -256,7 +256,7 @@ RustPBX filters out DTMF events that arrive when the IVR is **not expecting user
 
 ### State Machine Pattern (Python)
 
-Your provider is a per-call state machine. The reference implementation at `examples/step_ivr_provider.py`:
+Your provider is a per-call state machine. The reference implementation at `examples/unified_ivr_provider.py`:
 
 ```python
 class IvrSession:
@@ -542,4 +542,4 @@ RWI subscribers receive trace entries in real-time (event type: `ivr_step_trace`
 
 ### Reference Implementation
 
-`examples/step_ivr_provider.py` — complete Python provider, zero external dependencies. Covers: session state machine, Prompt → DtmfMenu → Transfer/Queue/Hangup, DTMF timeout handling, invalid digit retry with 3-strike hangup.
+`examples/unified_ivr_provider.py` — complete Python provider, zero external dependencies. Covers: session state machine, Prompt → DtmfMenu → Transfer/Queue/Hangup, DTMF timeout handling, invalid digit retry with 3-strike hangup, plus a WebSocket PCM16 bridge echo server and SIP INFO body builders (`ivr.exec`).

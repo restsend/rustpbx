@@ -48,7 +48,7 @@ use parking_lot::Mutex;
 use rustrtc::media::MediaStreamTrack;
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::SampleStreamSource;
-use rustrtc::{PeerConnection, RtpRewriteBridgeParams};
+use rustrtc::{PeerConnection, RtpRewriteBridgeOptions, RtpRewriteRule};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -70,9 +70,13 @@ pub enum EgressSource {
     /// **Fast-path**: transport-level zero-copy relay. The pacing loop is
     /// parked (tick skipped) and the ICE send channel is exclusively owned by
     /// the rewrite bridge. The peer sets up the bridge on its own PC.
+    ///
+    /// The relay is payload-type-aware: `rules` may include audio (catch-all),
+    /// DTMF and video rules, each rewriting to its own destination SSRC / PT.
     RewriteRelay {
         peer_pc: PeerConnection,
-        params: RtpRewriteBridgeParams,
+        options: RtpRewriteBridgeOptions,
+        rules: Vec<RtpRewriteRule>,
     },
     /// Emit silence frames (mute / hold placeholder / idle).
     Silence,

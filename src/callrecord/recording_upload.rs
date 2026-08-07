@@ -294,11 +294,6 @@ impl CallRecordHook for RecordingUploadHook {
                     call_id: record.call_id.clone(),
                     metadata,
                 });
-                info!(
-                    call_id = %record.call_id,
-                    url = %url,
-                    "RecordingMetadataAvailable event emitted"
-                );
             }
         }
 
@@ -311,10 +306,6 @@ impl CallRecordHook for RecordingUploadHook {
                 duration_secs: (record.end_time - record.start_time).num_seconds().max(0) as u64,
                 file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
             });
-            info!(
-                call_id = %record.call_id,
-                "RecordEnd event emitted"
-            );
         }
 
         Ok(())

@@ -149,6 +149,15 @@ type = "extension"
 # are stripped automatically.  Defaults to ["H264"] when not set.
 # video_codecs = ["H264"]
 
+# Media-plane video relay policy for proxied calls:
+#   - "pass_through" (default when unset): relay video between legs when both
+#     sides negotiate a common codec (H264/VP8). No transcoding.
+#   - "strip": drop video from the media path entirely (audio-only).
+#   - "transcode": same as pass_through for now (video transcoding not yet
+#     implemented); reserved for future H264↔VP8 conversion.
+# Set per-trunk via trunk.video_policy, or globally here.
+# video_policy = "pass_through"
+
 # ── Recording ─────────────────────────────────────────────────────────────────
 # IMPORTANT: [recording] and [sipflow] are mutually exclusive for RTP capture,
 # UNLESS force_file = true is set (see below).
@@ -304,13 +313,31 @@ engine = "flowdb"
 #   offline   — 不在线音,played as 183 early media before sending 480
 #   notfound  — 空号音,played as 183 early media before sending 404
 #   noanswer  — 无人应答音,played as 183 early media before the ring-timeout (408)
-#   play_duration_secs — how long to play a failure tone before the rejection
+#   error     — 服务不可用音,played as 183 early media before a 5xx rejection
+#               (e.g. an IVR/app fails to start because its config is missing
+#               or invalid). Defaults to sounds/service_unavailable_en.mp3.
+#
+# Failure tones play ONCE to natural completion and then the call is rejected:
+#   * audio files → the file plays to its full length (e.g. the English
+#     sounds/service_unavailable_en.mp3 announcement plays entirely)
+#   * tone://freq,ms → the tone plays for the specified ms (a 1-second minimum
+#     is enforced so a short spec never sounds like an instant click)
+# There is no fixed-length timer to tune.
 #
 # [proxy.trunks.wuhoo.ringback]
 # ring = "/sounds/company_ringback.wav"
 # busy = "tone://480,3000"
 # noanswer = "tone://480,3000"
-# play_duration_secs = 2
+
+# Global failure-tone defaults ([proxy.audio]). Applied to EVERY call as the
+# base audio profile; a per-trunk `ringback` overrides individual fields. When
+# unset, built-in defaults are used: busy/offline/noanswer/notfound/reject →
+# `tone://` beeps, and 5xx (IVR/app start failures) → sounds/service_unavailable_en.mp3,
+# so calls always hear a cue even with zero configuration.
+#
+# [proxy.audio]
+# error = "sounds/service_unavailable_en.mp3"
+# busy = "tone://480,3000"
 
 # Max ring/setup time in seconds for calls on this trunk before a no-answer
 # rejection (408). Defaults to 60s.

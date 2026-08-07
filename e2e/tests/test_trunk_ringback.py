@@ -7,8 +7,9 @@ Verifies the per-trunk `RingbackAudio` feature end-to-end with sipbot:
   * `reject`   — played as 183 early media before 603
   * `offline`  — played as 183 early media before 480
   * `notfound` — played as 183 early media before 404
-  * `play_duration_secs` — how long the failure tone is played before the
-                           final rejection is sent
+
+Failure tones play once to natural completion (the file's length, or the
+tone:// duration) and then the call is rejected.
 
 Audio tones use sipbot's `tone://frequency,duration_ms` spec, which the PBX
 renders into a WAV. Early-media RTP is observed on the caller thanks to the
@@ -19,14 +20,12 @@ Scenarios:
   2. Inbound trunk with ringback.busy   → caller hears 183 early media, then 486
   3. Inbound trunk reject/offline/notfound tones → 183 early media + 603/480/404
   4. Control: inbound trunk WITHOUT ringback → no 183, no early-media RTP, just 486
-  5. play_duration_secs honored for the busy tone
-  6. Outbound trunk with ringback.busy  → internal caller hears 183 early media, then 486
+  5. Outbound trunk with ringback.busy  → internal caller hears 183 early media, then 486
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 
 import pytest
@@ -130,7 +129,7 @@ async def test_trunk_busy_tone_183_early_media(pbx_config, pbx, sipbot_pool):
     pbx_config.add_trunk(
         "busy-trunk", dest="127.0.0.1:15201", direction="inbound",
         inbound_hosts=["127.0.0.1"],
-        ringback={"busy": "tone://480,3000", "play_duration_secs": 2},
+        ringback={"busy": "tone://480,3000"},
     )
     h.boot_pbx(pbx)
 
@@ -167,7 +166,7 @@ async def test_trunk_failure_tones(pbx_config, pbx, sipbot_pool, tone_field, rej
     pbx_config.add_trunk(
         f"{tone_field}-trunk", dest="127.0.0.1:15210", direction="inbound",
         inbound_hosts=["127.0.0.1"],
-        ringback={tone_field: "tone://500,3000", "play_duration_secs": 2},
+        ringback={tone_field: "tone://500,3000"},
     )
     h.boot_pbx(pbx)
 
@@ -186,13 +185,15 @@ async def test_trunk_failure_tones(pbx_config, pbx, sipbot_pool, tone_field, rej
 
 
 # ---------------------------------------------------------------------------
-# 4. Control: no ringback configured → no 183 / no early-media RTP
+# 4. No trunk ringback → the GLOBAL default busy tone still plays
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_trunk_no_ringback_no_early_media(pbx_config, pbx, sipbot_pool):
-    """Control group: a trunk WITHOUT ringback must NOT send 183 early media —
-    the callee's 486 is returned directly with no early-media audio."""
+async def test_trunk_no_ringback_uses_global_default_tone(pbx_config, pbx, sipbot_pool):
+    """A trunk WITHOUT its own ringback still gets the global failure-tone
+    default (`tone://480,3000` busy), so the caller hears 183 early media
+    before the 486. This is the "zero-config" behaviour: every call plays a
+    failure cue unless explicitly overridden."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "plain-trunk", dest="127.0.0.1:15202", direction="inbound",
@@ -206,50 +207,14 @@ async def test_trunk_no_ringback_no_early_media(pbx_config, pbx, sipbot_pool):
     _wait_call_ended(caller)
 
     codes = caller.get_status_counts()
-    assert codes.get(183, 0) == 0, f"no ringback must not produce 183, got: {codes}\n{caller.output[-3000:]}"
+    assert codes.get(183, 0) == 1, f"global default busy tone must produce 183, got: {codes}\n{caller.output[-3000:]}"
     assert codes.get(486, 0) == 1, f"expected 486 busy, got: {codes}\n{caller.output[-3000:]}"
     stats = caller.get_rtp_stats()
-    assert stats.rx_packets == 0, f"no ringback must produce no early-media RTP: {stats}\n{caller.output[-3000:]}"
+    assert stats.rx_packets > 0, f"global default busy tone must produce early-media RTP: {stats}\n{caller.output[-3000:]}"
 
 
 # ---------------------------------------------------------------------------
-# 5. play_duration_secs is honored
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_trunk_busy_play_duration(pbx_config, pbx, sipbot_pool):
-    """play_duration_secs=3: the busy tone must be played ~3s before the 486."""
-    play_secs = 3
-    pbx_config.set_realms(["127.0.0.1"])
-    pbx_config.add_trunk(
-        "dur-trunk", dest="127.0.0.1:15203", direction="inbound",
-        inbound_hosts=["127.0.0.1"],
-        ringback={"busy": "tone://480,3000", "play_duration_secs": play_secs},
-    )
-    h.boot_pbx(pbx)
-
-    await _reg_callee(sipbot_pool, pbx, 15203, username="1002", reject_code=486)
-    caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}")
-    # t0 = caller observes the 183 early media (busy tone starts)
-    assert await caller.wait_output_async(r"Early media", timeout=20), caller.output
-    t0 = time.monotonic()
-    # t1 = caller observes the final 486 rejection
-    assert await caller.wait_output_async(r"Call failed with status", timeout=20), caller.output
-    t1 = time.monotonic()
-    _wait_call_ended(caller)
-
-    elapsed = t1 - t0
-    assert elapsed >= play_secs - 0.5, (
-        f"busy tone played only {elapsed:.1f}s (expected ~{play_secs}s):\n{caller.output[-3000:]}"
-    )
-
-    codes = caller.get_status_counts()
-    assert codes.get(183, 0) == 1, f"expected 183 early media, got: {codes}\n{caller.output[-3000:]}"
-    assert codes.get(486, 0) == 1, f"expected 486 busy, got: {codes}\n{caller.output[-3000:]}"
-
-
-# ---------------------------------------------------------------------------
-# 6. Outbound trunk busy tone
+# 5. Outbound trunk busy tone
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -260,7 +225,7 @@ async def test_outbound_trunk_busy_tone(pbx_config, pbx, sipbot_pool):
     callee_port = 15204
     pbx_config.add_trunk(
         "carrier-trunk", dest=f"127.0.0.1:{callee_port}", direction="outbound",
-        ringback={"busy": "tone://480,3000", "play_duration_secs": 2},
+        ringback={"busy": "tone://480,3000"},
     )
     pbx_config.add_route(
         "out-to-carrier", match={"to.user": "^9"}, dest="carrier-trunk", priority=90,
@@ -298,7 +263,7 @@ async def test_trunk_noanswer_tone(pbx_config, pbx, sipbot_pool):
     pbx_config.add_trunk(
         "noanswer-trunk", dest="127.0.0.1:15206", direction="inbound",
         inbound_hosts=["127.0.0.1"],
-        ringback={"noanswer": "tone://480,3000", "play_duration_secs": 1},
+        ringback={"noanswer": "tone://480,1000"},
         max_ring_time=3,  # short ring timeout keeps the test fast
     )
     h.boot_pbx(pbx)
@@ -309,7 +274,7 @@ async def test_trunk_noanswer_tone(pbx_config, pbx, sipbot_pool):
     callee.terminate()
     await asyncio.sleep(1)
 
-    caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}")
+    caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}", hangup=8)
     assert await caller.wait_output_async(r"Call failed|4[0-9][0-9]", timeout=30), caller.output
     _wait_call_ended(caller)
 

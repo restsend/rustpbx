@@ -1041,7 +1041,7 @@ mod recorder_advanced_tests {
                     clock_rate: 48000,
                     channels: 2,
                 }),
-                video: None,
+                video: Vec::new(),
                 dtmf: Some(NegotiatedCodec {
                     codec: CodecType::TelephoneEvent,
                     payload_type: 101,

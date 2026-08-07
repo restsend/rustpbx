@@ -118,6 +118,67 @@ impl WavFormat {
     }
 }
 
+/// Header consistency checks for a detected WAV [`WavFormat`] against its
+/// `WavSpec` (channels / sample_rate / bits_per_sample). A mismatch almost
+/// always means the file was written by a tool that mislabeled the data — the
+/// classic cause of "played back as static / loud noise" (e.g. μ-law bytes
+/// stored under a 16-bit PCM header). Callers should surface these as warnings.
+pub fn format_issues(format: WavFormat, spec: &WavSpec) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    if spec.channels == 0 {
+        issues.push("channels is 0 (no audio frames)".to_string());
+    }
+    if spec.sample_rate == 0 {
+        issues.push("sample rate is 0".to_string());
+    }
+
+    match format {
+        WavFormat::Pcmu | WavFormat::Pcma | WavFormat::G729 => {
+            if spec.bits_per_sample != 8 {
+                issues.push(format!(
+                    "{format:?} (G.711/G.729) data must be 8 bits/sample, but the header declares {} — the payload is likely stored under the wrong format tag",
+                    spec.bits_per_sample
+                ));
+            }
+        }
+        WavFormat::G722 => {
+            if spec.bits_per_sample != 0 && spec.bits_per_sample != 8 {
+                issues.push(format!(
+                    "G722 expects 8 bits/sample (or 0), but the header declares {}",
+                    spec.bits_per_sample
+                ));
+            }
+        }
+        WavFormat::Pcm => {
+            if !matches!(spec.bits_per_sample, 8 | 16 | 24 | 32) {
+                issues.push(format!(
+                    "PCM supports 8/16/24/32 bits/sample, but the header declares {}",
+                    spec.bits_per_sample
+                ));
+            }
+        }
+        WavFormat::IeeeFloat => {
+            if !matches!(spec.bits_per_sample, 32 | 64) {
+                issues.push(format!(
+                    "IEEE float supports 32/64 bits/sample, but the header declares {}",
+                    spec.bits_per_sample
+                ));
+            }
+        }
+        WavFormat::Extensible | WavFormat::Unknown(_) => {
+            if !matches!(spec.bits_per_sample, 8 | 16 | 24 | 32 | 64) {
+                issues.push(format!(
+                    "unusual bits/sample {} for an extensible/unknown format",
+                    spec.bits_per_sample
+                ));
+            }
+        }
+    }
+
+    issues
+}
+
 // ── WavReader ───────────────────────────────────────────────────────────
 
 pub struct WavReader<R: Read> {
@@ -276,6 +337,12 @@ impl<R: Read + Seek> WavReader<R> {
 
     pub fn spec(&self) -> &WavSpec {
         &self.spec
+    }
+
+    /// The WAV container format detected from the `fmt ` chunk (e.g. PCM vs
+    /// μ-law vs a-law vs G.722). Use [`Self::spec`] for the raw header fields.
+    pub fn format(&self) -> WavFormat {
+        self.format
     }
 
     pub fn duration(&self) -> u32 {
@@ -1462,6 +1529,67 @@ mod tests {
             sample_format: SampleFormat::Float,
         };
         assert_eq!(float_spec.format_tag(), 0x0003);
+    }
+
+    fn spec(channels: u16, sample_rate: u32, bits_per_sample: u16) -> WavSpec {
+        WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample,
+            sample_format: SampleFormat::Int,
+        }
+    }
+
+    #[test]
+    fn test_format_issues_clean_mu_law_wav() {
+        // The canonical μ-law WAV: format tag 7, mono, 8 kHz, 8 bits.
+        let issues = format_issues(WavFormat::Pcmu, &spec(1, 8000, 8));
+        assert!(issues.is_empty(), "expected no issues, got {issues:?}");
+    }
+
+    #[test]
+    fn test_format_issues_mu_law_data_under_16bit_pcm_header() {
+        // μ-law (or a-law) bytes stored under a 16-bit PCM header — the classic
+        // "played back as loud static" case. Must be flagged.
+        let issues = format_issues(WavFormat::Pcmu, &spec(1, 8000, 16));
+        assert!(
+            issues.iter().any(|i| i.contains("8 bits/sample")),
+            "16-bit μ-law header must be flagged, got {issues:?}"
+        );
+
+        let issues = format_issues(WavFormat::Pcma, &spec(1, 8000, 16));
+        assert!(
+            issues.iter().any(|i| i.contains("8 bits/sample")),
+            "16-bit a-law header must be flagged, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_issues_invalid_pcm_bits() {
+        let issues = format_issues(WavFormat::Pcm, &spec(1, 8000, 12));
+        assert!(
+            issues.iter().any(|i| i.contains("8/16/24/32")),
+            "12-bit PCM must be flagged, got {issues:?}"
+        );
+        // Valid PCM widths pass.
+        for bits in [8u16, 16, 24, 32] {
+            assert!(
+                format_issues(WavFormat::Pcm, &spec(1, 8000, bits)).is_empty(),
+                "PCM {bits} bits should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_issues_zero_rate_or_channels() {
+        assert!(!format_issues(WavFormat::Pcm, &spec(0, 8000, 16)).is_empty());
+        assert!(!format_issues(WavFormat::Pcm, &spec(1, 0, 16)).is_empty());
+    }
+
+    #[test]
+    fn test_format_issues_g722_bits() {
+        assert!(format_issues(WavFormat::G722, &spec(1, 8000, 8)).is_empty());
+        assert!(!format_issues(WavFormat::G722, &spec(1, 8000, 16)).is_empty());
     }
 
     #[test]

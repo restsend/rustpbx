@@ -89,7 +89,6 @@ impl Drop for ServerDialogGuard {
     fn drop(&mut self) {
         let dlg = match self.dialog_layer.get_dialog(&self.id) {
             Some(dlg) => {
-                debug!(%self.id, state = %dlg.state(), "server dialog removed on drop");
                 self.dialog_layer.remove_dialog(&self.id);
                 match dlg {
                     Dialog::Invite(dlg) => dlg,

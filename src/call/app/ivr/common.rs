@@ -124,7 +124,7 @@ async fn synthesize_tts(
         }
     }
     // Fallback: try edge-cli if no TTS service configured
-    tracing::warn!(text = %text, "TTS service not configured, falling back to edge-cli");
+    tracing::info!(text = %text, "TTS service not configured, falling back to edge-cli");
     let voice_str = voice.unwrap_or("zh-CN-XiaoxiaoNeural").to_string();
     let fallback_cfg = crate::tts::TtsConfig {
         cache_dir: std::env::temp_dir()

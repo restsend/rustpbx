@@ -190,7 +190,7 @@ async fn test_destroy_within_bounded_time() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let start = std::time::Instant::now();
-    manager.destroy_conference(&cid).await;
+    let _ = manager.destroy_conference(&cid).await;
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_millis(2000),

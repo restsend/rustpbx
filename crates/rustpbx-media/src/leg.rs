@@ -50,6 +50,9 @@ pub struct LegConfig {
     pub transport: TransportMode,
     /// Codec preference (first entry is offered/used for the egress sender).
     pub codecs: Vec<CodecInfo>,
+    /// Video capabilities advertised on this leg's video m-line. Empty when the
+    /// leg carries no video (audio-only call).
+    pub video_codecs: Vec<rustrtc::config::VideoCapability>,
     pub rtp_port_range: Option<(u16, u16)>,
     pub external_ip: Option<String>,
     pub bind_ip: Option<String>,
@@ -73,6 +76,7 @@ impl LegConfig {
                 channels: 1,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -181,12 +185,30 @@ impl LegInner {
     /// observer and starts the egress pipeline in silence.
     pub fn from_rtc_config(
         id: impl Into<String>,
-        rtc_config: RtcConfiguration,
+        mut rtc_config: RtcConfiguration,
         codecs: Vec<CodecInfo>,
         comfort_noise: bool,
         comfort_noise_level_db: f32,
     ) -> Result<Leg> {
         let first_codec = codecs.first().ok_or_else(|| anyhow!("no codecs"))?;
+
+        // Stamp the correlation label (e.g. rustpbx's `{session_id}-{leg}`) on
+        // the RtcConfiguration so rustrtc's per-PC tracing span carries it —
+        // this is what groups every rustrtc log for this leg's connection.
+        let label: String = id.into();
+        if rtc_config.label.is_none() {
+            rtc_config.label = Some(label.clone());
+        }
+
+        // Video capabilities advertised on this leg's video m-line (empty when
+        // the leg carries no video). Read before `rtc_config` is moved into
+        // `PeerConnection::new`.
+        let video_caps = rtc_config
+            .media_capabilities
+            .as_ref()
+            .map(|caps| caps.video.clone())
+            .unwrap_or_default();
+
         let pc = {
             let handle = tokio::runtime::Handle::try_current();
             let _guard = handle.as_ref().ok().map(|h| h.enter());
@@ -202,6 +224,21 @@ impl LegInner {
             channels: first_codec.channels as u8,
         };
         let _ = pc.add_track(track, params);
+
+        // Egress video track: add ONE video sender when the config advertises
+        // video capabilities. Its presence makes rustrtc emit `a=ssrc` on the
+        // video m-line (fixing the browser's 2–3 s unsignaled-SSRC demux delay)
+        // and provides the video sender SSRC used as the relay destination.
+        // The sender's source stays idle — relayed video bypasses it entirely.
+        if let Some(first_video) = video_caps.first() {
+            let (_, video_track, _) = sample_track(MediaKind::Video, 100);
+            let video_params = RtpCodecParameters {
+                payload_type: first_video.payload_type,
+                clock_rate: first_video.clock_rate,
+                channels: 0,
+            };
+            let _ = pc.add_track(video_track, video_params);
+        }
 
         // Plaintext bidirectional observer (stats / DTMF / recording).
         let tap = IngressTap::new(64);
@@ -231,7 +268,7 @@ impl LegInner {
         );
 
         Ok(Arc::new(LegInner {
-            id: LegId::from(id.into()),
+            id: LegId::from(label),
             pc,
             tap,
             egress,
@@ -464,11 +501,11 @@ impl LegInner {
 
         match &source {
             // Switching TO RewriteRelay: (re)arm the rewrite bridge on this PC.
-            EgressSource::RewriteRelay { peer_pc, params } => {
+            EgressSource::RewriteRelay { peer_pc, options, rules } => {
                 // The rewrite bridge needs both RTP transports ready (they are
                 // created during SDP negotiation / DTLS start). Block until
                 // they exist instead of proceeding and failing
-                // bridge_rtp_with_rewrite_to, which previously left the relay
+                // bridge_rtp_with_rewrite_rules, which previously left the relay
                 // un-armed with only a WARN in MediaBridge::accept.
                 //
                 // Exception: a WebRTC peer's SRTP transport only exists after
@@ -484,14 +521,15 @@ impl LegInner {
                 if has_webrtc_peer {
                     let pc = self.pc.clone();
                     let peer = peer_pc.clone();
-                    let params = *params;
+                    let options = *options;
+                    let rules = rules.clone();
                     tokio::spawn(async move {
                         let result =
                             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                                 pc.wait_for_rtp_transport_ready(timeout).await?;
                                 peer.wait_for_rtp_transport_ready(timeout).await?;
                                 pc.clear_rtp_rewrite_bridge();
-                                pc.bridge_rtp_with_rewrite_to(&peer, params)?;
+                                pc.bridge_rtp_with_rewrite_rules(&peer, options, &rules)?;
                                 Ok::<_, anyhow::Error>(())
                             })
                             .await;
@@ -509,7 +547,7 @@ impl LegInner {
                     self.pc.wait_for_rtp_transport_ready(timeout).await?;
                     peer_pc.wait_for_rtp_transport_ready(timeout).await?;
                     self.pc.clear_rtp_rewrite_bridge();
-                    self.pc.bridge_rtp_with_rewrite_to(peer_pc, *params)?;
+                    self.pc.bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
                 }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
@@ -572,9 +610,9 @@ impl LegInner {
         let prev_was_relay = self.was_relay.swap(is_relay, Ordering::SeqCst);
 
         match &source {
-            EgressSource::RewriteRelay { peer_pc, params } => {
+            EgressSource::RewriteRelay { peer_pc, options, rules } => {
                 self.pc.clear_rtp_rewrite_bridge();
-                self.pc.bridge_rtp_with_rewrite_to(peer_pc, *params)?;
+                self.pc.bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
             }
             _ if prev_was_relay => {
                 self.pc.clear_rtp_rewrite_bridge();
@@ -738,7 +776,7 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         runtime_handle: tokio::runtime::Handle::try_current().ok(),
         media_capabilities: Some(rustrtc::config::MediaCapabilities {
             audio: cfg.codecs.iter().map(audio_capability_from_codec).collect(),
-            video: vec![rustrtc::config::VideoCapability::default()],
+            video: cfg.video_codecs.clone(),
             application: Some(rustrtc::config::ApplicationCapability::default()),
             image: vec![],
         }),
@@ -799,15 +837,21 @@ fn check_dtls_compatible(prev: Option<NegotiatedLegProfile>, _new_sdp: &str) -> 
     Ok(())
 }
 
-/// The audio sender SSRC of a PC — the SSRC the remote peer expects in RTP
-/// packets from this leg (advertised in the local SDP `a=ssrc` attribute).
-fn sender_ssrc(pc: &PeerConnection) -> u32 {
+/// The sender SSRC of a PC for the given media kind — the SSRC the remote peer
+/// expects in RTP packets from this leg (advertised in the local SDP
+/// `a=ssrc` attribute).
+pub fn sender_ssrc_for_kind(pc: &PeerConnection, kind: rustrtc::MediaKind) -> u32 {
     pc.get_transceivers()
         .into_iter()
-        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .find(|t| t.kind() == kind)
         .and_then(|t| t.sender())
         .map(|s| s.ssrc())
         .unwrap_or(0)
+}
+
+/// The audio sender SSRC of a PC.
+fn sender_ssrc(pc: &PeerConnection) -> u32 {
+    sender_ssrc_for_kind(pc, rustrtc::MediaKind::Audio)
 }
 
 #[cfg(test)]
@@ -906,6 +950,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
+            video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -936,6 +981,137 @@ mod tests {
             offer
         );
         a.stop();
+    }
+
+    #[tokio::test]
+    async fn leg_with_video_caps_emits_video_mline_with_ssrc() {
+        // A leg configured with H264+VP8 video capabilities must include a
+        // video m-line in its offer carrying both codecs AND an `a=ssrc`
+        // attribute. The a=ssrc is what lets the remote browser demux relayed
+        // video immediately instead of waiting out the 2–3 s unsignaled-SSRC
+        // demux timeout.
+        let cfg = LegConfig {
+            transport: TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            video_codecs: negotiate::MediaNegotiator::default_video_codecs(),
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("video-test".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+        let leg = LegInner::new("video", &cfg).expect("video leg");
+        let offer = leg.create_offer(vec![]).await.expect("create_offer");
+
+        assert!(
+            offer.contains("m=video"),
+            "offer lacks a video m-line:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("rtpmap:96 H264/90000"),
+            "offer lacks H264 rtpmap:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("rtpmap:98 VP8/90000"),
+            "offer lacks VP8 rtpmap:\n{}",
+            offer
+        );
+        assert!(
+            offer.contains("a=ssrc:"),
+            "offer lacks any a=ssrc:\n{}",
+            offer
+        );
+
+        // The video sender SSRC (advertised via a=ssrc) must be readable so
+        // the MediaBridge can use it as the relay destination SSRC.
+        assert_ne!(
+            sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Video),
+            0,
+            "video sender SSRC must be allocated"
+        );
+        leg.stop();
+    }
+
+    #[tokio::test]
+    async fn video_answer_echoes_ssrc_when_remote_offers_video() {
+        // Answerer path (caller leg): a WebRTC offer with a video m-line must
+        // be answered with a sendrecv video m-line that carries the leg's video
+        // sender a=ssrc — previously this leg had no video sender, so the video
+        // m-line was recvonly with no SSRC and the caller suffered the demux
+        // delay.
+        let cfg = LegConfig {
+            transport: TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            video_codecs: negotiate::MediaNegotiator::default_video_codecs(),
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("video-answer".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+        let leg = LegInner::new("answerer", &cfg).expect("answerer leg");
+
+        // Minimal WebRTC offer with audio + video m-lines (what a browser
+        // sends: sendrecv, video with an SSRC).
+        let offer = "v=0\r\n\
+            o=- 1 2 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=setup:actpass\r\n\
+            a=ice-ufrag:uv50\r\n\
+            a=ice-pwd:ib8b\r\n\
+            a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
+            m=video 4001 UDP/TLS/RTP/SAVPF 96 98\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=rtpmap:98 VP8/90000\r\n\
+            a=mid:1\r\n\
+            a=sendrecv\r\n\
+            a=setup:actpass\r\n\
+            a=ice-ufrag:uv50\r\n\
+            a=ice-pwd:ib8b\r\n\
+            a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n";
+
+        let answer = leg
+            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .await
+            .expect("leg answers video offer");
+        assert!(
+            answer.contains("m=video"),
+            "answer lacks a video m-line:\n{}",
+            answer
+        );
+        assert!(
+            answer.contains("rtpmap:96 H264/90000"),
+            "answer lacks H264 rtpmap:\n{}",
+            answer
+        );
+        assert!(
+            answer.contains("a=ssrc:"),
+            "answer lacks any a=ssrc (video demux delay):\n{}",
+            answer
+        );
+        leg.stop();
     }
 }
 

@@ -28,7 +28,7 @@ use parking_lot::{Mutex, RwLock};
 use rustrtc::peer_connection::RtpObserver;
 use rustrtc::rtp::RtpPacket;
 use tokio::sync::broadcast;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::dtmf::DtmfDetector;
 
@@ -207,7 +207,6 @@ impl IngressTap {
                 .lock()
                 .observe(&packet.payload, packet.header.timestamp);
             if let Some(digit) = digit {
-                debug!(pt, digit = digit.to_string(), direction = ?direction, "tap: DTMF digit detected");
                 let event = DtmfEvent {
                     direction,
                     digit,

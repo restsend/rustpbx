@@ -512,8 +512,9 @@ async fn rtp_timeout_disarm_cancels_receiver() {
 }
 
 /// App-level suppression (`set_app_paused`) keeps the timeout from firing even
-/// when the leg is re-armed (e.g. `play()` resumes the timer after a prompt
-/// while an IVR is still driving the call). Unpausing lets it fire again.
+/// when the leg is re-armed. This is used during a blind-transfer window (new
+/// B-leg ringing) where media may legitimately stall. Unpausing lets it fire
+/// again.
 #[tokio::test]
 async fn rtp_timeout_app_paused_suppresses_even_when_rearmed() {
     let mut mb = MediaBridge::new("it-rtp-timeout-app-paused", BridgeOpts::default());
@@ -529,8 +530,9 @@ async fn rtp_timeout_app_paused_suppresses_even_when_rearmed() {
     let slept = tokio::time::timeout(std::time::Duration::from_millis(400), &mut rx).await;
     assert!(slept.is_err(), "timeout must NOT fire while app-paused");
 
-    // Simulate play() ending and re-arming the timer while the app still drives
-    // the call: the receiver must still NOT fire despite active=true.
+    // Re-arm the timer while still suppressed (e.g. a transfer window that
+    // re-arms on a fresh leg): the receiver must still NOT fire despite
+    // active=true.
     let mut rx2 = mb
         .arm_rtp_timeout(LegSide::A, std::time::Duration::from_millis(150))
         .expect("re-armed while app-paused");
@@ -705,8 +707,9 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
             clock_rate: 48000,
             channels: 2,
             fmtp: None,
-        }],
-        rtp_port_range: None,
+            }],
+            video_codecs: Vec::new(),
+            rtp_port_range: None,
         external_ip: None,
         bind_ip: None,
         cname: Some("rtp-timeout-webrtc".to_string()),

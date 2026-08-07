@@ -265,7 +265,7 @@ impl LocalBackend {
                                 .set(rx.len() as f64);
                             perf.set_pending(rx.len() as i64);
                             if let Some(msg) = dumper.try_dump() {
-                                tracing::info!("{msg}");
+                                tracing::trace!("{msg}");
                             }
                         }
                     }
