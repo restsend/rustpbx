@@ -1,7 +1,7 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config, create_transaction,
 };
-use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaCapability, MediaPathMode};
+use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaCapability, MediaPathMode, ReturnAppSpec};
 use crate::call::runtime::{AppDescriptor, AppRuntime, AppRuntimeError, AppStatus, BridgeConfig};
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
@@ -436,8 +436,11 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
     session.legs.insert(agent_leg.clone(), leg);
     session.bridge = BridgeConfig::bridge(caller_leg, agent_leg.clone());
 
-    // Simulate a queue-transfer that set return_to_ivr
-    session.meta.transfer_return_to_ivr = Some("main-menu".to_string());
+    // Simulate a queue-transfer that set return_app
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
 
     let runtime = Arc::new(StartOnlyRuntime::new());
     session.app_runtime = runtime.clone();
@@ -459,7 +462,7 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
         "IVR app should be started on agent hangup"
     );
     // transfer_return_to_ivr should be consumed
-    assert!(session.meta.transfer_return_to_ivr.is_none());
+    assert!(session.meta.transfer_return_app.is_none());
     // Caller should NOT be in pending_hangup (IVR took over)
     let caller_dialog_id = session
         .caller_dialog
@@ -684,7 +687,6 @@ async fn test_queue_transfer_without_return_to_ivr_starts_queue_app() {
         .handle_queue_transfer(
             "support",
             None,
-            HashMap::new(),
             Vec::new(),
         )
         .await
@@ -708,17 +710,21 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
     session
         .handle_queue_transfer(
             "support",
-            Some("hello".to_string()),
-            HashMap::new(),
+            Some(crate::proxy::proxy_call::sip_session::ReturnTargetSpec {
+                app_name: "ivr".to_string(),
+                target: Some("hello".to_string()),
+                params: HashMap::new(),
+            }),
             Vec::new(),
         )
         .await
-        .expect("queue app should start with return_to_ivr");
+        .expect("queue app should start with return_app");
 
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
+    assert!(session.meta.transfer_return_app.is_some());
     assert_eq!(
-        session.meta.transfer_return_to_ivr,
-        Some("hello".to_string())
+        session.meta.transfer_return_app.as_ref().unwrap().app_name,
+        "ivr"
     );
 }
 
@@ -1314,7 +1320,6 @@ async fn queue_no_agents_play_then_hangup_starts_queue_app() {
         .handle_queue_transfer(
             "support",
             None,
-            HashMap::new(),
             Vec::new(),
         )
         .await
@@ -1348,12 +1353,15 @@ async fn queue_not_found_with_return_to_ivr_starts_ivr_app() {
     session
         .handle_queue_transfer(
             "asdf-queue",
-            Some("asdf".to_string()),
-            HashMap::new(),
+            Some(crate::proxy::proxy_call::sip_session::ReturnTargetSpec {
+                app_name: "ivr".to_string(),
+                target: Some("asdf".to_string()),
+                params: HashMap::new(),
+            }),
             Vec::new(),
         )
         .await
-        .expect("missing-queue fallback with return_to_ivr should start the IVR app");
+        .expect("missing-queue fallback with return_app should start the IVR app");
 
     // The IVR app (not the queue app) must be started.
     assert_eq!(
@@ -1391,7 +1399,6 @@ async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
         .handle_queue_transfer(
             "missing-queue",
             None,
-            HashMap::new(),
             Vec::new(),
         )
         .await
@@ -1496,7 +1503,6 @@ async fn queue_no_agents_hangup_fallback_starts_queue_app() {
         .handle_queue_transfer(
             "support",
             None,
-            HashMap::new(),
             Vec::new(),
         )
         .await

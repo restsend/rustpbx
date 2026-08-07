@@ -1,9 +1,9 @@
-use crate::call::domain::RtpTimeoutSide;
+use crate::call::domain::{ReturnAppSpec, RtpTimeoutSide};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::state::SessionHangupMessage;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Instant;
 
 pub struct CallMeta {
@@ -36,17 +36,14 @@ pub struct CallMeta {
     /// Optional display label of the queue driving the session (distinct from
     /// `queue_name` which is the machine identifier).
     pub queue_label: Option<String>,
-    /// When set and the connected B‑leg terminates, the session returns the
-    /// caller to this IVR instead of hanging up.
-    /// Set by `handle_blind_transfer` for `TransferTarget::Sip` and
-    /// `handle_queue_transfer` (on successful agent connection) when the
-    /// user configures `return_to_ivr` on the action.
-    /// Consumed once by `handle_callee_state` so the return is one-shot.
-    pub transfer_return_to_ivr: Option<String>,
-    /// Extra return-context params extracted from the `return_*` query string
-    /// of the transfer target (e.g. `return_menu`, `return_step_id`).
-    /// Forwarded as `ivr_params` when restarting the IVR.
-    pub transfer_return_params: HashMap<String, String>,
+    /// When set and the connected B‑leg (agent / bridge) terminates, the
+    /// session returns the caller to this app instead of hanging up.
+    /// Set by `handle_blind_transfer` for `TransferTarget::Sip` /
+    /// `TransferTarget::Bridge` and `handle_queue_transfer` when the user
+    /// configures `return_app` on the action.
+    /// Consumed once by the `CallCommand::StartReturnApp` handler so the
+    /// return is one-shot.
+    pub transfer_return_app: Option<ReturnAppSpec>,
     /// Ordered diagnostic timeline of the call (ring → answer → ivr → queue →
     /// transfer → bridge → hold/resume → plays → hangup). Persisted into the
     /// call-record `metadata["trace"]` array by `record_snapshot`.
@@ -88,8 +85,7 @@ impl CallMeta {
             error_code: None,
             app_name: None,
             queue_label: None,
-            transfer_return_to_ivr: None,
-            transfer_return_params: HashMap::new(),
+            transfer_return_app: None,
             trace: Vec::new(),
             rtp_timeout_side: None,
             rtp_timeout_leg: None,

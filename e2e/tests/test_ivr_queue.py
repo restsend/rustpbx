@@ -385,7 +385,8 @@ key = "1"
 [ivr.root.entries.action]
 type = "queue"
 target = "returnq"
-return_to_ivr = "ivr-return"
+return_app = "ivr"
+return_target = "ivr-return"
 ''')
     pbx.config_builder.add_queue(
         "returnq",
@@ -424,8 +425,8 @@ return_to_ivr = "ivr-return"
     await asyncio.sleep(8)
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
-    assert "returning caller to IVR" in log or "B‑leg hung up; returning caller to IVR" in log or "Connected dynamic leg ended; returning caller to IVR" in log, (
-        f"expected return-to-IVR log after agent hangup:\n{log[-3000:]}"
+    assert "starting return app" in log or "returning caller to IVR" in log or "B‑leg hung up; returning caller to IVR" in log or "Connected dynamic leg ended" in log, (
+        f"expected return-to-app log after agent hangup:\n{log[-3000:]}"
     )
 
 

@@ -629,6 +629,64 @@ impl MediaBridge {
         Ok(handle)
     }
 
+    /// Play a media source on a leg **without** breaking the opposite leg's
+    /// egress.  Unlike [`Self::play`], this does NOT call `unbridge()` first,
+    /// so the opposite leg keeps whatever it was playing (e.g. looping hold
+    /// music during an `ivr.exec` flow).
+    ///
+    /// Should only be used when the route is already inactive (e.g. after a
+    /// `hold()`).  If the route is active, use [`Self::play`] instead.
+    pub async fn play_side_only(
+        &mut self,
+        side: LegSide,
+        audio: Box<dyn crate::audio_source::AudioSource>,
+        loop_playback: bool,
+    ) -> Result<PlaybackHandle> {
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        leg.pause_rtp_timeout();
+        let leg_for_end = leg.clone();
+        let (handle, done_tx) = PlaybackHandle::new();
+        self.active_play.lock().insert(side);
+        let active_registry = self.active_play.clone();
+        let done_tx = Arc::new(parking_lot::Mutex::new(Some(done_tx)));
+        let on_end = Arc::new(move |interrupted: bool| {
+            active_registry.lock().remove(&side);
+            leg_for_end.resume_rtp_timeout();
+            if let Some(tx) = done_tx.lock().take() {
+                let _ = tx.send(PlaybackResult { interrupted });
+            }
+        });
+        leg.set_egress_source(EgressSource::Media {
+            audio,
+            loop_playback,
+            on_end: Some(on_end),
+        })
+        .await?;
+        Ok(handle)
+    }
+
+    /// Play a file on a leg **without** breaking the opposite leg's egress.
+    /// Convenience wrapper around [`Self::play_side_only`] for file sources.
+    /// Unlike [`Self::play_file`], does NOT mirror onto the opposite leg.
+    pub async fn play_file_side_only(
+        &mut self,
+        side: LegSide,
+        path: impl Into<String>,
+        loop_playback: bool,
+    ) -> Result<PlaybackHandle> {
+        let path = path.into();
+        self.play_side_only(
+            side,
+            Box::new(
+                crate::audio_source::FileAudioSource::new(path, loop_playback).await?,
+            ),
+            loop_playback,
+        )
+        .await
+    }
+
     /// Play a file (or http URL) on a leg. Reads the file async and pre-decodes
     /// it into memory; the egress pacing task reads from the in-memory cache.
     ///

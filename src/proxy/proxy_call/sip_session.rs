@@ -118,6 +118,9 @@ mod conference;
 mod supervisor;
 mod transfer;
 
+#[allow(unused_imports)]
+pub(crate) use transfer::ReturnTargetSpec;
+
 #[derive(Debug)]
 enum TimerAction {
     Refresh,
@@ -3774,66 +3777,19 @@ impl SipSession {
                     self.meta.connected_callee = None;
                     self.meta.connected_callee_dialog_id = None;
 
-                    // ── Return to IVR takes precedence over CSAT hook ──────────
+                    // Defer to the unified post-disconnect handler (CSAT first,
+                    // then return_app, then hangup).
                     if !self
                         .caller_dialog
                         .as_ref()
                         .is_none_or(|d| d.state().is_terminated())
                     {
-                        if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
-                            let mut ivr_params =
-                                std::mem::take(&mut self.meta.transfer_return_params);
-                            ivr_params.insert("transferred_from".into(), "agent".into());
-                            ivr_params.insert("return_reason".into(), "b_leg_hangup".into());
-                            info!(session_id = %self.id,
-                                session = %self.id,
-                                %ivr_name,
-                                ?ivr_params,
-                                "B‑leg hung up; returning caller to IVR"
-                            );
-                            self.bridge.clear();
-                            if self.start_ivr_app(&ivr_name, ivr_params).await.is_ok() {
-                                return Ok(());
-                            }
-                            warn!(session_id = %self.id,
-                                session = %self.id,
-                                %ivr_name,
-                                "Failed to restart IVR on B‑leg hangup; falling through to normal hangup"
-                            );
+                        if let Some(ref cmd_tx) = self.cmd_tx {
+                            let _ = cmd_tx.try_send(CallCommand::StartReturnApp);
+                        } else {
+                            self.pending_hangup.insert(self.caller_dialog_id());
                         }
                     }
-
-                    let hook_handled = if !self
-                        .caller_dialog
-                        .as_ref()
-                        .is_none_or(|d| d.state().is_terminated())
-                    {
-                        // Give session hooks a chance to start a post-call
-                        // app (e.g. CSAT survey) before hanging up the caller.
-                        let ctx = self.session_hook_ctx();
-                        let mut handled = false;
-                        for hook in self.server.session_hooks.iter() {
-                            if hook.on_agent_disconnected(&ctx, &*self.app_runtime).await {
-                                handled = true;
-                                break;
-                            }
-                        }
-                        handled
-                    } else {
-                        false
-                    };
-
-                    if !hook_handled
-                        && !self
-                            .caller_dialog
-                            .as_ref()
-                            .is_none_or(|d| d.state().is_terminated())
-                    {
-                        self.pending_hangup.insert(self.caller_dialog_id());
-                    }
-                    // If hook_handled == true, the survey app will hang up the caller
-                    // when it completes (via AppAction::Hangup). The app has built-in
-                    // timeouts (DTMF 10s, recording 30s) so it cannot hang indefinitely.
                 } else {
                     let (code, reason_str) = match reason {
                         TerminatedReason::UasBusy => {
@@ -8924,48 +8880,32 @@ impl SipSession {
                         .as_ref()
                         .is_none_or(|d| !d.state().is_terminated())
                 {
-                    // ── Return to IVR takes precedence over plain hangup ──
-                    // Mirrors the B2BUA callee-dialog-termination handler
-                    // (see handle_callee_state) so that dynamic-leg apps
-                    // (e.g. queue) also honour `transfer_return_to_ivr` when
-                    // the connected agent hangs up.
-                    if let Some(ivr_name) = self.meta.transfer_return_to_ivr.take() {
-                        let mut ivr_params = std::mem::take(&mut self.meta.transfer_return_params);
-                        ivr_params.insert("transferred_from".into(), "agent".into());
-                        ivr_params.insert("return_reason".into(), "b_leg_hangup".into());
-                        info!(session_id = %self.id,
-                            %leg_id,
-                            %ivr_name,
-                            ?ivr_params,
-                            "Connected dynamic leg ended; returning caller to IVR"
-                        );
-                        self.bridge.clear();
-                        if self.start_ivr_app(&ivr_name, ivr_params).await.is_ok() {
-                            return CommandResult::success();
+                    // Defer to the unified post-disconnect handler (CSAT first,
+                    // then return_app, then hangup).  Mirrors the B2BUA callee-
+                    // dialog-termination path so dynamic-leg apps (e.g. queue)
+                    // get the same return-app and CSAT-hook treatment.
+                    if let Some(ref cmd_tx) = self.cmd_tx {
+                        let _ = cmd_tx.try_send(CallCommand::StartReturnApp);
+                    } else {
+                        self.meta
+                            .hangup_reason
+                            .get_or_insert(CallRecordHangupReason::ByCallee);
+                        if let Some(d) = self.caller_dialog.as_ref() {
+                            self.pending_hangup.insert(d.id());
                         }
-                        warn!(session_id = %self.id,
-                            %leg_id,
-                            %ivr_name,
-                            "Failed to restart IVR on dynamic-leg hangup; falling through to normal hangup"
-                        );
-                    }
-
-                    self.meta
-                        .hangup_reason
-                        .get_or_insert(CallRecordHangupReason::ByCallee);
-                    if let Some(d) = self.caller_dialog.as_ref() {
-                        self.pending_hangup.insert(d.id());
                     }
                     info!(
                         session_id = %self.id,
                         %leg_id,
-                        "Connected dynamic leg ended; hanging up caller"
+                        "Connected dynamic leg ended; deferred to StartReturnApp"
                     );
                 }
                 CommandResult::failure(reason)
             }
 
             CallCommand::AppExited => self.handle_app_exited().await,
+
+            CallCommand::StartReturnApp => self.handle_start_return_app().await,
 
             CallCommand::SendInfo {
                 leg_id,
@@ -9027,6 +8967,63 @@ impl SipSession {
             }
         }
 
+        CommandResult::success()
+    }
+
+    /// Unified post-disconnect handler: decide what to do with the caller after
+    /// the connected B-leg (agent / bridge) terminates.
+    ///
+    /// Precedence (CSAT-first):
+    /// 1. `on_agent_disconnected` hooks (e.g. CSAT survey) — first hook that
+    ///    returns `true` takes over and this method returns.
+    /// 2. `meta.transfer_return_app` — start the stored return app.
+    /// 3. Neither — queue a normal hangup.
+    ///
+    /// Called from three disconnect paths (B2BUA callee termination, dynamic-
+    /// leg failure, Bridge monitor) via `CallCommand::StartReturnApp`.
+    async fn handle_start_return_app(&mut self) -> CommandResult {
+        let caller_alive = !self
+            .caller_dialog
+            .as_ref()
+            .is_none_or(|d| d.state().is_terminated());
+
+        if !caller_alive {
+            return CommandResult::success();
+        }
+
+        // 1. CSAT / session hooks take precedence.
+        let ctx = self.session_hook_ctx();
+        for hook in self.server.session_hooks.iter() {
+            if hook.on_agent_disconnected(&ctx, &*self.app_runtime).await {
+                return CommandResult::success();
+            }
+        }
+
+        // 2. Return app from CallMeta.
+        if let Some(spec) = self.meta.transfer_return_app.take() {
+            info!(session_id = %self.id,
+                app = %spec.app_name,
+                "B‑leg disconnected; starting return app"
+            );
+            self.bridge.clear();
+            let label = format!("Return app '{}'", spec.app_name);
+            match self
+                .ensure_app_running(&spec.app_name, Some(spec.params), &label)
+                .await
+            {
+                Ok(()) => return CommandResult::success(),
+                Err(e) => {
+                    warn!(session_id = %self.id,
+                        app = %spec.app_name,
+                        error = %e,
+                        "Failed to start return app; falling through to hangup"
+                    );
+                }
+            }
+        }
+
+        // 3. Neither hook nor return app — hang up the caller.
+        self.pending_hangup.insert(self.caller_dialog_id());
         CommandResult::success()
     }
 
@@ -9972,8 +9969,22 @@ impl SipSession {
             _ => crate::media::media_bridge::LegSide::A,
         };
 
+        // During ivr.exec the opposite leg is held with music. Use
+        // play_file_side_only to preserve that music instead of silencing
+        // it via unbridge().
+        let in_ivr_exec = self
+            .extensions
+            .read()
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+            .is_some();
+
         if let Some(mb) = self.bridge_mut() {
-            let handle = mb.play_file(target_side, &file_path, loop_playback).await?;
+            let handle = if in_ivr_exec {
+                mb.play_file_side_only(target_side, &file_path, loop_playback)
+                    .await?
+            } else {
+                mb.play_file(target_side, &file_path, loop_playback).await?
+            };
             // Forward the playback completion to the app event loop and restore
             // the media route (both legs) once playback ends.
             let app_event_bridge = self.app_event_bridge.clone();

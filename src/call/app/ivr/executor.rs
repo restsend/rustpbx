@@ -1647,7 +1647,7 @@ mod tests {
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }))
         }
 
@@ -1676,7 +1676,7 @@ mod tests {
             Box::new(mock_app(vec![ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             })])),
             "1001",
             "2000",
@@ -1707,7 +1707,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -1750,7 +1750,7 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack =
@@ -1787,14 +1787,14 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
         entries.insert(
             "2".into(),
             ActionNode::new(EntryAction::Queue {
                 target: "support".into(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -1887,7 +1887,7 @@ mod tests {
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }))
         }
     }
@@ -1965,7 +1965,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2181,7 +2181,7 @@ mod tests {
                 create_room_uri: "https://voip.example.com/rooms".into(),
                 headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
                 timeout_ms: Some(30000),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
                 success: None,
                 failure: None,
             })])),
@@ -2208,7 +2208,7 @@ mod tests {
                 create_room_uri: "wss://voip.example.com/room1".into(),
                 headers: HashMap::new(),
                 timeout_ms: None,
-                return_to_ivr: Some("main".into()),
+                return_app: Some("ivr".into()), return_target: Some("main".into()),
                 success: Some(Box::new(ActionNode::new(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
@@ -2225,7 +2225,7 @@ mod tests {
         stack
             .assert_cmd(200, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target == "bridge:wss://voip.example.com/room1?return_to_ivr=main")
+                    if target == "bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main")
             })
             .await;
     }
@@ -2264,7 +2264,7 @@ mod tests {
         let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         })]);
         app.trace = Some(trace.clone());
         app.ivr_name = Some("test-ivr".to_string());
@@ -2331,7 +2331,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2422,7 +2422,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
         let resp = serde_json::to_value(&entry).unwrap();
@@ -2466,7 +2466,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2542,7 +2542,7 @@ mod tests {
         let transfer_resp = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let url = spawn_mock_provider(vec![
@@ -2609,7 +2609,7 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack =
@@ -2671,7 +2671,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "3003".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2719,7 +2719,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2789,7 +2789,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2874,7 +2874,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -2957,7 +2957,7 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack =
@@ -3159,7 +3159,7 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
 
@@ -3262,7 +3262,7 @@ mod tests {
             EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             },
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
@@ -3271,7 +3271,7 @@ mod tests {
         app.current_node = Some(ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         }));
         app.current_step_id = Some("step-7".to_string());
         app.sess
@@ -3317,7 +3317,7 @@ mod tests {
             EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             },
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
@@ -3325,7 +3325,7 @@ mod tests {
         app.current_node = Some(ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         }));
         app.current_step_id = Some("step-9".to_string());
         app.sess
@@ -3493,7 +3493,7 @@ mod tests {
                 serde_json::to_value(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
                     params: HashMap::new(),
-                    return_to_ivr: None,
+                    return_app: None, return_target: None,
                 }))
                 .unwrap(),
             )
@@ -3569,7 +3569,7 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack =
@@ -3606,7 +3606,7 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack = MockCallStack::run(
@@ -3653,7 +3653,7 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
         });
 
         let mut stack =
@@ -3928,7 +3928,7 @@ mod tests {
                     Ok(ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
                         params: HashMap::new(),
-                        return_to_ivr: None,
+                        return_app: None, return_target: None,
                     }))
                 }
                 _ => Ok(ActionNode::new(EntryAction::Hangup {

@@ -542,7 +542,8 @@ impl IvrApp {
             EntryAction::Transfer {
                 target,
                 params,
-                return_to_ivr,
+                return_app,
+                return_target,
             } => {
                 let mut t = target.clone();
                 let mut query = String::new();
@@ -552,12 +553,14 @@ impl IvrApp {
                     }
                     query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
-                if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
                     if !query.is_empty() {
                         query.push('&');
                     }
-                    query.push_str(&format!("return_to_ivr={}", urlencoding::encode(ivr)));
-                    // Encode the current menu so the IVR can resume there
+                    query.push_str(&format!("return_app={}", urlencoding::encode(app)));
+                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
+                        query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
+                    }
                     let menu = self.current_menu_key().to_string();
                     if !menu.is_empty() && menu != "root" {
                         query.push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
@@ -575,32 +578,28 @@ impl IvrApp {
             }
             EntryAction::Queue {
                 target,
-                return_to_ivr,
+                return_app,
+                return_target,
             } => {
                 info!(
                     ivr = %self.definition.name,
                     queue = target,
-                    return_to_ivr = ?return_to_ivr,
+                    return_app = ?return_app,
                     "IVR sending to queue"
                 );
                 self.ivr_flow_completed(ctx, "transferred", "queue", Some(target))
                     .await;
                 self.state = IvrState::Done;
-                if let Some(ivr) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
-                    // Encode return IVR name so the queue can come back on failure
-                    // and the transfer engine stores it for agent-hangup return
-                    let mut queue_target = format!(
-                        "queue:{}?return_to_ivr={}",
-                        target,
-                        urlencoding::encode(ivr)
-                    );
-                    // Encode the current menu for resume
+                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+                    let mut query = format!("return_app={}", urlencoding::encode(app));
+                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
+                        query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
+                    }
                     let menu = self.current_menu_key().to_string();
                     if !menu.is_empty() && menu != "root" {
-                        queue_target
-                            .push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
+                        query.push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
                     }
-                    Ok(AppAction::Transfer(queue_target))
+                    Ok(AppAction::Transfer(format!("queue:{}?{}", target, query)))
                 } else {
                     Ok(AppAction::Transfer(format!("queue:{}", target)))
                 }
@@ -624,14 +623,12 @@ impl IvrApp {
             EntryAction::Bridge {
                 create_room_uri,
                 headers,
-                return_to_ivr,
+                return_app,
+                return_target,
                 success,
                 failure,
                 ..
             } => {
-                // Mirror step-mode behavior (common.rs execute_action): substitute
-                // variables, expose bridge_* session vars, append return_to_ivr,
-                // then transfer to the `bridge:` target.
                 let mut vars: std::collections::HashMap<String, String> = ctx
                     .session_vars
                     .iter()
@@ -651,9 +648,12 @@ impl IvrApp {
                     ctx.session_vars
                         .insert("bridge_branch".into(), "true".into());
                 }
-                if let Some(ivr_name) = return_to_ivr.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
                     let sep = if uri.contains('?') { "&" } else { "?" };
-                    uri = format!("{}{}return_to_ivr={}", uri, sep, ivr_name);
+                    uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
+                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
+                        uri = format!("{}&return_target={}", uri, urlencoding::encode(rt));
+                    }
                 }
                 let target = format!("bridge:{}", uri);
                 info!(ivr = %self.definition.name, target = %target, "IVR bridging to WebSocket endpoint");

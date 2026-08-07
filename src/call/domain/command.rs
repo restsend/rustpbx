@@ -13,6 +13,7 @@
 //! 3. Media commands include capability-aware options
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
@@ -446,6 +447,12 @@ pub enum CallCommand {
     /// running CallApp event loop finishes, for any reason).
     AppExited,
 
+    /// Start the post-disconnect return app (if any) after agent/B-leg hangs
+    /// up.  The handler reads `meta.transfer_return_app` and dispatches via
+    /// `ensure_app_running`.  CSAT hooks (`on_agent_disconnected`) take
+    /// precedence over the stored return spec.
+    StartReturnApp,
+
     /// Restore the MediaBridge route after an announcement/playback finished
     /// (re-activates fast-path relay or transcode). Issued internally when a
     /// playback handle's `done` resolves.
@@ -462,6 +469,36 @@ pub enum CallCommand {
         /// Body bytes.
         body: Vec<u8>,
     },
+}
+
+/// Generic descriptor for an app to start as the "return" destination after a
+/// connected B-leg (agent / bridge) disconnects.
+///
+/// Stored in [`crate::proxy::proxy_call::call_meta::CallMeta`] and consumed by
+/// the `CallCommand::StartReturnApp` handler.  Structurally identical to
+/// `CallCommand::StartApp` minus `auto_answer` — `(app_name, params)` is the
+/// lingua franca for app construction throughout the codebase.
+#[derive(Debug, Clone)]
+pub struct ReturnAppSpec {
+    /// Application name, e.g. `"ivr"`, `"voicemail"`, `"queue"`, `"csat_survey"`.
+    pub app_name: String,
+    /// Application-specific parameters (same shape as `CallCommand::StartApp::params`).
+    pub params: serde_json::Value,
+}
+
+impl ReturnAppSpec {
+    /// Build an IVR return spec from an IVR file name and optional extra params
+    /// (e.g. `return_menu`, `return_step_id`).
+    pub fn ivr(ivr_file: impl Into<String>, extra_params: HashMap<String, String>) -> Self {
+        let mut app_params = serde_json::json!({"file": ivr_file.into()});
+        if !extra_params.is_empty() {
+            app_params["ivr_params"] = serde_json::json!(extra_params);
+        }
+        Self {
+            app_name: "ivr".to_string(),
+            params: app_params,
+        }
+    }
 }
 
 /// Point-to-point bridge mode

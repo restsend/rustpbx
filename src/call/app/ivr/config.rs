@@ -161,12 +161,16 @@ pub enum EntryAction {
         #[serde(default)]
         params: HashMap<String, String>,
         #[serde(default)]
-        return_to_ivr: Option<String>,
+        return_app: Option<String>,
+        #[serde(default)]
+        return_target: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
-        return_to_ivr: Option<String>,
+        return_app: Option<String>,
+        #[serde(default)]
+        return_target: Option<String>,
     },
     Menu {
         menu: String,
@@ -359,7 +363,9 @@ pub enum EntryAction {
         #[serde(default)]
         timeout_ms: Option<u64>,
         #[serde(default)]
-        return_to_ivr: Option<String>,
+        return_app: Option<String>,
+        #[serde(default)]
+        return_target: Option<String>,
         #[serde(default)]
         success: Option<Box<ActionNode>>,
         #[serde(default)]
@@ -373,7 +379,8 @@ impl EntryAction {
         EntryAction::Transfer {
             target: target.into(),
             params: HashMap::new(),
-            return_to_ivr: None,
+            return_app: None,
+            return_target: None,
         }
     }
 }
@@ -420,12 +427,16 @@ pub enum WebhookResponse {
     Transfer {
         target: String,
         #[serde(default)]
-        return_to_ivr: Option<String>,
+        return_app: Option<String>,
+        #[serde(default)]
+        return_target: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
-        return_to_ivr: Option<String>,
+        return_app: Option<String>,
+        #[serde(default)]
+        return_target: Option<String>,
     },
     Menu {
         menu: String,
@@ -479,18 +490,18 @@ impl WebhookResponse {
         match self {
             WebhookResponse::Transfer {
                 target,
-                return_to_ivr,
+                return_app, return_target,
             } => EntryAction::Transfer {
                 target,
                 params: HashMap::new(),
-                return_to_ivr,
+                return_app, return_target,
             },
             WebhookResponse::Queue {
                 target,
-                return_to_ivr,
+                return_app, return_target,
             } => EntryAction::Queue {
                 target,
-                return_to_ivr,
+                return_app, return_target,
             },
             WebhookResponse::Menu { menu } => EntryAction::Menu { menu },
             WebhookResponse::Voicemail { target } => EntryAction::Voicemail { target },
@@ -733,7 +744,7 @@ action = { type = "menu", menu = "root" }
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_to_ivr: None,
+                return_app: None, return_target: None,
             }),
         );
         let json = serde_json::to_value(&node).unwrap();
@@ -806,14 +817,14 @@ action = { type = "menu", menu = "root" }
                     ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
                         params: HashMap::new(),
-                        return_to_ivr: None,
+                        return_app: None, return_target: None,
                     }),
                 ),
                 (
                     "2".into(),
                     ActionNode::new(EntryAction::Queue {
                         target: "support".into(),
-                        return_to_ivr: None,
+                        return_app: None, return_target: None,
                     }),
                 ),
             ]),
@@ -834,7 +845,7 @@ action = { type = "menu", menu = "root" }
             create_room_uri: "https://voip.example.com/rooms".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer token123".into())]),
             timeout_ms: Some(30000),
-            return_to_ivr: None,
+            return_app: None, return_target: None,
             success: None,
             failure: None,
         });
@@ -1011,7 +1022,7 @@ max_retries = 1
 [[ivr.root.entries]]
 key = "1"
 label = "Bridge"
-action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", headers = { Authorization = "Bearer token" }, timeout_ms = 30000, return_to_ivr = "bridge-tree" }
+action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", headers = { Authorization = "Bearer token" }, timeout_ms = 30000, return_app = "ivr", return_target = "bridge-tree" }
 "#;
         let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
         let root = config.ivr.root.as_ref().expect("root menu");
@@ -1022,7 +1033,7 @@ action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", heade
                 create_room_uri,
                 headers,
                 timeout_ms,
-                return_to_ivr,
+                return_app: _, return_target,
                 ..
             } => {
                 assert_eq!(create_room_uri, "wss://voip.example.com/ws");
@@ -1031,7 +1042,7 @@ action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", heade
                     Some(&"Bearer token".to_string())
                 );
                 assert_eq!(*timeout_ms, Some(30000));
-                assert_eq!(return_to_ivr.as_deref(), Some("bridge-tree"));
+                assert_eq!(return_target.as_deref(), Some("bridge-tree"));
             }
             other => panic!("expected Bridge action, got {other:?}"),
         }
