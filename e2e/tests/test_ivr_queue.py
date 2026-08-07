@@ -339,7 +339,8 @@ target = "noagent"
         None,
     )
     hangup_log = next(
-        (_ts(l) for l in log.splitlines() if "hangup fallback" in l.lower() or "Queue: hangup fallback" in l),
+        (_ts(l) for l in log.splitlines()
+         if "hangup fallback" in l.lower() or "play then hangup fallback" in l.lower()),
         None,
     )
     assert play_started and hangup_log, (
@@ -383,7 +384,8 @@ max_retries_action = {{ type = "hangup" }}
 key = "1"
 [ivr.root.entries.action]
 type = "queue"
-target = "returnq?return_to_ivr=ivr-return"
+target = "returnq"
+return_to_ivr = "ivr-return"
 ''')
     pbx.config_builder.add_queue(
         "returnq",
