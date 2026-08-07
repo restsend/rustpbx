@@ -49,9 +49,9 @@ export CC=clang
 
 # --- Step 2: Cargo build with all commercial features ---
 echo ""
-echo "[2/4] Building with cargo (features: default,commerce,wholesale,contact-center)..."
+echo "[2/4] Building with cargo (features: default,commerce,wholesale,contact-center,jemalloc)..."
 RUST_MIN_STACK=1073741824 cargo build --release \
-    --features default,commerce,wholesale,contact-center
+    --features default,commerce,wholesale,contact-center,jemalloc
 
 # --- Step 3: Prepare binaries for Docker ---
 echo ""

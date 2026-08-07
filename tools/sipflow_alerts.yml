@@ -1,0 +1,134 @@
+# Prometheus alert rules for the sipflow collector.
+#
+# Metrics come from the collector's /metrics endpoint (Prometheus recorder).
+# Key counters/gauges:
+#   sipflow_packets_received_total        packets parsed on UDP receiver threads (rate)
+#   sipflow_items_dropped_total           drops at the UDP channel / no call-id (rate)
+#   sipflow_record_backpressure_dropped_total  drops at the shard worker channel (rate)
+#   sipflow_flush_rows_total{type="rtp|sip"}   rows committed to SQLite (rate)
+#   sipflow_pending_items                 UDP channel depth (gauge)
+#   sipflow_worker_queue_depth            shard worker channel depth (gauge; last-writer per scrape)
+#   sipflow_flusher_queue_depth           flusher channel depth (gauge; last-writer per scrape)
+#   sipflow_flush_queue_dwell_seconds     time records wait in the flusher queue (histogram)
+#   sipflow_flush_db_seconds              SQLite commit time per flush (histogram)
+#   sipflow_wal_checkpoint_busy_total     checkpoints skipped because a reader held the WAL
+#
+# The collector drops packets in TWO places: at the UDP channel
+# (items_dropped) and at the shard boundary (record_backpressure_dropped).
+# The first is the "ingest cap" symptom (global stall, ~80% loss); the second
+# is per-shard saturation (only the overloaded shard loses records).
+
+groups:
+  - name: sipflow-collector
+    rules:
+      # ── Liveness ─────────────────────────────────────────────────────────
+      - alert: SipflowDown
+        expr: up{job="sipflow"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "sipflow collector {{ $labels.instance }} is down"
+
+      # ── Loss: collector dropping a material share of what it receives ─────
+      # Loss ratio = (UDP drops + shard drops) / received. >5% sustained
+      # means the collector cannot keep up with arrival.
+      - alert: SipflowHighLossRate
+        expr: >
+          (
+            rate(sipflow_items_dropped_total[5m])
+            + rate(sipflow_record_backpressure_dropped_total[5m])
+          )
+          / clamp_min(rate(sipflow_packets_received_total[5m]), 1)
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "sipflow loss rate >5% on {{ $labels.instance }}"
+          description: "loss={{ $value | humanizePercentage }} of received packets over the last 5m"
+
+      # ── Ingest-cap symptom: heavy UDP-channel drops (head-of-line stall) ──
+      - alert: SipflowUdpChannelDropping
+        expr: rate(sipflow_items_dropped_total[1m]) > 1000
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UDP channel dropping {{ $value | humanize }} pkts/s (ingest stall)"
+
+      # ── Per-shard saturation: shard boundary drops ────────────────────────
+      - alert: SipflowShardSaturated
+        expr: rate(sipflow_record_backpressure_dropped_total[1m]) > 1000
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "shard boundary dropping {{ $value | humanize }} pkts/s (flusher/DB backed up)"
+
+      # ── Water level: UDP channel backlog ──────────────────────────────────
+      - alert: SipflowUdpBacklogHigh
+        expr: sipflow_pending_items > 100000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UDP channel backlog {{ $value | humanize }} packets (>100k for 5m)"
+
+      # ── Water level: worker channel near capacity (5000 default) ──────────
+      - alert: SipflowWorkerQueueFull
+        expr: sipflow_worker_queue_depth > 4000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "shard worker channel near full ({{ $value }} of ~5000)"
+
+      # ── Flusher dwell: records waiting too long before commit ─────────────
+      - alert: SipflowFlushDwellHigh
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(sipflow_flush_queue_dwell_seconds_bucket[5m]))
+          )
+          > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "flusher queue dwell p95 = {{ $value | humanizeDuration }} (>2s)"
+
+      # ── SQLite commit slow (index work / large DB / slow disk) ────────────
+      - alert: SipflowFlushDbSlow
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(sipflow_flush_db_seconds_bucket[5m]))
+          )
+          > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQLite flush p95 = {{ $value | humanizeDuration }} (>500ms)"
+
+      # ── WAL checkpoint blocked by a reader → WAL will grow unbounded ──────
+      - alert: SipflowWalCheckpointBlocked
+        expr: rate(sipflow_wal_checkpoint_busy_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL checkpoints blocked by a reader (WAL will grow); check for long-running queries"
+
+      # ── Receiving traffic but writing nothing → pipeline wedged ───────────
+      - alert: SipflowWritesStalled
+        expr: >
+          rate(sipflow_packets_received_total[5m]) > 5000
+          and
+          rate(sipflow_flush_rows_total[5m]) < 100
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "receiving {{ $value | humanize }} pkts/s but writing <100 rows/s"

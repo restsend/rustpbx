@@ -697,6 +697,74 @@ async fn test_trunk_b2bua_early_media_183() -> Result<()> {
     Ok(())
 }
 
+// ─── Test 11: Wholesale — basic call with CDR round-trip ──────────────────
+
+#[tokio::test]
+async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
+    let alice = Arc::new(server.create_ua("alice").await?);
+    let bob = server.create_ua("bob").await?;
+
+    sleep(Duration::from_millis(100)).await;
+
+    let sdp = pcmu_sdp("127.0.0.1", 12345);
+
+    let alice_clone = alice.clone();
+    let sdp_clone = sdp.clone();
+    let caller_handle =
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+
+    let mut bob_dialog_id = None;
+    for _ in 0..50 {
+        let events = bob.process_dialog_events().await?;
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _) = event {
+                bob_dialog_id = Some(id.clone());
+                bob.answer_call(&id, Some(sdp.clone())).await?;
+                break;
+            }
+        }
+        if bob_dialog_id.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    let _bob_id = bob_dialog_id.ok_or_else(|| anyhow::anyhow!("No INVITE"))?;
+
+    let alice_id = tokio::time::timeout(Duration::from_secs(5), caller_handle)
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout"))?
+        .map_err(|e| anyhow::anyhow!("join: {}", e))?
+        .map_err(|e| anyhow::anyhow!("call: {}", e))?;
+
+    // Keep the call alive briefly then hangup
+    sleep(Duration::from_millis(500)).await;
+
+    alice.hangup(&alice_id).await?;
+
+    sleep(Duration::from_millis(800)).await;
+    let records = server.cdr_capture.get_all_records().await;
+    assert!(!records.is_empty(), "Should have CDR");
+    assert_eq!(records[0].details.status, "completed");
+    let error_code = records[0]
+        .details
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("error_code"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(
+        error_code, None,
+        "a successful sequential call must not retain a dialing error"
+    );
+
+    server.stop();
+    info!("test_trunk_b2bua_options_keepalive PASSED");
+    Ok(())
+}
+
 // ─── Test 12: Wholesale — mid-call re-INVITE (codec change) ──────────────
 
 #[tokio::test]

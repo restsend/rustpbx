@@ -4,6 +4,27 @@ use std::sync::Arc;
 
 pub const RWI_VERSION: &str = "1.0";
 
+/// Root call identity, constant across the call tree.
+///
+/// Populated with the session's own call context (`root = self`): the call the
+/// session belongs to. Derived (transferred) sessions keep their own context —
+/// there is no cross-session root propagation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RootCallInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callee_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+}
+
 /// Common call context flattened into all call-scoped RWI events.
 /// All fields are Option — when None they are omitted from JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -24,6 +45,8 @@ pub struct EventCallContext {
     pub app_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<RootCallInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +88,7 @@ pub struct CallMeta {
     pub trunk: Option<String>,
     pub app_id: Option<String>,
     pub routing_target: Option<String>,
+    pub root: Option<RootCallInfo>,
 }
 
 impl From<CallMeta> for EventCallContext {
@@ -78,6 +102,7 @@ impl From<CallMeta> for EventCallContext {
             trunk: m.trunk,
             app_id: m.app_id,
             routing_target: m.routing_target,
+            root: m.root,
         }
     }
 }
@@ -176,5 +201,51 @@ mod tests {
         let ctx = EventCallContext::from(meta);
         assert_eq!(ctx.caller.as_deref(), Some("2001"));
         assert_eq!(ctx.callee.as_deref(), Some("2002"));
+    }
+
+    #[tokio::test]
+    async fn eventcallcontext_carries_root() {
+        let meta = CallMeta {
+            caller: Some("2001".to_string()),
+            callee: Some("2002".to_string()),
+            caller_name: Some("alice".to_string()),
+            callee_name: Some("2002".to_string()),
+            root: Some(RootCallInfo {
+                caller: Some("2001".to_string()),
+                caller_name: Some("alice".to_string()),
+                callee: Some("2002".to_string()),
+                callee_name: Some("2002".to_string()),
+                call_id: Some("call-root-1".to_string()),
+                start_time: Some("2026-01-01T00:00:00Z".to_string()),
+            }),
+            ..Default::default()
+        };
+        let ctx = EventCallContext::from(meta);
+        let root = ctx.root.expect("root must be carried through");
+        assert_eq!(root.call_id.as_deref(), Some("call-root-1"));
+        assert_eq!(root.caller.as_deref(), Some("2001"));
+        assert_eq!(root.start_time.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn root_serializes_as_nested_object_and_omits_none() {
+        let root = RootCallInfo {
+            caller: Some("2001".to_string()),
+            call_id: Some("call-root-1".to_string()),
+            ..Default::default()
+        };
+        let ctx = EventCallContext {
+            root: Some(root),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(json["root"]["caller"], "2001");
+        assert_eq!(json["root"]["call_id"], "call-root-1");
+        assert!(json["root"]["callee_name"].is_null(), "None fields omitted or null");
+
+        // root=None must be omitted entirely.
+        let ctx = EventCallContext { root: None, ..Default::default() };
+        let json = serde_json::to_value(&ctx).unwrap();
+        assert!(json.get("root").is_none());
     }
 }

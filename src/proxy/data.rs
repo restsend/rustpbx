@@ -143,6 +143,7 @@ impl ProxyDataContext {
     ) -> Option<crate::call::TrunkContext> {
         let inbound_trunks = self.acl_inbound_trunks.load();
         let source_network = ipnet::IpNet::from(*addr);
+        let mut matched = None;
         for trunks in inbound_trunks.cover_values(&source_network) {
             for name in trunks {
                 let Some(trunk) = self.get_trunk(name) else {
@@ -151,14 +152,15 @@ impl ProxyDataContext {
                 if !trunk.matches_incoming_user_prefixes(from_user, to_user) {
                     continue;
                 }
-                return Some(crate::call::TrunkContext {
+                matched = Some(crate::call::TrunkContext {
                     id: trunk.id,
                     name: name.clone(),
                     did_numbers: trunk.did_numbers,
                 });
+                break;
             }
         }
-        None
+        matched
     }
 
     pub fn routes_snapshot(&self) -> Vec<RouteRule> {

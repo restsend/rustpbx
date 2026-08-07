@@ -1244,6 +1244,16 @@ impl SipSession {
                     .metadata
                     .as_ref()
                     .and_then(|m| m.get("trunk").cloned()),
+                // Root = this session's own call context (root=self). No
+                // cross-session propagation for transferred legs.
+                root: Some(crate::rwi::proto::RootCallInfo {
+                    caller: Some(original_caller.clone()),
+                    caller_name: extract_sip_username(&original_caller),
+                    callee: Some(original_callee.clone()),
+                    callee_name: extract_sip_username(&original_callee),
+                    call_id: Some(session_id_str.clone()),
+                    start_time: Some(context.created_at.clone()),
+                }),
                 ..Default::default()
             };
             let sid = session_id_str.clone();
@@ -4174,13 +4184,18 @@ impl SipSession {
             )
             .severity(crate::call_errors::ErrSeverity::Info),
         );
-        let mut last_error = {
+        if targets.is_empty() {
             self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::DIAL_NO_TARGETS);
-            into_callee_err(
+            return Err(into_callee_err(
                 &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
-            )
-        };
+            ));
+        }
+
+        let mut last_error = into_callee_err(
+            &StatusCode::TemporarilyUnavailable,
+            Some("All targets failed".to_string()),
+        );
 
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
@@ -4200,6 +4215,8 @@ impl SipSession {
             }
         }
 
+        self.meta.error_code =
+            Some(&crate::proxy::proxy_call::error_catalog::DIAL_ALL_TARGETS_FAILED);
         Err(last_error)
     }
 

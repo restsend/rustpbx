@@ -951,11 +951,50 @@ mod tests {
         assert!(v.get("callee").is_none(), "no callee injected without meta");
     }
 
+    /// Call-scoped broadcasts must carry the `root` block (root call identity)
+    /// when the CallMetaStore has it.
+    #[tokio::test]
+    async fn test_broadcast_event_enriches_with_root() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.meta_store.insert(
+            "c1".to_string(),
+            crate::rwi::CallMeta {
+                caller: Some("sip:alice@localhost".to_string()),
+                callee: Some("sip:4000@localhost".to_string()),
+                root: Some(crate::rwi::RootCallInfo {
+                    caller: Some("sip:alice@localhost".to_string()),
+                    caller_name: Some("alice".to_string()),
+                    callee: Some("sip:4000@localhost".to_string()),
+                    callee_name: Some("4000".to_string()),
+                    call_id: Some("c1".to_string()),
+                    start_time: Some("2026-01-01T00:00:00Z".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "c1".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["root"]["call_id"].as_str(), Some("c1"));
+        assert_eq!(v["root"]["caller"].as_str(), Some("sip:alice@localhost"));
+        assert_eq!(v["root"]["callee_name"].as_str(), Some("4000"));
+        assert_eq!(v["root"]["start_time"].as_str(), Some("2026-01-01T00:00:00Z"));
+    }
+
     /// When the event already carries its own `caller` field (e.g. cc_ringing
     /// or call_incoming), enrichment must not overwrite it with the context value.
     #[tokio::test]
-    async fn test_broadcast_event_preserves_explicit_caller() {
-        let mut gw = RwiGateway::new();
+    async fn test_broadcast_event_preserves_explicit_caller() {        let mut gw = RwiGateway::new();
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);

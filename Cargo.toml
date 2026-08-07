@@ -54,6 +54,7 @@ exclude = [
 ]
 
 [features]
+cross = []
 console = ["dep:minijinja"]
 jemalloc = ["dep:tikv-jemallocator"]
 addon-acme = ["instant-acme"]
@@ -155,6 +156,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.6"
 hex = { version = "0.4.3", optional = true }
+#rsipstack = { path = "../rsipstack" }
 audio-codec = "0.3.41"
 rustrtc = "0.3.112"
 reqwest = { version = "0.13.4", default-features = false, features = [

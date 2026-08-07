@@ -40,6 +40,7 @@ impl HybridLocalBackend {
         force_pcm: bool,
         pcm_sample_rate: u32,
         flowdb_sync_mode: flowdb::SyncMode,
+        blocking_backpressure: bool,
     ) -> Result<Self> {
         let sqlite = LocalBackend::new(
             root.clone(),
@@ -51,6 +52,7 @@ impl HybridLocalBackend {
             shards,
             force_pcm,
             pcm_sample_rate,
+            blocking_backpressure,
         )?;
         let flowdb = FlowDbBackend::new(
             root,
@@ -280,6 +282,7 @@ mod tests {
             false,
             16000,
             flowdb::SyncMode::Always,
+            false,
         )
         .expect("hybrid backend")
     }

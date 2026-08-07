@@ -123,6 +123,23 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 | `trunk` | Option\<String\> | SIP trunk name |
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Current routing target |
+| `root` | Option\<Object\> | Root call identity (see below) |
+
+**Root call (`root`)** — nested object identifying the root call of this call
+tree:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `caller` | Option\<String\> | Root call caller SIP URI |
+| `caller_name` | Option\<String\> | Root call caller name |
+| `callee` | Option\<String\> | Root call callee SIP URI |
+| `callee_name` | Option\<String\> | Root call callee name |
+| `call_id` | Option\<String\> | Root call identifier |
+| `start_time` | Option\<String\> | Root call start time (RFC3339) |
+
+Populated with the session's own call context (`root = self`). Transferred
+legs that run in a separate session keep their own context — there is no
+cross-session root propagation.
 
 **Notes**: the flat context never contains `agent_id`/`agent_name` — those are
 event-specific fields (e.g. `cc_*` events, `record_stopped`) that only appear
@@ -332,11 +349,16 @@ call produces no `cc_*` events.
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `agent_id` | Option\<String\> | CC agent identifier (callee leg) |
+| `agent_name` | Option\<String\> | CC agent display name |
 | `queue_id` | Option\<String\> | Queue/skill-group the call was routed through |
 | `reason` | String | Normalized reason, same vocabulary as `call_hangup.reason` |
 | `hangup_by` | Option\<String\> | `agent` \| `caller` \| `system` \| `transfer` \| `unknown` |
 | `duration_secs` | u64 | Talk time in seconds (0 for unanswered) |
 | *+ctx* | | Flat context fields |
+
+`cc_ringing` / `cc_answered` / `cc_held` / `cc_unheld` also carry `agent_id`
+(canonical agent id, resolved from endpoint → primary_endpoint → agent_id) and
+`agent_name`.
 
 ```json
 {
@@ -533,6 +555,11 @@ Triggered when the recording file upload completes, containing full metadata.
 | `process_flag` | Option\<String\> | Process identifier (e.g., `ks_22_normal`) |
 | `root_call_id` | Option\<String\> | Root call ID |
 
+> `agent_id` / `agent_name` are populated from the session extensions when the
+> call was routed to a CC agent (`agent_id` is the canonical agent id resolved
+> via endpoint → primary_endpoint → agent_id; `agent_name` is the agent display
+> name). For calls without CC agent involvement they are absent.
+
 ```json
 {
   "rwi": "1.0",
@@ -610,6 +637,8 @@ Dispatch: fan_out_to_context
 
 Call exits an IVR node.
 
+> **Also emitted on session termination**: when the sip_session is terminated mid-flow (caller hangup, system cancel, etc.), the built-in (tree-mode) IVR emits this event to record the node the caller was on. In that case `hangup_reason` is populated (e.g. `cancelled`, `remote_hangup`, `hangup`, `error`) and `call_result` is `"hangup"`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
@@ -619,7 +648,7 @@ Call exits an IVR node.
 | `duration_ms` | u32 | Node dwell time in milliseconds |
 | `exit_time` | String | Exit timestamp |
 | `next_node_id` | Option\<String\> | Next node ID |
-| `hangup_reason` | Option\<String\> | Hangup reason |
+| `hangup_reason` | Option\<String\> | Hangup reason (on session termination: `cancelled`/`remote_hangup`/`hangup`, etc.) |
 | `call_result` | Option\<String\> | Call result |
 | *+ctx* | | Flat context fields |
 
@@ -647,13 +676,15 @@ Dispatch: fan_out_to_context
 
 IVR flow completes (terminal action executed: Transfer, Queue, Voicemail, Hangup).
 
+> **Also emitted on session termination**: when the built-in (tree-mode) IVR is terminated mid-flow by the sip_session (caller hangup `remote_hangup`, system cancel `cancelled`, etc.), it is emitted with `final_result` set to the termination reason and `total_nodes_traversed` populated. `final_result` values: `transferred`, `queue`, `voicemail`, `hangup`, `abandoned`, `cancelled`, `remote_hangup`, `error`, etc.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `app_id` | String | IVR application ID |
 | `total_nodes_traversed` | u32 | Total nodes traversed |
 | `total_duration_ms` | u32 | Total IVR duration in milliseconds |
-| `final_result` | String | Final result (`transferred`, `voicemail`, `abandoned`, etc.) |
+| `final_result` | String | Final result (`transferred`, `voicemail`, `abandoned`, `cancelled`, `remote_hangup`, etc.) |
 | `completion_time` | String | Completion timestamp |
 | `final_routing_target` | Option\<String\> | Final routing target |
 | *+ctx* | | Flat context fields |
@@ -681,6 +712,8 @@ Dispatch: fan_out_to_context
 
 Step-mode IVR trace event. Emitted on each provider round-trip or action execution completion.
 
+> **Session-end entry (`session_end`)**: when the IVR session ends (including caller hangup `RemoteHangup` and system cancel `Cancelled`), an extra trace entry with `trigger.type="session_end"` is emitted. `action_type`/`step_id`/`step_name` record the last executed node, and `end_reason`/`end_detail` describe how the whole session ended. The external provider `/end` webhook is **not** called on `RemoteHangup`/`Cancelled` (the local trace event is still emitted).
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
@@ -699,6 +732,8 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `step_start_time` | Option\<String\> | Current step start time (ISO UTC) |
 | `step_end_time` | Option\<String\> | Current step end time (ISO UTC). Only present when step execution completes (terminal/error); null during WaitFor (waiting for user input) |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
+| `end_reason` | Option\<String\> | Present only on the session-end (`session_end`) entry; identifies how the whole IVR session ended (`normal`, `transfer`, `transfer_to_queue`, `hangup`, `user_hangup`, `timeout`, `error`, etc.) |
+| `end_detail` | Option\<String\> | Companion detail for `end_reason` (e.g. transfer target, error message) |
 
 > **`trigger` field**:
 >
@@ -710,7 +745,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 >
 > | Sub-field | Type | Description |
 > |-----------|------|-------------|
-> | `type` | String | Trigger source type: `session_start`, `dtmf`, `dtmf_menu`, `dtmf_menu_timeout`, `audio_complete`, `action_execute`, `chained`, `api_response`, `phone_collected`, `recording_complete`, `input_voice`, `error`, `dtmf_menu_invalid`, `unknown` |
+> | `type` | String | Trigger source type: `session_start`, `session_end`, `dtmf`, `dtmf_menu`, `dtmf_menu_timeout`, `audio_complete`, `action_execute`, `chained`, `api_response`, `phone_collected`, `recording_complete`, `input_voice`, `error`, `dtmf_menu_invalid`, `unknown` |
 > | `detail` | Option\<JSON Object\> | Structured trigger detail, omitted when none. Common values: DTMF → `{"digit":"2"}`; API response → `{"status":200}`; phone collection → `{"number":"13800138000"}` |
 >
 > **Timing fields**:
