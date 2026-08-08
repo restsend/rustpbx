@@ -353,6 +353,127 @@ target = "noagent"
     )
 
 
+@pytest.mark.asyncio
+async def test_ivr_to_queue_no_agent_returns_to_ivr(pbx, sipbot_pool, tmp_path):
+    """IVR → queue (return_app=ivr) with zero reachable agents: the busy
+    prompt plays, then the caller returns to the IVR instead of dead air.
+
+    Regression for the `AlreadyRunning("queue")` bug: when the IVR handed
+    control to the queue via AppAction::Transfer, the queue app failed to start
+    because the IVR was still registered as the running app on the runtime.
+    The caller heard nothing (no busy prompt), and the queue fallback
+    (return_to_ivr) never ran. With the fix the queue app starts, plays the
+    busy prompt, then transfers back to the IVR so the greeting replays.
+    """
+    from helpers import generate_sine_wav
+    import re
+    from datetime import datetime
+
+    greeting = tmp_path / "g.wav"
+    generate_sine_wav(greeting, 440.0, 1.5, 8000, 0.4)
+    busy = tmp_path / "busy.wav"
+    generate_sine_wav(busy, 330.0, 1.5, 8000, 0.5)
+
+    pbx.config_builder.add_ivr("ivr-ret-noagent", f'''\
+[ivr]
+name = "ivr-ret-noagent"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{greeting}"
+timeout_ms = 8000
+max_retries = 1
+max_retries_action = {{ type = "hangup" }}
+[[ivr.root.entries]]
+key = "1"
+[ivr.root.entries.action]
+type = "queue"
+target = "noagent-r"
+return_app = "ivr"
+return_target = "ivr-ret-noagent"
+''')
+    # skill-group:nonexistent resolves to zero agents → queue app path plays
+    # busy_prompt then executes the return_to_ivr fallback.
+    pbx.config_builder.add_queue(
+        "noagent-r",
+        strategy_mode="sequential",
+        targets=["skill-group:nonexistent"],
+        accept_immediately=False,
+        voice_prompts={"busy_prompt": str(busy)},
+    )
+    pbx.config_builder.add_route(
+        "to-ivr-ret-noagent",
+        match={"to.user": "ivr-ret-noagent"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/ivr-ret-noagent.toml"},
+        auto_answer=True,
+    )
+    h.boot_pbx(pbx)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:ivr-ret-noagent@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=14, dtmf_flows="2s:1",
+    )
+    answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
+    assert answered, f"call not answered:\n{caller.output[-1500:]}"
+
+    # Give the queue app time to start, play the ~1.5s busy prompt, and return
+    # the caller to the IVR (which replays the greeting).
+    await asyncio.sleep(9)
+
+    log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
+
+    # 1. The queue app must have started (guards the AlreadyRunning dead-air bug).
+    assert "playing busy prompt before fallback" in log, (
+        f"expected queue app busy prompt; the call may have hit AlreadyRunning dead-air:\n{log[-3000:]}"
+    )
+
+    # 2. The queue transfer must be configured to return to the IVR on fallback.
+    assert "will return to IVR on fallback" in log, (
+        f"expected return-to-IVR override log:\n{log[-3000:]}"
+    )
+
+    # 3. The IVR must be restarted AFTER the busy prompt (ordering proves the
+    #    queue fallback actually re-entered the IVR rather than dead air).
+    def _ts(line: str):
+        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)\+", line)
+        return datetime.fromisoformat(m.group(1)) if m else None
+
+    busy_ts = next(
+        (_ts(l) for l in log.splitlines() if "playing busy prompt before fallback" in l),
+        None,
+    )
+    ivr_restart = next(
+        (_ts(l) for l in log.splitlines()
+         if "Starting IVR application" in l
+         and _ts(l) is not None and busy_ts is not None and _ts(l) > busy_ts),
+        None,
+    )
+    assert busy_ts is not None, (
+        f"could not find busy-prompt log line:\n{log[-3000:]}"
+    )
+    assert ivr_restart is not None, (
+        f"IVR must restart after the busy prompt "
+        f"(busy={busy_ts}); the call may have sat in dead air.\n{log[-3000:]}"
+    )
+
+    # 4. The call must still be alive at this point (not dropped by the queue
+    #    fallback) — sipbot hangs up itself at `hangup` seconds.
+    assert caller.is_alive, (
+        f"caller exited before its own hangup; the call may have been dropped "
+        f"after the queue fallback:\n{caller.output[-1500:]}"
+    )
+
+    # 5. When the caller eventually hangs up, it must have received audio
+    #    (greeting + busy prompt + replayed greeting) → RX > 0.
+    caller.wait(timeout=40)
+    stats = caller.get_rtp_stats()
+    assert stats.rx_packets > 0, (
+        f"caller RX=0 (no prompt/greeting audio reached the caller): {stats}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # C4: Queue return_to_ivr — agent hangs up → caller returns to IVR
 # ---------------------------------------------------------------------------

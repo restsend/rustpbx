@@ -154,11 +154,10 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-#rsipstack = "0.6"
 hex = { version = "0.4.3", optional = true }
-rsipstack = { path = "../rsipstack" }
+rsipstack = "0.6.1"
 audio-codec = "0.3.41"
-rustrtc = "0.3.112"
+rustrtc = "0.3.113"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -259,7 +258,9 @@ csv-async = { version = "1.3.1", features = [
 ], optional = true }
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
-ldap3 = { version = "0.12.1", optional = true }
+ldap3 = { version = "0.12.1", optional = true, default-features = false, features = [
+    "tls-rustls-ring",
+] }
 ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
@@ -286,11 +287,6 @@ metrics-util = "0.20.4"
 
 [build-dependencies]
 chrono = "0.4"
-
-[patch.crates-io]
-# Use the local rustrtc checkout during development. Version must satisfy the
-# `rustrtc = "0.3.112"` requirement in this workspace's Cargo.toml files.
-rustrtc = { path = "../rustrtc" }
 
 [[bin]]
 name = "rustpbx"

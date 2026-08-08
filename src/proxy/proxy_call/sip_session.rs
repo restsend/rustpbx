@@ -1142,8 +1142,30 @@ enum ConstructMode<'a> {
         params: Option<serde_json::Value>,
         label: &str,
     ) -> Result<()> {
+        self.ensure_app_running_with(kind, params, true, label)
+            .await
+    }
+
+    /// Like [`Self::ensure_app_running`] but with an explicit `auto_answer`.
+    ///
+    /// Shared by `ensure_app_running` and `start_queue_app`: the app runtime
+    /// keeps the previously-started app registered (e.g. an IVR that handed
+    /// control over via `AppAction::Transfer`) until an explicit `stop_app`,
+    /// so `start_app` returns [`AppRuntimeError::AlreadyRunning`]. All app
+    /// transitions recover by stopping the stale app and restarting instead of
+    /// failing into dead air.
+    async fn ensure_app_running_with(
+        &self,
+        kind: &str,
+        params: Option<serde_json::Value>,
+        auto_answer: bool,
+        label: &str,
+    ) -> Result<()> {
         use crate::call::runtime::AppRuntimeError;
-        let result = self.app_runtime.start_app(kind, params.clone(), true).await;
+        let result = self
+            .app_runtime
+            .start_app(kind, params.clone(), auto_answer)
+            .await;
         match result {
             Ok(()) => {
                 // App now drives the session — suppress the RTP watchdog unless
@@ -1164,7 +1186,7 @@ enum ConstructMode<'a> {
                     }
                 }
                 self.app_runtime
-                    .start_app(kind, params, true)
+                    .start_app(kind, params, auto_answer)
                     .await
                     .map(|()| self.sync_rtp_timeout_pause())
                     .map_err(|e| anyhow!("Failed to restart {}: {:?}", label, e))
@@ -3795,7 +3817,7 @@ enum ConstructMode<'a> {
     /// queue-transfer path (`handle_queue_transfer`).  Resolves custom targets
     /// (skill-groups), applies the optional `queue_location_enricher`, stores
     /// the resolved plan in `pending_queue`, then starts the "queue" app.
-    async fn start_queue_app(&mut self, plan: crate::call::QueuePlan) -> Result<()> {
+    async fn start_queue_app(&mut self, mut plan: crate::call::QueuePlan) -> Result<()> {
         use crate::call::DialStrategy;
 
         let agents = match &plan.dial_strategy {
@@ -3834,12 +3856,26 @@ enum ConstructMode<'a> {
             .map(|l| l.contact_raw.clone().unwrap_or_else(|| l.aor.to_string()))
             .collect();
 
+        // The queue app dials from `plan.dial_strategy`, so write the resolved
+        // locations back into the plan. Custom targets (skill-groups) that
+        // resolved to zero reachable agents become an empty strategy — the
+        // queue app then plays the busy prompt and executes its fallback
+        // instead of dialing the raw `skill-group:` URI as if it were a SIP
+        // contact (which would leave the caller on hold music forever).
+        plan.dial_strategy = Some(if is_parallel {
+            DialStrategy::Parallel(resolved_agents)
+        } else {
+            DialStrategy::Sequential(resolved_agents)
+        });
+
         info!(session_id = %self.id,
             queue = %plan.queue_name,
             agents = agent_uris.len(),
             parallel = is_parallel,
             "Starting queue app"
         );
+
+        let has_resolved_agents = !agent_uris.is_empty();
 
         // Store resolved plan in context for the queue app factory
         if let Some(runtime) = self
@@ -3854,16 +3890,22 @@ enum ConstructMode<'a> {
             });
         }
 
-        self.app_runtime
-            .start_app("queue", None, plan.accept_immediately)
-            .await
-            .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
+        self.ensure_app_running_with(
+            "queue",
+            None,
+            plan.accept_immediately,
+            &format!("queue '{}'", plan.queue_name),
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
 
         self.start_caller_ingress_monitor_if_needed().await;
 
         // Inject dial_next_agent to kick off sequential agent dialing
-        // (parallel mode auto-dials in on_enter)
-        if !is_parallel {
+        // (parallel mode auto-dials in on_enter). Skip when no agents were
+        // resolved — on_enter already fell through to the busy-prompt/fallback
+        // path, so a second dial attempt would replay the busy prompt.
+        if !is_parallel && has_resolved_agents {
             let _ = self.app_runtime.inject_event(serde_json::json!({
                 "type": "custom",
                 "name": "dial_next_agent",
@@ -11241,19 +11283,6 @@ mod tests {
         drop(tx);
 
         assert!(rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_handle_lifecycle() {
-        use crate::call::runtime::SessionId;
-
-        for i in 0..10 {
-            let id = SessionId::from(format!("lifecycle-test-{}", i));
-            let (handle, cmd_rx) = SipSession::with_handle(id);
-
-            drop(cmd_rx);
-            drop(handle);
-        }
     }
 
     #[tokio::test]

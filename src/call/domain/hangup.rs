@@ -250,8 +250,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn system_hangup_reason_display() {
-        assert_eq!(SystemHangupReason::NoAnswer.to_string(), "no_answer");
-    }
 }

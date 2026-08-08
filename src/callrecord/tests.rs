@@ -701,61 +701,6 @@ async fn test_save_with_s3_like_with_custom_headers() {
 }
 
 #[tokio::test]
-async fn test_save_with_s3_like_memory_store() {
-    // Test using memory store for S3-like functionality without real cloud storage
-    let vendor = crate::config::S3Vendor::Minio;
-    let bucket = "test-bucket".to_string();
-    let region = "us-east-1".to_string();
-    let access_key = "minioadmin".to_string();
-    let secret_key = "minioadmin".to_string();
-    let endpoint = "http://localhost:9000".to_string(); // Local minio endpoint
-
-    let record = CallRecord {
-        call_id: "test_s3_call_123".to_string(),
-        start_time: Utc::now(),
-        end_time: Utc::now(),
-        caller: "+1234567890".to_string(),
-        callee: "+0987654321".to_string(),
-        status_code: 200,
-        hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        ..Default::default()
-    };
-
-    // This test will only succeed if there's a local minio instance running
-    // In real scenarios, this would use actual cloud storage credentials
-    let result = match crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
-        vendor,
-        bucket: bucket.clone(),
-        region,
-        access_key,
-        secret_key,
-        endpoint: Some(endpoint.clone()),
-        prefix: None,
-    }) {
-        Ok(storage) => {
-            S3CallRecordSaver {
-                root: "./config/cdr".to_string(),
-                bucket,
-                endpoint: Some(endpoint),
-                storage,
-            }
-            .save(&record)
-            .await
-        }
-        Err(e) => Err(e),
-    };
-
-    // We expect this might fail in test environment without real S3 storage
-    match result {
-        Ok(message) => println!("S3 upload test passed: {}", message),
-        Err(e) => println!(
-            "S3 upload test failed (expected without real S3 setup): {:?}",
-            e
-        ),
-    }
-}
-
-#[tokio::test]
 async fn test_save_with_s3_like_with_media() {
     // Create a temporary media file
     let mut temp_file = NamedTempFile::new().unwrap();

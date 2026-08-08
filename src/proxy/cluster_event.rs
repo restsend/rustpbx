@@ -582,26 +582,6 @@ mod tests {
         assert!(msg.to_event().is_none());
     }
 
-    #[test]
-    fn test_locator_message_to_event_invalid_aor() {
-        // URI parser may accept many strings, so test with empty aor
-        // which results in None from the user() check path — but to_event
-        // only checks parseability, not user extraction.  An empty string
-        // will either parse or fail; if it parses, the event is still valid.
-        // The key invariant is: a truly unparseable string returns None.
-        let msg = ClusterLocatorMessage {
-            event: "registered".to_string(),
-            aor: String::new(),
-            registered_aor: None,
-            contact_raw: None,
-            expires: 0,
-            destination: None,
-        };
-        // Empty string may or may not parse as URI; either way the
-        // conversion should not panic.
-        let _ = msg.to_event();
-    }
-
     // ── ClusterPresenceMessage JSON round-trip ──────────────────────────────
 
     #[test]

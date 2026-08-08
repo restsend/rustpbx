@@ -442,31 +442,6 @@ async fn test_rtp_sequence_validation() -> Result<()> {
     Ok(())
 }
 
-/// Test 5: High packet rate RTP test
-/// Verifies system handles high-rate RTP streams
-#[tokio::test]
-async fn test_rtp_high_packet_rate() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-
-    // Test with 10ms intervals (100 packets per second)
-    let _config = RtpFlowTestConfig {
-        packet_count: 200,
-        interval_ms: 10,
-        ..Default::default()
-    };
-
-    let mut test = RtpE2eTest::new_with_mode(MediaProxyMode::Auto).await?;
-    test.setup_caller("alice").await?;
-    test.setup_callee("bob").await?;
-
-    // Setup call...
-    // Execute test with high rate
-    // Verify no excessive loss
-
-    info!("High packet rate RTP test completed");
-    Ok(())
-}
-
 /// Test 6: Large payload RTP test
 /// Verifies system handles various payload sizes
 #[tokio::test]

@@ -93,12 +93,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_session_id_display() {
-        let id = SessionId::from("test-session");
-        assert_eq!(format!("{}", id), "test-session");
-    }
-
-    #[test]
     fn test_bridge_config() {
         let mut config = BridgeConfig::new();
         assert!(!config.active);

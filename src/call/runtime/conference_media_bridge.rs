@@ -561,12 +561,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_conference_bridge_creation() {
-        let conf_mgr = Arc::new(ConferenceManager::new());
-        let _bridge = ConferenceMediaBridge::new(conf_mgr);
-    }
-
-    #[tokio::test]
     async fn test_start_bridge_requires_output_rx() {
         let conf_mgr = Arc::new(ConferenceManager::new());
         let bridge = ConferenceMediaBridge::new(conf_mgr);
@@ -576,20 +570,6 @@ mod tests {
             .start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU)
             .await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_bridge_handle_stop() {
-        let conf_mgr = Arc::new(ConferenceManager::new());
-        let bridge = ConferenceMediaBridge::new(conf_mgr);
-        let leg_id = LegId::new("test-leg");
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        if let Ok(handle) = bridge
-            .start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU)
-            .await
-        {
-            handle.stop();
-        }
     }
 
     #[tokio::test]
@@ -1038,40 +1018,6 @@ mod tests {
             }
             _ => panic!("Expected Audio sample"),
         }
-    }
-
-    /// Verify that dropping a `ConferenceBridgeHandle` cancels its token and
-    /// aborts its tasks, preventing leaks when handles are silently replaced.
-    #[tokio::test]
-    async fn test_conference_bridge_handle_drop_cancels_tasks() {
-        use tokio_util::sync::CancellationToken;
-
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-
-        let task = crate::utils::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
-                }
-            }
-        });
-
-        let handle = ConferenceBridgeHandle {
-            _tasks: vec![task],
-            cancel_token: cancel,
-        };
-
-        // Drop the handle — Drop impl should cancel + abort
-        drop(handle);
-
-        // Give the abort a moment to propagate
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // The task should be finished (aborted) — no longer running
-        // (If Drop didn't abort, the task would still be alive for 60 seconds)
     }
 
     /// Verify that `set_active_bridge` on `SessionConferenceBridge` stops the

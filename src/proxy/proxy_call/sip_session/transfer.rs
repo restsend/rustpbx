@@ -638,49 +638,14 @@ impl SipSession {
                 // the app named by `return_app`, or play the service-unavailable
                 // announcement and hang up (mirroring the queue app's own
                 // fallback).
-                self.record_trace(
-                    crate::call_errors::TraceEvent::new(
-                        crate::call_errors::TraceKind::Queue,
-                        format!("Queue '{}' not found — using fallback", queue_name),
+                return self
+                    .handle_queue_failure_fallback(
+                        queue_name,
+                        "not found",
+                        "queue.not_found",
+                        return_app.as_ref(),
                     )
-                    .severity(crate::call_errors::ErrSeverity::Error)
-                    .code("queue.not_found"),
-                );
-
-                if let Some(spec) = &return_app {
-                    info!(
-                        session_id = %self.id,
-                        queue = %queue_name,
-                        app = %spec.app_name,
-                        target = ?spec.target,
-                        "Queue not found; returning to app"
-                    );
-                    let resolved = self.resolve_return_app(Some(spec.clone())).await;
-                    if let Some(rspec) = resolved {
-                        return self
-                            .ensure_app_running(
-                                &rspec.app_name,
-                                Some(rspec.params),
-                                &format!("Return app '{}' (queue not found)", rspec.app_name),
-                            )
-                            .await;
-                    }
-                }
-
-                warn!(
-                    session_id = %self.id,
-                    queue = %queue_name,
-                    "Queue not found; playing service-unavailable announcement and hanging up"
-                );
-                let fallback_plan = crate::call::QueuePlan {
-                    queue_name: queue_name.to_string(),
-                    voice_prompts: Some(crate::call::VoicePrompts {
-                        busy_prompt: Some(crate::call::DEFAULT_QUEUE_FAILURE_AUDIO.to_string()),
-                        ..crate::call::VoicePrompts::default()
-                    }),
-                    ..crate::call::QueuePlan::default()
-                };
-                return self.start_queue_app(fallback_plan).await;
+                    .await;
             }
         };
 
@@ -765,7 +730,17 @@ impl SipSession {
             ));
         }
 
-        self.start_queue_app(queue_plan).await?;
+        if let Err(e) = self.start_queue_app(queue_plan).await {
+            warn!(session_id = %self.id, queue = %queue_name, error = %e, "Queue app failed to start; applying graceful fallback");
+            return self
+                .handle_queue_failure_fallback(
+                    queue_name,
+                    &format!("start failed ({})", e),
+                    "queue.start_failed",
+                    return_app.as_ref(),
+                )
+                .await;
+        }
 
         // Store the resolved return app on meta so that when the connected
         // agent (B‑leg) hangs up, the session returns the caller to the app
@@ -773,6 +748,63 @@ impl SipSession {
         self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
         info!(session_id = %self.id, queue = %queue_name, return_app = ?self.meta.transfer_return_app, "Queue transfer completed: queue app started");
         Ok(())
+    }
+
+    /// Graceful fallback when a queue cannot be serviced: record an error
+    /// trace, then either return to the app named by `return_app` (if set) or
+    /// play the service-unavailable announcement and hang up. Shared by the
+    /// queue-not-found and queue-app-start-failure paths so the caller is never
+    /// left in dead air after the IVR has already handed the call over.
+    async fn handle_queue_failure_fallback(
+        &mut self,
+        queue_name: &str,
+        reason: &str,
+        code: &str,
+        return_app: Option<&ReturnTargetSpec>,
+    ) -> Result<()> {
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                format!("Queue '{}' {} — using fallback", queue_name, reason),
+            )
+            .severity(crate::call_errors::ErrSeverity::Error)
+            .code(code),
+        );
+
+        if let Some(spec) = return_app {
+            info!(
+                session_id = %self.id,
+                queue = %queue_name,
+                app = %spec.app_name,
+                target = ?spec.target,
+                "Queue failed; returning to app"
+            );
+            let resolved = self.resolve_return_app(Some(spec.clone())).await;
+            if let Some(rspec) = resolved {
+                return self
+                    .ensure_app_running(
+                        &rspec.app_name,
+                        Some(rspec.params),
+                        &format!("Return app '{}' (queue failed)", rspec.app_name),
+                    )
+                    .await;
+            }
+        }
+
+        warn!(
+            session_id = %self.id,
+            queue = %queue_name,
+            "Queue failed; playing service-unavailable announcement and hanging up"
+        );
+        let fallback_plan = crate::call::QueuePlan {
+            queue_name: queue_name.to_string(),
+            voice_prompts: Some(crate::call::VoicePrompts {
+                busy_prompt: Some(crate::call::DEFAULT_QUEUE_FAILURE_AUDIO.to_string()),
+                ..crate::call::VoicePrompts::default()
+            }),
+            ..crate::call::QueuePlan::default()
+        };
+        self.start_queue_app(fallback_plan).await
     }
 
     /// Resolve a raw [`ReturnTargetSpec`] (extracted from query params) into a

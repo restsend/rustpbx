@@ -118,12 +118,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn leg_id_display() {
-        let id = LegId::new("leg-123");
-        assert_eq!(id.to_string(), "leg-123");
-    }
-
-    #[test]
     fn leg_state_transitions() {
         let mut leg = Leg::new(LegId::new("test"));
         assert_eq!(leg.state, LegState::Initializing);

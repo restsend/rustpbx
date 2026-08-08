@@ -1493,3 +1493,186 @@ async fn queue_no_agents_hangup_fallback_starts_queue_app() {
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
 }
+
+// ─── IVR → queue transfer: start_queue_app AlreadyRunning recovery ───────────
+//
+// Regression for the dead-air bug: when an IVR hands control to a queue via
+// `AppAction::Transfer`, the IVR app is still registered as the running app on
+// the runtime (only `stop_app` clears it). `start_queue_app` used to call
+// `start_app` directly, so the queue app failed with `AlreadyRunning("queue")`
+// and the caller sat in silence — no transfer/busy prompt, no fallback to
+// `return_app`. It must recover exactly like `start_ivr_app` does: stop the
+// stale app and restart.
+
+#[tokio::test]
+async fn queue_transfer_recovers_from_already_running() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "db-1".to_string(),
+        RouteQueueConfig {
+            name: Some("to-agent".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:nonexistent".to_string(),
+                    label: Some("no-agents".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(AlreadyRunningThenOkRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer("db-1", None, Vec::new())
+        .await
+        .expect("queue transfer should recover from AlreadyRunning");
+
+    assert_eq!(
+        runtime.start_calls.load(Ordering::SeqCst),
+        2,
+        "queue app start should be retried after stopping the stale app"
+    );
+    assert_eq!(
+        runtime.stop_calls.load(Ordering::SeqCst),
+        1,
+        "the stale running app should be stopped exactly once"
+    );
+}
+
+/// Test runtime that fails every `queue` start (non-retryable `UnknownApp`)
+/// but succeeds for other apps, recording which non-queue apps were started.
+struct FailQueueStartRuntime {
+    started_apps: std::sync::Mutex<Vec<String>>,
+}
+
+impl FailQueueStartRuntime {
+    fn new() -> Self {
+        Self {
+            started_apps: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn started_apps(&self) -> Vec<String> {
+        self.started_apps.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AppRuntime for FailQueueStartRuntime {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    async fn start_app(
+        &self,
+        app_name: &str,
+        _params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        if app_name == "queue" {
+            return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
+        }
+        self.started_apps
+            .lock()
+            .unwrap()
+            .push(app_name.to_string());
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn status(&self) -> AppStatus {
+        AppStatus::Idle
+    }
+
+    fn current_app(&self) -> Option<String> {
+        None
+    }
+
+    fn required_capabilities(&self) -> Vec<MediaCapability> {
+        vec![]
+    }
+
+    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn queue_transfer_start_failure_with_return_app_returns_to_ivr() {
+    // If the queue app cannot be started at all (beyond AlreadyRunning), a
+    // configured `return_app` must still rescue the caller back into the app
+    // instead of leaving dead air.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "db-1".to_string(),
+        RouteQueueConfig {
+            name: Some("to-agent".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:nonexistent".to_string(),
+                    label: Some("no-agents".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(FailQueueStartRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer(
+            "db-1",
+            Some(crate::proxy::proxy_call::sip_session::ReturnTargetSpec {
+                app_name: "ivr".to_string(),
+                target: Some("asdf".to_string()),
+                params: HashMap::new(),
+            }),
+            Vec::new(),
+        )
+        .await
+        .expect("queue start failure with return_app should start the IVR app");
+
+    assert_eq!(
+        runtime.started_apps(),
+        vec!["ivr".to_string()],
+        "queue start failure should fall back to the return app, not start the queue"
+    );
+
+    // A queue.start_failed trace event must be recorded.
+    let has_trace = session.meta.trace.iter().any(|ev| {
+        ev.kind == crate::call_errors::TraceKind::Queue
+            && ev.code.as_deref() == Some("queue.start_failed")
+    });
+    assert!(
+        has_trace,
+        "expected a queue.start_failed trace event; trace = {:?}",
+        session.meta.trace
+    );
+}

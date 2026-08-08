@@ -137,9 +137,3 @@ fn dispatch_command(
         Err(e) => Ok(CommandResult::failure(format!("failed to dispatch: {}", e))),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    // Integration tests would require a full registry setup
-    // Unit tests for conversion are in the adapter modules
-}
