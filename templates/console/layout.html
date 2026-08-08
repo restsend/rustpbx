@@ -5,12 +5,14 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="view-transition" content="same-origin" />
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
     <meta name="locale" content="{{ locale | default('en') }}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     <script type="application/json" id="__currentUser">{{ current_user | json | safe }}</script>
     <script type="application/json" id="__locales">{{ available_locales | json | safe }}</script>
     <script src="{{ api_prefix }}/locales/{{ locale }}.js"></script>
+    <link rel="stylesheet" href="{{ static_path | default('/static') }}/css/console.css">
     {% block js_head %}
     <script>
         window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');
@@ -48,8 +50,6 @@
     {% endif %}
     <script defer
         src="{{alpine_js|default('https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js')|safe}}"></script>
-    <script
-        src="{{tailwind_js|default('https://cdnjs.cloudflare.com/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js')|safe}}"></script>
     <script>
         window.RustPBX = window.RustPBX || {};
         window.RustPBX.plugins = []; 

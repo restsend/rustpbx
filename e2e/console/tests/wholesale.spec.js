@@ -117,8 +117,9 @@ describeFn('Wholesale — tenant CRUD via JSON', () => {
     const parsed = JSON.parse(reqBody)
     expect(parsed.name).toBe(tenantName)
 
-    // Verify redirect to the tenants list happened (form interceptor navigates on success).
-    await page.waitForURL('**/wholesale/tenants', { timeout: 10000 }).catch(() => {})
-    console.log(`  ✓ form interceptor: "${tenantName}" created via JSON POST, redirected to list`)
+    // Verify redirect to the new tenant's detail page happened (form interceptor
+    // navigates to /wholesale/tenants/{id} on success).
+    await page.waitForURL(/\/wholesale\/tenants\/\d+/, { timeout: 10000 }).catch(() => {})
+    console.log(`  ✓ form interceptor: "${tenantName}" created via JSON POST, redirected to tenant detail`)
   })
 })

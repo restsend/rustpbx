@@ -5,10 +5,15 @@
   "dependencies": {
     "@playwright/test": "1.60.0"
   },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.13",
+    "tailwindcss": "^4.1.13"
+  },
   "scripts": {
     "test": "npx playwright test",
     "test:headed": "npx playwright test --headed",
     "baseline": "BASELINE=1 npx playwright test --config=playwright.config.js --output=report",
-    "report": "npx playwright show-report report"
+    "report": "npx playwright show-report report",
+    "build:css": "tailwindcss -i console.input.css -o ../../static/css/console.css --minify"
   }
 }

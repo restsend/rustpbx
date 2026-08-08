@@ -1,0 +1,15 @@
+/* Input for the precompiled console stylesheet (Tailwind CSS v4).
+ *
+ * Build (run from e2e/console/, where tailwindcss is installed):
+ *   npx @tailwindcss/cli -i console.input.css -o ../../static/css/console.css --minify
+ *
+ * The generated static/css/console.css is loaded by templates/console/layout.html
+ * so every page is styled immediately on load, removing the flash/reflow caused
+ * by relying on the in-browser Tailwind build alone. @source paths are relative
+ * to this file (e2e/console/).
+ */
+@import "tailwindcss";
+
+@source "../../templates";
+@source "../../src/addons";
+@source "../../static/js";
