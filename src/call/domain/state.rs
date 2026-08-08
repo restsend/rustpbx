@@ -2,7 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Overall state of a session
+/// Overall state of a session.
+///
+/// Derived purely from leg states via [`crate::proxy::proxy_call::sip_session::SipSession::derive_state`].
+/// Per-leg concerns (hold, early media, transfer, running app) are tracked on
+/// [`crate::call::domain::LegState`], not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -12,35 +16,12 @@ pub enum SessionState {
     Initializing,
     /// Session is ringing (at least one leg ringing)
     Ringing,
-    /// Early media is active
-    EarlyMedia,
     /// Session is active (legs are bridged)
     Active,
-    /// Session is on hold
-    Held,
-    /// Transfer in progress
-    Transferring,
-    /// Application is running (IVR, Voicemail, etc.)
-    AppRunning,
     /// Session is being terminated
     Ending,
     /// Session has been terminated
     Ended,
-}
-
-impl From<crate::proxy::proxy_call::state::ProxyCallPhase> for SessionState {
-    fn from(phase: crate::proxy::proxy_call::state::ProxyCallPhase) -> Self {
-        use crate::proxy::proxy_call::state::ProxyCallPhase;
-        match phase {
-            ProxyCallPhase::Initializing => SessionState::Initializing,
-            ProxyCallPhase::Ringing => SessionState::Ringing,
-            ProxyCallPhase::EarlyMedia => SessionState::EarlyMedia,
-            ProxyCallPhase::Bridged => SessionState::Active,
-            ProxyCallPhase::Terminating => SessionState::Ending,
-            ProxyCallPhase::Failed => SessionState::Ended,
-            ProxyCallPhase::Ended => SessionState::Ended,
-        }
-    }
 }
 
 impl std::fmt::Display for SessionState {
@@ -48,11 +29,7 @@ impl std::fmt::Display for SessionState {
         match self {
             SessionState::Initializing => write!(f, "initializing"),
             SessionState::Ringing => write!(f, "ringing"),
-            SessionState::EarlyMedia => write!(f, "early_media"),
             SessionState::Active => write!(f, "active"),
-            SessionState::Held => write!(f, "held"),
-            SessionState::Transferring => write!(f, "transferring"),
-            SessionState::AppRunning => write!(f, "app_running"),
             SessionState::Ending => write!(f, "ending"),
             SessionState::Ended => write!(f, "ended"),
         }

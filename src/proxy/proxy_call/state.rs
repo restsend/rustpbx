@@ -3,7 +3,6 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason};
 use parking_lot::RwLock;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -81,18 +80,6 @@ pub struct CallContext {
     pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyCallPhase {
-    Initializing,
-    Ringing,
-    EarlyMedia,
-    Bridged,
-    Terminating,
-    Failed,
-    Ended,
-}
 
 #[derive(Clone)]
 pub struct SipSessionShared {
