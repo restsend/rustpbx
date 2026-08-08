@@ -6741,6 +6741,16 @@ enum ConstructMode<'a> {
         self.fire_hold_transition_hooks(&leg_id, prev, new_state)
             .await;
 
+        // Cross-leg hold propagation only applies when the proxy anchors media
+        // (a MediaBridge is present). In bypass mode the peer already received
+        // the relayed offer — this hold UPDATE was forwarded to the callee
+        // as-is and answered there — so propagating hold with a separate
+        // re-INVITE would push a redundant/conflicting offer to the peer and
+        // wait for an answer that may never come, hanging the dialog.
+        if self.bypasses_local_media() {
+            return;
+        }
+
         // Cross-leg propagation
         match side {
             DialogSide::Caller => {

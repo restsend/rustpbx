@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use rustrtc::peer_connection::RtpObserver;
 use rustrtc::rtp::RtpPacket;
@@ -95,6 +96,13 @@ pub struct IngressTap {
     ingress_bytes: AtomicU64,
     egress_packets: AtomicU64,
     egress_bytes: AtomicU64,
+    /// Ingress SSRC → payload types seen (post-SRTP-unprotect, pre-rewrite).
+    /// Lets the RTCP relay map a receiver's PLI/NACK (targeting the relayed
+    /// SSRC) back onto the peer's real sender SSRC so the peer browser's
+    /// encoder actually responds. Written on the hot path (per new (ssrc,pt)),
+    /// read occasionally by the RTCP relay — a sharded concurrent map keeps
+    /// both non-blocking (no try_lock-skip semantics).
+    ingress_ssrc_pts: DashMap<u32, std::collections::HashSet<u8>>,
 
     // ── DTMF ────────────────────────────────────────────────────────────
     /// Telephone-event payload types for this leg (e.g. `[101]`). Only
@@ -122,6 +130,7 @@ impl IngressTap {
             ingress_bytes: AtomicU64::new(0),
             egress_packets: AtomicU64::new(0),
             egress_bytes: AtomicU64::new(0),
+            ingress_ssrc_pts: DashMap::new(),
             dtmf_payload_types: Mutex::new(Vec::new()),
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
@@ -170,6 +179,19 @@ impl IngressTap {
         self.ingress_packets.load(Ordering::Relaxed)
     }
 
+    /// The most-recently-seen ingress SSRC that carries any of `pts`. Used by
+    /// the RTCP relay to rewrite a receiver's PLI/NACK (whose media_ssrc is
+    /// the *relayed* SSRC) back onto the peer browser's real sender SSRC, so
+    /// the peer's encoder responds. `None` while the peer hasn't sent that
+    /// media type yet.
+    pub fn ingress_ssrc_for_pts(&self, pts: &[u8]) -> Option<u32> {
+        self.ingress_ssrc_pts
+            .iter()
+            .filter(|e| pts.iter().any(|p| e.value().contains(p)))
+            .map(|e| *e.key())
+            .max()
+    }
+
     /// Finalize the recorder backend, if any.
     pub fn finalize_recorder(&self) {
         if let Some(rec) = self.recorder.read().as_ref() {
@@ -185,6 +207,14 @@ impl IngressTap {
             PacketDirection::Ingress => {
                 self.ingress_packets.fetch_add(1, Ordering::Relaxed);
                 self.ingress_bytes.fetch_add(payload_len, Ordering::Relaxed);
+                // Remember which SSRC carries which payload type (needed by the
+                // RTCP relay to rewrite PLI/NACK back onto the peer's sender
+                // SSRC). DashMap: shard-locked, non-blocking; a tiny set per
+                // SSRC, so an existing key just gets a PT inserted.
+                self.ingress_ssrc_pts
+                    .entry(packet.header.ssrc)
+                    .or_default()
+                    .insert(packet.header.payload_type);
             }
             PacketDirection::Egress => {
                 self.egress_packets.fetch_add(1, Ordering::Relaxed);
@@ -274,6 +304,30 @@ mod tests {
         assert_eq!(s.ingress_bytes, 3 * 160);
         assert_eq!(s.egress_packets, 2);
         assert_eq!(s.egress_bytes, 2 * 160);
+    }
+
+    /// The RTCP relay looks up the peer's real sender SSRC via the ingress
+    /// tap's (ssrc → PT) map so it can rewrite a PLI/NACK's media_ssrc. This
+    /// guards that lookup: audio and video SSRCs are tracked per payload type.
+    #[test]
+    fn ingress_ssrc_for_pts_resolves_peer_sender_ssrc() {
+        let tap = IngressTap::new(8);
+        // Bob's browser sends audio on SSRC 1001 (PT 111) and video on
+        // SSRC 2002 (PT 96). Both ingress.
+        tap.on_ingress(&make_packet(111, 1, 160, 1001, vec![1u8; 160]), test_addr());
+        tap.on_ingress(&make_packet(96, 1, 3000, 2002, vec![1u8; 200]), test_addr());
+
+        // Video lookup must return bob's video SSRC, not the audio one.
+        assert_eq!(tap.ingress_ssrc_for_pts(&[96]), Some(2002));
+        assert_eq!(tap.ingress_ssrc_for_pts(&[96, 97]), Some(2002));
+        // Audio lookup returns the audio SSRC.
+        assert_eq!(tap.ingress_ssrc_for_pts(&[111]), Some(1001));
+        // An SSRC that has only been seen on egress (relayed) must NOT resolve.
+        let relayed = make_packet(96, 1, 3000, 9999, vec![1u8; 200]);
+        tap.on_egress(&relayed, test_addr());
+        assert_ne!(tap.ingress_ssrc_for_pts(&[96]), Some(9999));
+        // Unknown PT → None.
+        assert_eq!(tap.ingress_ssrc_for_pts(&[110]), None);
     }
 
     #[test]

@@ -34,6 +34,7 @@ use tracing::{debug, info, warn};
 use crate::egress::EgressSource;
 use crate::ingress_tap::{DtmfEvent, MediaRecorder};
 use crate::leg::Leg;
+use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
 
 /// Which side of the 2-party bridge a leg occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -446,14 +447,17 @@ impl MediaBridge {
                     out_payload_type: Some(b_pt),
                 });
             }
-            if let Some((va, vb)) = &video_match {
-                rules_a_to_b.push(RtpRewriteRule {
-                    match_payload_type: Some(va.payload_type),
-                    fixed_out_ssrc: Some(b_video_ssrc),
-                    ssrc_offset: 0,
-                    out_payload_type: Some(vb.payload_type),
-                });
-            }
+            let (video_a_to_b, video_b_to_a) = video_relay_rules(
+                &pa.video,
+                &pb.video,
+                a_video_ssrc,
+                b_video_ssrc,
+                pa.audio.as_ref().map(|a| a.payload_type),
+                pa.dtmf_pts(),
+                pb.audio.as_ref().map(|a| a.payload_type),
+                pb.dtmf_pts(),
+            );
+            rules_a_to_b.extend(video_a_to_b);
 
             // ── B→A rules (mirror) ──
             let mut rules_b_to_a = vec![RtpRewriteRule {
@@ -470,14 +474,7 @@ impl MediaBridge {
                     out_payload_type: Some(a_pt),
                 });
             }
-            if let Some((va, vb)) = &video_match {
-                rules_b_to_a.push(RtpRewriteRule {
-                    match_payload_type: Some(vb.payload_type),
-                    fixed_out_ssrc: Some(a_video_ssrc),
-                    ssrc_offset: 0,
-                    out_payload_type: Some(va.payload_type),
-                });
-            }
+            rules_b_to_a.extend(video_b_to_a);
 
             let options_a_to_b = RtpRewriteBridgeOptions {
                 strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
@@ -509,6 +506,12 @@ impl MediaBridge {
                 strip_b_to_a = options_b_to_a.strip_extensions,
                 "fast-path relay activated"
             );
+            // WebRTC receivers depend on RTCP PLI/NACK to recover lost video
+            // keyframes; the RTP relay forwards only RTP, so relay the feedback
+            // across the legs (rewriting media_ssrc to the peer's real sender
+            // SSRC). Without this, a missed initial keyframe is unrecoverable →
+            // one-way black video.
+            wire_rtcp_relay(&la, &lb, &pa, &pb);
         } else {
             // ── transcoding: decode peer codec → re-encode own codec ──
             let b_recv = get_audio_recv_track(lb.pc())
@@ -925,6 +928,194 @@ fn get_audio_recv_track(pc: &rustrtc::PeerConnection) -> Option<Arc<dyn MediaStr
         .map(|r| -> Arc<dyn MediaStreamTrack> { r.track() })
 }
 
+/// Build the video payload-type rewrite rules for the fast-path relay.
+///
+/// The relay must match **every** video payload type a leg may actually send,
+/// not just the first common codec. Each WebRTC peer picks its own send codec
+/// (offerer vs answerer, hardware vs software encoder), so a leg may send any
+/// negotiated profile — VP8 **or** one of the H264 variants. An unmatched
+/// video PT falls through to the audio catch-all rule and gets stamped with
+/// the audio SSRC, which the peer drops: a persistent one-way video failure
+/// (the peer sending on the covered PT still works, the other side is black).
+///
+/// For each video codec on leg A we add a rule matching that PT and rewriting
+/// it to the peer leg's PT for the same (name, fmtp) codec, stamped with the
+/// destination leg's video sender SSRC; the mirror covers B→A. PTs that
+/// collide with a leg's own audio / DTMF payload types are skipped so the
+/// video rules never hijack the audio stream.
+#[allow(clippy::too_many_arguments)]
+fn video_relay_rules(
+    a: &[NegotiatedVideoCodec],
+    b: &[NegotiatedVideoCodec],
+    a_video_ssrc: u32,
+    b_video_ssrc: u32,
+    a_audio_pt: Option<u8>,
+    a_dtmf_pts: std::collections::HashSet<u8>,
+    b_audio_pt: Option<u8>,
+    b_dtmf_pts: std::collections::HashSet<u8>,
+) -> (Vec<RtpRewriteRule>, Vec<RtpRewriteRule>) {
+    fn match_peer<'x>(
+        codec: &NegotiatedVideoCodec,
+        peer: &'x [NegotiatedVideoCodec],
+    ) -> Option<&'x NegotiatedVideoCodec> {
+        // Prefer an exact (name, fmtp) match so H264 profiles map 1:1 (their
+        // PTs are preserved across legs by the codec builder); fall back to a
+        // name-only match when the fmtp differs between legs.
+        peer.iter()
+            .find(|c| c.name.eq_ignore_ascii_case(&codec.name) && c.fmtp == codec.fmtp)
+            .or_else(|| peer.iter().find(|c| c.name.eq_ignore_ascii_case(&codec.name)))
+    }
+
+    fn is_audio_pt(pt: u8, audio_pt: Option<u8>, dtmf_pts: &std::collections::HashSet<u8>) -> bool {
+        audio_pt == Some(pt) || dtmf_pts.contains(&pt)
+    }
+
+    let mut a_to_b = Vec::new();
+    for va in a {
+        if is_audio_pt(va.payload_type, a_audio_pt, &a_dtmf_pts) {
+            continue;
+        }
+        if let Some(vb) = match_peer(va, b) {
+            a_to_b.push(RtpRewriteRule {
+                match_payload_type: Some(va.payload_type),
+                fixed_out_ssrc: Some(b_video_ssrc),
+                ssrc_offset: 0,
+                out_payload_type: Some(vb.payload_type),
+            });
+        }
+    }
+
+    let mut b_to_a = Vec::new();
+    for vb in b {
+        if is_audio_pt(vb.payload_type, b_audio_pt, &b_dtmf_pts) {
+            continue;
+        }
+        if let Some(va) = match_peer(vb, a) {
+            b_to_a.push(RtpRewriteRule {
+                match_payload_type: Some(vb.payload_type),
+                fixed_out_ssrc: Some(a_video_ssrc),
+                ssrc_offset: 0,
+                out_payload_type: Some(va.payload_type),
+            });
+        }
+    }
+
+    (a_to_b, b_to_a)
+}
+
+/// The RTP transport used to send RTCP to a leg's remote peer (the PC's
+/// muxed media transport, from the video sender — all media shares it).
+fn leg_send_transport(leg: &Leg, kind: MediaKind) -> Option<Arc<rustrtc::transports::rtp::RtpTransport>> {
+    leg.pc()
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == kind)
+        .and_then(|t| t.sender())
+        .and_then(|s| s.transport())
+}
+
+/// Wire RTCP feedback relay for the fast-path RTP relay.
+///
+/// The RTP rewrite bridge forwards only RTP; each leg's RTCP (PLI / NACK) is
+/// consumed locally by rustrtc. A WebRTC receiver depends on PLI to recover a
+/// lost initial keyframe and NACK to recover lost packets — without them, a
+/// single missed keyframe is unrecoverable and the video stays black in one
+/// direction. This subscribes to each leg's audio/video sender feedback and
+/// forwards PLI/NACK to the peer leg's transport, rewriting `media_ssrc` from
+/// the *relayed* SSRC back onto the peer browser's real sender SSRC (observed
+/// on the peer leg's ingress tap) so the peer's encoder responds.
+fn wire_rtcp_relay(
+    a: &Leg,
+    b: &Leg,
+    pa: &NegotiatedLegProfile,
+    pb: &NegotiatedLegProfile,
+) {
+    let a_video_pts: Vec<u8> = pa.video.iter().map(|v| v.payload_type).collect();
+    let b_video_pts: Vec<u8> = pb.video.iter().map(|v| v.payload_type).collect();
+    let a_audio_pt = pa.audio.as_ref().map(|c| c.payload_type);
+    let b_audio_pt = pb.audio.as_ref().map(|c| c.payload_type);
+
+    // Bob's feedback (leg A senders) → forward to alice (leg B transport).
+    wire_rtcp_sender_forward(a.clone(), b.clone(), MediaKind::Video, b_video_pts);
+    let b_audio_pts: Vec<u8> = b_audio_pt.into_iter().collect();
+    wire_rtcp_sender_forward(a.clone(), b.clone(), MediaKind::Audio, b_audio_pts);
+
+    // Alice's feedback (leg B senders) → forward to bob (leg A transport).
+    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Video, a_video_pts);
+    let a_audio_pts: Vec<u8> = a_audio_pt.into_iter().collect();
+    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Audio, a_audio_pts);
+}
+
+/// Spawn one RTCP-forwarding task: feedback (PLI/NACK) targeting a sender of
+/// `src_leg` is rewritten to the peer's real sender SSRC (looked up from
+/// `dst_leg`'s ingress tap for `dst_pts`) and pushed to the peer via
+/// `dst_leg`'s send transport.
+///
+/// The sender transports only exist after the DTLS/SRTP handshake completes
+/// (post-answer), so the task waits for them before subscribing/forwarding.
+fn wire_rtcp_sender_forward(
+    src_leg: Leg,
+    dst_leg: Leg,
+    kind: MediaKind,
+    dst_pts: Vec<u8>,
+) {
+    use rustrtc::rtp::{GenericNack, PictureLossIndication, RtcpPacket};
+
+    let sender = src_leg
+        .pc()
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == kind)
+        .and_then(|t| t.sender());
+    let Some(sender) = sender else { return };
+    if dst_pts.is_empty() {
+        return;
+    }
+    let mut rx = sender.subscribe_rtcp();
+    let dst_tap = dst_leg.ingress_tap().clone();
+    tokio::spawn(async move {
+        // Wait for the destination leg's send transport (created on DTLS/SRTP
+        // setup after the remote answers) — a few seconds max.
+        let mut dst_tx = None;
+        for _ in 0..50 {
+            dst_tx = leg_send_transport(&dst_leg, kind)
+                .or_else(|| leg_send_transport(&dst_leg, MediaKind::Audio));
+            if dst_tx.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let Some(dst_tx) = dst_tx else {
+            return;
+        };
+
+        while let Ok(packet) = rx.recv().await {
+            // The peer's real sender SSRC for this media type; skip until the
+            // peer has actually started sending it.
+            let Some(target) = dst_tap.ingress_ssrc_for_pts(&dst_pts) else {
+                continue;
+            };
+            let forwarded = match &packet {
+                RtcpPacket::PictureLossIndication(p) => {
+                    RtcpPacket::PictureLossIndication(PictureLossIndication {
+                        sender_ssrc: p.sender_ssrc,
+                        media_ssrc: target,
+                    })
+                }
+                RtcpPacket::GenericNack(n) => RtcpPacket::GenericNack(GenericNack {
+                    sender_ssrc: n.sender_ssrc,
+                    media_ssrc: target,
+                    lost_packets: n.lost_packets.clone(),
+                }),
+                _ => continue,
+            };
+            if dst_tx.send_rtcp(&[forwarded]).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
 // Re-export the profile type for callers that inspect legs.
 pub use crate::negotiate::NegotiatedLegProfile as LegProfile;
 
@@ -1223,6 +1414,64 @@ mod tests {
         mb.close();
     }
 
+    /// Two WebRTC legs that both carry VIDEO (VP8 + H264) negotiate and bridge
+    /// over the fast-path relay. This exercises the all-payload-type video
+    /// rewrite rules AND the RTCP PLI/NACK relay wiring (`wire_rtcp_relay`)
+    /// — regression guard for the one-way black-video bug. In the unit-test
+    /// environment the DTLS transports never come up, so the RTCP-forwarding
+    /// tasks must degrade gracefully (no panic, no spin) while the RTP relay
+    /// rules are still installed and both legs report fast-path egress.
+    #[tokio::test]
+    async fn webrtc_video_legs_bridge_fastpath_with_rtcp_relay() {
+        use rustrtc::SdpType;
+
+        let cfg = LegConfig {
+            transport: rustrtc::TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: audio_codec::CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            video_codecs: crate::negotiate::MediaNegotiator::default_video_codecs(),
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("webrtc-video".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+        let mut mb = MediaBridge::new("s-video-rtcp", BridgeOpts::default());
+        let a = LegInner::new("a", &cfg).unwrap();
+        let b = LegInner::new("b", &cfg).unwrap();
+
+        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let b_answer = b
+            .apply_sdp(&a_offer, SdpType::Offer)
+            .await
+            .expect("b answers a (webrtc video)");
+        a.apply_sdp(&b_answer, SdpType::Answer)
+            .await
+            .expect("a applies webrtc video answer");
+
+        mb.replace_leg(LegSide::A, a).await;
+        mb.replace_leg(LegSide::B, b).await;
+        mb.accept(LegSide::A).await;
+        mb.accept(LegSide::B).await;
+
+        assert!(mb.is_bridged(), "route should be active after both answer");
+        for side in [LegSide::A, LegSide::B] {
+            let leg = mb.leg(side).expect("leg");
+            assert!(leg.egress_is_relay(), "leg {side:?} should use fast-path relay");
+        }
+
+        // Give the RTCP-forwarding tasks a moment: with no DTLS transport in
+        // the unit-test env they must time out quietly (never panic/spin).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        mb.close();
+    }
+
     #[tokio::test]
     async fn webrtc_rtp_cross_transport_bridge_transcodes() {
         use rustrtc::SdpType;
@@ -1501,5 +1750,101 @@ mod tests {
             "leg B PCM stream must decode the tone played on A"
         );
         mb.close();
+    }
+
+    fn vcap(name: &str, pt: u8, fmtp: Option<&str>) -> NegotiatedVideoCodec {
+        NegotiatedVideoCodec {
+            name: name.to_string(),
+            payload_type: pt,
+            clock_rate: 90000,
+            fmtp: fmtp.map(str::to_string),
+            rtx_payload_type: None,
+        }
+    }
+
+    fn empty_dtmf() -> std::collections::HashSet<u8> {
+        std::collections::HashSet::new()
+    }
+
+    /// The fast-path relay must install a rewrite rule for EVERY negotiated
+    /// video payload type, not just the first common codec. A browser may send
+    /// video on any negotiated profile (VP8 or any H264 variant); an unmatched
+    /// PT falls to the audio catch-all, is stamped with the AUDIO SSRC, and is
+    /// dropped by the peer — the one-way video failure.
+    #[test]
+    fn video_relay_rules_cover_all_negotiated_video_pts() {
+        // Real browser negotiation (mirrors a Chrome offer → bridge answer):
+        // VP8 first, then several H264 profiles at preserved PTs (96..=124).
+        let a = vec![
+            vcap("VP8", 96, None),
+            vcap("H264", 102, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f")),
+            vcap("H264", 104, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f")),
+            vcap("H264", 108, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f")),
+            vcap("H264", 114, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f")),
+            vcap("H264", 116, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f")),
+            vcap("H264", 39, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f")),
+            vcap("H264", 118, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f")),
+        ];
+        let b = a.clone();
+
+        let (a_to_b, b_to_a) = video_relay_rules(
+            &a,
+            &b,
+            0xA0A0A0A0, // a_video_ssrc
+            0xB0B0B0B0, // b_video_ssrc
+            Some(111),
+            empty_dtmf(),
+            Some(111),
+            empty_dtmf(),
+        );
+
+        let a_to_b_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = a_to_b
+            .iter()
+            .map(|r| (r.match_payload_type.unwrap(), *r))
+            .collect();
+        let b_to_a_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = b_to_a
+            .iter()
+            .map(|r| (r.match_payload_type.unwrap(), *r))
+            .collect();
+
+        // Every video PT on leg A must have a relay rule, stamped with leg B's
+        // video sender SSRC; mirror for B→A.
+        for va in &a {
+            let rule = a_to_b_by_pt.get(&va.payload_type).unwrap_or_else(|| {
+                panic!("no A→B relay rule for video PT {}", va.payload_type)
+            });
+            assert_eq!(rule.fixed_out_ssrc, Some(0xB0B0B0B0), "A→B must use B's video SSRC");
+            assert_eq!(rule.out_payload_type, Some(va.payload_type), "PT preserved across legs");
+        }
+        for vb in &b {
+            let rule = b_to_a_by_pt.get(&vb.payload_type).unwrap_or_else(|| {
+                panic!("no B→A relay rule for video PT {}", vb.payload_type)
+            });
+            assert_eq!(rule.fixed_out_ssrc, Some(0xA0A0A0A0), "B→A must use A's video SSRC");
+            assert_eq!(rule.out_payload_type, Some(vb.payload_type), "PT preserved across legs");
+        }
+    }
+
+    /// Video rules must not hijack a leg's own audio / DTMF payload types —
+    /// otherwise DTMF events (or the audio stream) would be rewritten to the
+    /// video SSRC and the peer would drop them.
+    #[test]
+    fn video_relay_rules_skip_audio_and_dtmf_pts() {
+        let a = vec![vcap("VP8", 96, None), vcap("H264", 110, None)];
+        let b = vec![vcap("VP8", 96, None), vcap("H264", 110, None)];
+        let mut a_dtmf = std::collections::HashSet::new();
+        a_dtmf.insert(110);
+        let mut b_dtmf = std::collections::HashSet::new();
+        b_dtmf.insert(110);
+
+        let (a_to_b, b_to_a) = video_relay_rules(
+            &a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf,
+        );
+
+        let a_matched: Vec<u8> = a_to_b.iter().map(|r| r.match_payload_type.unwrap()).collect();
+        let b_matched: Vec<u8> = b_to_a.iter().map(|r| r.match_payload_type.unwrap()).collect();
+        // PT 96 (audio) and PT 110 (DTMF) must be excluded from the video rules.
+        assert!(!a_matched.contains(&96) && !a_matched.contains(&110), "A video rules hijack audio/DTMF: {a_matched:?}");
+        assert!(!b_matched.contains(&96) && !b_matched.contains(&110), "B video rules hijack audio/DTMF: {b_matched:?}");
     }
 }

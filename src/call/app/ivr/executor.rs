@@ -3755,8 +3755,13 @@ mod tests {
                 if header.trim().is_empty() {
                     break;
                 }
-                if let Some(v) = header.trim_start().strip_prefix("Content-Length:") {
-                    content_length = v.trim().parse().unwrap_or(0);
+                // HTTP header names are case-insensitive; reqwest sends
+                // `content-length:` lowercase. A case-sensitive match here
+                // mis-reads every request body and desyncs the keep-alive
+                // connection (bodies leak into the next request line).
+                let h = header.trim_start();
+                if h.len() >= 15 && h[..15].eq_ignore_ascii_case("content-length:") {
+                    content_length = h[15..].trim().parse().unwrap_or(0);
                 }
             }
             let mut body = vec![0u8; content_length];
