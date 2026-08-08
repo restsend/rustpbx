@@ -315,7 +315,7 @@ pub struct SipSession {
     pub reporter: Option<CallReporter>,
     cdr_sent: Arc<std::sync::atomic::AtomicBool>,
 
-    pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
+    pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
     /// sharing. Cloned into every `CallSessionContext` so all hook callbacks
@@ -353,7 +353,7 @@ pub struct SipSessionHandle {
     session_id: SessionId,
     cmd_tx: mpsc::Sender<CallCommand>,
     snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
-    app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
+    app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
 }
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
@@ -1241,7 +1241,7 @@ impl SipSession {
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
-            RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>,
+            RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>,
         > = Arc::new(RwLock::new(None));
 
         let sip_handle = SipSessionHandle {
@@ -1322,9 +1322,9 @@ impl SipSession {
         // Create a shared handle for app event delivery (send_app_event).
         // The old SessionAction→CallCommand bridge has been removed — the
         // unified SipSessionHandle speaks CallCommand natively.
-        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new();
+        let bridge_shared = crate::proxy::proxy_call::state::AppEventBridgeShared::new();
         let bridge_handle =
-            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
+            crate::proxy::proxy_call::state::AppEventBridge::with_shared(bridge_shared);
 
         // Wire the bridge into the sip handle so send_app_event forwards events.
         let mut slot = app_event_bridge.write();
@@ -1458,7 +1458,7 @@ impl SipSession {
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
-            RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>,
+            RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>,
         > = Arc::new(RwLock::new(None));
 
         let sip_handle = SipSessionHandle {
@@ -1511,9 +1511,9 @@ impl SipSession {
             gw.read().meta_store.insert(session_id_str.clone(), meta);
         }
 
-        let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new();
+        let bridge_shared = crate::proxy::proxy_call::state::AppEventBridgeShared::new();
         let bridge_handle =
-            crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
+            crate::proxy::proxy_call::state::AppEventBridge::with_shared(bridge_shared);
         let mut slot = app_event_bridge.write();
         *slot = Some(bridge_handle.clone());
 
@@ -9890,7 +9890,7 @@ impl SipSession {
     /// playback paths.
     #[allow(clippy::too_many_arguments)]
     fn dispatch_playback_completion(
-        app_event_bridge: &Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
+        app_event_bridge: &Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
         rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
         session_id: &SessionId,
         event_leg_id_str: &Option<String>,

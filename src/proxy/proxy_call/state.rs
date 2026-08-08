@@ -82,11 +82,11 @@ pub struct CallContext {
 
 
 #[derive(Clone)]
-pub struct SipSessionShared {
+pub struct AppEventBridgeShared {
     app_event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>>>,
 }
 
-impl SipSessionShared {
+impl AppEventBridgeShared {
     pub fn new() -> Self {
         Self {
             app_event_tx: Arc::new(RwLock::new(None)),
@@ -112,20 +112,20 @@ impl SipSessionShared {
     }
 }
 
-impl Default for SipSessionShared {
+impl Default for AppEventBridgeShared {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Clone)]
-pub struct SipSessionHandle {
-    shared: SipSessionShared,
+pub struct AppEventBridge {
+    shared: AppEventBridgeShared,
 }
 
-impl SipSessionHandle {
-    /// Create a new handle with the given shared state
-    pub fn with_shared(shared: SipSessionShared) -> Self {
+impl AppEventBridge {
+    /// Create a new bridge with the given shared state
+    pub fn with_shared(shared: AppEventBridgeShared) -> Self {
         Self { shared }
     }
 
