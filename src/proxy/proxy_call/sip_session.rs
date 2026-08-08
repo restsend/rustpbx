@@ -1939,11 +1939,165 @@ enum ConstructMode<'a> {
         Ok(desc.to_sdp_string())
     }
 
-    pub async fn process(
+    /// Adapter that makes an optional caller-dialog receiver behave like a
+    /// real one in `run_main_loop`. When `None` (UAC mode) it parks forever so
+    /// the corresponding `select!` arm never fires.
+    async fn recv_opt_state(
+        rx: &mut Option<mpsc::UnboundedReceiver<DialogState>>,
+    ) -> Option<DialogState> {
+        match rx {
+            Some(r) => r.recv().await,
+            None => std::future::pending::<Option<DialogState>>().await,
+        }
+    }
+
+    /// Unified event loop shared by [`process`] (UAS) and [`process_uac`] (UAC).
+    ///
+    /// Drives hangup drain, cancellation, caller/callee dialog-state events,
+    /// command dispatch, session-timer refresh, and max-call-duration. Exits
+    /// when cancelled, all hangups drained, and all dialogs terminated.
+    async fn run_main_loop(
         &mut self,
-        mut state_rx: mpsc::UnboundedReceiver<DialogState>,
+        mut state_rx: Option<mpsc::UnboundedReceiver<DialogState>>,
         mut callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
         mut cmd_rx: mpsc::Receiver<CallCommand>,
+    ) -> Result<()> {
+        let hangup_futures = FuturesUnordered::new();
+        let timeout = futures::future::pending::<()>().boxed();
+        let mut cancelled = false;
+        tokio::pin!(hangup_futures);
+        tokio::pin!(timeout);
+
+        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
+            debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
+            tokio::time::sleep(max_dur).boxed()
+        } else {
+            futures::future::pending::<()>().boxed()
+        };
+        tokio::pin!(max_duration_sleep);
+
+        loop {
+            for dialog_id in self.pending_hangup.drain() {
+                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
+                    let dialog = dialog.clone();
+                    hangup_futures.push(async move {
+                        let res = dialog.hangup().await;
+                        res.map(|_| dialog_id)
+                    });
+                }
+            }
+
+            if cancelled
+                && hangup_futures.is_empty()
+                && self.pending_hangup.is_empty()
+                && self
+                    .caller_dialog
+                    .as_ref()
+                    .is_none_or(|d| d.state().is_terminated())
+                && self.callee_dialogs.is_empty()
+            {
+                break;
+            }
+
+            tokio::select! {
+                res = hangup_futures.next(), if !hangup_futures.is_empty() => {
+                    if let Some(res) = res {
+                        tracing::info!(session_id = %self.id, dialog_id = ?res.as_ref().ok(), "Hangup completed");
+                        // Remove the dialog from callee_dialogs immediately so the
+                        // break condition can be satisfied without waiting for a
+                        // callee_state_rx Terminated event (which may arrive late or
+                        // never in some race conditions).
+                        if let Ok(dialog_id) = &res {
+                            self.callee_dialogs.remove(dialog_id);
+                        }
+                    }
+                }
+                _ = self.cancel_token.cancelled(), if !cancelled => {
+                    *timeout = tokio::time::sleep(Self::SHUTDOWN_DRAIN_TIMEOUT).boxed();
+                    cancelled = true;
+                }
+
+                Some(state) = Self::recv_opt_state(&mut state_rx) => {
+                    if let Err(e) = self.handle_dialog_state(state).await {
+                        warn!(session_id = %self.id, error = %e, "Error handling dialog state");
+                    }
+                }
+
+                Some(state) = callee_state_rx.recv() => {
+                    if let Err(e) = self.handle_callee_state(state).await {
+                        warn!(session_id = %self.id, error = %e, "Error handling callee state");
+                    }
+                }
+
+                Some(cmd) = cmd_rx.recv() => {
+                    let result = self
+                        .execute_command(cmd, Some(&mut callee_state_rx))
+                        .await;
+                    if !result.success {
+                        warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
+                    }
+                }
+
+                _ = &mut timeout, if cancelled => {
+                    break;
+                }
+
+                Some(expired) = self.timer_queue.next(), if !cancelled && !self.timer_queue.is_empty() => {
+                    let scheduled = expired.into_inner();
+
+                    match self.next_timer_action(&scheduled) {
+                        Some(TimerAction::Refresh) => {
+                            let refresh_ok = match if self.caller_dialog.is_some()
+                                && scheduled == self.caller_dialog_id()
+                            {
+                                self.send_server_session_refresh().await
+                            } else {
+                                self.send_callee_session_refresh(&scheduled).await
+                            } {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    warn!(session_id = %self.id, dialog_id = %scheduled, error = %e, "Failed to send session refresh");
+                                    false
+                                }
+                            };
+
+                            if refresh_ok {
+                                self.schedule_timer(scheduled);
+                            } else {
+                                self.schedule_expiration_timer(scheduled);
+                            }
+                        }
+                        Some(TimerAction::Expired) => {
+                            warn!(session_id = %self.id, dialog_id = %scheduled, "Session timer expired, terminating session");
+                            self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
+                            self.pending_hangup.insert(scheduled);
+                        }
+                        None => {}
+                    }
+                }
+
+                // RTP timeout handled via MediaBridge callback → cmd channel
+
+                _ = &mut max_duration_sleep => {
+                    warn!(session_id = %self.id,
+                        session_id = %self.context.session_id,
+                        max_duration = ?self.context.dialplan.max_call_duration,
+                        "Max call duration exceeded, terminating session"
+                    );
+                    self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
+                    self.cancel_token.cancel();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn process(
+        &mut self,
+        state_rx: mpsc::UnboundedReceiver<DialogState>,
+        mut callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
+        cmd_rx: mpsc::Receiver<CallCommand>,
         _dialog_guard: ServerDialogGuard,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
@@ -2022,134 +2176,8 @@ enum ConstructMode<'a> {
             return Err(anyhow!("Dialplan failed: {} {:?}", status_code, reason));
         }
 
-        let hangup_futures = FuturesUnordered::new();
-        let timeout = futures::future::pending::<()>().boxed();
-        let mut cancelled = false;
-        tokio::pin!(hangup_futures);
-        tokio::pin!(timeout);
-
-        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
-            debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
-            tokio::time::sleep(max_dur).boxed()
-        } else {
-            futures::future::pending::<()>().boxed()
-        };
-        tokio::pin!(max_duration_sleep);
-
-        loop {
-            for dialog_id in self.pending_hangup.drain() {
-                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
-                    let dialog = dialog.clone();
-                    hangup_futures.push(async move {
-                        let res = dialog.hangup().await;
-                        res.map(|_| dialog_id)
-                    });
-                }
-            }
-
-            if cancelled
-                && hangup_futures.is_empty()
-                && self.pending_hangup.is_empty()
-                && self
-                    .caller_dialog
-                    .as_ref()
-                    .is_none_or(|d| d.state().is_terminated())
-                && self.callee_dialogs.is_empty()
-            {
-                break;
-            }
-
-            tokio::select! {
-                res = hangup_futures.next(), if !hangup_futures.is_empty() => {
-                    if let Some(res) = res {
-                        tracing::info!(session_id = %self.id, dialog_id = ?res.as_ref().ok(), "Hangup completed");
-                        // Remove the dialog from callee_dialogs immediately so the
-                        // break condition can be satisfied without waiting for a
-                        // callee_state_rx Terminated event (which may arrive late or
-                        // never in some race conditions).
-                        if let Ok(dialog_id) = &res {
-                            self.callee_dialogs.remove(dialog_id);
-                        }
-                    }
-                }
-                _ = self.cancel_token.cancelled(), if !cancelled => {
-                    *timeout = tokio::time::sleep(Self::SHUTDOWN_DRAIN_TIMEOUT).boxed();
-                    cancelled = true;
-                }
-
-
-                Some(state) = state_rx.recv() => {
-                    if let Err(e) = self.handle_dialog_state(state).await {
-                        warn!(session_id = %self.id, error = %e, "Error handling dialog state");
-                    }
-                }
-
-
-                Some(state) = callee_state_rx.recv() => {
-                    if let Err(e) = self.handle_callee_state(state).await {
-                        warn!(session_id = %self.id, error = %e, "Error handling callee state");
-                    }
-                }
-
-
-                Some(cmd) = cmd_rx.recv() => {
-                    let result = self
-                        .execute_command(cmd, Some(&mut callee_state_rx))
-                        .await;
-                    if !result.success {
-                        warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
-                    }
-                }
-
-                _ = &mut timeout, if cancelled => {
-                    break;
-                }
-
-                Some(expired) = self.timer_queue.next(), if !cancelled && !self.timer_queue.is_empty() => {
-                    let scheduled = expired.into_inner();
-
-                    match self.next_timer_action(&scheduled) {
-                        Some(TimerAction::Refresh) => {
-                            let refresh_ok = match if scheduled == self.caller_dialog_id() {
-                                self.send_server_session_refresh().await
-                            } else {
-                                self.send_callee_session_refresh(&scheduled).await
-                            } {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    warn!(session_id = %self.id, dialog_id = %scheduled, error = %e, "Failed to send session refresh");
-                                    false
-                                }
-                            };
-
-                            if refresh_ok {
-                                self.schedule_timer(scheduled);
-                            } else {
-                                self.schedule_expiration_timer(scheduled);
-                            }
-                        }
-                        Some(TimerAction::Expired) => {
-                            warn!(session_id = %self.id, dialog_id = %scheduled, "Session timer expired, terminating session");
-                            self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                            self.pending_hangup.insert(scheduled);
-                        }
-                        None => {}
-                    }
-                }
-
-                // RTP timeout handled via MediaBridge callback → cmd channel
-
-                _ = &mut max_duration_sleep => {
-                    warn!(session_id = %self.id,
-                        session_id = %self.context.session_id,
-                        max_duration = ?self.context.dialplan.max_call_duration,
-                        "Max call duration exceeded, terminating session"
-                    );
-                    self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                    self.cancel_token.cancel();
-                }
-            }
-        }
+        self.run_main_loop(Some(state_rx), callee_state_rx, cmd_rx)
+            .await?;
 
         self.cleanup().await;
 
@@ -2169,108 +2197,12 @@ enum ConstructMode<'a> {
     ///   * session-timer refresh / max-duration / hangup drain
     pub async fn process_uac(
         &mut self,
-        mut callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
-        mut cmd_rx: mpsc::Receiver<CallCommand>,
+        callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
+        cmd_rx: mpsc::Receiver<CallCommand>,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
 
-        let hangup_futures = FuturesUnordered::new();
-        let timeout = futures::future::pending::<()>().boxed();
-        let mut cancelled = false;
-        tokio::pin!(hangup_futures);
-        tokio::pin!(timeout);
-
-        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
-            tokio::time::sleep(max_dur).boxed()
-        } else {
-            futures::future::pending::<()>().boxed()
-        };
-        tokio::pin!(max_duration_sleep);
-
-        loop {
-            for dialog_id in self.pending_hangup.drain() {
-                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
-                    let dialog = dialog.clone();
-                    hangup_futures.push(async move {
-                        let res = dialog.hangup().await;
-                        res.map(|_| dialog_id)
-                    });
-                }
-            }
-
-            if cancelled
-                && hangup_futures.is_empty()
-                && self.pending_hangup.is_empty()
-                && self.callee_dialogs.is_empty()
-            {
-                break;
-            }
-
-            tokio::select! {
-                res = hangup_futures.next(), if !hangup_futures.is_empty() => {
-                    if let Some(res) = res {
-                        tracing::info!(session_id = %self.id, dialog_id = ?res.as_ref().ok(), "Hangup completed");
-                        if let Ok(dialog_id) = &res {
-                            self.callee_dialogs.remove(dialog_id);
-                        }
-                    }
-                }
-                _ = self.cancel_token.cancelled(), if !cancelled => {
-                    debug!(session_id = %self.context.session_id, "UAC session cancellation observed");
-                    *timeout = tokio::time::sleep(Self::SHUTDOWN_DRAIN_TIMEOUT).boxed();
-                    cancelled = true;
-                }
-                Some(state) = callee_state_rx.recv() => {
-                    if let Err(e) = self.handle_callee_state(state).await {
-                        warn!(session_id = %self.id, error = %e, "Error handling callee state");
-                    }
-                }
-                Some(cmd) = cmd_rx.recv() => {
-                    let result = self
-                        .execute_command(cmd, Some(&mut callee_state_rx))
-                        .await;
-                    if !result.success {
-                        warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
-                    }
-                }
-                _ = &mut timeout, if cancelled => {
-                    break;
-                }
-                _ = &mut max_duration_sleep => {
-                    warn!(session_id = %self.id,
-                        max_duration = ?self.context.dialplan.max_call_duration,
-                        "Max call duration exceeded, terminating UAC session"
-                    );
-                    self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                    self.cancel_token.cancel();
-                }
-                Some(expired) = self.timer_queue.next(), if !cancelled && !self.timer_queue.is_empty() => {
-                    let scheduled = expired.into_inner();
-                    match self.next_timer_action(&scheduled) {
-                        Some(TimerAction::Refresh) => {
-                            let refresh_ok = match self.send_callee_session_refresh(&scheduled).await {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    warn!(session_id = %self.id, dialog_id = %scheduled, error = %e, "Failed to send session refresh");
-                                    false
-                                }
-                            };
-                            if refresh_ok {
-                                self.schedule_timer(scheduled);
-                            } else {
-                                self.schedule_expiration_timer(scheduled);
-                            }
-                        }
-                        Some(TimerAction::Expired) => {
-                            warn!(session_id = %self.id, dialog_id = %scheduled, "Session timer expired, terminating UAC session");
-                            self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                            self.pending_hangup.insert(scheduled);
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
+        self.run_main_loop(None, callee_state_rx, cmd_rx).await?;
 
         self.cleanup().await;
         let _ = _cancel_guard;
