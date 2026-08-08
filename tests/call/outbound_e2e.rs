@@ -13,7 +13,6 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use rustpbx::rwi::CallInitiated;
 use rustpbx::rwi::RwiGateway;
-use rustpbx::rwi::event::to_legacy_event;
 use tokio::time::timeout;
 
 #[tokio::test]
@@ -24,16 +23,10 @@ async fn test_gateway_event_tap_delivers_events() {
     let mut rx = gw.read().subscribe_events();
 
     let call_id = "tap-test-call".to_string();
-    gw.read().send_event_to_call_owner(
-        &call_id,
-        &to_legacy_event(
-            &CallInitiated {
-                call_id: call_id.clone(),
-                destination: "sip:test@127.0.0.1".to_string(),
-            },
-            None,
-        ),
-    );
+    gw.read().send_to_owner(&CallInitiated {
+        call_id: call_id.clone(),
+        destination: "sip:test@127.0.0.1".to_string(),
+    });
 
     let entry = timeout(Duration::from_secs(2), rx.recv())
         .await

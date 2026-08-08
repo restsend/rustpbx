@@ -57,7 +57,12 @@ pub fn to_flat_payload<E: RwiEventSpec>(
     RwiEvent::from_spec(event, ctx).payload
 }
 
-/// Bridge a typed event spec into the legacy enum transport during migration.
+/// Build a type-erased `RwiEvent` from a typed spec (optionally enriched with
+/// call context). Alias for [`RwiEvent::from_spec`].
+///
+/// Retained for addons that translate heterogeneous internal events into
+/// `RwiEvent` values for the RWI gateway / webhook (e.g. the CC addon's queue,
+/// skill-group and agent event translators).
 pub fn to_legacy_event<E: RwiEventSpec>(event: &E, ctx: Option<&EventCallContext>) -> RwiEvent {
     RwiEvent::from_spec(event, ctx)
 }

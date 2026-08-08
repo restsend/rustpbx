@@ -359,13 +359,12 @@ impl QueueApp {
     }
 
     /// Broadcast a queue lifecycle RWI event via the gateway (if captured).
-    /// Mirrors the ACD engine bridge in `cc/mod.rs` (`to_legacy_event` +
-    /// `broadcast_event`) so that queue events look identical regardless of
-    /// which subsystem generated them.
+    /// Mirrors the ACD engine bridge in `cc/mod.rs` (`broadcast`) so that queue
+    /// events look identical regardless of which subsystem generated them.
     fn emit_rwi<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
         if let Some(ref gw) = self.rwi_gateway {
             let gw = gw.read();
-            gw.broadcast_event(&crate::rwi::event::to_legacy_event(event, None));
+            gw.broadcast(event);
         }
     }
 

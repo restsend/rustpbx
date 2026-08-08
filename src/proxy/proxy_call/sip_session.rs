@@ -9889,17 +9889,12 @@ impl SipSession {
             });
         }
         if let Some(gw) = rwi_gateway {
-            let event = crate::rwi::event::to_legacy_event(
-                &crate::rwi::MediaPlayFinished {
-                    call_id: session_id.to_string(),
-                    leg_id: event_leg_id_str.clone(),
-                    track_id: track_id.to_string(),
-                    interrupted,
-                },
-                None,
-            );
-            let g = gw.read();
-            g.send_event_to_call_owner(&session_id.to_string(), &event);
+            gw.read().send_to_owner(&crate::rwi::MediaPlayFinished {
+                call_id: session_id.to_string(),
+                leg_id: event_leg_id_str.clone(),
+                track_id: track_id.to_string(),
+                interrupted,
+            });
         }
         let _ = handle_for_restore.send_command(CallCommand::ResumeMedia);
     }

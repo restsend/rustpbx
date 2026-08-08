@@ -75,6 +75,20 @@ pub struct RwiEventMessage {
     pub target_sessions: Vec<SessionId>,
 }
 
+/// Delivery target for the unified [`RwiGateway::dispatch`] primitive.
+#[derive(Debug, Clone, Copy)]
+enum DispatchTarget<'a> {
+    /// Deliver to the session that owns the routed `call_id`.
+    Owner(&'a CallId),
+    /// Deliver to a single session directly (no cache / webhook / tap).
+    Session(&'a SessionId),
+    /// Deliver to every session subscribed to `context`, optionally excluding
+    /// one session.
+    FanOut(&'a str, Option<&'a SessionId>),
+    /// Deliver to every online session (global events).
+    Broadcast,
+}
+
 impl RwiGateway {
     pub fn new() -> Self {
         Self::with_config(1000, 60) // Default: 1000 events, 60 seconds
@@ -119,8 +133,8 @@ impl RwiGateway {
         session
     }
 
-    /// Register the WebSocket event sender for a session so that `send_event`
-    /// and `fan_out_event_to_context` can deliver events to it.
+    /// Register the WebSocket event sender for a session so that events can be
+    /// delivered to it.
     pub fn set_session_event_sender(&mut self, session_id: &SessionId, sender: WsEventSender) {
         self.session_event_senders
             .insert(session_id.clone(), sender);
@@ -133,9 +147,9 @@ impl RwiGateway {
 
     /// Subscribe to the always-on event tap.
     ///
-    /// Every event that flows through the gateway (via `send_event_to_call_owner`,
-    /// `fan_out_event_to_context`, `broadcast_event`, and their typed-spec
-    /// counterparts) is fanned out to this broadcast channel.
+    /// Every event that flows through the gateway (via `send_to_owner`,
+    /// `send_to_owner_at`, `fan_out`, `broadcast`, and `broadcast_event`) is
+    /// fanned out to this broadcast channel.
     ///
     /// Callers should filter by `call_id` and handle `RecvError::Lagged`
     /// gracefully (e.g. skip missed events and continue).
@@ -325,29 +339,102 @@ impl RwiGateway {
         self.call_ownership.len()
     }
 
-    /// Send a pre-serialized flat JSON value to a single session.
-    /// Applies per-session event type filter before sending.
-    fn send_json_to_session(
-        &self,
-        session_id: &SessionId,
-        value: &serde_json::Value,
-        event_type: &str,
-    ) {
-        if let Some(sender) = self.session_event_senders.get(session_id) {
-            if let Some(filter) = self.session_event_filters.get(session_id) {
-                if !filter.contains(event_type) {
-                    return;
-                }
-            }
-            let _ = sender.send(value.clone());
+    /// Fan an event entry out to the RWI webhook handler (if configured) and
+    /// the always-on event tap.
+    fn fanout_webhook_tap(&self, entry: &EventCacheEntry) {
+        if let Some(tx) = &self.webhook_tx {
+            let _ = tx.send(entry.clone());
         }
+        let _ = self.event_tap.send(entry.clone());
     }
 
-    /// Send an event to a single session by session_id.
-    /// Enriches from `CallMetaStore`, then dispatches the flat payload.
-    pub fn send_event_to_session(&self, session_id: &SessionId, flat: &RwiEvent) {
-        let enriched = self.enrich_flat_event(flat);
-        self.send_json_to_session(session_id, &enriched.payload, enriched.event_type);
+    /// Allocate the next monotonic event sequence number.
+    fn next_sequence(&self) -> u64 {
+        let mut cache_state = self.event_cache.lock();
+        let s = cache_state.next_sequence;
+        cache_state.next_sequence += 1;
+        s
+    }
+
+    /// Single dispatch primitive shared by every event path.
+    ///
+    /// Owner / FanOut targets cache the (raw) event for session resume, enrich
+    /// it from the `CallMetaStore`, and forward one enriched entry to both the
+    /// webhook handler and the event tap. Session / Broadcast targets do not
+    /// cache — they are direct or global sends.
+    fn dispatch(&self, dispatch_call_id: &CallId, event: &RwiEvent, target: DispatchTarget) {
+        match target {
+            DispatchTarget::Session(session_id) => {
+                let enriched = self.enrich_flat_event(event);
+                self.send_flat_to_session(session_id, &enriched);
+            }
+            DispatchTarget::Broadcast => {
+                let enriched = self.enrich_flat_event(event);
+                let seq = self.next_sequence();
+                let entry = EventCacheEntry {
+                    sequence: seq,
+                    cached_at: chrono::Utc::now(),
+                    call_id: enriched.call_id.clone().unwrap_or_default(),
+                    event: enriched.clone(),
+                };
+                self.fanout_webhook_tap(&entry);
+                for session_id in self.session_event_senders.keys() {
+                    self.send_flat_to_session(session_id, &enriched);
+                }
+            }
+            DispatchTarget::Owner(owner_call_id) => {
+                // Feed DTMF digits to any active DtmfCollect tap for this call.
+                if event.event_type == "dtmf" {
+                    let digit_char = event
+                        .payload
+                        .get("digit")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.chars().next());
+                    let leg_id = event
+                        .payload
+                        .get("leg_id")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned);
+                    if let Some(c) = digit_char {
+                        if let Some(tx) = self.dtmf_taps.get(owner_call_id) {
+                            let _ = tx.send((leg_id, c));
+                        }
+                    }
+                }
+
+                let seq = self.cache_event(dispatch_call_id, event);
+                let enriched = self.enrich_flat_event(event);
+                let entry = EventCacheEntry {
+                    sequence: seq,
+                    cached_at: chrono::Utc::now(),
+                    call_id: dispatch_call_id.clone(),
+                    event: enriched.clone(),
+                };
+                self.fanout_webhook_tap(&entry);
+                if let Some(owner_id) = self.call_ownership.get(owner_call_id) {
+                    self.send_flat_to_session(owner_id, &enriched);
+                }
+            }
+            DispatchTarget::FanOut(context, exclude) => {
+                let seq = self.cache_event(dispatch_call_id, event);
+                let enriched = self.enrich_flat_event(event);
+                let entry = EventCacheEntry {
+                    sequence: seq,
+                    cached_at: chrono::Utc::now(),
+                    call_id: dispatch_call_id.clone(),
+                    event: enriched.clone(),
+                };
+                self.fanout_webhook_tap(&entry);
+                if let Some(subscribers) = self.context_subscriptions.get(context) {
+                    for session_id in subscribers {
+                        if exclude.map_or(false, |e| e == session_id) {
+                            continue;
+                        }
+                        self.send_flat_to_session(session_id, &enriched);
+                    }
+                }
+            }
+        }
     }
 
     /// Set a channel variable for the given call.
@@ -449,55 +536,6 @@ impl RwiGateway {
         cache_state.next_sequence
     }
 
-    /// Forward a cached event to the webhook broadcast channel (if configured)
-    /// and to the always-on event tap.
-    fn forward_to_webhook(&self, call_id: &CallId, event: &RwiEvent, sequence: u64) {
-        let entry = EventCacheEntry {
-            sequence,
-            cached_at: chrono::Utc::now(),
-            call_id: call_id.clone(),
-            event: event.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
-        }
-        let _ = self.event_tap.send(entry);
-    }
-
-    /// Send an event to the owner of a call_id (if any).
-    /// Also caches the event for session resumption.
-    pub fn send_event_to_call_owner(&self, call_id: &CallId, event: &RwiEvent) {
-        // Feed DTMF digits to any active DtmfCollect tap for this call.
-        if event.event_type == "dtmf" {
-            let digit_char = event
-                .payload
-                .get("digit")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.chars().next());
-            let leg_id = event
-                .payload
-                .get("leg_id")
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned);
-            if let Some(c) = digit_char {
-                if let Some(tx) = self.dtmf_taps.get(call_id) {
-                    let _ = tx.send((leg_id, c));
-                }
-            }
-        }
-
-        // Cache the event first
-        let sequence = self.cache_event(call_id, event);
-
-        // Forward to webhook handler (if configured)
-        self.forward_to_webhook(call_id, event, sequence);
-
-        // Send to owner
-        if let Some(owner_id) = self.call_ownership.get(call_id) {
-            self.send_event_to_session(owner_id, event);
-        }
-    }
-
     /// Register a DTMF tap for an active DtmfCollect on `call_id`.
     pub fn add_dtmf_tap(
         &self,
@@ -512,34 +550,6 @@ impl RwiGateway {
         self.dtmf_taps.remove(call_id);
     }
 
-    /// Fan-out an event to all sessions subscribed to a context.
-    /// Used for inbound `call.incoming` notifications.
-    /// Also caches the event for session resumption.
-    pub fn fan_out_event_to_context(&self, context: &str, event: &RwiEvent, call_id: &CallId) {
-        self.fan_out_event_to_context_excluding(context, event, call_id, None);
-    }
-
-    pub fn fan_out_event_to_context_excluding(
-        &self,
-        context: &str,
-        event: &RwiEvent,
-        call_id: &CallId,
-        exclude: Option<&SessionId>,
-    ) {
-        let sequence = self.cache_event(call_id, event);
-
-        self.forward_to_webhook(call_id, event, sequence);
-
-        if let Some(subscribers) = self.context_subscriptions.get(context) {
-            for session_id in subscribers {
-                if exclude.map_or(false, |ex| ex == session_id) {
-                    continue;
-                }
-                self.send_event_to_session(session_id, event);
-            }
-        }
-    }
-
     /// Send an event to every known session (broadcast).
     /// Call-scoped events (with `call_id`) carry it in the envelope so webhook
     /// consumers can correlate. Truly global events (agent_state_changed, etc.)
@@ -548,42 +558,13 @@ impl RwiGateway {
     /// Each broadcast event gets a unique sequence number from a monotonic
     /// counter so the webhook dedup logic doesn't drop consecutive CC events
     /// (cc_ringing, cc_answered, cc_hangup) that share the same call_id.
+    ///
+    /// This is the dispatch path used by addons that construct events
+    /// dynamically (e.g. the CC addon's agent / queue / skill-group events).
+    /// Call-scoped broadcasts are enriched with flat context (caller/callee/
+    /// names/direction) from the `CallMetaStore` exactly like call_owner events.
     pub fn broadcast_event(&self, event: &RwiEvent) {
-        // Enrich with flat call context (caller/callee/names/direction) from
-        // the CallMetaStore so broadcast events (cc_*, queue_*, skill_group_*)
-        // carry the primary call's context just like call_owner events do.
-        // Events without a call_id (e.g. agent_state_changed, queue_alert) are
-        // unaffected (enrichment is a no-op without a meta entry).
-        let enriched = self.enrich_flat_event(event);
-        // Use a unique sequence so webhook dedup doesn't drop consecutive
-        // CC events with the same call_id.
-        let seq = {
-            let mut cache_state = self.event_cache.lock();
-            let s = cache_state.next_sequence;
-            cache_state.next_sequence += 1;
-            s
-        };
-        let call_id = event.call_id.clone().unwrap_or_default();
-        let entry = EventCacheEntry {
-            sequence: seq,
-            cached_at: chrono::Utc::now(),
-            call_id: call_id.clone(),
-            event: event.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let entry = EventCacheEntry {
-                sequence: seq,
-                cached_at: chrono::Utc::now(),
-                call_id: event.call_id.clone().unwrap_or_default(),
-                event: enriched.clone(),
-            };
-            let _ = tx.send(entry);
-        }
-        let _ = self.event_tap.send(entry);
-
-        for session_id in self.session_event_senders.keys() {
-            self.send_event_to_session(session_id, &enriched);
-        }
+        self.dispatch(&String::new(), event, DispatchTarget::Broadcast);
     }
 
     /// Resume a session after disconnect
@@ -643,13 +624,6 @@ impl RwiGateway {
         flat.clone()
     }
 
-    fn dispatch_flat(&self, flat: &RwiEvent) {
-        let enriched = self.enrich_flat_event(flat);
-        for session_id in self.session_event_senders.keys() {
-            self.send_flat_to_session(session_id, &enriched);
-        }
-    }
-
     fn send_flat_to_session(&self, session_id: &SessionId, flat: &RwiEvent) {
         if let Some(sender) = self.session_event_senders.get(session_id) {
             if let Some(filter) = self.session_event_filters.get(session_id) {
@@ -661,102 +635,31 @@ impl RwiGateway {
         }
     }
 
-    fn cache_flat_event(&self, call_id: &CallId, flat: &RwiEvent) -> u64 {
-        let mut cache_state = self.event_cache.lock();
-        let now = chrono::Utc::now();
-        while let Some(front) = cache_state.cache.front() {
-            if now.signed_duration_since(front.cached_at).num_seconds() as u64
-                > self.max_cache_age_secs
-            {
-                cache_state.cache.pop_front();
-            } else {
-                break;
-            }
-        }
-        let seq = cache_state.next_sequence;
-        cache_state.next_sequence += 1;
-        cache_state.cache.push_back(EventCacheEntry {
-            sequence: seq,
-            cached_at: now,
-            call_id: call_id.clone(),
-            event: flat.clone(),
-        });
-        seq
-    }
-
     pub fn broadcast<E: RwiEventSpec>(&self, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
-        let seq = {
-            let mut cs = self.event_cache.lock();
-            let s = cs.next_sequence;
-            cs.next_sequence += 1;
-            s
-        };
-        let entry = EventCacheEntry {
-            sequence: seq,
-            cached_at: chrono::Utc::now(),
-            call_id: String::new(),
-            event: flat.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
-        }
-        let _ = self.event_tap.send(entry);
-        self.dispatch_flat(&flat);
+        self.dispatch(&String::new(), &flat, DispatchTarget::Broadcast);
     }
 
     pub fn send_to_owner<E: RwiEventSpec>(&self, event: &E) {
-        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
+        let Some(cid) = event.call_id().map(ToOwned::to_owned) else {
             warn!("send_to_owner: event has no call_id, skipping");
             return;
         };
         let flat = RwiEvent::from_spec(event, None);
-        let seq = self.cache_flat_event(&cid, &flat);
-        let enriched = self.enrich_flat_event(&flat);
-        let entry = EventCacheEntry {
-            sequence: seq,
-            cached_at: chrono::Utc::now(),
-            call_id: cid.clone(),
-            event: enriched.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
-        }
-        let _ = self.event_tap.send(entry);
-        if let Some(owner_id) = self.call_ownership.get(&cid) {
-            self.send_flat_to_session(owner_id, &enriched);
-        }
+        self.dispatch(&cid, &flat, DispatchTarget::Owner(&cid));
+    }
+
+    /// Send an event to the owner of an explicit `call_id` regardless of the
+    /// event's own `call_id()`. Used by supervisor / ringback flows that fan a
+    /// single event out to several call owners. Caches and forwards to the
+    /// webhook/tap exactly like [`Self::send_to_owner`].
+    pub fn send_to_owner_at<E: RwiEventSpec>(&self, call_id: &CallId, event: &E) {
+        let flat = RwiEvent::from_spec(event, None);
+        self.dispatch(call_id, &flat, DispatchTarget::Owner(call_id));
     }
 
     pub fn fan_out<E: RwiEventSpec>(&self, context: &str, event: &E) {
-        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
-            warn!("fan_out: event has no call_id, skipping");
-            return;
-        };
-        let flat = RwiEvent::from_spec(event, None);
-        let seq = self.cache_flat_event(&cid, &flat);
-        let enriched = self.enrich_flat_event(&flat);
-        let entry = EventCacheEntry {
-            sequence: seq,
-            cached_at: chrono::Utc::now(),
-            call_id: cid.clone(),
-            event: enriched.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
-        }
-        let _ = self.event_tap.send(entry);
-        if let Some(subscribers) = self.context_subscriptions.get(context) {
-            for session_id in subscribers {
-                self.send_flat_to_session(session_id, &enriched);
-            }
-        }
-    }
-
-    pub fn send_to_session<E: RwiEventSpec>(&self, session_id: &SessionId, event: &E) {
-        let flat = RwiEvent::from_spec(event, None);
-        let enriched = self.enrich_flat_event(&flat);
-        self.send_flat_to_session(session_id, &enriched);
+        self.fan_out_excluding(context, event, None);
     }
 
     pub fn fan_out_excluding<E: RwiEventSpec>(
@@ -765,31 +668,17 @@ impl RwiGateway {
         event: &E,
         exclude: Option<&SessionId>,
     ) {
-        let Some(cid) = event.call_id().map(|s| s.to_owned()) else {
-            warn!("fan_out_excluding: event has no call_id, skipping");
+        let Some(cid) = event.call_id().map(ToOwned::to_owned) else {
+            warn!("fan_out: event has no call_id, skipping");
             return;
         };
         let flat = RwiEvent::from_spec(event, None);
-        let seq = self.cache_flat_event(&cid, &flat);
-        let enriched = self.enrich_flat_event(&flat);
-        let entry = EventCacheEntry {
-            sequence: seq,
-            cached_at: chrono::Utc::now(),
-            call_id: cid.clone(),
-            event: enriched.clone(),
-        };
-        if let Some(tx) = &self.webhook_tx {
-            let _ = tx.send(entry.clone());
-        }
-        let _ = self.event_tap.send(entry);
-        if let Some(subscribers) = self.context_subscriptions.get(context) {
-            for session_id in subscribers {
-                if exclude.map_or(false, |e| e == session_id) {
-                    continue;
-                }
-                self.send_flat_to_session(session_id, &enriched);
-            }
-        }
+        self.dispatch(&cid, &flat, DispatchTarget::FanOut(context, exclude));
+    }
+
+    pub fn send_to_session<E: RwiEventSpec>(&self, session_id: &SessionId, event: &E) {
+        let flat = RwiEvent::from_spec(event, None);
+        self.dispatch(&String::new(), &flat, DispatchTarget::Session(session_id));
     }
 }
 

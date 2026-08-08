@@ -423,13 +423,12 @@ async fn test_pcm_frame_does_not_break_session_state() {
     // Verify subscription still works by pushing an event
     {
         let gw = gateway.read();
-        let event = rustpbx::rwi::event::to_legacy_event(
+        gw.fan_out(
+            "pcm-test",
             &rustpbx::rwi::CallRinging {
                 call_id: "test".to_string(),
             },
-            None,
         );
-        gw.fan_out_event_to_context("pcm-test", &event, &"test".to_string());
     }
 
     // Should receive the event

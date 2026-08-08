@@ -547,19 +547,17 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Push a DTMF event via the gateway directly
-    let event = rustpbx::rwi::event::to_legacy_event(
-        &rustpbx::rwi::Dtmf {
-            call_id: "pushed-call".to_string(),
-            digit: "7".to_string(),
-            leg_id: None,
-            extra: None,
-        },
-        None,
-    );
     {
         let gw = gateway.read();
-        let call_id = "pushed-call".to_string();
-        gw.fan_out_event_to_context("push-ctx", &event, &call_id);
+        gw.fan_out(
+            "push-ctx",
+            &rustpbx::rwi::Dtmf {
+                call_id: "pushed-call".to_string(),
+                digit: "7".to_string(),
+                leg_id: None,
+                extra: None,
+            },
+        );
     }
 
     // The client must receive it within 2 seconds

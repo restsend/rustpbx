@@ -184,44 +184,38 @@ async fn test_full_session_resume_flow() {
         // Push some events via gateway
         {
             let gw = gateway.read();
-            let events = vec![
-                rustpbx::rwi::event::to_legacy_event(
-                    &rustpbx::rwi::CallIncoming {
-                        call_id: "resume-call-1".to_string(),
-                        context: "resume-test".to_string(),
-                        caller: "sip:alice@test.com".to_string(),
-                        callee: "sip:bob@test.com".to_string(),
-                        dial_direction: "inbound".to_string(),
-                        trunk: None,
-                        sip_headers: std::collections::HashMap::new(),
-                        root_call_id: None,
-                        caller_name: None,
-                        callee_name: None,
-                        called_phone: None,
-                        app_id: None,
-                        routing_target: None,
-                        uuid: None,
-                        routing_path: None,
-                    },
-                    None,
-                ),
-                rustpbx::rwi::event::to_legacy_event(
-                    &rustpbx::rwi::CallRinging {
-                        call_id: "resume-call-1".to_string(),
-                    },
-                    None,
-                ),
-                rustpbx::rwi::event::to_legacy_event(
-                    &rustpbx::rwi::CallAnswered {
-                        call_id: "resume-call-1".to_string(),
-                    },
-                    None,
-                ),
-            ];
-
-            for event in events {
-                gw.fan_out_event_to_context("resume-test", &event, &"resume-call-1".to_string());
-            }
+            gw.fan_out(
+                "resume-test",
+                &rustpbx::rwi::CallIncoming {
+                    call_id: "resume-call-1".to_string(),
+                    context: "resume-test".to_string(),
+                    caller: "sip:alice@test.com".to_string(),
+                    callee: "sip:bob@test.com".to_string(),
+                    dial_direction: "inbound".to_string(),
+                    trunk: None,
+                    sip_headers: std::collections::HashMap::new(),
+                    root_call_id: None,
+                    caller_name: None,
+                    callee_name: None,
+                    called_phone: None,
+                    app_id: None,
+                    routing_target: None,
+                    uuid: None,
+                    routing_path: None,
+                },
+            );
+            gw.fan_out(
+                "resume-test",
+                &rustpbx::rwi::CallRinging {
+                    call_id: "resume-call-1".to_string(),
+                },
+            );
+            gw.fan_out(
+                "resume-test",
+                &rustpbx::rwi::CallAnswered {
+                    call_id: "resume-call-1".to_string(),
+                },
+            );
         }
 
         // Give time for events to be cached

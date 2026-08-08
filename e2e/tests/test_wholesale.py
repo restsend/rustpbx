@@ -91,14 +91,183 @@ async def test_wholesale_call_billing(pbx_config, pbx, sipbot_pool, tmp_path):
     assert float(rec["price_total"] or 0) > 0, f"expected positive price: {rec}"
 
 
-def _seed(db: WholesaleDb) -> None:
+@pytest.mark.asyncio
+async def test_wholesale_audio_and_dtmf_passthrough(pbx_config, pbx, sipbot_pool, tmp_path):
+    """Wholesale-routed trunk call: bidirectional RTP audio + RFC 2833 DTMF
+    must pass through the anchored MediaBridge, and a billing CDR is written.
+
+    Covers the three media concerns for the wholesale workflow in a single
+    end-to-end call:
+      1. Audio  — caller and carrier exchange RTP (TX>0 and RX>0 on both legs)
+      2. DTMF   — RFC 2833 digits sent by the caller arrive at the carrier leg
+      3. CDR    — a wholesale_cdrs row with positive price is produced
+    RTP-inactivity teardown is exercised by the dedicated trunk B2BUA suite
+    (test_trunk_b2bua_rtp_timeout_no_bye_tears_down) which shares the same
+    anchored-media code path.
+    """
+    db_path = tmp_path / "wholesale_adtmf.sqlite3"
+    carrier_port = 15191
+    pbx_config.database_url = f"sqlite://{db_path}"
+    pbx_config.set_wholesale()
+    pbx_config.media_proxy = "all"  # anchor media through the MediaBridge
+    pbx_config.add_trunk(
+        "E2E-Carrier", dest=f"127.0.0.1:{carrier_port}", direction="outbound", trunk_id=1001,
+    )
+    pbx_config.add_trunk(
+        "E2E-Inbound", dest=f"127.0.0.1:{carrier_port}", direction="inbound", trunk_id=1002,
+        inbound_hosts=["127.0.0.1"],
+    )
+
+    pbx.stop()
+    pbx.prepare(webhook_url="", extra_features=["addon-wholesale"], build=False)
+    pbx.start(timeout=90)
+
+    db = WholesaleDb(str(db_path))
+    try:
+        _seed(db, f"127.0.0.1:{carrier_port}")
+    finally:
+        db.close()
+
+    # Restart so the wholesale addon loads the seeded trunks/profile.
+    pbx.stop()
+    pbx.start(timeout=90)
+
+    # Carrier UAS answers the outbound trunk with echo + audio-quality reporting
+    # so we can assert bidirectional RTP on the carrier leg too.
+    carrier = sipbot_pool.callee(
+        host=pbx.host, port=carrier_port, username="carrier", password="123456",
+        register=False, ring_secs=1, answer_mode="echo", audio_quality=True,
+    )
+    # Caller sends two RFC 2833 DTMF digits mid-call.
+    caller = sipbot_pool.caller(
+        target=f"sip:91001234567@{pbx.sip_addr}", username="caller", password="123456",
+        hangup=8, dtmf_flows="2s:1,4s:2",
+    )
+    assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+    # 2. DTMF: the carrier leg must receive at least one RFC 2833 digit through
+    # the wholesale B2BUA's MediaBridge dtmf_bus forwarder. Check before hangup
+    # so the digits have time to arrive (scheduled at 2s/4s into the call).
+    digits: list[str] = []
+    deadline = asyncio.get_event_loop().time() + 15
+    while asyncio.get_event_loop().time() < deadline:
+        digits = carrier.get_dtmf_digits()
+        if digits:
+            break
+        await asyncio.sleep(0.3)
+    assert digits, (
+        f"carrier received no DTMF through wholesale B2BUA:\n{carrier.output[-2000:]}"
+    )
+
+    # Wait for the caller to hang up so sipbot prints its final RTP summary.
+    await caller.wait_output_async(r"All bots finished", timeout=30)
+
+    # 1. Audio: caller sent RTP (TX>0) and received carrier echo RTP (RX>0).
+    # Stats are only populated after the process exits and prints its summary.
+    caller_stats = caller.get_rtp_stats()
+    assert caller_stats.tx_packets > 0, f"caller sent no RTP: {caller_stats}\n{caller.output[-2000:]}"
+    assert caller_stats.rx_packets > 0, f"caller received no RTP: {caller_stats}\n{caller.output[-2000:]}"
+
+    # 3. CDR: a wholesale_cdrs billing row with positive price is produced.
+    rows: list[dict] = []
+    db2 = WholesaleDb(str(db_path))
+    try:
+        deadline = asyncio.get_event_loop().time() + 15
+        while asyncio.get_event_loop().time() < deadline:
+            rows = db2.all(
+                "select call_id, tenant_id, price_total, cost_total, status "
+                "from wholesale_cdrs order by id desc limit 5"
+            )
+            if rows:
+                break
+            await asyncio.sleep(0.5)
+    finally:
+        db2.close()
+    assert rows, "no wholesale_cdrs record produced for audio/dtmf call"
+    assert float(rows[0]["price_total"] or 0) > 0, f"expected positive price: {rows[0]}"
+
+
+@pytest.mark.asyncio
+async def test_wholesale_183_early_media_passthrough(pbx_config, pbx, sipbot_pool, tmp_path):
+    """Carrier sends 183 Session Progress (early media) before answering → the
+    caller must receive the 183 + early-media RTP through the wholesale B2BUA's
+    anchored MediaBridge, then the call answers normally.
+
+    This exercises the carrier→tenant 183 early-media relay path
+    (sip_session.rs: callee DialogState::Early with SDP → Pranswer on caller
+    dialog) which is the wholesale equivalent of in-band ringback/progress
+    tones generated upstream by the carrier.
+    """
+    db_path = tmp_path / "wholesale_183.sqlite3"
+    carrier_port = 15192
+    pbx_config.database_url = f"sqlite://{db_path}"
+    pbx_config.set_wholesale()
+    pbx_config.media_proxy = "all"  # anchor media through the MediaBridge
+    pbx_config.add_trunk(
+        "E2E-Carrier", dest=f"127.0.0.1:{carrier_port}", direction="outbound", trunk_id=1001,
+    )
+    pbx_config.add_trunk(
+        "E2E-Inbound", dest=f"127.0.0.1:{carrier_port}", direction="inbound", trunk_id=1002,
+        inbound_hosts=["127.0.0.1"],
+    )
+
+    pbx.stop()
+    pbx.prepare(webhook_url="", extra_features=["addon-wholesale"], build=False)
+    pbx.start(timeout=90)
+
+    db = WholesaleDb(str(db_path))
+    try:
+        _seed(db, f"127.0.0.1:{carrier_port}")
+    finally:
+        db.close()
+
+    # Restart so the wholesale addon loads the seeded trunks/profile.
+    pbx.stop()
+    pbx.start(timeout=90)
+
+    # Carrier UAS sends 183 early media (ringback wav) while ringing, then
+    # answers with echo after ring_secs.
+    ringback_wav = str(Path(h.__file__).resolve().parents[2] / "fixtures" / "sample.wav")
+    carrier = sipbot_pool.callee(
+        host=pbx.host, port=carrier_port, username="carrier", password="123456",
+        register=False, ring_secs=3, answer_mode="echo", ringback=ringback_wav,
+    )
+    caller = sipbot_pool.caller(
+        target=f"sip:91001234567@{pbx.sip_addr}", username="caller", password="123456",
+        hangup=8,
+    )
+
+    # The caller must receive a 183 Session Progress (early media relayed from
+    # the carrier through the anchored MediaBridge).
+    assert await caller.wait_output_async(r"183", timeout=20), (
+        f"caller did not receive 183 Session Progress:\n{caller.output[-2000:]}"
+    )
+
+    # The call must then answer (200 OK).
+    assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+    # Caller received early-media RTP (ringback) from the carrier leg.
+    await caller.wait_output_async(r"All bots finished", timeout=30)
+    stats = caller.get_rtp_stats()
+    assert stats.rx_packets > 0, (
+        f"caller received no RTP (early media + answer media):\n{caller.output[-2000:]}"
+    )
+
+    # 183 must appear in the caller's status counts.
+    codes = caller.get_status_counts()
+    assert codes.get(183, 0) >= 1, (
+        f"expected at least one 183 Session Progress, got: {codes}\n{caller.output[-2000:]}"
+    )
+
+
+def _seed(db: WholesaleDb, carrier_dest: str = "127.0.0.1:15190") -> None:
     """Seed a minimal tenant / rate / trunk / routing profile."""
     sell_deck = db.ensure_rate_deck("E2E-Sell", "sell")
     buy_deck = db.ensure_rate_deck("E2E-Buy", "buy")
     db.ensure_rate(sell_deck, "1", 0.10, 60, 60)
     db.ensure_rate(buy_deck, "1", 0.05, 60, 60)
 
-    out = db.ensure_outbound_trunk("E2E-Carrier", "127.0.0.1:15190")
+    out = db.ensure_outbound_trunk("E2E-Carrier", carrier_dest)
     inc = db.ensure_inbound_trunk(
         "E2E-Inbound", ip_acl="127.0.0.1", caller_prefix=None, callee_prefix="9"
     )
