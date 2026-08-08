@@ -730,6 +730,25 @@ impl BuiltinAppFactory {
 /// Fan a detected DTMF digit out to: the running app (`inject_event`), the
 /// RWI gateway (typed `Dtmf` event), and the bridge WebSocket (if connected).
 /// Shared by the SIP INFO path and the RTP RFC 2833 path (MediaBridge dtmf_bus).
+/// Parse a SIP INFO `application/dtmf-relay` body and extract the first
+/// `Signal=` digit, if present. Shared by caller and callee INFO handlers.
+fn parse_dtmf_digit(body_text: &str) -> Option<char> {
+    for line in body_text.lines() {
+        let line = line.trim();
+        if line.to_lowercase().starts_with("signal=") {
+            let digit = line
+                .trim_start_matches(|c: char| !c.eq_ignore_ascii_case(&'s'))
+                .trim_start_matches("Signal=")
+                .trim_start_matches("signal=")
+                .trim();
+            if !digit.is_empty() {
+                return Some(digit.chars().next().unwrap_or_default());
+            }
+        }
+    }
+    None
+}
+
 fn forward_dtmf_event(
     digit: char,
     leg_id: &str,
@@ -2935,7 +2954,7 @@ enum ConstructMode<'a> {
                     .ok();
             }
             DialogState::Info(_, request, tx_handle) => {
-                self.handle_dialog_info(request, tx_handle).await?;
+                self.handle_dialog_info(DialogSide::Caller, request, tx_handle).await?;
             }
             DialogState::Notify(_, request, tx_handle) => {
                 self.handle_dialog_notify(request, tx_handle).await?;
@@ -2984,6 +3003,7 @@ enum ConstructMode<'a> {
 
     async fn handle_dialog_info(
         &mut self,
+        side: DialogSide,
         request: rsipstack::sip::Request,
         tx_handle: TransactionHandle,
     ) -> Result<()> {
@@ -2995,6 +3015,11 @@ enum ConstructMode<'a> {
         let is_picture_fast_update =
             Self::is_picture_fast_update_info(content_type.as_deref(), &body_text);
 
+        let leg_label = match side {
+            DialogSide::Caller => "caller",
+            DialogSide::Callee => "callee",
+        };
+
         if is_dtmf {
             info!(session_id = %self.id,
                 session_id = %self.context.session_id,
@@ -3005,50 +3030,79 @@ enum ConstructMode<'a> {
                 body = %body_text,
                 "INFO DTMF message body"
             );
-            for line in body_text.lines() {
-                let line = line.trim();
-                if line.to_lowercase().starts_with("signal=") {
-                    let digit = line
-                        .trim_start_matches(|c: char| !c.eq_ignore_ascii_case(&'s'))
-                        .trim_start_matches("Signal=")
-                        .trim_start_matches("signal=")
-                        .trim();
-                    if !digit.is_empty() {
-                        let digit_char = digit.chars().next().unwrap_or_default();
-                        forward_dtmf_event(
-                            digit_char,
-                            "caller",
-                            &self.context.session_id,
-                            &self.app_runtime,
-                            &self.server.rwi_gateway,
-                            &self.bridge_dtmf_tx,
-                        );
-                    }
-                }
+            if let Some(digit_char) = parse_dtmf_digit(&body_text) {
+                forward_dtmf_event(
+                    digit_char,
+                    leg_label,
+                    &self.context.session_id,
+                    &self.app_runtime,
+                    &self.server.rwi_gateway,
+                    &self.bridge_dtmf_tx,
+                );
             }
-            if let Some(callee_id) = self.meta.connected_callee_dialog_id.clone() {
-                if let Some(dlg) = self.server.dialog_layer.get_dialog(&callee_id) {
-                    let fwd_headers = vec![rsipstack::sip::Header::ContentType(
-                        rsipstack::sip::headers::ContentType::from("application/dtmf-relay"),
-                    )];
-                    if let Err(e) =
-                        Self::send_info_to_dialog(&dlg, fwd_headers, request.body().to_vec()).await
-                    {
-                        warn!(session_id = %self.id,
-                            session_id = %self.context.session_id,
-                            error = %e,
-                            "Failed to forward SIP INFO DTMF to callee"
-                        );
-                    } else {
-                        debug!(session_id = %self.id,
-                            session_id = %self.context.session_id,
-                            "Forwarded SIP INFO DTMF to callee"
-                        );
+            // Forward DTMF INFO to the peer dialog
+            let peer_side = match side {
+                DialogSide::Caller => "callee",
+                DialogSide::Callee => "caller",
+            };
+            let forward_result = match side {
+                DialogSide::Caller => {
+                    // Forward to the connected callee dialog
+                    match self.meta.connected_callee_dialog_id.clone() {
+                        Some(callee_id) => {
+                            match self.server.dialog_layer.get_dialog(&callee_id) {
+                                Some(dlg) => {
+                                    let fwd_headers = vec![rsipstack::sip::Header::ContentType(
+                                        rsipstack::sip::headers::ContentType::from(
+                                            "application/dtmf-relay",
+                                        ),
+                                    )];
+                                    Self::send_info_to_dialog(
+                                        &dlg,
+                                        fwd_headers,
+                                        request.body().to_vec(),
+                                    )
+                                    .await
+                                }
+                                None => Ok(()),
+                            }
+                        }
+                        None => Ok(()),
                     }
                 }
+                DialogSide::Callee => {
+                    // Forward to the caller (server) dialog
+                    match self.caller_dialog.as_ref() {
+                        Some(server_dialog) => {
+                            let fwd_headers = vec![rsipstack::sip::Header::ContentType(
+                                rsipstack::sip::headers::ContentType::from(
+                                    "application/dtmf-relay",
+                                ),
+                            )];
+                            server_dialog
+                                .info(Some(fwd_headers), Some(request.body().to_vec()))
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| anyhow::anyhow!(e))
+                        }
+                        None => Ok(()),
+                    }
+                }
+            };
+            if let Err(e) = forward_result {
+                warn!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to forward SIP INFO DTMF to {}", peer_side
+                );
+            } else {
+                debug!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    "Forwarded SIP INFO DTMF to {}", peer_side
+                );
             }
         } else if is_picture_fast_update {
-            self.handle_picture_fast_update(DialogSide::Caller).await;
+            self.handle_picture_fast_update(side).await;
         } else if content_type
             .as_deref()
             .is_some_and(|ct| ct.contains(RUSTPBX_COMMAND_CT))
@@ -3693,75 +3747,8 @@ enum ConstructMode<'a> {
                     .ok();
             }
             DialogState::Info(_, request, tx_handle) => {
-                let content_type = Self::request_content_type(&request);
-                let is_dtmf = content_type
-                    .as_deref()
-                    .is_some_and(|ct| ct.contains("application/dtmf-relay"));
-                let body_text = String::from_utf8_lossy(request.body());
-                let is_picture_fast_update =
-                    Self::is_picture_fast_update_info(content_type.as_deref(), &body_text);
-
-                if is_dtmf {
-                    for line in body_text.lines() {
-                        let line = line.trim();
-                        if line.to_lowercase().starts_with("signal=") {
-                            let digit = line
-                                .trim_start_matches(|c: char| !c.eq_ignore_ascii_case(&'s'))
-                                .trim_start_matches("Signal=")
-                                .trim_start_matches("signal=")
-                                .trim();
-                            if !digit.is_empty() {
-                                let event = serde_json::json!({
-                                    "type": "dtmf",
-                                    "leg_id": "callee",
-                                    "digit": digit.chars().next().unwrap_or_default().to_string(),
-                                });
-                                if let Err(e) = self.app_runtime.inject_event(event) {
-                                    debug!(session_id = %self.id,
-                                        session_id = %self.context.session_id,
-                                        error = %e,
-                                        "Callee SIP INFO DTMF app inject (no active app)"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Forward to caller
-                    if let Some(server_dialog) = self.caller_dialog.as_ref() {
-                        let fwd_headers = vec![rsipstack::sip::Header::ContentType(
-                            rsipstack::sip::headers::ContentType::from("application/dtmf-relay"),
-                        )];
-                        if let Err(e) = server_dialog
-                            .info(Some(fwd_headers), Some(request.body().to_vec()))
-                            .await
-                        {
-                            warn!(session_id = %self.id,
-                                session_id = %self.context.session_id,
-                                error = %e,
-                                "Failed to forward callee SIP INFO DTMF to caller"
-                            );
-                        } else {
-                            debug!(session_id = %self.id,
-                                session_id = %self.context.session_id,
-                                "Forwarded callee SIP INFO DTMF to caller"
-                            );
-                        }
-                    }
-                } else if is_picture_fast_update {
-                    self.handle_picture_fast_update(DialogSide::Callee).await;
-                } else if content_type
-                    .as_deref()
-                    .is_some_and(|ct| ct.contains(RUSTPBX_COMMAND_CT))
-                {
-                    self.handle_rustpbx_info_command(&body_text, &tx_handle)
-                        .await?;
-                    // Do NOT forward to caller — PBX-internal command
-                    return Ok(());
-                }
-                tx_handle
-                    .respond(rsipstack::sip::StatusCode::OK, None, None)
-                    .await
-                    .ok();
+                self.handle_dialog_info(DialogSide::Callee, request, tx_handle)
+                    .await?;
             }
             _ => {}
         }
