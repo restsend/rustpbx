@@ -790,10 +790,17 @@ fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
         .get(1)
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(5060);
-    Some((host.to_string(), port))
+     Some((host.to_string(), port))
+ }
+
+/// How the session was constructed: inbound (UAS, with a server dialog) or
+/// outbound (UAC, no server dialog).
+enum ConstructMode<'a> {
+    Uas { server_dialog: &'a InviteDialog },
+    Uac,
 }
 
-impl SipSession {
+ impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1213,17 +1220,17 @@ impl SipSession {
         }
     }
 
-    pub fn new(
+    /// Unified constructor shared by [`new`] (UAS) and [`new_uac`] (UAC).
+    fn new_inner(
         server: SipServerRef,
         cancel_token: CancellationToken,
         call_record_sender: Option<CallRecordSender>,
         context: CallContext,
-        server_dialog: InviteDialog,
+        mode: ConstructMode<'_>,
         use_media_proxy: bool,
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
     ) -> (Self, SipSessionHandle, mpsc::Receiver<CallCommand>) {
-        // Clone-once locals used repeatedly below
         let session_id_str = context.session_id.clone();
         let original_caller = context.original_caller.clone();
         let original_callee = context.original_callee.clone();
@@ -1251,14 +1258,11 @@ impl SipSession {
             app_event_bridge: app_event_bridge.clone(),
         };
 
-        // Build ApplicationContext for call apps (IVR, voicemail, etc.)
-        let call_info = CallInfo {
-            session_id: session_id_str.clone(),
-            caller: original_caller.clone(),
-            callee: original_callee.clone(),
-            direction: context.dialplan.direction.to_string(),
-            started_at: chrono::Utc::now(),
-            sip_headers: {
+        // Build ApplicationContext for call apps (IVR, voicemail, etc.).
+        // UAS mode extracts SIP headers from the inbound INVITE; UAC mode has
+        // no inbound request.
+        let sip_headers = match mode {
+            ConstructMode::Uas { server_dialog } => {
                 let mut hdrs =
                     crate::call::app::extract_sip_headers(&server_dialog.initial_request());
                 if let Some(ref routed) = context.dialplan.routed_headers {
@@ -1267,15 +1271,21 @@ impl SipSession {
                     }
                 }
                 hdrs
-            },
+            }
+            ConstructMode::Uac => Default::default(),
+        };
+        let call_info = CallInfo {
+            session_id: session_id_str.clone(),
+            caller: original_caller.clone(),
+            callee: original_callee.clone(),
+            direction: context.dialplan.direction.to_string(),
+            started_at: chrono::Utc::now(),
+            sip_headers,
             route_name: context
                 .metadata
                 .as_ref()
                 .and_then(|m| m.get("route_name").cloned()),
         };
-        // Create a shared session-extensions bag so CallApps and
-        // CallSessionHooks can pass typed data across layers (e.g. CSAT
-        // results → CDR).
         let session_extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
 
         let mut app_ctx = ApplicationContext::new(
@@ -1303,32 +1313,29 @@ impl SipSession {
                     .metadata
                     .as_ref()
                     .and_then(|m| m.get("trunk").cloned()),
-                // Root = this session's own call context (root=self). No
-                // cross-session propagation for transferred legs.
-                root: Some(crate::rwi::proto::RootCallInfo {
-                    caller: Some(original_caller.clone()),
-                    caller_name: extract_sip_username(&original_caller),
-                    callee: Some(original_callee.clone()),
-                    callee_name: extract_sip_username(&original_callee),
-                    call_id: Some(session_id_str.clone()),
-                    start_time: Some(context.created_at.clone()),
-                }),
+                // UAS: root = this session's own call context (root=self).
+                // UAC: no cross-session propagation for originated legs.
+                root: match mode {
+                    ConstructMode::Uas { .. } => Some(crate::rwi::proto::RootCallInfo {
+                        caller: Some(original_caller.clone()),
+                        caller_name: extract_sip_username(&original_caller),
+                        callee: Some(original_callee.clone()),
+                        callee_name: extract_sip_username(&original_callee),
+                        call_id: Some(session_id_str.clone()),
+                        start_time: Some(context.created_at.clone()),
+                    }),
+                    ConstructMode::Uac => None,
+                },
                 ..Default::default()
             };
-            let sid = session_id_str.clone();
-            gw.read().meta_store.insert(sid, meta);
+            gw.read().meta_store.insert(session_id_str.clone(), meta);
         }
 
-        // Create a shared handle for app event delivery (send_app_event).
-        // The old SessionAction→CallCommand bridge has been removed — the
-        // unified SipSessionHandle speaks CallCommand natively.
+        // Create a shared bridge for app event delivery (send_app_event).
         let bridge_shared = crate::proxy::proxy_call::state::AppEventBridgeShared::new();
         let bridge_handle =
             crate::proxy::proxy_call::state::AppEventBridge::with_shared(bridge_shared);
-
-        // Wire the bridge into the sip handle so send_app_event forwards events.
-        let mut slot = app_event_bridge.write();
-        *slot = Some(bridge_handle.clone());
+        *app_event_bridge.write() = Some(bridge_handle.clone());
 
         let app_runtime: Arc<dyn AppRuntime> = Arc::new(
             DefaultAppRuntime::new(AppRuntimeConfig {
@@ -1348,10 +1355,25 @@ impl SipSession {
             .first_target()
             .map(|target| target.aor.to_string());
 
-        let initial = server_dialog.initial_request();
-        let caller_offer = Self::extract_sdp(initial.body());
+        // Caller offer SDP: UAS extracts from the inbound INVITE; UAC has none
+        // yet (populated later when media is set up).
+        let caller_offer = match mode {
+            ConstructMode::Uas { server_dialog } => {
+                Self::extract_sdp(server_dialog.initial_request().body())
+            }
+            ConstructMode::Uac => None,
+        };
 
         let conference_server = server.conference_server.clone();
+
+        // Caller dialog + leg wiring differs by mode.
+        let (caller_dialog_field, caller_leg_dialog) = match mode {
+            ConstructMode::Uas { server_dialog } => (
+                Some(server_dialog.clone()),
+                Some(rsipstack::dialog::dialog::Dialog::Invite(server_dialog.clone())),
+            ),
+            ConstructMode::Uac => (None, None),
+        };
 
         let mut session = Self {
             id: session_id.clone(),
@@ -1361,19 +1383,17 @@ impl SipSession {
             app_runtime,
             snapshot_cache: snapshot_cache.clone(),
             server,
-            caller_dialog: Some(server_dialog.clone()),
+            caller_dialog: caller_dialog_field,
             callee_dialogs: Arc::new(DashMap::new()),
             legs: {
                 use crate::proxy::proxy_call::leg_registry::LegRegistry;
                 let mut lr = LegRegistry::new();
                 let caller_id = LegId::from("caller");
-                let caller_dialog =
-                    rsipstack::dialog::dialog::Dialog::Invite(server_dialog.clone());
                 lr.add_leg(
                     caller_id.clone(),
                     Leg::new(caller_id),
                     caller_peer.clone(),
-                    Some(caller_dialog),
+                    caller_leg_dialog,
                 );
                 // callee peer registered without a dialog until it answers
                 lr.set_peer(LegId::from("callee"), callee_peer.clone());
@@ -1408,7 +1428,7 @@ impl SipSession {
             active_plays: std::collections::HashMap::new(),
         };
 
-        // ── Phase 0: Initialize MediaBridge eagerly when media is anchored ──
+        // Phase 0: Initialize MediaBridge eagerly when media is anchored.
         // In Bypass (None) mode the bridge stays None so SDP is passed through
         // untouched (see `bypasses_local_media`).
         if use_media_proxy {
@@ -1423,14 +1443,32 @@ impl SipSession {
         (session, sip_handle, cmd_rx)
     }
 
+    pub fn new(
+        server: SipServerRef,
+        cancel_token: CancellationToken,
+        call_record_sender: Option<CallRecordSender>,
+        context: CallContext,
+        server_dialog: InviteDialog,
+        use_media_proxy: bool,
+        caller_peer: Arc<dyn MediaPeer>,
+        callee_peer: Arc<dyn MediaPeer>,
+    ) -> (Self, SipSessionHandle, mpsc::Receiver<CallCommand>) {
+        Self::new_inner(
+            server,
+            cancel_token,
+            call_record_sender,
+            context,
+            ConstructMode::Uas { server_dialog: &server_dialog },
+            use_media_proxy,
+            caller_peer,
+            callee_peer,
+        )
+    }
+
     /// Construct a SipSession in **UAC / outbound mode** (no inbound caller
     /// dialog). Used by RWI originate: the caller (A leg) is virtual (media
     /// anchored on the MediaBridge, no real SIP peer) and the callee (B leg)
     /// is a real outbound INVITE that is sent later and attached on answer.
-    ///
-    /// `caller_offer` is the virtual caller's local SDP offer (may be `None`
-    /// until media is set up); it is stored in `MediaState` for later SDP
-    /// negotiation with the callee.
     #[allow(clippy::too_many_arguments)]
     pub fn new_uac(
         server: SipServerRef,
@@ -1441,165 +1479,16 @@ impl SipSession {
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
     ) -> (Self, SipSessionHandle, mpsc::Receiver<CallCommand>) {
-        let session_id_str = context.session_id.clone();
-        let original_caller = context.original_caller.clone();
-        let original_callee = context.original_callee.clone();
-        let concurrent_call_lease = context.dialplan.concurrent_call_lease.take();
-
-        let session_id = SessionId::from(session_id_str.clone());
-
-        let media_profile = if use_media_proxy {
-            MediaRuntimeProfile::from_media_path(MediaPathMode::Anchored)
-        } else {
-            MediaRuntimeProfile::from_media_path(MediaPathMode::Bypass)
-        };
-
-        let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
-        let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
-        let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
-        let app_event_bridge: Arc<
-            RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>,
-        > = Arc::new(RwLock::new(None));
-
-        let sip_handle = SipSessionHandle {
-            session_id: session_id.clone(),
-            cmd_tx: cmd_tx.clone(),
-            snapshot_cache: snapshot_cache.clone(),
-            app_event_bridge: app_event_bridge.clone(),
-        };
-
-        // Build ApplicationContext — no inbound SIP headers in UAC mode.
-        let call_info = CallInfo {
-            session_id: session_id_str.clone(),
-            caller: original_caller.clone(),
-            callee: original_callee.clone(),
-            direction: context.dialplan.direction.to_string(),
-            started_at: chrono::Utc::now(),
-            sip_headers: Default::default(),
-            route_name: context
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("route_name").cloned()),
-        };
-        let session_extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
-
-        let mut app_ctx = ApplicationContext::new(
-            server.database.clone().unwrap_or_default(),
-            call_info,
-            Arc::new(crate::config::Config {
-                proxy: (*server.proxy_config).clone(),
-                ..Default::default()
-            }),
-        );
-        app_ctx.rwi_gateway = server.rwi_gateway.clone();
-        app_ctx.ivr_trace = server.ivr_trace.clone();
-        app_ctx.session_extensions = session_extensions.clone();
-
-        if let Some(ref gw) = server.rwi_gateway {
-            let meta = crate::rwi::proto::CallMeta {
-                caller: Some(original_caller.clone()),
-                callee: Some(original_callee.clone()),
-                caller_name: extract_sip_username(&original_caller),
-                callee_name: extract_sip_username(&original_callee),
-                direction: Some(context.dialplan.direction.to_string()),
-                trunk: context
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("trunk").cloned()),
-                ..Default::default()
-            };
-            gw.read().meta_store.insert(session_id_str.clone(), meta);
-        }
-
-        let bridge_shared = crate::proxy::proxy_call::state::AppEventBridgeShared::new();
-        let bridge_handle =
-            crate::proxy::proxy_call::state::AppEventBridge::with_shared(bridge_shared);
-        let mut slot = app_event_bridge.write();
-        *slot = Some(bridge_handle.clone());
-
-        let app_runtime: Arc<dyn AppRuntime> = Arc::new(
-            DefaultAppRuntime::new(AppRuntimeConfig {
-                session_id: session_id_str.clone(),
-                handle: sip_handle.clone(),
-                context: Arc::new(app_ctx),
-            })
-            .with_factory(Arc::new(BuiltinAppFactory {
-                addon_registry: server.addon_registry.clone(),
-            })),
-        );
-
-        let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::new();
-        meta.routed_caller = context.dialplan.caller.as_ref().map(|uri| uri.to_string());
-        meta.routed_callee = context
-            .dialplan
-            .first_target()
-            .map(|target| target.aor.to_string());
-
-        let conference_server = server.conference_server.clone();
-
-        let mut session = Self {
-            id: session_id.clone(),
-            state: SessionState::Initializing,
-            bridge: BridgeConfig::new(),
-            media_profile: media_profile.clone(),
-            app_runtime,
-            snapshot_cache: snapshot_cache.clone(),            server,
-            caller_dialog: None,
-            callee_dialogs: Arc::new(DashMap::new()),
-            legs: {
-                use crate::proxy::proxy_call::leg_registry::LegRegistry;
-                let mut lr = LegRegistry::new();
-                let caller_id = LegId::from("caller");
-                // Virtual caller leg: no dialog, just a peer anchor.
-                lr.add_leg(
-                    caller_id.clone(),
-                    Leg::new(caller_id),
-                    caller_peer.clone(),
-                    None,
-                );
-                lr.set_peer(LegId::from("callee"), callee_peer.clone());
-                lr
-            },
-            pending_hangup: HashSet::new(),
-            context,
-            concurrent_call_lease,
-            transient_leases: Vec::new(),
-            call_record_sender,
+        Self::new_inner(
+            server,
             cancel_token,
-            meta,
-            // No caller offer yet — will be populated when media is set up.
-            media: crate::proxy::proxy_call::media_state::MediaState::new(None),
-            timers: HashMap::new(),
-            update_refresh_disabled: HashSet::new(),
-            timer_queue: DelayQueue::new(),
-            timer_keys: HashMap::new(),
-            callee_event_tx: None,
-            callee_guards: Vec::new(),
-            reporter: None,
-            cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            app_event_bridge: app_event_bridge.clone(),
-            extensions: session_extensions,
-            conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
-            media_path_strategy: Arc::new(crate::call::runtime::ConferenceStrategy::new(
-                conference_server.clone(),
-            ).with_session_id(session_id_str.clone())),
-            bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
-            cmd_tx: Some(cmd_tx.clone()),
-            handle: sip_handle.clone(),
-            dtmf_digits: Vec::new(),
-            active_plays: std::collections::HashMap::new(),
-        };
-
-        if use_media_proxy {
-            session.media.bridge = Some(crate::media::media_bridge::MediaBridge::new(
-                session_id_str.clone(),
-                crate::media::media_bridge::BridgeOpts::default(),
-            ));
-            session.spawn_dtmf_forwarder();
-        }
-        session.attach_sipflow_media_capture();
-
-        (session, sip_handle, cmd_rx)
+            call_record_sender,
+            context,
+            ConstructMode::Uac,
+            use_media_proxy,
+            caller_peer,
+            callee_peer,
+        )
     }
 
     pub async fn serve(
