@@ -9127,7 +9127,7 @@ impl SipSession {
             }
         }
 
-        self.state = Self::derive_state(&self.legs);
+        self.sync_state();
         self.bridge.clear();
 
         if self.app_runtime.is_running() {
@@ -9146,6 +9146,7 @@ impl SipSession {
     fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
             leg.state = new_state;
+            self.sync_state();
             true
         } else {
             // Leg does not exist — do NOT silently create a phantom leg.
@@ -9851,6 +9852,21 @@ impl SipSession {
             return SessionState::Ringing;
         }
         SessionState::Initializing
+    }
+
+    /// Re-derive the session-level [`SessionState`] from the current leg states
+    /// and refresh the externally-visible snapshot cache when it changes.
+    ///
+    /// This is the **single entry point** that keeps `self.state` and
+    /// [`update_snapshot_cache`] in sync with leg reality. Called automatically
+    /// by [`update_leg_state`] on every leg transition, so callers that mutate
+    /// legs through the normal path never need to think about session state.
+    fn sync_state(&mut self) {
+        let new_state = Self::derive_state(&self.legs);
+        if new_state != self.state {
+            self.state = new_state;
+            self.update_snapshot_cache();
+        }
     }
 
     /// Resolve when playback finishes (natural EOF or interrupted), or when
