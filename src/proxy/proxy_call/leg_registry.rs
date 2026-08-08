@@ -6,28 +6,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+/// All per-leg data bundled into a single struct so add/remove cannot forget
+/// to touch one of the (former) parallel maps.
+struct LegData {
+    leg: Leg,
+    dialog: Option<Dialog>,
+    /// `None` when the leg exists (via `insert`) but no peer has been set yet.
+    peer: Option<Arc<dyn MediaPeer>>,
+    transport: Option<rustrtc::TransportMode>,
+    answer: Option<String>,
+    has_video: bool,
+    tasks: Vec<JoinHandle<()>>,
+    conference_bridge: Option<ConferenceBridgeHandle>,
+}
+
 pub struct LegRegistry {
-    pub states: HashMap<LegId, Leg>,
-    pub dialogs: HashMap<LegId, Dialog>,
-    pub peers: HashMap<LegId, Arc<dyn MediaPeer>>,
-    pub transports: HashMap<LegId, rustrtc::TransportMode>,
-    pub answers: HashMap<LegId, String>,
-    pub has_video: HashMap<LegId, bool>,
-    pub tasks: HashMap<LegId, Vec<JoinHandle<()>>>,
-    pub conference_bridge_handles: HashMap<LegId, ConferenceBridgeHandle>,
+    legs: HashMap<LegId, LegData>,
 }
 
 impl LegRegistry {
     pub fn new() -> Self {
         Self {
-            states: HashMap::new(),
-            dialogs: HashMap::new(),
-            peers: HashMap::new(),
-            transports: HashMap::new(),
-            answers: HashMap::new(),
-            has_video: HashMap::new(),
-            tasks: HashMap::new(),
-            conference_bridge_handles: HashMap::new(),
+            legs: HashMap::new(),
         }
     }
 
@@ -38,100 +38,141 @@ impl LegRegistry {
         peer: Arc<dyn MediaPeer>,
         dialog: Option<Dialog>,
     ) {
-        self.states.insert(id.clone(), state);
-        if let Some(dlg) = dialog {
-            self.dialogs.insert(id.clone(), dlg);
-        }
-        self.peers.insert(id, peer);
+        self.legs.insert(
+            id,
+            LegData {
+                leg: state,
+                dialog,
+                peer: Some(peer),
+                transport: None,
+                answer: None,
+                has_video: false,
+                tasks: Vec::new(),
+                conference_bridge: None,
+            },
+        );
     }
 
     pub fn remove_leg(&mut self, id: &LegId) -> Option<(Leg, Vec<JoinHandle<()>>)> {
-        let state = self.states.remove(id)?;
-        self.dialogs.remove(id);
-        self.peers.remove(id);
-        self.transports.remove(id);
-        self.answers.remove(id);
-        self.has_video.remove(id);
-        if let Some(handle) = self.conference_bridge_handles.remove(id) {
+        let data = self.legs.remove(id)?;
+        if let Some(handle) = data.conference_bridge {
             handle.stop();
         }
-        let tasks = self.tasks.remove(id).unwrap_or_default();
-        Some((state, tasks))
+        Some((data.leg, data.tasks))
     }
 
     pub fn set_dialog(&mut self, id: LegId, dialog: Dialog) {
-        self.dialogs.insert(id, dialog);
+        if let Some(data) = self.legs.get_mut(&id) {
+            data.dialog = Some(dialog);
+        }
+    }
+
+    pub fn get_dialog(&self, id: &LegId) -> Option<&Dialog> {
+        self.legs.get(id).and_then(|d| d.dialog.as_ref())
     }
 
     pub fn retain_dialogs_by_dialog_id(&mut self, terminated_id: &rsipstack::dialog::DialogId) {
-        self.dialogs.retain(|_, dlg| dlg.id() != *terminated_id);
+        for data in self.legs.values_mut() {
+            if let Some(ref dlg) = data.dialog {
+                if dlg.id() == *terminated_id {
+                    data.dialog = None;
+                }
+            }
+        }
     }
 
     pub fn get_peer(&self, id: &LegId) -> Option<&Arc<dyn MediaPeer>> {
-        self.peers.get(id)
+        self.legs.get(id).and_then(|d| d.peer.as_ref())
     }
 
     pub fn set_peer(&mut self, id: LegId, peer: Arc<dyn MediaPeer>) {
-        self.peers.insert(id, peer);
+        self.legs
+            .entry(id)
+            .or_insert_with(|| LegData {
+                leg: Leg::new(LegId::new("")),
+                dialog: None,
+                peer: None,
+                transport: None,
+                answer: None,
+                has_video: false,
+                tasks: Vec::new(),
+                conference_bridge: None,
+            })
+            .peer = Some(peer);
     }
 
     pub fn caller_peer(&self) -> Option<&Arc<dyn MediaPeer>> {
-        self.peers.get(&LegId::new("caller"))
+        self.get_peer(&LegId::new("caller"))
     }
 
     pub fn callee_peer(&self) -> Option<&Arc<dyn MediaPeer>> {
-        self.peers.get(&LegId::new("callee"))
+        self.get_peer(&LegId::new("callee"))
     }
 
     pub fn get_transport(&self, id: &LegId) -> Option<rustrtc::TransportMode> {
-        self.transports.get(id).cloned()
+        self.legs.get(id).and_then(|d| d.transport.clone())
     }
 
     pub fn set_transport(&mut self, id: LegId, transport: rustrtc::TransportMode) {
-        self.transports.insert(id, transport);
+        if let Some(data) = self.legs.get_mut(&id) {
+            data.transport = Some(transport);
+        }
     }
 
     pub fn caller_is_webrtc(&self) -> bool {
-        self.transports
-            .get(&LegId::new("caller"))
-            .map(|t| *t == rustrtc::TransportMode::WebRtc)
+        self.get_transport(&LegId::new("caller"))
+            .map(|t| t == rustrtc::TransportMode::WebRtc)
             .unwrap_or(false)
     }
 
     pub fn callee_is_webrtc(&self) -> bool {
-        self.transports
-            .get(&LegId::new("callee"))
-            .map(|t| *t == rustrtc::TransportMode::WebRtc)
+        self.get_transport(&LegId::new("callee"))
+            .map(|t| t == rustrtc::TransportMode::WebRtc)
             .unwrap_or(false)
     }
 
     pub fn get_answer(&self, id: &LegId) -> Option<&str> {
-        self.answers.get(id).map(|s| s.as_str())
+        self.legs.get(id).and_then(|d| d.answer.as_deref())
     }
 
     pub fn set_answer(&mut self, id: LegId, answer: String) {
-        self.answers.insert(id, answer);
+        if let Some(data) = self.legs.get_mut(&id) {
+            data.answer = Some(answer);
+        }
     }
 
     pub fn leg_has_video(&self, id: &LegId) -> bool {
-        self.has_video.get(id).copied().unwrap_or(false)
+        self.legs.get(id).map(|d| d.has_video).unwrap_or(false)
     }
 
     pub fn set_video_state(&mut self, id: &LegId, has_video: bool) {
-        self.has_video.insert(id.clone(), has_video);
+        if let Some(data) = self.legs.get_mut(id) {
+            data.has_video = has_video;
+        }
     }
 
     pub fn push_task(&mut self, id: LegId, handle: JoinHandle<()>) {
-        self.tasks.entry(id).or_default().push(handle);
+        if let Some(data) = self.legs.get_mut(&id) {
+            data.tasks.push(handle);
+        }
     }
 
     pub fn drain_tasks(&mut self) -> impl Iterator<Item = (LegId, Vec<JoinHandle<()>>)> + '_ {
-        self.tasks.drain()
+        self.legs.iter_mut().filter_map(|(id, data)| {
+            if data.tasks.is_empty() {
+                None
+            } else {
+                Some((id.clone(), std::mem::take(&mut data.tasks)))
+            }
+        })
     }
 
     pub fn set_conference_bridge_handle(&mut self, id: LegId, handle: ConferenceBridgeHandle) {
-        if let Some(old) = self.conference_bridge_handles.insert(id.clone(), handle) {
-            old.stop();
+        if let Some(data) = self.legs.get_mut(&id) {
+            if let Some(old) = data.conference_bridge.take() {
+                old.stop();
+            }
+            data.conference_bridge = Some(handle);
         }
     }
 
@@ -139,53 +180,71 @@ impl LegRegistry {
         &mut self,
         id: &LegId,
     ) -> Option<ConferenceBridgeHandle> {
-        self.conference_bridge_handles.remove(id)
+        self.legs.get_mut(id).and_then(|d| d.conference_bridge.take())
     }
 
     pub fn stop_all_conference_bridge_handles(&mut self) {
-        for (_, handle) in self.conference_bridge_handles.drain() {
-            handle.stop();
+        for data in self.legs.values_mut() {
+            if let Some(handle) = data.conference_bridge.take() {
+                handle.stop();
+            }
         }
     }
 
     pub fn contains_key(&self, id: &LegId) -> bool {
-        self.states.contains_key(id)
+        self.legs.contains_key(id)
     }
 
     pub fn len(&self) -> usize {
-        self.states.len()
+        self.legs.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
+        self.legs.is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&LegId, &Leg)> {
-        self.states.iter()
+        self.legs.iter().map(|(id, d)| (id, &d.leg))
     }
 
     pub fn get(&self, id: &LegId) -> Option<&Leg> {
-        self.states.get(id)
+        self.legs.get(id).map(|d| &d.leg)
     }
 
     pub fn get_mut(&mut self, id: &LegId) -> Option<&mut Leg> {
-        self.states.get_mut(id)
+        self.legs.get_mut(id).map(|d| &mut d.leg)
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Leg> {
-        self.states.values()
+        self.legs.values().map(|d| &d.leg)
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Leg> {
-        self.states.values_mut()
+        self.legs.values_mut().map(|d| &mut d.leg)
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &LegId> {
-        self.states.keys()
+        self.legs.keys()
     }
 
     pub fn insert(&mut self, id: LegId, state: Leg) {
-        self.states.insert(id, state);
+        if let Some(data) = self.legs.get_mut(&id) {
+            data.leg = state;
+        } else {
+            self.legs.insert(
+                id,
+                LegData {
+                    leg: state,
+                    dialog: None,
+                    peer: None,
+                    transport: None,
+                    answer: None,
+                    has_video: false,
+                    tasks: Vec::new(),
+                    conference_bridge: None,
+                },
+            );
+        }
     }
 
     pub fn remove(&mut self, id: &LegId) -> Option<Leg> {
@@ -205,14 +264,13 @@ impl Default for LegRegistry {
 
 impl Drop for LegRegistry {
     fn drop(&mut self) {
-        for (_, handles) in self.tasks.drain() {
-            for handle in handles {
+        for data in self.legs.values() {
+            for handle in &data.tasks {
                 handle.abort();
             }
-        }
-        // Stop all conference bridge handles (cancels their tasks)
-        for (_, handle) in self.conference_bridge_handles.drain() {
-            handle.stop();
+            if let Some(handle) = &data.conference_bridge {
+                handle.stop();
+            }
         }
     }
 }

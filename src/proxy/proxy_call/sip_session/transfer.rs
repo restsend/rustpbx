@@ -1259,7 +1259,7 @@ impl SipSession {
                         }
                     }
                 });
-                self.legs.tasks.entry(leg_id.clone()).or_default().push(mon);
+                self.legs.push_task(leg_id.clone(), mon);
             }
         }
 

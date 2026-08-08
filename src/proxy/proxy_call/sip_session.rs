@@ -1176,7 +1176,7 @@ enum ConstructMode<'a> {
                 }
             }
         });
-        self.legs.tasks.entry(leg.clone()).or_default().push(handle);
+        self.legs.push_task(leg.clone(), handle);
     }
 
     /// Build an `AudioReceiver` from a `PeerConnection` using the session's
@@ -8627,7 +8627,6 @@ impl SipSession {
                 // Forward to running app before processing so the app can react
                 let agent_uri = self
                     .legs
-                    .states
                     .get(&leg_id)
                     .and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
@@ -8662,7 +8661,6 @@ impl SipSession {
                 // Forward to running app before removing the leg (so we can get the URI)
                 let agent_uri = self
                     .legs
-                    .states
                     .get(&leg_id)
                     .and_then(|l| l.endpoint.clone());
                 let event_name = if reason.contains("486") || reason.to_lowercase().contains("busy")
@@ -9539,7 +9537,7 @@ impl SipSession {
 #[async_trait::async_trait]
 impl crate::call::runtime::LegMediaBridger for SipSession {
     async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
-        let peer = self.legs.peers.get(leg_id).cloned();
+        let peer = self.legs.get_peer(leg_id).cloned();
         let handle = if let Some(peer) = peer {
             self.start_conference_media_bridge_for_peer(conf_id, leg_id, &peer, None, None)
                 .await?
@@ -10411,8 +10409,7 @@ impl SipSession {
         let headers = Self::sdp_headers();
         let dialog = if leg_id.0 == "callee" {
             self.legs
-                .dialogs
-                .get(&LegId::from("callee"))
+                .get_dialog(&LegId::from("callee"))
                 .and_then(|d| match d {
                     rsipstack::dialog::dialog::Dialog::Invite(inv) => Some(inv.clone()),
                     _ => None,

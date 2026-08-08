@@ -37,7 +37,7 @@ impl SipSession {
             .iter()
             .filter(|(_, leg)| leg.is_active())
             .map(|(id, _)| {
-                let peer = self.legs.peers.get(id).cloned();
+                let peer = self.legs.get_peer(id).cloned();
                 (id.clone(), peer)
             })
             .collect();
@@ -445,7 +445,7 @@ impl SipSession {
 
         self.require_leg(&leg_id)?;
 
-        let peer = self.legs.peers.get(&leg_id).cloned();
+        let peer = self.legs.get_peer(&leg_id).cloned();
         let bridge_result = if let Some(peer) = peer {
             self.start_conference_media_bridge_for_peer(&conf_id, &leg_id, &peer, None, None)
                 .await
