@@ -139,7 +139,7 @@ headers = { "X-Api-Key" = "secret" }
 | `rtp_timeout` | int | RTP timeout per direction in seconds — if no audio received on either direction for this duration, call is terminated. Overrides proxy-level `rtp_timeout`. Set to `0` to disable. (default: uses proxy config, 30s) |
 | `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |
 | `headers` | object | Custom SIP headers to add to the outgoing INVITE (key-value) |
-| `with_original_headers` | bool | Whether to forward original headers (except core SIP headers) |
+| `with_original_headers` | bool | Per-route override of original-header passthrough: `true` forwards the original INVITE's custom headers to the callee leg (equivalent to `header_passthrough.mode = "all"`); `false` forwards none. When omitted, the internal-vs-trunk resolution applies — internal destinations forward all custom headers, external trunks forward per their `header_passthrough` config (default: none). Core SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. |
 | `extensions` | object | Custom key-value pairs stored in the dialplan (useful for CDRs) |
 
 ### Python Example (Flask)

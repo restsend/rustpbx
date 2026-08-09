@@ -3143,3 +3143,128 @@ async fn test_no_limits_means_no_holds() {
         _ => panic!("expected Forward"),
     }
 }
+
+#[test]
+fn header_passthrough_default_all_allows_everything() {
+    use crate::proxy::routing::HeaderPassthrough;
+    let rule = HeaderPassthrough::default();
+    assert_eq!(rule.mode, crate::proxy::routing::HeaderPassthroughMode::All);
+    assert!(rule.allows("X-Smart2Agent"));
+    assert!(rule.allows("X-Referred-Id"));
+    assert!(rule.allows("x-smart2agent"));
+}
+
+#[test]
+fn header_passthrough_whitelist_matches_case_insensitively() {
+    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    let rule = HeaderPassthrough {
+        mode: HeaderPassthroughMode::Whitelist,
+        whitelist: vec!["X-Smart2Agent".into(), "X-SmartParams".into()],
+        blacklist: vec![],
+    };
+    assert!(rule.allows("x-smart2agent"));
+    assert!(rule.allows("X-SMARTPARAMS"));
+    assert!(!rule.allows("X-SmartBridgeType"));
+    assert!(!rule.allows("X-Referred-Id"));
+}
+
+#[test]
+fn header_passthrough_blacklist_excludes_matched() {
+    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    let rule = HeaderPassthrough {
+        mode: HeaderPassthroughMode::Blacklist,
+        whitelist: vec![],
+        blacklist: vec!["x-token".into(), "authorization".into()],
+    };
+    assert!(rule.allows("X-Smart2Agent"));
+    assert!(rule.allows("X-Referred-Id"));
+    assert!(!rule.allows("X-Token"));
+    assert!(!rule.allows("x-token"));
+}
+
+#[test]
+fn header_passthrough_all_mode_honors_whitelist_then_blacklist() {
+    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    // mode=All + non-empty whitelist behaves like a whitelist
+    let wl = HeaderPassthrough {
+        mode: HeaderPassthroughMode::All,
+        whitelist: vec!["X-Smart2Agent".into()],
+        blacklist: vec![],
+    };
+    assert!(wl.allows("x-smart2agent"));
+    assert!(!wl.allows("X-Referred-Id"));
+
+    // mode=All + non-empty blacklist behaves like a blacklist
+    let bl = HeaderPassthrough {
+        mode: HeaderPassthroughMode::All,
+        whitelist: vec![],
+        blacklist: vec!["x-token".into()],
+    };
+    assert!(bl.allows("X-Smart2Agent"));
+    assert!(!bl.allows("X-Token"));
+}
+
+#[test]
+fn trunk_dest_host_port_parses_uris_and_bare_addresses() {
+    use crate::proxy::routing::trunk_dest_host_port;
+    assert_eq!(
+        trunk_dest_host_port("sip:172.25.225.2:15060"),
+        Some(("172.25.225.2".to_string(), 15060))
+    );
+    assert_eq!(
+        trunk_dest_host_port("sip:gateway.example.com"),
+        Some(("gateway.example.com".to_string(), 5060))
+    );
+    assert_eq!(
+        trunk_dest_host_port("1.2.3.4:5080"),
+        Some(("1.2.3.4".to_string(), 5080))
+    );
+    assert_eq!(
+        trunk_dest_host_port("5.6.7.8"),
+        Some(("5.6.7.8".to_string(), 5060))
+    );
+    assert_eq!(trunk_dest_host_port(""), None);
+}
+
+#[test]
+fn find_trunk_by_dest_matches_host_port_case_insensitively() {
+    use crate::proxy::routing::{TrunkConfig, find_trunk_by_dest};
+    let mut trunks = std::collections::HashMap::new();
+    trunks.insert(
+        "gw".to_string(),
+        TrunkConfig {
+            dest: "sip:GW.EXAMPLE.COM:5060".to_string(),
+            ..Default::default()
+        },
+    );
+    let hit = find_trunk_by_dest(&trunks, "gw.example.com", 5060);
+    assert!(hit.is_some());
+    assert_eq!(hit.unwrap().dest, "sip:GW.EXAMPLE.COM:5060");
+    assert!(find_trunk_by_dest(&trunks, "gw.example.com", 5080).is_none());
+    assert!(find_trunk_by_dest(&trunks, "other.example.com", 5060).is_none());
+}
+
+#[test]
+fn trunk_config_deserializes_header_passthrough() {
+    use crate::proxy::routing::TrunkConfig;
+    let toml_str = r#"
+        dest = "sip:gw.example.com:5060"
+        [header_passthrough]
+        mode = "whitelist"
+        whitelist = ["X-Smart2Agent", "X-SmartParams"]
+        blacklist = []
+    "#;
+    let trunk: TrunkConfig = toml::from_str(toml_str).unwrap();
+    let hp = trunk.header_passthrough.unwrap();
+    assert_eq!(hp.mode, crate::proxy::routing::HeaderPassthroughMode::Whitelist);
+    assert!(hp.allows("x-smart2agent"));
+    assert!(!hp.allows("X-SmartBridgeType"));
+}
+
+#[test]
+fn trunk_config_header_passthrough_defaults_to_none() {
+    use crate::proxy::routing::TrunkConfig;
+    let toml_str = r#"dest = "sip:gw.example.com:5060""#;
+    let trunk: TrunkConfig = toml::from_str(toml_str).unwrap();
+    assert!(trunk.header_passthrough.is_none());
+}

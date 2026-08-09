@@ -2506,6 +2506,54 @@ impl SipSession {
             );
         }
 
+        // Forward custom headers from the original request per the resolved
+        // passthrough rule (internal destination => all, external trunk =>
+        // configured rule, else none). Standard SIP headers are always excluded
+        // via `Dialplan::should_forward_header`.
+        let passthrough = match self.context.dialplan.header_passthrough.clone() {
+            Some(rule) => Some(rule),
+            None => {
+                // App/queue/fork legs resolve their target after routing, so
+                // fall back to a per-target resolution here.
+                let realm = {
+                    let host = callee_uri.host().to_string();
+                    match callee_uri.host_with_port.port {
+                        Some(p) => format!("{host}:{}", p.0),
+                        None => host,
+                    }
+                };
+                let same_realm = self.server.is_same_realm(&realm).await;
+                self.server
+                    .header_passthrough_for(
+                        target,
+                        same_realm,
+                        &self.context.dialplan.original.uri,
+                    )
+                    .await
+            }
+        };
+        let passthrough_header_count = passthrough.as_ref().map(|rule| {
+            let selected = crate::call::Dialplan::select_passthrough_headers(
+                &self.context.dialplan.original.headers.0,
+                &headers,
+                rule,
+            );
+            let count = selected.len();
+            headers.extend(selected);
+            count
+        });
+        debug!(
+            session_id = %self.context.session_id,
+            %callee_uri,
+            passthrough_mode = passthrough
+                .as_ref()
+                .map(|r| format!("{:?}", r.mode))
+                .unwrap_or_else(|| "none".to_string()),
+            passthrough_headers = passthrough_header_count.unwrap_or(0),
+            callee_is_webrtc = Self::callee_supports_webrtc(target),
+            "callee INVITE original-header passthrough resolution"
+        );
+
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
         let leg_id = leg_id_override.unwrap_or("callee");
         self.legs.set_transport(

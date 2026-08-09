@@ -101,6 +101,12 @@ struct HttpResponsePayload {
     pub rtp_timeout: Option<u32>,
     pub media_proxy: Option<MediaProxyMode>,
     pub headers: Option<HashMap<String, String>>,
+    /// When set, overrides the original-header passthrough for this route.
+    /// `true` forwards the original INVITE's custom headers to the callee leg
+    /// (equivalent to `header_passthrough.mode = "all"`); `false` forwards none.
+    /// When omitted, the internal-vs-trunk resolution applies (internal
+    /// destinations forward everything, external trunks forward per their
+    /// `header_passthrough` config, default none).
     pub with_original_headers: Option<bool>,
     pub extensions: Option<HashMap<String, String>>,
     /// Allowed audio codecs. If set, restricts the audio codecs used for this call.
@@ -309,8 +315,15 @@ impl CallRouter for HttpCallRouter {
                     dialplan.media.proxy_mode = mode;
                 }
 
+                // `with_original_headers` is an explicit per-route override of
+                // the original-header passthrough rule. When omitted, the
+                // internal-vs-trunk resolution applies at INVITE build time.
                 if let Some(with_orig) = result.with_original_headers {
-                    dialplan.with_original_headers = with_orig;
+                    dialplan.header_passthrough = if with_orig {
+                        Some(crate::proxy::routing::HeaderPassthrough::all())
+                    } else {
+                        None
+                    };
                 }
 
                 if let Some(exts) = result.extensions {

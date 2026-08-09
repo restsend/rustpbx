@@ -322,6 +322,11 @@ engine = "flowdb"
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
+# # Forward original custom headers to this trunk's outgoing INVITE.
+# # Unset (default) -> forward nothing; internal destinations forward everything.
+# # header_passthrough = { mode = "all" }
+# # header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
+# # header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
 
 # [[proxy.routes]]
 # name = "default"

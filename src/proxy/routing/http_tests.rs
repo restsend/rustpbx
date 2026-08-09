@@ -710,7 +710,18 @@ mod tests {
             dialplan.media.proxy_mode,
             crate::config::MediaProxyMode::None
         );
-        assert!(dialplan.with_original_headers);
+        assert!(
+            dialplan.header_passthrough.is_some(),
+            "with_original_headers=true must map to a passthrough rule"
+        );
+        assert!(
+            dialplan
+                .header_passthrough
+                .as_ref()
+                .unwrap()
+                .allows("X-Smart2Agent"),
+            "with_original_headers=true must be an all-forwarding rule"
+        );
 
         let target = dialplan.first_target().unwrap();
         let header = target.headers.as_ref().unwrap().first().unwrap();
@@ -945,5 +956,75 @@ mod tests {
             },
             _ => panic!("Expected DialplanFlow::Targets"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_http_router_with_original_headers_false_disables_passthrough() {
+        let app = Router::new().route(
+            "/route",
+            post(|| async {
+                Json(json!({
+                    "action": "forward",
+                    "targets": ["sip:1001@127.0.0.1"],
+                    "with_original_headers": false
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = HttpRouterConfig {
+            url: format!("http://{}/route", addr),
+            headers: None,
+            fallback_to_static: false,
+            timeout_ms: Some(1000),
+        };
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:target@example.com".try_into().unwrap(),
+            headers: Default::default(),
+            version: rsipstack::sip::Version::V2,
+            body: vec![],
+        };
+        let caller = SipUser::default();
+        let cookie = TransactionCookie::default();
+
+        struct DummyRouteInvite;
+        #[async_trait::async_trait]
+        impl crate::call::RouteInvite for DummyRouteInvite {
+            async fn route_invite(
+                &self,
+                _: rsipstack::dialog::invitation::InviteOption,
+                _: &rsipstack::sip::Request,
+                _: &crate::call::DialDirection,
+                _: &TransactionCookie,
+            ) -> anyhow::Result<crate::config::RouteResult> {
+                Ok(crate::config::RouteResult::NotHandled(
+                    rsipstack::dialog::invitation::InviteOption::default(),
+                    None,
+                ))
+            }
+        }
+
+        let dialplan = router
+            .resolve(&request, Box::new(DummyRouteInvite), &caller, &cookie)
+            .await
+            .unwrap();
+
+        assert!(
+            dialplan.header_passthrough.is_none(),
+            "with_original_headers=false must map to no passthrough"
+        );
     }
 }
