@@ -18,7 +18,6 @@ pub mod events;
 pub mod request;
 pub mod webhook;
 
-pub use api::router;
 pub use request::{DialRequest, OnAnswer, OnFailure};
 
 use crate::call::runtime::ConferenceManager;

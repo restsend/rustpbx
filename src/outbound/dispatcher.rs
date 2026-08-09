@@ -116,10 +116,10 @@ async fn dispatch_inner(
             detail: "execute_flow".to_string(),
         },
 
-        OnAnswer::App { app_name, .. } => DispatchOutcome {
-            success: true,
-            detail: format!("app:{}", app_name),
-        },
+        OnAnswer::App {
+            app_name,
+            app_params,
+        } => dispatch_app(processor, call_id, app_name, app_params).await,
 
         OnAnswer::BridgeToLeg { leg_id } => dispatch_bridge(processor, call_id, leg_id).await,
 
@@ -140,6 +140,37 @@ async fn dispatch_inner(
                 depth,
             )
             .await
+        }
+    }
+}
+
+async fn dispatch_app(
+    processor: &RwiCommandProcessor,
+    call_id: &str,
+    app_name: &str,
+    app_params: &std::collections::HashMap<String, String>,
+) -> DispatchOutcome {
+    let params = if app_params.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(app_params).unwrap_or_default())
+    };
+    let cmd = RwiCommandPayload::AppStart {
+        call_id: call_id.to_string(),
+        app_name: app_name.to_string(),
+        params,
+    };
+    match processor.process_command(cmd).await {
+        Ok(_) => DispatchOutcome {
+            success: true,
+            detail: format!("app:{}", app_name),
+        },
+        Err(e) => {
+            warn!(%call_id, %app_name, error = %e, "app start failed");
+            DispatchOutcome {
+                success: false,
+                detail: format!("app start failed: {}", e),
+            }
         }
     }
 }

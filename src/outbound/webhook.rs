@@ -1,7 +1,6 @@
 //! Sync webhook client for post-answer instructions.
 
 use crate::http_util::HttpFetchOptions;
-use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -32,9 +31,6 @@ pub struct WebhookInstruction {
     /// Target for bridge (leg_id) / enqueue (queue) / app (app_name).
     #[serde(default)]
     pub target: Option<String>,
-    /// Additional variables to set on the call.
-    #[serde(default)]
-    pub vars: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -76,16 +72,4 @@ pub async fn call_sync_webhook(
     }
 }
 
-/// Convenience helper returning an `Err` on failure (for non-fallback paths).
-pub async fn require_instruction(
-    client: &reqwest::Client,
-    url: &str,
-    headers: &HashMap<String, String>,
-    timeout: Duration,
-    payload: &WebhookPayload<'_>,
-) -> Result<WebhookInstruction> {
-    match call_sync_webhook(client, url, headers, timeout, payload).await {
-        WebhookOutcome::Ok(instr) => Ok(instr),
-        WebhookOutcome::Err(msg) => Err(anyhow!(msg)),
-    }
-}
+

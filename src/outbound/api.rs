@@ -23,20 +23,6 @@ use tokio::sync::mpsc;
 /// on the pump task instead of buffering unboundedly (memory growth / DoS risk).
 const SSE_EVENT_QUEUE_CAPACITY: usize = 128;
 
-/// Build the outbound sub-router. The caller is responsible for applying
-/// auth middleware (AMI IP allowlist).
-pub fn router() -> axum::Router<OutboundContext> {
-    axum::Router::new().route("/dial", axum::routing::post(dial))
-}
-
-/// POST /outbound/dial — HTTP entry point.
-pub async fn dial(
-    axum::extract::State(ctx): axum::extract::State<OutboundContext>,
-    Json(req): Json<DialRequest>,
-) -> Response {
-    execute_dial_response(ctx, req).await
-}
-
 /// Core entry point — builds the SSE stream from a context + request.
 pub async fn execute_dial_response(ctx: OutboundContext, req: DialRequest) -> Response {
     match execute_dial_core(ctx, req).await {
@@ -79,23 +65,19 @@ pub async fn execute_dial_core(
     // Subscribe BEFORE originating so we don't miss early events.
     let mut event_rx = ctx.gateway.read().subscribe_events();
 
-    // Build the processor.
-    let processor = RwiCommandProcessor::new(
-        ctx.call_registry.clone(),
-        ctx.gateway.clone(),
-        ctx.conference_manager.clone(),
-    )
-    .with_sip_server(ctx.sip_server.clone());
+    // Build the processor (shared with the post-answer dispatch task).
+    let processor = std::sync::Arc::new(
+        RwiCommandProcessor::new(
+            ctx.call_registry.clone(),
+            ctx.gateway.clone(),
+            ctx.conference_manager.clone(),
+        )
+        .with_sip_server(ctx.sip_server.clone()),
+    );
 
     let destination = normalize_destination(&req.destination, &ctx);
     let caller_id = req.caller_id.clone().or_else(|| {
-        let realm = ctx
-            .sip_server
-            .proxy_config
-            .realms
-            .as_ref()
-            .and_then(|v| v.first().cloned())
-            .unwrap_or_else(|| ctx.sip_server.proxy_config.addr.clone());
+        let realm = ctx.sip_server.proxy_config.first_realm();
         Some(format!("sip:outbound@{}", realm))
     });
 
@@ -133,14 +115,7 @@ pub async fn execute_dial_core(
     let callee_for_dispatch = req.destination.clone();
     let answer_timeout = std::time::Duration::from_secs(ctx.config.default_answer_timeout);
     let http_client = ctx.http_client.clone();
-
-    // Fresh processor for the dispatch task (RwiCommandProcessor is not Clone).
-    let dispatch_processor = RwiCommandProcessor::new(
-        ctx.call_registry.clone(),
-        ctx.gateway.clone(),
-        ctx.conference_manager.clone(),
-    )
-    .with_sip_server(ctx.sip_server.clone());
+    let dispatch_processor = processor.clone();
 
     crate::utils::spawn(async move {
         let deadline = tokio::time::Instant::now() + answer_timeout;
@@ -253,16 +228,6 @@ pub async fn execute_dial_core(
     Ok(rx)
 }
 
-/// Resolve the SIP realm for outbound URI construction (first configured realm,
-/// else the proxy's advertised address).
-fn resolve_realm(proxy_config: &crate::config::ProxyConfig) -> String {
-    proxy_config
-        .realms
-        .as_ref()
-        .and_then(|v| v.first().cloned())
-        .unwrap_or_else(|| proxy_config.addr.clone())
-}
-
 /// Convert a bare phone number into a SIP URI. Pure helper (realm supplied) —
 /// unit-testable without a full `OutboundContext`.
 fn normalize_destination_with_realm(dest: &str, realm: &str) -> String {
@@ -287,7 +252,7 @@ fn normalize_destination(dest: &str, ctx: &OutboundContext) -> String {
     if dest.starts_with("sip:") {
         return dest.to_string();
     }
-    let realm = resolve_realm(&ctx.sip_server.proxy_config);
+    let realm = ctx.sip_server.proxy_config.first_realm();
     normalize_destination_with_realm(dest, &realm)
 }
 

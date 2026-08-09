@@ -1081,6 +1081,15 @@ impl ProxyConfig {
         }
     }
 
+    /// The SIP realm for constructed URIs: first configured realm, else the
+    /// proxy's advertised address.
+    pub fn first_realm(&self) -> String {
+        self.realms
+            .as_ref()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| self.addr.clone())
+    }
+
     pub fn normalize_realm(realm: &str) -> &str {
         let realm = if let Some(pos) = realm.find(':') {
             &realm[..pos]

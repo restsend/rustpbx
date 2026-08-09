@@ -892,12 +892,7 @@ impl RwiCommandProcessor {
                 CommandError::CommandFailed(format!("invalid destination: {}", req.destination))
             })?;
 
-        let realm = server
-            .proxy_config
-            .realms
-            .as_ref()
-            .and_then(|v| v.first().cloned())
-            .unwrap_or_else(|| server.proxy_config.addr.clone());
+        let realm = server.proxy_config.first_realm();
         let caller_str = Self::normalize_originate_caller_id(req.caller_id.as_deref(), &realm);
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
