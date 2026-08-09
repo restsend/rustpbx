@@ -1,9 +1,7 @@
 use anyhow::{Result, anyhow};
 use audio_codec::{CodecType, Resampler, create_decoder};
-use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::wav_reader::{WavFormat, WavReader, format_issues};
@@ -423,71 +421,6 @@ impl AudioSource for ResamplingAudioSource {
     }
 }
 
-pub struct AudioSourceManager {
-    current_source: Arc<Mutex<Option<Box<dyn AudioSource>>>>,
-    target_sample_rate: u32,
-    completion_notify: Arc<Notify>,
-}
-
-impl AudioSourceManager {
-    pub fn new(target_sample_rate: u32) -> Self {
-        Self {
-            current_source: Arc::new(Mutex::new(None)),
-            target_sample_rate,
-            completion_notify: Arc::new(Notify::new()),
-        }
-    }
-
-    pub async fn switch_to_file(&self, file_path: String, loop_playback: bool) -> Result<()> {
-        let file_source = FileAudioSource::new(file_path.clone(), loop_playback).await?;
-        let resampling_source =
-            ResamplingAudioSource::new(Box::new(file_source), self.target_sample_rate);
-
-        let mut current = self.current_source.lock();
-        *current = Some(Box::new(resampling_source));
-
-        debug!(
-            file_path = %file_path,
-            loop_playback,
-            "Switched to file audio source"
-        );
-
-        Ok(())
-    }
-
-    pub fn switch_to_silence(&self) {
-        let silence = SilenceSource::new(self.target_sample_rate);
-        let mut current = self.current_source.lock();
-        *current = Some(Box::new(silence));
-
-        debug!("Switched to silence audio source");
-    }
-
-    pub fn read_samples(&self, buffer: &mut [i16]) -> usize {
-        let mut current = self.current_source.lock();
-        if let Some(ref mut source) = *current {
-            let read = source.read_samples(buffer);
-            if read == 0 {
-                self.completion_notify.notify_one();
-            }
-            read
-        } else {
-            for sample in buffer.iter_mut() {
-                *sample = 0;
-            }
-            buffer.len()
-        }
-    }
-
-    pub fn has_active_source(&self) -> bool {
-        let current = self.current_source.lock();
-        current.is_some()
-    }
-
-    pub async fn wait_for_completion(&self) {
-        self.completion_notify.notified().await;
-    }
-}
 
 pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
     use std::path::Path;
@@ -786,91 +719,6 @@ mod tests {
             read2, 960,
             "20ms @48kHz should yield a full 960-sample frame after reset"
         );
-    }
-
-    #[test]
-    fn test_audio_source_manager_silence() {
-        let manager = AudioSourceManager::new(8000);
-        manager.switch_to_silence();
-        assert!(manager.has_active_source());
-
-        let mut buffer = vec![0i16; 160];
-        let read = manager.read_samples(&mut buffer);
-        assert_eq!(read, 160, "silence source always fills the buffer");
-    }
-
-    #[test]
-    fn test_audio_source_manager_no_source_returns_silence() {
-        let manager = AudioSourceManager::new(8000);
-        let mut buf = vec![999i16; 160];
-        let read = manager.read_samples(&mut buf);
-        assert_eq!(read, 160);
-        assert!(
-            buf.iter().all(|&s| s == 0),
-            "no-source path must produce silence"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_audio_source_manager_completion_notify_on_exhaustion() {
-        struct OneShotSource {
-            data: Vec<i16>,
-            pos: usize,
-        }
-        impl AudioSource for OneShotSource {
-            fn read_samples(&mut self, buf: &mut [i16]) -> usize {
-                let avail = self.data.len() - self.pos;
-                let n = buf.len().min(avail);
-                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-                self.pos += n;
-                n
-            }
-            fn sample_rate(&self) -> u32 {
-                8000
-            }
-            fn channels(&self) -> u16 {
-                1
-            }
-            fn has_data(&self) -> bool {
-                self.pos < self.data.len()
-            }
-            fn reset(&mut self) -> Result<()> {
-                self.pos = 0;
-                Ok(())
-            }
-        }
-
-        let manager = Arc::new(AudioSourceManager::new(8000));
-        {
-            let src = OneShotSource {
-                data: vec![1i16; 160],
-                pos: 0,
-            };
-            let resampled = ResamplingAudioSource::new(Box::new(src), 8000);
-            let mut current = manager.current_source.lock();
-            *current = Some(Box::new(resampled));
-        }
-
-        let manager_clone = manager.clone();
-        let notified = tokio::spawn(async move {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                manager_clone.wait_for_completion(),
-            )
-            .await
-        });
-
-        let mut buf = vec![0i16; 160];
-        let read = manager.read_samples(&mut buf);
-        assert_eq!(read, 160, "should read all 160 samples");
-
-        let read2 = manager.read_samples(&mut buf);
-        assert_eq!(read2, 0, "source should be exhausted");
-
-        notified
-            .await
-            .expect("join")
-            .expect("completion notify not fired within 500 ms");
     }
 
     #[tokio::test]

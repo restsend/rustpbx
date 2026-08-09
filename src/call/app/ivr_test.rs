@@ -12,7 +12,6 @@ mod tests {
     use crate::call::app::testing::MockCallStack;
     use crate::call::domain::MediaSource;
     use crate::call::domain::CallCommand;
-    use crate::media::Track;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -1896,43 +1895,35 @@ action = { type = "transfer", target = "100" }
         path.to_string_lossy().to_string()
     }
 
-    /// Start real FileTrack playback for a PlayPrompt command and emit its
-    /// completion into the MockCallStack event channel.
-    ///
-    /// Returns the FileTrack handle (for later stop/inspection if needed).
-    async fn wire_real_playback(
-        audio_file: &str,
-        stack: &MockCallStack,
-    ) -> crate::media::FileTrack {
+    /// Simulate file playback for a PlayPrompt command: read the WAV to
+    /// compute its real duration, then emit `AudioComplete` into the
+    /// MockCallStack event channel once that duration elapses.
+    async fn wire_real_playback(audio_file: &str, stack: &MockCallStack) {
         use crate::call::app::ControllerEvent;
-        use crate::media::{FileTrack, PlaybackEndReason};
-        use audio_codec::CodecType;
+        use crate::media::wav_reader::WavReader;
+
+        let duration = std::fs::File::open(audio_file)
+            .ok()
+            .and_then(|f| WavReader::new(f).ok())
+            .map(|r| {
+                let rate = r.spec().sample_rate.max(1);
+                Duration::from_secs_f64(r.duration() as f64 / rate as f64)
+            })
+            .unwrap_or(Duration::from_millis(20));
 
         let tx = stack.event_sender();
-        let track = FileTrack::new("e2e-track".to_string())
-            .with_path(audio_file.to_string())
-            .with_loop(false)
-            .with_codec_preference(vec![CodecType::PCMU])
-            .with_on_end(std::sync::Arc::new(move |reason| {
-                let _ = tx.send(ControllerEvent::AudioComplete {
-                    track_id: "caller".to_string(),
-                    interrupted: matches!(reason, PlaybackEndReason::Interrupted),
-                });
-            }));
-
-        let _ = track.local_description().await;
-        track.start_playback().await.expect("start_playback");
-
-        track
+        crate::utils::spawn(async move {
+            tokio::time::sleep(duration).await;
+            let _ = tx.send(ControllerEvent::AudioComplete {
+                track_id: "caller".to_string(),
+                interrupted: false,
+            });
+        });
     }
 
-    /// Expect the next command to be PlayPrompt matching `expected_path`, start
-    /// real playback, and return the FileTrack.
-    async fn expect_and_play(
-        stack: &mut MockCallStack,
-        expected_path: &str,
-        label: &str,
-    ) -> crate::media::FileTrack {
+    /// Expect the next command to be PlayPrompt matching `expected_path` and
+    /// simulate its playback to completion.
+    async fn expect_and_play(stack: &mut MockCallStack, expected_path: &str, label: &str) {
         let cmd = stack
             .next_cmd(500)
             .await
@@ -1950,13 +1941,13 @@ action = { type = "transfer", target = "100" }
         wire_real_playback(&audio_file, stack).await
     }
 
-    // ── E2E: real FileTrack completion drives IVR AudioComplete ──────────────
+    // ── E2E: simulated playback completion drives IVR AudioComplete ──────────────
 
-    /// End-to-end integration test: a real `FileTrack` playing a real WAV file
+    /// End-to-end integration test: a simulated playback of a real WAV file
     /// fires on_end, which emits `MockCallStack::audio_complete("default")`
     /// — verifying the full pipeline:
     ///
-    ///   IVR emits PlayPrompt → FileTrack starts playback → WAV exhausted →
+    ///   IVR emits PlayPrompt → playback starts → WAV exhausted →
     ///   on_end → AudioComplete injected → IVR advances state
     #[tokio::test]
     async fn test_ivr_real_file_playback_drives_audio_complete() {
@@ -2011,7 +2002,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
 
-        let _track = expect_and_play(&mut stack, &greeting_path, "root greeting").await;
+        expect_and_play(&mut stack, &greeting_path, "root greeting").await;
 
         // Real file completes → IVR enters WaitingDtmf → no command emitted
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2033,7 +2024,7 @@ action = { type = "transfer", target = "100" }
 
     /// Full multi-step e2e: root greeting (real WAV) → DTMF "2" to sub-menu →
     /// sub-menu greeting (real WAV) → DTMF "1" → transfer.
-    /// Verifies that multiple consecutive real FileTrack completions drive the
+    /// Verifies that multiple consecutive simulated playback completions drive the
     /// IVR state machine correctly across menu transitions.
     #[tokio::test]
     async fn test_ivr_e2e_submenu_real_playback() {
@@ -2120,8 +2111,8 @@ action = { type = "transfer", target = "100" }
             })
             .await;
 
-        // Root greeting plays with real FileTrack
-        let _t1 = expect_and_play(&mut stack, &root_wav, "root greeting").await;
+        // Root greeting plays with simulated playback
+        expect_and_play(&mut stack, &root_wav, "root greeting").await;
 
         // Wait for real file completion → IVR enters WaitingDtmf
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2129,8 +2120,8 @@ action = { type = "transfer", target = "100" }
         // Navigate to support sub-menu
         stack.dtmf("2");
 
-        // Sub-menu greeting plays with real FileTrack
-        let _t2 = expect_and_play(&mut stack, &sub_wav, "support greeting").await;
+        // Sub-menu greeting plays with simulated playback
+        expect_and_play(&mut stack, &sub_wav, "support greeting").await;
 
         // Wait for real file completion → IVR enters WaitingDtmf in support menu
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2149,7 +2140,7 @@ action = { type = "transfer", target = "100" }
     // ── E2E: hangup with goodbye prompt using real files ─────────────────────
 
     /// Verifies the full chain: greeting (real WAV) → DTMF "0" → goodbye prompt
-    /// (real WAV) → hangup. Both audio completions are driven by real FileTrack
+    /// (real WAV) → hangup. Both audio completions are driven by simulated playback
     /// completion, not simulated.
     #[tokio::test]
     async fn test_ivr_e2e_hangup_with_real_goodbye() {
@@ -2205,15 +2196,15 @@ action = { type = "transfer", target = "100" }
             })
             .await;
 
-        // Greeting with real FileTrack
-        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        // Greeting with simulated playback
+        expect_and_play(&mut stack, &greeting_wav, "greeting").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Press "0" → IVR plays goodbye prompt
         stack.dtmf("0");
 
-        // Goodbye prompt with real FileTrack
-        let _t2 = expect_and_play(&mut stack, &goodbye_wav, "goodbye").await;
+        // Goodbye prompt with simulated playback
+        expect_and_play(&mut stack, &goodbye_wav, "goodbye").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // After goodbye completes → IVR should hang up
@@ -2281,18 +2272,18 @@ action = { type = "transfer", target = "100" }
             .await;
 
         // 1. Root greeting (real)
-        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 2. Press invalid key "7"
         stack.dtmf("7");
 
         // 3. Invalid prompt plays (real)
-        let _t2 = expect_and_play(&mut stack, &invalid_wav, "invalid prompt").await;
+        expect_and_play(&mut stack, &invalid_wav, "invalid prompt").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 4. After invalid prompt finishes → greeting replays (real)
-        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 5. Press valid key "1" → transfer
@@ -2373,18 +2364,18 @@ action = { type = "transfer", target = "100" }
             .await;
 
         // 1. Root greeting (real)
-        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 2. Press "3" → play announcement
         stack.dtmf("3");
 
         // 3. Announcement plays (real)
-        let _t2 = expect_and_play(&mut stack, &announce_wav, "announcement").await;
+        expect_and_play(&mut stack, &announce_wav, "announcement").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 4. Announcement finishes → returns to root → greeting replays (real)
-        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 5. Press "1" → transfer
@@ -2528,15 +2519,15 @@ action = { type = "transfer", target = "100" }
             .await;
 
         // 1. Initial greeting (real)
-        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting 1").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting 1").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // No DTMF → timeout fires (150ms) → repeat → greeting replays (real)
-        let _t2 = expect_and_play(&mut stack, &greeting_wav, "greeting 2 (retry 1)").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting 2 (retry 1)").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // No DTMF → timeout again → repeat → greeting replays (real)
-        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting 3 (retry 2)").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting 3 (retry 2)").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // No DTMF → timeout → max retries exceeded → hangup
@@ -2609,14 +2600,14 @@ action = { type = "transfer", target = "100" }
             .await;
 
         // Greeting (real)
-        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        expect_and_play(&mut stack, &greeting_wav, "greeting").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Press "4" → PlayAndHangup
         stack.dtmf("4");
 
         // Busy prompt (real)
-        let _t2 = expect_and_play(&mut stack, &busy_wav, "busy prompt").await;
+        expect_and_play(&mut stack, &busy_wav, "busy prompt").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // After busy prompt → hangup with code 486

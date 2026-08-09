@@ -130,9 +130,9 @@ fn run_file_recorder(recorder: &mut Recorder, mut cmd_rx: mpsc::Receiver<FileRec
     while let Some(cmd) = cmd_rx.blocking_recv() {
         match cmd {
             FileRecCmd::Sample(leg, sample, hint) => {
-                let dtmf_pt = recorder_dtmf_pt(recorder, leg);
-                let dtmf_clk = recorder_dtmf_clock_rate(recorder, leg);
-                if let Err(e) = recorder.write_sample(leg, &sample, dtmf_pt, dtmf_clk, hint) {
+                // The Recorder resolves its DTMF PT from the leg profile
+                // internally (with a shape-based fallback).
+                if let Err(e) = recorder.write_sample(leg, &sample, None, None, hint) {
                     warn!("FileRecorder write_sample error: {e}");
                 }
             }
@@ -157,16 +157,6 @@ fn run_file_recorder(recorder: &mut Recorder, mut cmd_rx: mpsc::Receiver<FileRec
             }
         }
     }
-}
-
-fn recorder_dtmf_pt(_recorder: &Recorder, _leg: Leg) -> Option<u8> {
-    // The Recorder already knows its DTMF PT from the leg profile; pass None
-    // and let it resolve internally (it also has a shape-based fallback).
-    None
-}
-
-fn recorder_dtmf_clock_rate(_recorder: &Recorder, _leg: Leg) -> Option<u32> {
-    None
 }
 
 impl MediaRecorder for FileRecorder {

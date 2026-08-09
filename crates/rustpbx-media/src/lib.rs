@@ -8,7 +8,6 @@ pub mod audio_source;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
-pub mod file_track;
 pub mod ingress_tap;
 pub mod leg;
 pub mod leg_id;
@@ -22,29 +21,20 @@ pub mod rtc_track;
 pub mod rtp_track_builder;
 pub mod telephone_event;
 pub mod track;
-pub mod transcoder;
-pub mod transcoding_pipeline;
 pub mod wav_reader;
 pub mod wav_writer;
 
-#[cfg(test)]
-mod file_track_tests;
 #[cfg(test)]
 mod media_track_tests;
 #[cfg(test)]
 mod mixer_e2e_tests;
 #[cfg(test)]
 mod recorder_tests;
-#[cfg(test)]
-mod unified_pc_tests;
 
 // ── Re-exports ──────────────────────────────────────────────────────
 pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
-#[cfg(test)]
-pub(crate) use file_track::audio_frame_timing;
-pub use file_track::{FileTrack, PlaybackEndCallback, PlaybackEndReason};
 pub use leg_id::LegId;
 pub use media_stream::TrackMap;
 pub use media_stream::{MediaStream, MediaStreamBuilder};
@@ -53,7 +43,6 @@ pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;
 pub use track::Track;
-pub use transcoder::Transcoder;
 
 // ── Shared utility types ────────────────────────────────────────────
 
@@ -72,33 +61,4 @@ pub fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
-#[derive(Debug, Clone)]
-pub struct ReceiveTimestampClock {
-    base_instant: std::time::Instant,
-    base_epoch_micros: u64,
-}
 
-impl ReceiveTimestampClock {
-    pub fn new() -> Self {
-        let base_epoch_micros = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_micros() as u64)
-            .unwrap_or_default();
-
-        Self {
-            base_instant: std::time::Instant::now(),
-            base_epoch_micros,
-        }
-    }
-
-    pub fn now_micros(&self) -> u64 {
-        self.base_epoch_micros
-            .saturating_add(self.base_instant.elapsed().as_micros() as u64)
-    }
-}
-
-impl Default for ReceiveTimestampClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}

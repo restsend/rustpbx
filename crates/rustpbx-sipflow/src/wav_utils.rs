@@ -7,7 +7,7 @@ use std::{
 
 use crate::{SipFlowItem, SipFlowMsgType, extract_rtp_addr, extract_sdp};
 
-fn dtmf_code_to_char(code: u8) -> Option<char> {
+pub fn dtmf_code_to_char(code: u8) -> Option<char> {
     match code {
         0..=9 => Some((b'0' + code) as char),
         10 => Some('*'),
@@ -59,17 +59,22 @@ fn extract_codecs_from_sdp(sdp: &str) -> Vec<CodecInfo> {
     codecs
 }
 
-struct DtmfGen {
+/// Dual-tone DTMF synthesizer (standard 697–941 Hz × 1209–1633 Hz matrix).
+pub struct DtmfGenerator {
     sample_rate: u32,
 }
 
-impl DtmfGen {
-    fn new(sample_rate: u32) -> Self {
+impl DtmfGenerator {
+    pub fn new(sample_rate: u32) -> Self {
         Self { sample_rate }
     }
 
-    fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
+    pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
         let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
+        self.generate_samples(digit, num_samples)
+    }
+
+    pub fn generate_samples(&self, digit: char, num_samples: usize) -> Vec<i16> {
         let freqs = match digit {
             '1' => (697.0, 1209.0),
             '2' => (697.0, 1336.0),
@@ -315,7 +320,7 @@ fn parse_dtmf_payload(payload: &[u8], clock_rate: u32) -> Option<(char, u32)> {
     Some((digit, duration_ms.max(20)))
 }
 
-fn looks_like_dtmf_payload(payload: &[u8]) -> bool {
+pub fn looks_like_dtmf_payload(payload: &[u8]) -> bool {
     if payload.len() != 4 {
         return false;
     }
@@ -329,7 +334,7 @@ fn encode_dtmf_tone(
     target_codec: Option<CodecType>,
     target_sample_rate: u32,
 ) -> Vec<u8> {
-    let generator = DtmfGen::new(target_sample_rate);
+    let generator = DtmfGenerator::new(target_sample_rate);
     let pcm = generator.generate(digit, duration_ms);
 
     match target_codec {

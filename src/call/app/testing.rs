@@ -166,8 +166,8 @@ impl MockCallStack {
     }
 
     /// Return a clone of the event sender so callers can inject events
-    /// asynchronously (e.g. from a background task wired to a real FileTrack
-    /// completion_notify).
+    /// asynchronously (e.g. from a background task simulating playback
+    /// completion).
     pub fn event_sender(&self) -> mpsc::UnboundedSender<ControllerEvent> {
         self.event_tx.clone()
     }

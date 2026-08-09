@@ -299,22 +299,4 @@ async fn test_full_duplex_media_bridge() {
     manager.destroy_conference(&"conf4".into()).await.unwrap();
 }
 
-#[tokio::test]
-async fn test_transcoding_pipeline() {
-    use audio_codec::CodecType;
-    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
 
-    let pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);
-
-    // Create test PCM audio
-    let pcm: Vec<i16> = (0..160).map(|i| (i as i16 * 100) % 32767).collect();
-    let encoded = pipeline.encode_from_pcm(&pcm);
-    let decoded = pipeline.decode_to_pcm(&encoded);
-
-    // Verify encode/decode round-trip produces same length output
-    assert_eq!(
-        decoded.len(),
-        pcm.len(),
-        "Round-trip should preserve length"
-    );
-}

@@ -12,7 +12,6 @@ use crate::negotiate;
 pub struct RtcTrack {
     track_id: String,
     pc: PeerConnection,
-    rtp_map: Vec<negotiate::CodecInfo>,
     muted: std::sync::atomic::AtomicBool,
     sender: Option<SampleStreamSource>,
 }
@@ -41,7 +40,6 @@ impl RtcTrack {
         Self {
             track_id,
             pc,
-            rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
             sender: Some(tx),
         }
@@ -82,18 +80,9 @@ impl RtcTrack {
         Self {
             track_id,
             pc,
-            rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
             sender: Some(tx),
         }
-    }
-
-    async fn set_local(&self, pc: &PeerConnection, desc: SessionDescription) -> Result<String> {
-        pc.set_local_description(desc)?;
-        let desc = pc
-            .local_description()
-            .ok_or_else(|| anyhow!("missing local description"))?;
-        Ok(desc.to_sdp_string())
     }
 
     async fn set_remote(&self, pc: &PeerConnection, sdp: &str, ty: SdpType) -> Result<()> {
@@ -135,7 +124,7 @@ impl Track for RtcTrack {
                 return Err(anyhow!("unsupported answer SDP type: {:?}", answer_type));
             }
         }
-        let sdp = self.set_local(&self.pc, answer).await?;
+        let sdp = crate::leg::set_local(&self.pc, answer)?;
         Ok(sdp)
     }
 
@@ -143,7 +132,7 @@ impl Track for RtcTrack {
         self.pc.wait_for_gathering_complete().await;
         match self.pc.create_offer().await {
             Ok(offer) => {
-                let sdp = self.set_local(&self.pc, offer).await?;
+                let sdp = crate::leg::set_local(&self.pc, offer)?;
                 Ok(sdp)
             }
             Err(e) => {
@@ -171,10 +160,6 @@ impl Track for RtcTrack {
         Some(self.pc.clone())
     }
 
-    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
-        self.rtp_map.first().cloned()
-    }
-
     async fn set_muted(&self, muted: bool) -> bool {
         self.muted
             .store(muted, std::sync::atomic::Ordering::Relaxed);
@@ -187,10 +172,6 @@ impl Track for RtcTrack {
 
     fn get_sender(&self) -> Option<SampleStreamSource> {
         self.sender.clone()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 

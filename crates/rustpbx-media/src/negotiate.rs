@@ -1,4 +1,3 @@
-use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription, TransportMode};
 use std::collections::{HashMap, HashSet};
@@ -81,13 +80,6 @@ pub struct ExtractedCodecs {
     pub dtmf: Vec<CodecInfo>,
 }
 
-/// Complete negotiation result
-#[derive(Debug, Clone)]
-pub struct NegotiationResult {
-    pub codec: CodecType,
-    pub params: rustrtc::RtpCodecParameters,
-    pub dtmf_pt: Option<u8>,
-}
 
 /// A single negotiated codec with its RTP parameters from SDP answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,19 +162,6 @@ impl Default for NegotiatedLegProfile {
 }
 
 impl NegotiatedLegProfile {
-    /// Build a `{payload_type → CodecInfo}` map for this leg's audio + DTMF
-    /// codecs. Used by the bridge's `LegEgressEncoder` to resolve incoming
-    /// PTs without re-parsing SDP on every packet.
-    pub fn build_pt_map(&self) -> std::collections::HashMap<u8, CodecInfo> {
-        let mut map = std::collections::HashMap::new();
-        if let Some(audio) = &self.audio {
-            map.insert(audio.payload_type, audio.to_codec_info());
-        }
-        if let Some(dtmf) = &self.dtmf {
-            map.insert(dtmf.payload_type, dtmf.to_codec_info());
-        }
-        map
-    }
 
     /// All telephone-event PTs configured for this leg.
     pub fn dtmf_pts(&self) -> std::collections::HashSet<u8> {
@@ -194,12 +173,6 @@ impl NegotiatedLegProfile {
     }
 }
 
-/// Bridge codec lists for caller-facing and callee-facing sides.
-#[derive(Debug, Clone)]
-pub struct BridgeCodecLists {
-    pub caller_side: Vec<CodecInfo>,
-    pub callee_side: Vec<CodecInfo>,
-}
 
 /// Media negotiator for SDP parsing and codec selection
 pub struct MediaNegotiator;
@@ -377,71 +350,8 @@ impl MediaNegotiator {
         Self::extract_codec_params(sdp_str).dtmf
     }
 
-    /// Select the best common codec from the remote (answerer) codec list.
-    ///
-    /// Rules (in order of priority):
-    /// 1. Respect the remote party's SDP order (first = most preferred).
-    /// 2. Skip `telephone-event` (handled separately).
-    /// 3. Filter by `allow_codecs` — if empty, all codecs are allowed.
-    /// 4. If the first candidate is not allowed, continue scanning the list
-    ///    to find the first codec that IS in `allow_codecs`.
-    pub fn select_best_codec(
-        remote_codecs: &[CodecInfo],
-        allowed_codecs: &[CodecType],
-    ) -> Option<CodecInfo> {
-        remote_codecs
-            .iter()
-            .filter(|c| c.codec != CodecType::TelephoneEvent)
-            .find(|c| allowed_codecs.is_empty() || allowed_codecs.contains(&c.codec))
-            .cloned()
-    }
 
-    /// Extract all codec information from SDP
-    pub fn extract_all_codecs(sdp_str: &str) -> Vec<CodecInfo> {
-        let extracted = Self::extract_codec_params(sdp_str);
-        extracted.audio.into_iter().chain(extracted.dtmf).collect()
-    }
 
-    /// Negotiate codec between two SDP offers/answers
-    /// Returns the selected codec info
-    pub fn negotiate_codec(
-        local_codecs: &[CodecType],
-        remote_sdp: &str,
-    ) -> Result<NegotiationResult> {
-        let remote_codecs = Self::extract_all_codecs(remote_sdp);
-
-        // Find first matching codec (prioritize local order)
-        for local_codec in local_codecs {
-            if let Some(remote) = remote_codecs
-                .iter()
-                .find(|r| r.codec == *local_codec && r.codec != CodecType::TelephoneEvent)
-            {
-                let params = rustrtc::RtpCodecParameters {
-                    payload_type: remote.payload_type,
-                    clock_rate: remote.clock_rate,
-                    channels: if remote.channels > 255 {
-                        255
-                    } else {
-                        remote.channels as u8
-                    },
-                };
-
-                let remote_dtmf_codecs: Vec<_> = remote_codecs
-                    .iter()
-                    .filter(|r| r.codec == CodecType::TelephoneEvent)
-                    .cloned()
-                    .collect();
-
-                return Ok(NegotiationResult {
-                    codec: remote.codec,
-                    params,
-                    dtmf_pt: remote_dtmf_codecs.first().map(|codec| codec.payload_type),
-                });
-            }
-        }
-
-        Err(anyhow!("No compatible codec found"))
-    }
 
     /// Build default codec list for RTP endpoints
     pub fn default_rtp_codecs() -> Vec<CodecType> {
@@ -688,169 +598,6 @@ impl MediaNegotiator {
         caps
     }
 
-    fn attr_payload_type(attr: &rustrtc::sdp::Attribute) -> Option<u8> {
-        let value = attr.value.as_ref()?;
-        value.split_whitespace().next()?.parse::<u8>().ok()
-    }
-
-    /// Restrict generated SDP video to the subset of codecs that also appear in
-    /// a reference SDP, and mirror reference media directions.
-    ///
-    /// The generated SDP stays the source of truth for WebRTC-specific SDP, ICE,
-    /// DTLS, and candidates. Audio codecs are not filtered here; all generated
-    /// audio SDP should be rewritten by the shared codec policy helpers.
-    pub fn restrict_sdp_to_reference_codecs(
-        sdp_type: SdpType,
-        sdp: &str,
-        reference_sdp_type: SdpType,
-        reference_sdp: &str,
-    ) -> Option<String> {
-        let mut desc = SessionDescription::parse(sdp_type, sdp).ok()?;
-        let reference_desc = SessionDescription::parse(reference_sdp_type, reference_sdp).ok()?;
-        let source_video_caps = desc.to_video_capabilities();
-        let reference_video_caps = reference_desc.to_video_capabilities();
-
-        if let Some(audio_section) = desc
-            .media_sections
-            .iter_mut()
-            .find(|section| section.kind == MediaKind::Audio)
-        {
-            if let Some(reference_audio) = reference_desc
-                .media_sections
-                .iter()
-                .find(|section| section.kind == MediaKind::Audio)
-            {
-                audio_section.direction = reference_audio.direction;
-            }
-        }
-
-        if let Some(reference_video) = reference_desc
-            .media_sections
-            .iter()
-            .find(|section| section.kind == MediaKind::Video)
-            && let Some(video_section) = desc
-                .media_sections
-                .iter_mut()
-                .find(|section| section.kind == MediaKind::Video)
-        {
-            if reference_video.port == 0 {
-                video_section.port = 0;
-                video_section.direction = rustrtc::Direction::Inactive;
-                return Some(desc.to_sdp_string());
-            }
-
-            let accepted_by_reference: HashSet<(String, u32)> = reference_video_caps
-                .iter()
-                .map(|cap| (cap.codec_name.to_ascii_uppercase(), cap.clock_rate))
-                .collect();
-
-            if !accepted_by_reference.is_empty() {
-                video_section.direction = reference_video.direction;
-
-                let mut allowed_pts = Vec::new();
-                let mut seen_pts = HashSet::new();
-                for cap in &source_video_caps {
-                    let signature = (cap.codec_name.to_ascii_uppercase(), cap.clock_rate);
-                    if accepted_by_reference.contains(&signature)
-                        && seen_pts.insert(cap.payload_type)
-                    {
-                        allowed_pts.push(cap.payload_type);
-                    }
-                }
-
-                let allowed_video_pts: HashSet<u8> = allowed_pts.into_iter().collect();
-                if allowed_video_pts.is_empty() {
-                    return None;
-                }
-
-                video_section.formats.retain(|pt| {
-                    pt.parse::<u8>()
-                        .is_ok_and(|pt| allowed_video_pts.contains(&pt))
-                });
-                video_section
-                    .attributes
-                    .retain(|attr| match attr.key.as_str() {
-                        "rtpmap" | "fmtp" => Self::attr_payload_type(attr)
-                            .is_none_or(|pt| allowed_video_pts.contains(&pt)),
-                        "rtcp-fb" => {
-                            let pt = attr
-                                .value
-                                .as_deref()
-                                .and_then(|value| value.split_whitespace().next());
-                            pt.is_none_or(|pt| {
-                                pt == "*"
-                                    || pt
-                                        .parse::<u8>()
-                                        .is_ok_and(|pt| allowed_video_pts.contains(&pt))
-                            })
-                        }
-                        _ => true,
-                    });
-            }
-        }
-
-        Some(desc.to_sdp_string())
-    }
-
-    pub fn sanitize_sdp_for_rtp_peer(
-        sdp_type: SdpType,
-        sdp: &str,
-        context: &str,
-    ) -> Result<String> {
-        let mut desc = SessionDescription::parse(sdp_type, sdp)
-            .map_err(|e| anyhow!("Failed to parse {} SDP: {}", context, e))?;
-
-        desc.session
-            .attributes
-            .retain(Self::keep_rtp_peer_session_attribute);
-        for section in &mut desc.media_sections {
-            section.mid.clear();
-            section
-                .attributes
-                .retain(Self::keep_rtp_peer_media_attribute);
-        }
-
-        Ok(desc.to_sdp_string())
-    }
-
-    fn keep_rtp_peer_session_attribute(attr: &Attribute) -> bool {
-        match attr.key.as_str() {
-            "group" => attr
-                .value
-                .as_deref()
-                .map(|value| !value.trim_start().starts_with("BUNDLE"))
-                .unwrap_or(true),
-            "msid-semantic" | "ice-lite" | "ice-ufrag" | "ice-pwd" | "ice-options"
-            | "fingerprint" | "setup" | "candidate" | "end-of-candidates" | "extmap" => false,
-            _ => true,
-        }
-    }
-
-    fn keep_rtp_peer_media_attribute(attr: &Attribute) -> bool {
-        !matches!(
-            attr.key.as_str(),
-            "mid"
-                | "msid"
-                | "bundle-only"
-                | "rtcp-mux"
-                | "rtcp-mux-only"
-                | "rtcp-rsize"
-                | "ice-ufrag"
-                | "ice-pwd"
-                | "ice-options"
-                | "fingerprint"
-                | "setup"
-                | "candidate"
-                | "end-of-candidates"
-                | "extmap"
-                | "rtcp-fb"
-                | "rid"
-                | "simulcast"
-                | "ssrc"
-                | "ssrc-group"
-        )
-    }
-
     /// Build codec list for an outgoing offer to the callee.
     ///
     /// Algorithm:
@@ -993,39 +740,6 @@ impl MediaNegotiator {
         }
     }
 
-    /// Build a codec list constrained by an offer and an ordered preference list.
-    ///
-    /// The returned audio codecs are always a subset of the offer and keep the
-    /// order of `preferred_codecs`. When `preferred_codecs` is empty, or none
-    /// of the preferred codecs exists in the offer, this falls back to the
-    /// offer's audio codec order.
-    /// Build both caller-side and callee-side codec lists for a bridge.
-    ///
-    /// `caller_sdp` is the SDP from the caller.
-    /// `caller_is_webrtc` / `callee_is_webrtc` control WebRTC-specific filtering
-    /// (e.g., G729 removal from WebRTC sides).
-    /// `allow_codecs` specifies the allowed codec set (pass-through or generated).
-    pub fn build_bridge_codec_lists(
-        caller_sdp: &str,
-        caller_is_webrtc: bool,
-        callee_is_webrtc: bool,
-        allow_codecs: &[CodecType],
-    ) -> BridgeCodecLists {
-        let mut caller_side = Self::build_codec_list_from_offer(caller_sdp, allow_codecs);
-        let mut callee_side = Self::build_callee_codec_offer_with_allow(caller_sdp, allow_codecs);
-
-        if caller_is_webrtc {
-            caller_side = Self::filter_webrtc_offer_codecs(caller_sdp, caller_side);
-        }
-        if callee_is_webrtc {
-            callee_side = Self::filter_webrtc_offer_codecs(caller_sdp, callee_side);
-        }
-
-        BridgeCodecLists {
-            caller_side,
-            callee_side,
-        }
-    }
 
     pub fn build_codec_list_from_offer(
         offer_sdp: &str,
@@ -1286,39 +1000,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_negotiate_codec() {
-        let local_codecs = vec![CodecType::PCMU, CodecType::PCMA];
 
-        let remote_sdp = "v=0\r\n\
-            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
-            s=-\r\n\
-            t=0 0\r\n\
-            m=audio 10000 RTP/AVP 8 101\r\n\
-            a=rtpmap:8 PCMA/8000\r\n\
-            a=rtpmap:101 telephone-event/8000\r\n";
-
-        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp).unwrap();
-
-        assert_eq!(result.codec, CodecType::PCMA);
-        assert_eq!(result.params.payload_type, 8);
-        assert_eq!(result.dtmf_pt, Some(101));
-    }
-
-    #[test]
-    fn test_negotiate_codec_no_match() {
-        let local_codecs = vec![CodecType::Opus];
-
-        let remote_sdp = "v=0\r\n\
-            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
-            s=-\r\n\
-            t=0 0\r\n\
-            m=audio 10000 RTP/AVP 0\r\n\
-            a=rtpmap:0 PCMU/8000\r\n";
-
-        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp);
-        assert!(result.is_err());
-    }
 
     #[test]
     fn test_default_codecs() {
@@ -1430,88 +1112,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_select_best_codec_with_preference() {
-        // Simulating Answer codecs where remote peer chose G722 first, then PCMU
-        let codecs = vec![
-            CodecInfo {
-                payload_type: 9,
-                codec: CodecType::G722,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-        ];
 
-        // RFC 3264: Respect remote (answerer's) preference
-        // Even if our preference is [PCMU, G722], we should respect the Answer order
-        let allowed = vec![CodecType::PCMU, CodecType::G722];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        // Should pick G722 because it's first in the Answer (remote preference)
-        assert_eq!(best.codec, CodecType::G722);
-
-        // If our allowed list is [G722, PCMU], still pick G722 (first in remote)
-        let allowed = vec![CodecType::G722, CodecType::PCMU];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::G722);
-
-        // Only allow PCMU - should scan past G722 to find PCMU
-        let allowed = vec![CodecType::PCMU];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::PCMU);
-
-        // Empty allowed list - should follow remote order (first codec)
-        let allowed = vec![];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::G722);
-    }
-
-    #[test]
-    fn test_select_best_codec_skips_telephone_event() {
-        // Simulating Answer with TelephoneEvent as first codec (should be skipped)
-        let codecs = vec![
-            CodecInfo {
-                payload_type: 101,
-                codec: CodecType::TelephoneEvent,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: Some("0-16".to_string()),
-            },
-            CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 8,
-                codec: CodecType::PCMA,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-        ];
-
-        // Should skip TelephoneEvent and pick PCMU (first audio codec)
-        let allowed = vec![CodecType::PCMU, CodecType::PCMA];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::PCMU);
-        assert_ne!(best.codec, CodecType::TelephoneEvent);
-
-        // Empty allowed list - should skip TelephoneEvent and pick first audio codec
-        let allowed = vec![];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::PCMU);
-        assert_ne!(best.codec, CodecType::TelephoneEvent);
-    }
 
     #[test]
     fn test_g722_clock_rate_preserves_sdp_value() {
@@ -1550,63 +1151,6 @@ mod tests {
         assert_eq!(g729_info.unwrap().clock_rate, 8000);
     }
 
-    #[test]
-    fn test_answer_codec_selection_respects_answerer_preference() {
-        // Simulating the scenario from user's log:
-        // rustpbx sent INVITE with: 96(G729), 9(G722), 0(PCMU), 8(PCMA), 111(Opus)
-        // alice answered with:     0(PCMU), 8(PCMA), 9(G722), 18(G729), 111(Opus)
-        // RFC 3264: We MUST use PCMU (alice's first choice), not G729 (our first choice)
-
-        let answer_codecs = vec![
-            CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 8,
-                codec: CodecType::PCMA,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 9,
-                codec: CodecType::G722,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 18,
-                codec: CodecType::G729,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-        ];
-
-        // Our preference was G729 first, but we should respect alice's choice (PCMU)
-        let our_offer_order = vec![
-            CodecType::G729,
-            CodecType::G722,
-            CodecType::PCMU,
-            CodecType::PCMA,
-        ];
-
-        let selected = MediaNegotiator::select_best_codec(&answer_codecs, &our_offer_order);
-        assert!(selected.is_some(), "Should find a matching codec");
-
-        let selected = selected.unwrap();
-        assert_eq!(
-            selected.codec,
-            CodecType::PCMU,
-            "Must use PCMU (answerer's first choice), not G729 (offerer's first choice)"
-        );
-        assert_eq!(selected.payload_type, 0);
-    }
 
     // ── Bridge codec list tests ──────────────────────────────────
 
@@ -2078,224 +1622,9 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert_eq!(callee_audio.len(), 3);
     }
 
-    #[test]
-    fn test_restrict_sdp_to_reference_codecs_preserves_caller_payload_types() {
-        let answer_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 96 0 110 126\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:0\r\n\
-a=sendrecv\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:96 opus/48000/2\r\n\
-a=fmtp:96 minptime=10;useinbandfec=1\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:110 telephone-event/48000\r\n\
-a=fmtp:110 0-16\r\n\
-a=rtpmap:126 telephone-event/8000\r\n\
-a=fmtp:126 0-16\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96 97 103 104\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:1\r\n\
-a=sendrecv\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:96 VP8/90000\r\n\
-a=rtcp-fb:96 nack pli\r\n\
-a=rtpmap:97 rtx/90000\r\n\
-a=fmtp:97 apt=96\r\n\
-a=rtpmap:103 H264/90000\r\n\
-a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
-a=rtcp-fb:103 nack pli\r\n\
-a=rtpmap:104 rtx/90000\r\n\
-a=fmtp:104 apt=103\r\n";
 
-        let callee_answer = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 9 RTP/AVP 111 0 101\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=fmtp:111 useinbandfec=1\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n\
-a=fmtp:101 0-16\r\n\
-m=video 50035 RTP/AVP 103\r\n\
-c=IN IP4 127.0.0.1\r\n\
-a=recvonly\r\n\
-a=rtpmap:103 H264/90000\r\n\
-a=fmtp:103 profile-level-id=42801F; packetization-mode=1\r\n";
 
-        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
-            SdpType::Answer,
-            answer_sdp,
-            SdpType::Answer,
-            callee_answer,
-        )
-        .unwrap();
 
-        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 96 0 110 126"));
-        assert!(filtered.contains("a=rtpmap:96 opus/48000/2"));
-        assert!(filtered.contains("a=rtpmap:0 PCMU/8000"));
-        assert!(filtered.contains("a=rtpmap:110 telephone-event/48000"));
-        assert!(filtered.contains("a=rtpmap:126 telephone-event/8000"));
-        assert!(!filtered.contains("a=rtpmap:101 telephone-event/8000"));
-        assert!(filtered.contains("m=video 9 UDP/TLS/RTP/SAVPF 103"));
-        assert!(filtered.contains("a=recvonly"));
-        assert!(filtered.contains("a=rtpmap:103 H264/90000"));
-        assert!(filtered.contains(
-            "a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
-        ));
-        assert!(!filtered.contains("a=rtpmap:96 VP8/90000"));
-        assert!(!filtered.contains("a=rtpmap:97 rtx/90000"));
-        assert!(!filtered.contains("profile-level-id=42801F"));
-    }
-
-    #[test]
-    fn test_restrict_sdp_to_reference_codecs_propagates_rejected_video() {
-        let answer_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-a=group:BUNDLE 0 1\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111 9\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:0\r\n\
-a=sendrecv\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=rtpmap:9 G722/8000\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 103\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:1\r\n\
-a=sendrecv\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:103 H264/90000\r\n\
-a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n";
-
-        let callee_answer = "v=0\r\n\
-o=- 1 1 IN IP4 192.168.3.7\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 4012 RTP/AVP 9\r\n\
-c=IN IP4 192.168.3.7\r\n\
-a=sendrecv\r\n\
-a=rtpmap:9 G722/8000\r\n\
-m=video 0 RTP/AVP 103\r\n\
-c=IN IP4 127.0.0.1\r\n";
-
-        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
-            SdpType::Answer,
-            answer_sdp,
-            SdpType::Answer,
-            callee_answer,
-        )
-        .unwrap();
-
-        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 9"));
-        assert!(filtered.contains("m=video 0 UDP/TLS/RTP/SAVPF 103"));
-        assert!(filtered.contains("a=mid:1"));
-        assert!(filtered.contains("a=inactive"));
-        assert!(filtered.contains("a=rtpmap:103 H264/90000"));
-    }
-
-    #[test]
-    fn test_restrict_answer_preserves_rtp_video_attributes_for_rtp_caller() {
-        let answer_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-c=IN IP4 127.0.0.1\r\n\
-t=0 0\r\n\
-m=audio 18238 RTP/AVP 96 0 8 9 101 97\r\n\
-a=sendrecv\r\n\
-a=rtpmap:96 opus/48000/2\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:9 G722/8000\r\n\
-a=rtpmap:101 telephone-event/48000\r\n\
-a=rtpmap:97 telephone-event/8000\r\n\
-m=video 16756 RTP/AVP 96\r\n\
-a=sendrecv\r\n\
-a=rtpmap:96 H264/90000\r\n\
-a=fmtp:96 profile-level-id=42801F\r\n\
-a=rtcp-fb:96 nack pli\r\n";
-
-        let callee_answer = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-a=group:BUNDLE 0 1\r\n\
-m=audio 50013 UDP/TLS/RTP/SAVPF 96 0 8 9 101 97\r\n\
-c=IN IP4 192.168.139.3\r\n\
-a=mid:0\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:96 opus/48000/2\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:1\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:96 H264/90000\r\n\
-a=rtcp-fb:96 ccm fir\r\n\
-a=rtcp-fb:96 nack pli\r\n\
-a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n";
-
-        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
-            SdpType::Answer,
-            answer_sdp,
-            SdpType::Answer,
-            callee_answer,
-        )
-        .unwrap();
-
-        assert!(filtered.contains("m=video 16756 RTP/AVP 96"));
-        assert!(filtered.contains("a=rtpmap:96 H264/90000"));
-        assert!(filtered.contains("a=fmtp:96 profile-level-id=42801F"));
-        assert!(!filtered.contains("profile-level-id=42001f"));
-    }
-
-    #[test]
-    fn test_restrict_sdp_to_reference_codecs_can_keep_transcoded_audio() {
-        let answer_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 126\r\n\
-c=IN IP4 0.0.0.0\r\n\
-a=mid:0\r\n\
-a=sendrecv\r\n\
-a=rtcp-mux\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=rtpmap:9 G722/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:126 telephone-event/8000\r\n\
-a=fmtp:126 0-16\r\n";
-
-        let callee_answer = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 55277 RTP/AVP 18 126\r\n\
-c=IN IP4 127.0.0.1\r\n\
-a=sendrecv\r\n\
-a=rtpmap:18 G729/8000\r\n\
-a=fmtp:18 annexb=yes\r\n\
-a=rtpmap:126 telephone-event/8000\r\n";
-
-        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
-            SdpType::Answer,
-            answer_sdp,
-            SdpType::Answer,
-            callee_answer,
-        )
-        .unwrap();
-
-        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 126"));
-        assert!(filtered.contains("a=rtpmap:111 opus/48000/2"));
-        assert!(filtered.contains("a=rtpmap:126 telephone-event/8000"));
-    }
 
     /// to_audio_capability converts all known codecs
     #[test]
@@ -2742,103 +2071,9 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(rewritten.contains("a=fmtp:102 0-16\r\n"));
     }
 
-    #[test]
-    fn test_negotiate_codec_g722_selected_when_first_in_local() {
-        let local_codecs = vec![CodecType::G722, CodecType::PCMU, CodecType::PCMA];
-        let remote_sdp = "v=0\r\n\
-            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
-            s=-\r\n\
-            t=0 0\r\n\
-            m=audio 10000 RTP/AVP 0 9 8 101\r\n\
-            a=rtpmap:0 PCMU/8000\r\n\
-            a=rtpmap:9 G722/8000\r\n\
-            a=rtpmap:8 PCMA/8000\r\n\
-            a=rtpmap:101 telephone-event/8000\r\n";
 
-        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp).unwrap();
-        assert_eq!(
-            result.codec,
-            CodecType::G722,
-            "G722 is first in local preference and present in remote, should be selected"
-        );
-        assert_eq!(result.params.payload_type, 9);
-    }
 
-    #[test]
-    fn test_negotiate_codec_g729_selected() {
-        let local_codecs = vec![CodecType::G729, CodecType::PCMU];
-        let remote_sdp = "v=0\r\n\
-            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
-            s=-\r\n\
-            t=0 0\r\n\
-            m=audio 10000 RTP/AVP 0 18 101\r\n\
-            a=rtpmap:0 PCMU/8000\r\n\
-            a=rtpmap:18 G729/8000\r\n\
-            a=rtpmap:101 telephone-event/8000\r\n";
 
-        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp).unwrap();
-        assert_eq!(
-            result.codec,
-            CodecType::G729,
-            "G729 is first in local preference and present in remote"
-        );
-        assert_eq!(result.params.payload_type, 18);
-    }
-
-    #[test]
-    fn test_select_best_codec_g722_first_in_remote() {
-        let codecs = vec![
-            CodecInfo {
-                payload_type: 9,
-                codec: CodecType::G722,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-        ];
-        let allowed: Vec<CodecType> = vec![];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(
-            best.codec,
-            CodecType::G722,
-            "G722 first in remote, empty allow → pick G722"
-        );
-    }
-
-    #[test]
-    fn test_select_best_codec_g729_allowed() {
-        let codecs = vec![
-            CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-            CodecInfo {
-                payload_type: 18,
-                codec: CodecType::G729,
-                clock_rate: 8000,
-                channels: 1,
-                fmtp: None,
-            },
-        ];
-        let allowed = vec![CodecType::G729];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(
-            best.codec,
-            CodecType::G729,
-            "Only G729 allowed, scan past PCMU"
-        );
-        assert_eq!(best.payload_type, 18);
-    }
 
     /// A WebRTC answer can negotiate TWO telephone-event payload types — e.g.
     /// `110 telephone-event/48000` alongside `126 telephone-event/8000`.
@@ -3038,37 +2273,4 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
     }
 
-    #[test]
-    fn test_sanitize_sdp_for_rtp_peer_removes_webrtc_video_metadata() {
-        let sdp = "v=0\r\n\
-            o=- 1 1 IN IP4 127.0.0.1\r\n\
-            s=-\r\n\
-            t=0 0\r\n\
-            m=video 10000 RTP/AVP 96\r\n\
-            a=mid:1\r\n\
-            a=rtcp-mux\r\n\
-            a=rtpmap:96 H264/90000\r\n\
-            a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
-            a=rtcp-fb:96 goog-remb\r\n\
-            a=rtcp-fb:96 transport-cc\r\n\
-            a=rtcp-fb:96 nack\r\n\
-            a=rtcp-fb:96 nack pli\r\n\
-            a=rtcp-fb:96 ccm fir\r\n\
-            a=ssrc:1234 cname:test\r\n\
-            a=ssrc-group:FID 1234 5678\r\n";
-
-        let sanitized =
-            MediaNegotiator::sanitize_sdp_for_rtp_peer(SdpType::Offer, sdp, "test RTP offer")
-                .unwrap();
-
-        assert!(sanitized.contains("a=rtpmap:96 H264/90000\r\n"));
-        assert!(sanitized.contains("a=fmtp:96 packetization-mode=1"));
-        assert!(!sanitized.contains("a=mid:"));
-        assert!(!sanitized.contains("a=rtcp-mux"));
-        assert!(!sanitized.contains("goog-remb"));
-        assert!(!sanitized.contains("transport-cc"));
-        assert!(!sanitized.contains("a=rtcp-fb:"));
-        assert!(!sanitized.contains("a=ssrc:"));
-        assert!(!sanitized.contains("a=ssrc-group:"));
-    }
 }

@@ -387,10 +387,6 @@ impl LegInner {
     /// answer as UAC). Also extracts and stores the negotiated profile and
     /// refreshes the egress codec + DTMF payload types.
     pub async fn apply_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<String> {
-        // DTLS fingerprint check (R2): reject BEFORE mutating the PC so a bad
-        // re-INVITE cannot half-apply (Bug B root cause).
-        check_dtls_compatible(self.negotiated(), remote)?;
-
         let desc = SessionDescription::parse(sdp_type, remote)
             .map_err(|e| anyhow!("failed to parse remote sdp: {:?}", e))?;
         self.pc
@@ -581,48 +577,6 @@ impl LegInner {
     }
 
     /// Put the leg on hold: play hold music (looping) or silence.
-    /// Caller ([`crate::media_bridge::MediaBridge`]) must clear any rewrite
-    /// bridge first so the remote peer hears only the hold source.
-    pub async fn hold(
-        &self,
-        music: Option<Box<dyn crate::audio_source::AudioSource>>,
-    ) -> Result<()> {
-        match music {
-            Some(audio) => self.play(audio, true, None).await,
-            None => self.mute().await,
-        }
-    }
-
-    /// Resume from hold / play: restore egress to silence.
-    /// Caller must re-arm the rewrite bridge if the leg is still routed.
-    pub async fn resume(&self) -> Result<()> {
-        self.mute().await
-    }
-
-    /// Mute the leg (send silence).
-    pub async fn mute(&self) -> Result<()> {
-        self.set_egress_source(EgressSource::Silence).await
-    }
-
-    /// Non-blocking variant of [`Self::set_egress_source`].
-    pub fn try_set_egress_source(&self, source: EgressSource) -> Result<()> {
-        let is_relay = matches!(&source, EgressSource::RewriteRelay { .. });
-        let prev_was_relay = self.was_relay.swap(is_relay, Ordering::SeqCst);
-
-        match &source {
-            EgressSource::RewriteRelay { peer_pc, options, rules } => {
-                self.pc.clear_rtp_rewrite_bridge();
-                self.pc.bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
-            }
-            _ if prev_was_relay => {
-                self.pc.clear_rtp_rewrite_bridge();
-            }
-            _ => {}
-        }
-
-        self.egress.try_set_source(source)
-    }
-
     /// Send RTP DTMF digits (RFC 2833 / RFC 4733 telephone-event) to the leg's
     /// remote peer via the egress sender.
     ///
@@ -803,7 +757,7 @@ fn audio_capability_from_codec(c: &CodecInfo) -> rustrtc::config::AudioCapabilit
     }
 }
 
-fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result<String> {
+pub(crate) fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result<String> {
     pc.set_local_description(desc)?;
     let desc = pc
         .local_description()
@@ -824,17 +778,6 @@ fn sync_sender_codec(pc: &PeerConnection, payload_type: u8, clock_rate: u32, cha
             });
         }
     }
-}
-
-/// R2: if the PC has already started its DTLS transport, reject a remote SDP
-/// whose fingerprint differs (rustrtc would error mid-apply, half-mutating).
-fn check_dtls_compatible(prev: Option<NegotiatedLegProfile>, _new_sdp: &str) -> Result<()> {
-    // The authoritative check is rustrtc's (peer_connection.rs set_remote). We
-    // additionally surface a clear error here when a previous profile exists.
-    // Full fingerprint comparison is left to rustrtc; this is a no-op guard
-    // that documents the contract.
-    let _ = prev;
-    Ok(())
 }
 
 /// The sender SSRC of a PC for the given media kind — the SSRC the remote peer

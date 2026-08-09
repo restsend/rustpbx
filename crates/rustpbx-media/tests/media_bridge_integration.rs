@@ -264,22 +264,6 @@ async fn play_file_fires_on_end() {
     mb.close();
 }
 
-/// Leg::hold(None) sets egress to silence, resume restores it to silence.
-#[tokio::test]
-async fn leg_hold_then_resume_switches_egress() {
-    let mut mb = MediaBridge::new("it-hold", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    mb.replace_leg(LegSide::A, a).await;
-    let la = mb.leg(LegSide::A).unwrap();
-
-    // hold without music → silence.
-    la.hold(None).await.expect("hold");
-    // resume → silence (also sets egress to silence).
-    la.resume().await.expect("resume");
-
-    mb.close();
-}
-
 /// MediaBridge::hold breaks the route, then MediaBridge::resume re-arms it.
 #[tokio::test]
 async fn mediabridge_hold_resume_preserves_route() {

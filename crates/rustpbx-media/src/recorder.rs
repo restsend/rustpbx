@@ -174,28 +174,6 @@ impl Recorder {
         })
     }
 
-    /// Create a recorder for RTP captured at the caller boundary.
-    /// Both captured directions use the caller-facing negotiated profile:
-    /// Leg A is caller ingress and Leg B is caller egress.
-    pub fn new_caller_facing(
-        path: &str,
-        profile: Option<NegotiatedLegProfile>,
-        stereo_swap: bool,
-    ) -> Result<Self> {
-        let codec = profile
-            .as_ref()
-            .and_then(|profile| profile.audio.as_ref())
-            .map(|codec| codec.codec)
-            .unwrap_or(CodecType::PCMU);
-        let mut recorder = Self::new(path, codec)?;
-        recorder.stereo_swap = stereo_swap;
-        if let Some(profile) = profile {
-            recorder.set_leg_profile(Leg::A, profile.clone());
-            recorder.set_leg_profile(Leg::B, profile);
-        }
-        Ok(recorder)
-    }
-
     pub fn set_leg_profile(&mut self, leg: Leg, profile: NegotiatedLegProfile) {
         match leg {
             Leg::A => self.profile_a = profile,
@@ -976,84 +954,12 @@ impl Drop for Recorder {
     }
 }
 
-pub struct DtmfGenerator {
-    sample_rate: u32,
-}
-
-impl DtmfGenerator {
-    pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate }
-    }
-
-    pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
-        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
-        self.generate_samples(digit, num_samples)
-    }
-
-    pub fn generate_samples(&self, digit: char, num_samples: usize) -> Vec<i16> {
-        let freqs = match digit {
-            '1' => (697.0, 1209.0),
-            '2' => (697.0, 1336.0),
-            '3' => (697.0, 1477.0),
-            '4' => (770.0, 1209.0),
-            '5' => (770.0, 1336.0),
-            '6' => (770.0, 1477.0),
-            '7' => (852.0, 1209.0),
-            '8' => (852.0, 1336.0),
-            '9' => (852.0, 1477.0),
-            '*' => (941.0, 1209.0),
-            '0' => (941.0, 1336.0),
-            '#' => (941.0, 1477.0),
-            'A' => (697.0, 1633.0),
-            'B' => (770.0, 1633.0),
-            'C' => (852.0, 1633.0),
-            'D' => (941.0, 1633.0),
-            _ => return Vec::new(),
-        };
-        let mut samples = Vec::with_capacity(num_samples);
-
-        for i in 0..num_samples {
-            let t = i as f32 / self.sample_rate as f32;
-            let s1 = (2.0 * std::f32::consts::PI * freqs.0 * t).sin();
-            let s2 = (2.0 * std::f32::consts::PI * freqs.1 * t).sin();
-            let s = (s1 + s2) / 2.0;
-            samples.push((s * 32767.0) as i16);
-        }
-
-        samples
-    }
-}
+pub use rustpbx_sipflow::wav_utils::DtmfGenerator;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use audio_codec::{CodecType, create_decoder, create_encoder};
-
-    #[test]
-    fn caller_facing_recorder_shares_one_profile_between_legs() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("caller-facing.wav");
-        let profile = NegotiatedLegProfile {
-            audio: Some(crate::negotiate::NegotiatedCodec {
-                payload_type: 8,
-                codec: CodecType::PCMA,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            video: Vec::new(),
-            dtmf: None,
-            dtmf_pts: Vec::new(),
-            transport: rustrtc::TransportMode::Rtp,
-        };
-
-        let recorder =
-            Recorder::new_caller_facing(&path.to_string_lossy(), Some(profile.clone()), true)
-                .unwrap();
-
-        assert_eq!(recorder.profile_a, profile);
-        assert_eq!(recorder.profile_b, profile);
-        assert!(recorder.stereo_swap);
-    }
 
     #[test]
     fn test_mix_pcmu_both_silent() {

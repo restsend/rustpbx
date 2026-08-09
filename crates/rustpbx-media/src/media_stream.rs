@@ -82,10 +82,6 @@ impl MediaStream {
         guard.set_remote_description(remote, sdp_type).await
     }
 
-    pub async fn remove_track(&self, track_id: &str, _stop_audio_immediately: bool) {
-        self.tracks.remove(track_id);
-    }
-
     /// Mute a track by ID
     /// Returns true if the track was found and muted
     pub async fn mute_track(&self, track_id: &str) -> bool {

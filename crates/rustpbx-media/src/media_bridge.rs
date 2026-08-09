@@ -381,8 +381,8 @@ impl MediaBridge {
             // with the correct (video) SSRC and PT.
             let a_transport = la.pc().config().transport_mode.clone();
             let b_transport = lb.pc().config().transport_mode.clone();
-            let a_ssrc = sender_ssrc(la.pc());
-            let b_ssrc = sender_ssrc(lb.pc());
+            let a_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
+            let b_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
 
@@ -900,11 +900,18 @@ impl MediaBridge {
 
     /// Tear down everything (called on session end; also via Drop).
     pub fn close(&mut self) {
+        self.route_active = false;
+        self.teardown();
+    }
+
+    /// Cancel tasks and stop legs. Legs are stopped synchronously (the rustrtc
+    /// close path has no tokio::spawn, so this never panics during runtime
+    /// teardown).
+    fn teardown(&mut self) {
         self.root_cancel.cancel();
         for (_, cancel) in self.leg_wire_cancels.drain() {
             cancel.cancel();
         }
-        self.route_active = false;
         if let Some(la) = self.leg_a.take() {
             la.stop();
         }
@@ -916,30 +923,8 @@ impl MediaBridge {
 
 impl Drop for MediaBridge {
     fn drop(&mut self) {
-        // Stop legs synchronously (rustrtc close path has no tokio::spawn, so
-        // this never panics during runtime teardown).
-        self.root_cancel.cancel();
-        for (_, cancel) in self.leg_wire_cancels.drain() {
-            cancel.cancel();
-        }
-        if let Some(la) = self.leg_a.take() {
-            la.stop();
-        }
-        if let Some(lb) = self.leg_b.take() {
-            lb.stop();
-        }
+        self.teardown();
     }
-}
-
-/// The audio sender SSRC of a PC — the SSRC the remote peer expects in RTP
-/// packets from this leg (advertised in the local SDP `a=ssrc` attribute).
-fn sender_ssrc(pc: &rustrtc::PeerConnection) -> u32 {
-    pc.get_transceivers()
-        .into_iter()
-        .find(|t| t.kind() == MediaKind::Audio)
-        .and_then(|t| t.sender())
-        .map(|s| s.ssrc())
-        .unwrap_or(0)
 }
 
 /// The audio receiver track of a PC — the depacketized inbound audio that

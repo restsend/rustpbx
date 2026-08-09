@@ -1,10 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use audio_codec::CodecType;
 use rustrtc::media::SampleStreamSource;
 use rustrtc::{PeerConnection, SdpType};
-
-use crate::negotiate;
 
 #[async_trait]
 pub trait Track: Send + Sync {
@@ -14,13 +11,6 @@ pub trait Track: Send + Sync {
     async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()>;
     async fn stop(&self);
     async fn get_peer_connection(&self) -> Option<PeerConnection>;
-    fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {}
-    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
-        None
-    }
-
-    /// Allow downcasting to concrete types for dynamic audio source switching
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Set muted state for this track
     /// Returns true if the operation was successful
