@@ -4601,11 +4601,6 @@ impl SipSession {
         let caller_endpoint = self.leg_bridge_endpoint(&LegId::from("caller"));
         bridge_builder = self.with_caller_capture_sender(bridge_builder, caller_endpoint);
         let bridge = bridge_builder.build();
-        // The app/IVR peer PC has no real transport (the application is
-        // in-process), so its RtpSender never polls the ForwardingTrack carrying
-        // caller ingress. That track is Caller→Callee for WebRTC callers and
-        // Callee→Caller for RTP/SRTP callers.
-        bridge.set_app_ingress_drain(self.leg_bridge_endpoint(&LegId::from("caller")));
         bridge.setup_bridge().await?;
         self.media.media_bridge = Some(bridge);
 
@@ -6172,12 +6167,6 @@ impl SipSession {
                 session_id = %self.context.session_id,
                 "Starting media bridge forwarding"
             );
-            // Kill the drain tasks so the target RtpSenders can take over
-            // single-consumer ForwardingTrack.recv() without competing with
-            // the drain relay. The forwarder itself stays alive to maintain
-            // PC event listeners and the sink.
-            bridge.kill_drain_tasks();
-            bridge.clear_app_ingress_drain();
             bridge.start_bridge().await;
             self.media.media_bridge_started = true;
             self.record_trace(
@@ -6258,11 +6247,18 @@ impl SipSession {
         matches!(target.transport, Some(Transport::Ws | Transport::Wss))
     }
 
-    /// Resolve bridge endpoint for a leg from leg_transport.
     fn leg_bridge_endpoint(&self, leg_id: &LegId) -> BridgeEndpoint {
-        match self.legs.get_transport(leg_id) {
-            Some(rustrtc::TransportMode::WebRtc) => BridgeEndpoint::Caller,
-            _ => BridgeEndpoint::Callee,
+        // Endpoint follows actual PC placement; transport alone is ambiguous for SIP↔SIP.
+        let connects_to_caller_pc = if leg_id.as_str() == "caller" {
+            self.is_caller_webrtc()
+        } else {
+            self.media.callee_uses_caller_pc
+                || (self.is_callee_webrtc() && !self.media.callee_pc_is_webrtc)
+        };
+        if connects_to_caller_pc {
+            BridgeEndpoint::Caller
+        } else {
+            BridgeEndpoint::Callee
         }
     }
 
@@ -13081,6 +13077,49 @@ mod tests {
             .legs
             .transports
             .insert(LegId::from("callee"), rustrtc::TransportMode::Rtp);
+
+        let caller = LegId::from("caller");
+        let callee = LegId::from("callee");
+        assert_eq!(session.leg_bridge_endpoint(&caller), BridgeEndpoint::Caller);
+        assert_eq!(session.leg_bridge_endpoint(&callee), BridgeEndpoint::Callee);
+
+        session
+            .legs
+            .transports
+            .insert(caller.clone(), rustrtc::TransportMode::Rtp);
+        session
+            .legs
+            .transports
+            .insert(callee.clone(), rustrtc::TransportMode::WebRtc);
+        assert_eq!(session.leg_bridge_endpoint(&caller), BridgeEndpoint::Callee);
+        assert_eq!(session.leg_bridge_endpoint(&callee), BridgeEndpoint::Caller);
+
+        session.media.callee_uses_caller_pc = true;
+        session
+            .legs
+            .transports
+            .insert(callee.clone(), rustrtc::TransportMode::Rtp);
+        assert_eq!(session.leg_bridge_endpoint(&caller), BridgeEndpoint::Callee);
+        assert_eq!(session.leg_bridge_endpoint(&callee), BridgeEndpoint::Caller);
+
+        session.media.callee_uses_caller_pc = false;
+        session.media.callee_pc_is_webrtc = true;
+        session
+            .legs
+            .transports
+            .insert(caller.clone(), rustrtc::TransportMode::WebRtc);
+        session
+            .legs
+            .transports
+            .insert(callee.clone(), rustrtc::TransportMode::WebRtc);
+        assert_eq!(session.leg_bridge_endpoint(&caller), BridgeEndpoint::Caller);
+        assert_eq!(session.leg_bridge_endpoint(&callee), BridgeEndpoint::Callee);
+
+        session.media.callee_pc_is_webrtc = false;
+        session
+            .legs
+            .transports
+            .insert(callee, rustrtc::TransportMode::Rtp);
 
         let pc = session.get_local_reinvite_pc(DialogSide::Caller).await;
 

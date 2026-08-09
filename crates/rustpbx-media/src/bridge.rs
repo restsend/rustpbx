@@ -106,6 +106,66 @@ struct OutputState {
     marker_pending: bool,
 }
 
+impl OutputState {
+    fn begin_audio_segment(&mut self) {
+        self.active_rtp_offset = None;
+        self.active_seq_offset = None;
+        self.marker_pending = true;
+    }
+
+    fn rewrite_audio_frame(&mut self, frame: &mut AudioFrame) {
+        if self.marker_pending {
+            frame.marker = true;
+            self.marker_pending = false;
+        }
+
+        let source_sequence = frame.sequence_number.unwrap_or_default();
+        let source_timestamp = frame.rtp_timestamp;
+        let sequence_offset = match self.active_seq_offset {
+            Some(offset) => offset,
+            None => {
+                let expected = self.next_sequence_number.unwrap_or(source_sequence);
+                let offset = expected.wrapping_sub(source_sequence);
+                self.active_seq_offset = Some(offset);
+                offset
+            }
+        };
+        let timestamp_offset = match self.active_rtp_offset {
+            Some(offset) => offset,
+            None => {
+                let expected = self.next_rtp_timestamp.unwrap_or(source_timestamp);
+                let offset = expected.wrapping_sub(source_timestamp);
+                self.active_rtp_offset = Some(offset);
+                offset
+            }
+        };
+        let output_sequence = source_sequence.wrapping_add(sequence_offset);
+        let output_timestamp = source_timestamp.wrapping_add(timestamp_offset);
+
+        frame.sequence_number = Some(output_sequence);
+        frame.rtp_timestamp = output_timestamp;
+        self.next_sequence_number = Some(output_sequence.wrapping_add(1));
+        self.next_rtp_timestamp =
+            Some(output_timestamp.wrapping_add(frame_ticks_20ms(frame.clock_rate)));
+    }
+
+    fn try_rewrite_peer_audio_frame(
+        &mut self,
+        frame: &mut AudioFrame,
+        segment_started: &mut bool,
+    ) -> bool {
+        if self.mode != BRIDGE_OUTPUT_PEER {
+            return false;
+        }
+        if !*segment_started {
+            self.begin_audio_segment();
+            *segment_started = true;
+        }
+        self.rewrite_audio_frame(frame);
+        true
+    }
+}
+
 /// One peer's media endpoint within an N-peer bridge.
 pub struct PeerEntry {
     /// PeerConnection for this peer
@@ -361,6 +421,8 @@ struct DirectionCodecState {
     /// Live audio forwarding track for this direction, exposed for runtime
     /// SDP profile updates without taking ownership away from the RTP sender.
     forwarding_track: Arc<parking_lot::Mutex<Option<std::sync::Weak<ForwardingTrack>>>>,
+    drain_task: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    drain_generation: Arc<AtomicU64>,
 }
 
 impl DirectionCodecState {
@@ -372,6 +434,8 @@ impl DirectionCodecState {
             source_codec: parking_lot::Mutex::new(None),
             target_codec: parking_lot::Mutex::new(None),
             forwarding_track: Arc::new(parking_lot::Mutex::new(None)),
+            drain_task: Arc::new(parking_lot::Mutex::new(None)),
+            drain_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -566,11 +630,6 @@ pub struct BridgePeer {
     /// when PeerConnection(s) are replaced (e.g. RTP → WebRTC callee).
     forwarder_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     caller_gate: Arc<AtomicBool>,
-    /// The bridge endpoint carrying caller ingress for an app/IVR bridge.
-    /// Its ForwardingTrack is drained by a dedicated task because the app-side
-    /// PC has no real transport and its RtpSender never polls recv(). Driving
-    /// recv() keeps caller-side stats and RFC 2833 DTMF detection alive.
-    app_ingress_drain: parking_lot::RwLock<Option<BridgeEndpoint>>,
     dtmf_sink: Arc<parking_lot::RwLock<Option<DtmfSink>>>,
     stats: BridgeStats,
     callee_to_caller_codec: DirectionCodecState,
@@ -609,20 +668,12 @@ struct DirectionParams {
     forwarding_track_slot: Arc<parking_lot::Mutex<Option<std::sync::Weak<ForwardingTrack>>>>,
     /// Slot to store the ForwardingTrack's shared stats Arc.
     stats_slot: Option<Arc<parking_lot::Mutex<Option<Arc<ForwardStats>>>>>,
-    /// When true (app/IVR bridge whose callee PC has no real transport), the
-    /// target PC's RtpSender never polls the ForwardingTrack, so caller audio,
-    /// stats and DTMF detection stall. A dedicated drain task polls recv()
-    /// instead and forwards samples to `drain_sender`.
-    drain_ingress: bool,
     /// The target side's MediaSender, used by the drain task to forward audio.
     drain_sender: Option<MediaSender>,
-    /// The target side's output mode (PEER / FILE / MUTED). The drain relay must
-    /// NOT write while the target is in FILE or MUTED mode — otherwise its
-    /// forwarded peer audio interleaves (on the same SSRC/sender channel) with
-    /// the file-output clock's greeting/music, producing two RTP timestamp/PT
-    /// domains on one stream (the IVR→bridge "PT 0↔96 + timestamp 切换" bug).
-    /// recv() is still polled so DTMF detection / stats keep working.
-    drain_target_output_mode: Arc<AtomicU8>,
+    drain_rtp_sender: Option<Arc<RtpSender>>,
+    drain_output_state: Arc<parking_lot::Mutex<OutputState>>,
+    drain_task: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    drain_generation: Arc<AtomicU64>,
 }
 
 enum DirectionEventResult {
@@ -646,7 +697,6 @@ impl BridgePeer {
             forwarding_stopped: AtomicBool::new(false),
             forwarder_handle: Arc::new(parking_lot::Mutex::new(None)),
             caller_gate: Arc::new(AtomicBool::new(false)),
-            app_ingress_drain: parking_lot::RwLock::new(None),
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
             stats: BridgeStats {
                 caller_to_callee: LegStats::new(),
@@ -679,25 +729,6 @@ impl BridgePeer {
     /// Returns whether the caller gate has been opened.
     pub fn is_caller_gate_open(&self) -> bool {
         self.caller_gate.load(Ordering::Acquire)
-    }
-
-    /// Mark the bridge endpoint carrying caller ingress for an application
-    /// (IVR/queue) bridge. Its ForwardingTrack is then drained by a dedicated
-    /// task (see `process_track_event`) so caller-side stats and DTMF detection
-    /// keep working even though the app-side RtpSender never polls.
-    pub fn set_app_ingress_drain(&self, endpoint: BridgeEndpoint) {
-        *self.app_ingress_drain.write() = Some(endpoint);
-        info!(
-            bridge_id = %self.id,
-            session_id = ?self.session_id,
-            ?endpoint,
-            "App ingress drain configured (drives caller→app stats/DTMF via a \
-             dedicated task since the app peer PC has no transport)"
-        );
-    }
-
-    pub fn clear_app_ingress_drain(&self) {
-        self.app_ingress_drain.write().take();
     }
 
     fn side_state(&self, side: BridgeSide) -> &BridgeSideState {
@@ -943,11 +974,7 @@ impl BridgePeer {
         if self.forwarding_started.swap(true, Ordering::AcqRel) {
             // Already started — restart with potentially re-configured PeerConnection(s),
             // e.g. when the IVR app bridge replaces an RTP callee PC with a WebRTC one.
-            if let Some(handle) = self.forwarder_handle.lock().take() {
-                handle.abort();
-            }
-            self.forwarding_started.store(false, Ordering::Release);
-            self.forwarding_started.swap(true, Ordering::AcqRel);
+            self.await_forwarding_shutdown().await;
             debug!(bridge_id = %self.id, "Media bridge forwarding restarted with re-configured PeerConnections");
         } else {
             debug!(bridge_id = %self.id, "Media bridge forwarding started");
@@ -1235,9 +1262,7 @@ impl BridgePeer {
         let mut state = self.output_state(endpoint).lock();
         let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
-        state.active_rtp_offset = None;
-        state.active_seq_offset = None;
-        state.marker_pending = true;
+        state.begin_audio_segment();
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
         drop(state);
@@ -1283,6 +1308,7 @@ impl BridgePeer {
         let mut state = self.output_state(endpoint).lock();
         state.mode = BRIDGE_OUTPUT_PEER;
         let old_source = state.file_source.take();
+        state.begin_audio_segment();
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_PEER, Ordering::Release);
         drop(state);
@@ -1292,6 +1318,12 @@ impl BridgePeer {
             endpoint = ?endpoint,
             "Bridge output replaced with peer source"
         );
+    }
+
+    pub fn rewrite_output_audio_frame(&self, endpoint: BridgeEndpoint, frame: &mut AudioFrame) {
+        self.output_state(endpoint)
+            .lock()
+            .rewrite_audio_frame(frame);
     }
 
     pub async fn mute_output(&self, endpoint: BridgeEndpoint) {
@@ -1628,7 +1660,7 @@ impl BridgePeer {
                         break;
                     }
                     _ = interval.tick() => {
-                            let sample = {
+                        let sample = {
                             let mut guard = ctx.output_state.lock();
                             if guard.mode != BRIDGE_OUTPUT_FILE {
                                 continue;
@@ -1646,8 +1678,7 @@ impl BridgePeer {
                             guard.mode = BRIDGE_OUTPUT_PEER;
                             ctx.output_mode_atomic.store(BRIDGE_OUTPUT_PEER, Ordering::Release);
                             guard.file_source.take();
-                            guard.active_rtp_offset = None;
-                            guard.active_seq_offset = None;
+                            guard.begin_audio_segment();
                             debug!(
                                 bridge_id = %ctx.bridge_id,
                                 endpoint = ?ctx.endpoint,
@@ -1656,45 +1687,13 @@ impl BridgePeer {
                             continue;
                         };
 
+                        let mut guard = ctx.output_state.lock();
+                        // Reject a file frame read before a concurrent switch to PEER.
+                        if guard.mode != BRIDGE_OUTPUT_FILE {
+                            continue;
+                        }
                         if let MediaSample::Audio(frame) = &mut sample {
-                            let mut guard = ctx.output_state.lock();
-
-                            if guard.marker_pending {
-                                frame.marker = true;
-                                guard.marker_pending = false;
-                            }
-
-                            let src_seq = frame.sequence_number.unwrap_or_default();
-                            let src_ts = frame.rtp_timestamp;
-
-                            let seq_offset = match guard.active_seq_offset {
-                                Some(offset) => offset,
-                                None => {
-                                    let expected = guard.next_sequence_number.unwrap_or(src_seq);
-                                    let offset = expected.wrapping_sub(src_seq);
-                                    guard.active_seq_offset = Some(offset);
-                                    offset
-                                }
-                            };
-
-                            let ts_offset = match guard.active_rtp_offset {
-                                Some(offset) => offset,
-                                None => {
-                                    let expected = guard.next_rtp_timestamp.unwrap_or(src_ts);
-                                    let offset = expected.wrapping_sub(src_ts);
-                                    guard.active_rtp_offset = Some(offset);
-                                    offset
-                                }
-                            };
-
-                            let mapped_seq = src_seq.wrapping_add(seq_offset);
-                            let mapped_ts = src_ts.wrapping_add(ts_offset);
-                            frame.sequence_number = Some(mapped_seq);
-                            frame.rtp_timestamp = mapped_ts;
-
-                            guard.next_sequence_number = Some(mapped_seq.wrapping_add(1));
-                            guard.next_rtp_timestamp =
-                                Some(mapped_ts.wrapping_add(frame_ticks_20ms(frame.clock_rate)));
+                            guard.rewrite_audio_frame(frame);
                         }
 
                         let Some(sender) = ctx.sender.as_ref() else {
@@ -1975,22 +1974,6 @@ impl BridgePeer {
             return;
         }
 
-        // Audio track: create a ForwardingTrack and replace the target sender,
-        // exactly like the video path above.
-        let Some(target_transceiver) = dir
-            .target_pc
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-        else {
-            warn!(bridge_id = %bridge_id, direction = dir.direction, "Audio transceiver not found on target PC");
-            return;
-        };
-        let Some(existing_sender) = target_transceiver.sender() else {
-            warn!(bridge_id = %bridge_id, direction = dir.direction, "Target audio transceiver has no sender");
-            return;
-        };
-
         // Build NegotiatedLegProfile from the bridge's codec state.
         let (ingress_profile, egress_profile) = Self::build_leg_profiles(dir, &transceiver);
 
@@ -2016,6 +1999,24 @@ impl BridgePeer {
         // ForwardingTrack creation (via set_dtmf_sink) is visible on every recv().
         forwarding.set_shared_dtmf_sink(Some(Arc::clone(&common.dtmf_sink)));
 
+        let Some(target_transceiver) = dir
+            .target_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Audio)
+        else {
+            warn!(bridge_id = %bridge_id, direction = dir.direction, "Audio transceiver not found on target PC");
+            return;
+        };
+        let Some(existing_sender) = target_transceiver.sender() else {
+            warn!(bridge_id = %bridge_id, direction = dir.direction, "Target audio transceiver has no sender");
+            return;
+        };
+        let uses_endpoint_sender = dir
+            .drain_rtp_sender
+            .as_ref()
+            .is_some_and(|sender| Arc::ptr_eq(sender, &existing_sender));
+
         // Capture the shared stats Arc before type-erasing.
         let ft_stats = forwarding.stats();
         if let Some(ref slot) = dir.stats_slot {
@@ -2023,56 +2024,58 @@ impl BridgePeer {
         }
 
         let forwarding = Arc::new(forwarding);
+        // Serialize writer revocation with its final output-mode check and send.
+        let generation = {
+            let _output = dir.drain_output_state.lock();
+            dir.drain_generation
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1)
+        };
+        let previous = dir.drain_task.lock().take();
+        if let Some(previous) = previous {
+            previous.abort();
+            let _ = previous.await;
+        }
         *dir.forwarding_track_slot.lock() = Some(Arc::downgrade(&forwarding));
         let forwarding: Arc<dyn MediaStreamTrack> = forwarding;
-
-        let mut sender_builder =
-            rustrtc::RtpSender::builder(forwarding.clone(), existing_sender.ssrc())
-                .stream_id(existing_sender.stream_id().to_string())
-                .params(existing_sender.params());
-        let cname_val = existing_sender.cname();
-        if !cname_val.starts_with("rustrtc-cname-") {
-            sender_builder = sender_builder.cname(cname_val.to_string());
+        if !uses_endpoint_sender {
+            // Replaced external PCs retain the existing direct-track path.
+            let mut sender_builder =
+                rustrtc::RtpSender::builder(forwarding.clone(), existing_sender.ssrc())
+                    .stream_id(existing_sender.stream_id().to_string())
+                    .params(existing_sender.params());
+            let cname = existing_sender.cname();
+            if !cname.starts_with("rustrtc-cname-") {
+                sender_builder = sender_builder.cname(cname.to_string());
+            }
+            for interceptor in existing_sender.interceptors() {
+                sender_builder = sender_builder.interceptor(interceptor.clone());
+            }
+            target_transceiver.set_sender(Some(sender_builder.build()));
+            debug!(
+                bridge_id = %bridge_id,
+                direction = dir.direction,
+                source_track = %track.id(),
+                target_ssrc = existing_sender.ssrc(),
+                "Wired audio forwarding track to external target sender"
+            );
+            return;
         }
-        // Preserve all configured sender interceptors when replacing the sender.
-        for interceptor in existing_sender.interceptors() {
-            sender_builder = sender_builder.interceptor(interceptor.clone());
-        }
-        let sender = sender_builder.build();
-        target_transceiver.set_sender(Some(sender.clone()));
 
-        // App/IVR bridge: the target PC (e.g. WebRTC in-process for the app)
-        // has no real transport, so its RtpSender never polls the
-        // ForwardingTrack. Without a consumer, RFC 2833 DTMF is never observed
-        // and audio never flows.
-        //
-        // The drain task acts as a permanent relay: it polls
-        // ForwardingTrack.recv() (which triggers DTMF detection, transcoding,
-        // stats) and forwards the result to the sender via sender.send().
-        // This works for ALL scenarios:
-        //   - IVR: sender has no transport → audio silently dropped (app
-        //     doesn't need it; only DTMF events matter).
-        //   - After transfer (WebRTC callee): sender's transport connects →
-        //     audio is sent to the remote party.
-        //   - After transfer (SIP callee with replaced RTP PC): same.
-        //
-        // The sender's own send-loop also calls track.recv(), but since the
-        // drain is the sole consumer of the single-consumer track, the
-        // send-loop gets nothing and stays idle. No duplication.
-        if dir.drain_ingress
-            && let Some(drain_sender) = dir.drain_sender.clone()
+        let Some(drain_sender) = dir.drain_sender.clone() else {
+            warn!(bridge_id = %bridge_id, direction = dir.direction, "Target audio sample sender is unavailable");
+            return;
+        };
+
         {
             let drain_track = forwarding.clone();
             let drain_cancel = common.cancel_token.clone();
             let drain_bid = bridge_id.to_string();
             let drain_dir = dir.direction;
-            // Target side's output mode: the drain relay may only forward peer
-            // audio while the target is in PEER mode. In FILE mode the
-            // file-output clock owns the egress (greeting/music/position
-            // announcements); in MUTED mode nothing should egress. Forwarding
-            // here anyway interleaves two timestamp/PT domains on one SSRC.
-            let drain_target_mode = Arc::clone(&dir.drain_target_output_mode);
+            let drain_output_state = Arc::clone(&dir.drain_output_state);
+            let drain_generation = Arc::clone(&dir.drain_generation);
             let h = tokio::spawn(async move {
+                let mut segment_started = false;
                 info!(
                     bridge_id = %drain_bid,
                     direction = %drain_dir,
@@ -2084,12 +2087,15 @@ impl BridgePeer {
                         _ = drain_cancel.cancelled() => break,
                         res = drain_track.recv() => {
                             match res {
-                                Ok(sample) => {
-                                    // Suppress peer audio while the target side
-                                    // is playing a file or muted. recv() was
-                                    // still polled above, so DTMF detection and
-                                    // stats remain active.
-                                    if drain_target_mode.load(Ordering::Acquire) != BRIDGE_OUTPUT_PEER {
+                                Ok(mut sample) => {
+                                    let mut output = drain_output_state.lock();
+                                    if drain_generation.load(Ordering::Acquire) != generation {
+                                        break;
+                                    }
+                                    let MediaSample::Audio(frame) = &mut sample else {
+                                        continue;
+                                    };
+                                    if !output.try_rewrite_peer_audio_frame(frame, &mut segment_started) {
                                         continue;
                                     }
                                     if let Err(e) = drain_sender.send(sample) {
@@ -2121,18 +2127,15 @@ impl BridgePeer {
                     "Drain relay stopped"
                 );
             });
-            Self::prune_sub_tasks(sub_tasks).await;
-            sub_tasks.lock().push(h);
+            *dir.drain_task.lock() = Some(h);
         }
 
         debug!(
             bridge_id = %bridge_id,
             direction = dir.direction,
             source_track = %track.id(),
-            target_ssrc = existing_sender.ssrc(),
             gate_present = dir.gate.is_some(),
             stats_slot_wired = dir.stats_slot.is_some(),
-            drain_ingress = dir.drain_ingress,
             "Wired audio forwarding track"
         );
     }
@@ -2225,7 +2228,6 @@ impl BridgePeer {
 
     fn spawn_bidirectional_forwarder(&self) -> tokio::task::JoinHandle<()> {
         let bridge_id = self.id.clone();
-        let app_ingress_drain = *self.app_ingress_drain.read();
 
         let common = ForwardTrackArgs {
             cancel_token: self.cancel_token.clone(),
@@ -2246,9 +2248,11 @@ impl BridgePeer {
             target_codec_info: self.caller_to_callee_codec.target_codec.lock().clone(),
             forwarding_track_slot: Arc::clone(&self.caller_to_callee_codec.forwarding_track),
             stats_slot: Some(Arc::clone(&self.callee.forward_stats)),
-            drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Caller),
             drain_sender: self.callee.send.lock().clone(),
-            drain_target_output_mode: Arc::clone(&self.callee.output_mode),
+            drain_rtp_sender: self.callee.audio_sender.lock().clone(),
+            drain_output_state: Arc::clone(&self.callee.output_state),
+            drain_task: Arc::clone(&self.caller_to_callee_codec.drain_task),
+            drain_generation: Arc::clone(&self.caller_to_callee_codec.drain_generation),
         };
 
         let callee = DirectionParams {
@@ -2265,9 +2269,11 @@ impl BridgePeer {
             target_codec_info: self.callee_to_caller_codec.target_codec.lock().clone(),
             forwarding_track_slot: Arc::clone(&self.callee_to_caller_codec.forwarding_track),
             stats_slot: Some(Arc::clone(&self.caller.forward_stats)),
-            drain_ingress: app_ingress_drain == Some(BridgeEndpoint::Callee),
             drain_sender: self.caller.send.lock().clone(),
-            drain_target_output_mode: Arc::clone(&self.caller.output_mode),
+            drain_rtp_sender: self.caller.audio_sender.lock().clone(),
+            drain_output_state: Arc::clone(&self.caller.output_state),
+            drain_task: Arc::clone(&self.callee_to_caller_codec.drain_task),
+            drain_generation: Arc::clone(&self.callee_to_caller_codec.drain_generation),
         };
 
         let caller_pc = self.caller.pc();
@@ -2280,6 +2286,31 @@ impl BridgePeer {
         let callee_state_rx = callee_pc.subscribe_peer_state();
 
         tokio::spawn(async move {
+            // A restarted forwarder must wire receivers whose Track event fired earlier.
+            for (source_pc, direction) in [(&caller_pc, &caller), (&callee_pc, &callee)] {
+                for transceiver in source_pc.get_transceivers() {
+                    if transceiver.kind() == rustrtc::MediaKind::Audio
+                        && transceiver.receiver().is_some_and(|r| r.ssrc() != 0)
+                        && direction
+                            .forwarding_track_slot
+                            .lock()
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_none()
+                    {
+                        Self::process_track_event(
+                            &bridge_id,
+                            source_pc,
+                            direction,
+                            &common,
+                            &sub_tasks,
+                            transceiver,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             let mut caller_recv = Box::pin(caller_pc.recv());
             let mut callee_recv = Box::pin(callee_pc.recv());
             let mut caller_state_rx = caller_state_rx;
@@ -2402,6 +2433,48 @@ impl BridgePeer {
         self.callee.pc()
     }
 
+    fn reset_audio_forwarding(&self) {
+        for (direction, output_state) in [
+            (&self.caller_to_callee_codec, &self.callee.output_state),
+            (&self.callee_to_caller_codec, &self.caller.output_state),
+        ] {
+            let _output = output_state.lock();
+            direction.drain_generation.fetch_add(1, Ordering::AcqRel);
+            *direction.forwarding_track.lock() = None;
+            if let Some(task) = direction.drain_task.lock().as_ref() {
+                task.abort();
+            }
+        }
+    }
+
+    async fn await_audio_forwarding_shutdown(&self) {
+        self.reset_audio_forwarding();
+        for direction in [&self.caller_to_callee_codec, &self.callee_to_caller_codec] {
+            let task = direction.drain_task.lock().take();
+            if let Some(task) = task {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    async fn await_forwarding_shutdown(&self) {
+        let forwarder = self.forwarder_handle.lock().take();
+        if let Some(handle) = forwarder {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        let tasks = self.sub_tasks.lock().drain(..).collect::<Vec<_>>();
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        self.await_audio_forwarding_shutdown().await;
+    }
+
     /// Replace the callee-side PeerConnection. Used when an IVR app bridge
     /// (originally built with an RTP callee PC) needs to serve a WebRTC callee.
     pub fn replace_callee_pc(&self, pc: PeerConnection) {
@@ -2448,25 +2521,16 @@ impl BridgePeer {
     /// returns to its prompt flow).
     pub fn stop_forwarding(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge forwarding (PeerConnections kept alive)");
-        if let Some(handle) = self.forwarder_handle.lock().take() {
+        if let Some(handle) = self.forwarder_handle.lock().as_ref() {
             handle.abort();
         }
         // Abort all sub-tasks (forward_track_to_sender, pli_forwarder, etc.)
         // that were spawned by the bidirectional forwarder.
-        for task in self.sub_tasks.lock().drain(..) {
+        for task in self.sub_tasks.lock().iter() {
             task.abort();
         }
+        self.reset_audio_forwarding();
         self.forwarding_stopped.store(true, Ordering::Release);
-    }
-
-    /// Abort only the drain relay tasks (sub_tasks) without stopping the
-    /// forwarder itself. Used when transitioning from IVR→transfer so the
-    /// target RtpSender send-loop can take over ForwardingTrack.recv()
-    /// without competing with the drain relay.
-    pub fn kill_drain_tasks(&self) {
-        for task in self.sub_tasks.lock().drain(..) {
-            task.abort();
-        }
     }
 
     /// Returns `true` after `stop_forwarding()` has been called and forwarding
@@ -2490,7 +2554,6 @@ impl BridgePeer {
     /// is still actively forwarding would result in duplicate forwarders.
     pub fn reset_forwarding_state(&self) {
         self.forwarding_stopped.store(false, Ordering::Release);
-        self.forwarding_started.store(false, Ordering::Release);
     }
 
     /// Stop the bridge (async — waits for forwarding tasks to finish)
@@ -2501,21 +2564,11 @@ impl BridgePeer {
         self.caller.pc().close();
         self.callee.pc().close();
 
-        // Drain the forwarder handle separately (not in bridge_tasks so start_bridge can
-        // abort & replace it when PeerConnection is replaced).
-        let fwd = self.forwarder_handle.lock().take();
+        self.await_forwarding_shutdown().await;
+
         // Wait for main tasks to complete (drain while holding lock, then drop guard before .await)
         let tasks = self.bridge_tasks.lock().drain(..).collect::<Vec<_>>();
         for task in tasks {
-            let _ = task.await;
-        }
-        if let Some(fwd) = fwd {
-            let _ = fwd.await;
-        }
-
-        // Wait for sub-tasks (forward_track_to_sender, pli_forwarder, etc.)
-        let sub = self.sub_tasks.lock().drain(..).collect::<Vec<_>>();
-        for task in sub {
             let _ = task.await;
         }
     }
@@ -2535,6 +2588,8 @@ impl BridgePeer {
         for task in sub.iter() {
             task.abort();
         }
+        drop(sub);
+        self.reset_audio_forwarding();
         // pc().close() calls tokio::spawn internally in rustrtc.
         // During runtime shutdown this would panic → double-panic → SIGABRT.
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -2932,6 +2987,254 @@ mod tests {
             .finalize()
             .map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn output_state_keeps_rtp_timeline_across_source_switches() {
+        let mut state = OutputState {
+            mode: BRIDGE_OUTPUT_PEER,
+            file_source: None,
+            next_rtp_timestamp: None,
+            next_sequence_number: None,
+            active_rtp_offset: None,
+            active_seq_offset: None,
+            marker_pending: false,
+        };
+
+        let mut first = AudioFrame {
+            rtp_timestamp: 1_000,
+            clock_rate: 8_000,
+            sequence_number: Some(10),
+            ..Default::default()
+        };
+        state.rewrite_audio_frame(&mut first);
+        assert_eq!(
+            (first.sequence_number, first.rtp_timestamp),
+            (Some(10), 1_000)
+        );
+
+        state.begin_audio_segment();
+        let mut peer_first = AudioFrame {
+            rtp_timestamp: 50_000,
+            clock_rate: 8_000,
+            sequence_number: Some(600),
+            ..Default::default()
+        };
+        state.rewrite_audio_frame(&mut peer_first);
+        assert_eq!(
+            (peer_first.sequence_number, peer_first.rtp_timestamp),
+            (Some(11), 1_160)
+        );
+        assert!(peer_first.marker);
+
+        let mut peer_second = AudioFrame {
+            rtp_timestamp: 50_160,
+            clock_rate: 8_000,
+            sequence_number: Some(601),
+            ..Default::default()
+        };
+        state.rewrite_audio_frame(&mut peer_second);
+        assert_eq!(
+            (peer_second.sequence_number, peer_second.rtp_timestamp),
+            (Some(12), 1_320)
+        );
+        assert!(!peer_second.marker);
+
+        state.begin_audio_segment();
+        let mut ivr_again = AudioFrame {
+            rtp_timestamp: 7_000,
+            clock_rate: 8_000,
+            sequence_number: Some(90),
+            ..Default::default()
+        };
+        state.rewrite_audio_frame(&mut ivr_again);
+        assert_eq!(
+            (ivr_again.sequence_number, ivr_again.rtp_timestamp),
+            (Some(13), 1_480)
+        );
+        assert!(ivr_again.marker);
+    }
+
+    #[tokio::test]
+    async fn direct_audio_injection_keeps_endpoint_rtp_timeline() {
+        let bridge = BridgePeerBuilder::new("direct-audio-continuity".to_string()).build();
+        let endpoint = BridgeEndpoint::Callee;
+        let mut first = AudioFrame {
+            rtp_timestamp: 1_000,
+            clock_rate: 8_000,
+            sequence_number: Some(10),
+            ..Default::default()
+        };
+        bridge.rewrite_output_audio_frame(endpoint, &mut first);
+
+        bridge.replace_output_with_peer(endpoint).await;
+        let mut second = AudioFrame {
+            rtp_timestamp: 3_000_000_000,
+            clock_rate: 8_000,
+            sequence_number: Some(40_000),
+            ..Default::default()
+        };
+        bridge.rewrite_output_audio_frame(endpoint, &mut second);
+
+        assert_eq!(second.rtp_timestamp, 1_160);
+        assert!(second.marker);
+    }
+
+    #[test]
+    fn output_state_skips_peer_audio_while_file_is_active() {
+        let mut state = OutputState {
+            mode: BRIDGE_OUTPUT_FILE,
+            file_source: None,
+            next_rtp_timestamp: Some(1_000),
+            next_sequence_number: Some(10),
+            active_rtp_offset: None,
+            active_seq_offset: None,
+            marker_pending: false,
+        };
+        let mut frame = AudioFrame {
+            rtp_timestamp: 50_000,
+            clock_rate: 8_000,
+            sequence_number: Some(600),
+            ..Default::default()
+        };
+        let mut segment_started = false;
+
+        assert!(!state.try_rewrite_peer_audio_frame(&mut frame, &mut segment_started));
+        assert!(!segment_started);
+        assert_eq!(
+            (frame.sequence_number, frame.rtp_timestamp),
+            (Some(600), 50_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_track_event_keeps_existing_rtp_sender() {
+        let bridge = BridgePeerBuilder::new("stable-audio-sender".to_string())
+            .with_rtp_port_range(24900, 25000)
+            .build();
+        bridge.setup_bridge().await.unwrap();
+
+        let target_pc = bridge.callee_pc();
+        let target_transceiver = target_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Audio)
+            .expect("callee audio transceiver");
+        let original_sender = target_transceiver.sender().expect("callee audio sender");
+
+        let source_transceiver = Arc::new(rustrtc::RtpTransceiver::new_for_test(
+            rustrtc::MediaKind::Audio,
+            rustrtc::TransceiverDirection::RecvOnly,
+        ));
+        source_transceiver.set_receiver(Some(
+            rustrtc::peer_connection::RtpReceiverBuilder::new(rustrtc::MediaKind::Audio, 42)
+                .build(),
+        ));
+
+        let mut direction = DirectionParams {
+            target_pc: target_pc.clone(),
+            direction: "Caller->Callee",
+            path: ForwardPath::new(LegTransport::Caller, LegTransport::Callee),
+            video_payload_type: Arc::clone(&bridge.callee.video_payload_type),
+            video_payload_map: Arc::clone(&bridge.callee.video_payload_map),
+            video_track_label: "caller-to-callee-video",
+            pli_label: "Callee PLI -> Caller source",
+            dtmf_mapping: Some(Arc::clone(&bridge.caller_to_callee_codec.dtmf_mapping)),
+            gate: Some(Arc::clone(&bridge.caller_gate)),
+            source_codec_info: None,
+            target_codec_info: None,
+            forwarding_track_slot: Arc::clone(&bridge.caller_to_callee_codec.forwarding_track),
+            stats_slot: Some(Arc::clone(&bridge.callee.forward_stats)),
+            drain_sender: bridge.callee.send.lock().clone(),
+            drain_rtp_sender: bridge.callee.audio_sender.lock().clone(),
+            drain_output_state: Arc::clone(&bridge.callee.output_state),
+            drain_task: Arc::clone(&bridge.caller_to_callee_codec.drain_task),
+            drain_generation: Arc::clone(&bridge.caller_to_callee_codec.drain_generation),
+        };
+        let common = ForwardTrackArgs {
+            cancel_token: bridge.cancel_token.clone(),
+            dtmf_sink: Arc::clone(&bridge.dtmf_sink),
+        };
+        let sub_tasks = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        BridgePeer::process_track_event(
+            "stable-audio-sender",
+            &bridge.caller_pc(),
+            &direction,
+            &common,
+            &sub_tasks,
+            Arc::clone(&source_transceiver),
+        )
+        .await;
+
+        let sender_after_track = target_transceiver.sender().expect("callee audio sender");
+        assert!(
+            Arc::ptr_eq(&original_sender, &sender_after_track),
+            "audio track wiring must preserve the endpoint RtpSender and its RTP sequence state"
+        );
+
+        let first_drain = direction
+            .drain_task
+            .lock()
+            .as_ref()
+            .expect("first audio drain task")
+            .abort_handle();
+        let replacement_transceiver = Arc::new(rustrtc::RtpTransceiver::new_for_test(
+            rustrtc::MediaKind::Audio,
+            rustrtc::TransceiverDirection::RecvOnly,
+        ));
+        replacement_transceiver.set_receiver(Some(
+            rustrtc::peer_connection::RtpReceiverBuilder::new(rustrtc::MediaKind::Audio, 43)
+                .build(),
+        ));
+        BridgePeer::process_track_event(
+            "stable-audio-sender",
+            &bridge.caller_pc(),
+            &direction,
+            &common,
+            &sub_tasks,
+            Arc::clone(&replacement_transceiver),
+        )
+        .await;
+        assert!(
+            first_drain.is_finished(),
+            "a replacement audio track must stop the previous drain writer"
+        );
+
+        let external = BridgePeerBuilder::new("external-audio-target".to_string())
+            .with_rtp_port_range(25000, 25100)
+            .build();
+        external.setup_bridge().await.unwrap();
+        let external_pc = external.callee_pc();
+        let external_transceiver = external_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Audio)
+            .expect("external audio transceiver");
+        let external_sender = external_transceiver
+            .sender()
+            .expect("external audio sender");
+        direction.target_pc = external_pc;
+        BridgePeer::process_track_event(
+            "stable-audio-sender",
+            &bridge.caller_pc(),
+            &direction,
+            &common,
+            &sub_tasks,
+            replacement_transceiver,
+        )
+        .await;
+        assert!(!Arc::ptr_eq(
+            &external_sender,
+            &external_transceiver.sender().expect("fallback sender")
+        ));
+        assert!(direction.drain_task.lock().is_none());
+
+        for task in sub_tasks.lock().drain(..) {
+            task.abort();
+        }
+        external.stop().await;
+        bridge.stop().await;
     }
 
     #[test]
@@ -4989,6 +5292,12 @@ mod tests {
         // Start first time
         bridge.start_bridge().await;
         assert!(!bridge.forwarding_stopped());
+        let first_forwarder = bridge
+            .forwarder_handle
+            .lock()
+            .as_ref()
+            .expect("first forwarder")
+            .abort_handle();
 
         // Stop forwarding (simulates re-INVITE)
         bridge.stop_forwarding();
@@ -4998,6 +5307,7 @@ mod tests {
         bridge.reset_forwarding_state();
         bridge.start_bridge().await;
         assert!(!bridge.forwarding_stopped());
+        assert!(first_forwarder.is_finished());
 
         bridge.stop().await;
     }
