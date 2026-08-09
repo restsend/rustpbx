@@ -750,6 +750,7 @@ impl SipSession {
         //        to remove the contention before reading.
         let mut audio_sender: Option<SampleStreamSource> = None;
         let mut pc: Option<PeerConnection> = None;
+        let mut output_rewriter = None;
 
         if let Some(bridge) = self.media.media_bridge.clone() {
             // The app media_bridge has two sides: "caller" (WebRTC) and "callee"
@@ -778,6 +779,7 @@ impl SipSession {
                 pc = Some(bridge.callee_pc().clone());
                 audio_sender = bridge.get_callee_sender().await;
             }
+            output_rewriter = Some((bridge, leg_endpoint));
             info!(%leg_id, is_caller, sip_leg_is_webrtc, "Bridge sourcing media from app media_bridge");
         }
 
@@ -934,7 +936,7 @@ impl SipSession {
                                             chunk
                                         };
                                         let encoded = encoder.encode(&chunk);
-                                        let frame = RtcAudioFrame {
+                                        let mut frame = RtcAudioFrame {
                                             rtp_timestamp: rtp_ts,
                                             clock_rate,
                                             data: encoded.into(),
@@ -945,6 +947,9 @@ impl SipSession {
                                             raw_packet: None,
                                             source_addr: None,
                                         };
+                                        if let Some((bridge, endpoint)) = &output_rewriter {
+                                            bridge.rewrite_output_audio_frame(*endpoint, &mut frame);
+                                        }
                                         if audio_sender.send(MediaSample::Audio(frame)).is_err() {
                                             warn!(%leg_id, "Bridge forward: audio sender closed");
                                             return;

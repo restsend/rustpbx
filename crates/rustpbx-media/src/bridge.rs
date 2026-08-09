@@ -1320,6 +1320,12 @@ impl BridgePeer {
         );
     }
 
+    pub fn rewrite_output_audio_frame(&self, endpoint: BridgeEndpoint, frame: &mut AudioFrame) {
+        self.output_state(endpoint)
+            .lock()
+            .rewrite_audio_frame(frame);
+    }
+
     pub async fn mute_output(&self, endpoint: BridgeEndpoint) {
         let mut state = self.output_state(endpoint).lock();
         state.mode = BRIDGE_OUTPUT_MUTED;
@@ -3047,6 +3053,31 @@ mod tests {
             (Some(13), 1_480)
         );
         assert!(ivr_again.marker);
+    }
+
+    #[tokio::test]
+    async fn direct_audio_injection_keeps_endpoint_rtp_timeline() {
+        let bridge = BridgePeerBuilder::new("direct-audio-continuity".to_string()).build();
+        let endpoint = BridgeEndpoint::Callee;
+        let mut first = AudioFrame {
+            rtp_timestamp: 1_000,
+            clock_rate: 8_000,
+            sequence_number: Some(10),
+            ..Default::default()
+        };
+        bridge.rewrite_output_audio_frame(endpoint, &mut first);
+
+        bridge.replace_output_with_peer(endpoint).await;
+        let mut second = AudioFrame {
+            rtp_timestamp: 3_000_000_000,
+            clock_rate: 8_000,
+            sequence_number: Some(40_000),
+            ..Default::default()
+        };
+        bridge.rewrite_output_audio_frame(endpoint, &mut second);
+
+        assert_eq!(second.rtp_timestamp, 1_160);
+        assert!(second.marker);
     }
 
     #[test]
