@@ -313,16 +313,6 @@ pub fn rwi_to_call_command(
         // ========================================================================
         // Queue Operations
         // ========================================================================
-        RwiCommandPayload::QueueEnqueue(req) => Ok(CallCommand::QueueEnqueue {
-            leg_id: LegId::new(req.call_id),
-            queue_id: req.queue_id,
-            priority: req.priority,
-        }),
-
-        RwiCommandPayload::QueueDequeue { call_id } => Ok(CallCommand::QueueDequeue {
-            leg_id: LegId::new(call_id),
-        }),
-
         RwiCommandPayload::QueueHold { call_id } => {
             let sid = session_id
                 .or(Some(&call_id))
@@ -342,7 +332,9 @@ pub fn rwi_to_call_command(
             })
         }
 
-        RwiCommandPayload::QueueSetPriority { .. }
+        RwiCommandPayload::QueueEnqueue(_)
+        | RwiCommandPayload::QueueDequeue { .. }
+        | RwiCommandPayload::QueueSetPriority { .. }
         | RwiCommandPayload::QueueAssignAgent { .. }
         | RwiCommandPayload::QueueRequeue { .. } => {
             // These are queue management commands, not session commands

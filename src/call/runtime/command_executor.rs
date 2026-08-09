@@ -103,10 +103,6 @@ pub struct ExecutionContext {
     pub session_id: String,
     /// Media runtime profile for capability checks
     pub media_profile: MediaRuntimeProfile,
-    /// Source of the command (for logging/tracking)
-    pub source: CommandSource,
-    /// Optional command ID for tracking
-    pub command_id: Option<String>,
 }
 
 impl ExecutionContext {
@@ -114,23 +110,11 @@ impl ExecutionContext {
         Self {
             session_id: session_id.into(),
             media_profile: MediaRuntimeProfile::default(),
-            source: CommandSource::Internal,
-            command_id: None,
         }
     }
 
     pub fn with_media_profile(mut self, profile: MediaRuntimeProfile) -> Self {
         self.media_profile = profile;
-        self
-    }
-
-    pub fn with_source(mut self, source: CommandSource) -> Self {
-        self.source = source;
-        self
-    }
-
-    pub fn with_command_id(mut self, id: impl Into<String>) -> Self {
-        self.command_id = Some(id.into());
         self
     }
 
@@ -200,30 +184,6 @@ pub enum MediaCapabilityCheck {
     Degraded { reason: String },
     /// Command cannot be executed due to capability limitations
     Denied { reason: String },
-}
-
-/// Source of the command
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    /// RWI (WebSocket) interface
-    Rwi,
-    /// Console (HTTP) interface
-    Console,
-    /// Internal system
-    Internal,
-    /// SIP signaling
-    Sip,
-}
-
-impl std::fmt::Display for CommandSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CommandSource::Rwi => write!(f, "rwi"),
-            CommandSource::Console => write!(f, "console"),
-            CommandSource::Internal => write!(f, "internal"),
-            CommandSource::Sip => write!(f, "sip"),
-        }
-    }
 }
 
 #[cfg(test)]

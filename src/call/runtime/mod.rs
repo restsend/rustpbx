@@ -43,12 +43,8 @@ mod conference_server;
 mod conference_strategy;
 mod default_app_runtime;
 mod media_path_strategy;
-mod queue_manager;
 mod session_runtime;
 pub mod test_utils;
-
-#[cfg(test)]
-mod app_runtime_contract_tests;
 
 #[cfg(test)]
 mod integration_tests;
@@ -62,5 +58,4 @@ pub use conference_server::*;
 pub use conference_strategy::*;
 pub use default_app_runtime::*;
 pub use media_path_strategy::*;
-pub use queue_manager::*;
 pub use session_runtime::*;

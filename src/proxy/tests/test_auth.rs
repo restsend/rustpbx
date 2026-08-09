@@ -520,7 +520,6 @@ async fn test_guest_call_allowed_extension() {
         rwi_gateway: None,
         ivr_trace: None,
         tls_listener: None,
-        queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: conf_mgr,
         conference_server: conf_server,
         agent_registry: None,

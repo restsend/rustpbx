@@ -1,8 +1,8 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config, create_transaction,
 };
-use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaCapability, MediaPathMode, ReturnAppSpec};
-use crate::call::runtime::{AppDescriptor, AppRuntime, AppRuntimeError, AppStatus, BridgeConfig};
+use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
+use crate::call::runtime::{AppRuntime, AppRuntimeError, BridgeConfig};
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
     QueuePlan, TransactionCookie,
@@ -88,21 +88,10 @@ impl AppRuntime for AlreadyRunningThenOkRuntime {
         false
     }
 
-    fn status(&self) -> AppStatus {
-        AppStatus::Idle
-    }
-
     fn current_app(&self) -> Option<String> {
         None
     }
 
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
 }
 
 struct AlwaysFailStartRuntime;
@@ -145,21 +134,10 @@ impl AppRuntime for AlwaysFailStartRuntime {
         false
     }
 
-    fn status(&self) -> AppStatus {
-        AppStatus::Idle
-    }
-
     fn current_app(&self) -> Option<String> {
         None
     }
 
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
 }
 
 #[async_trait]
@@ -189,21 +167,10 @@ impl AppRuntime for StartOnlyRuntime {
         false
     }
 
-    fn status(&self) -> AppStatus {
-        AppStatus::Idle
-    }
-
     fn current_app(&self) -> Option<String> {
         None
     }
 
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
 }
 
 /// Test runtime that records the name of every app started, so tests can
@@ -254,21 +221,10 @@ impl AppRuntime for NameCapturingRuntime {
         false
     }
 
-    fn status(&self) -> AppStatus {
-        AppStatus::Idle
-    }
-
     fn current_app(&self) -> Option<String> {
         None
     }
 
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
 }
 
 async fn build_session(dialplan: Dialplan) -> SipSession {
@@ -729,11 +685,7 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
     );
 }
 
-// ─── DTMF fix regression tests ───────────────────────────────────────────────
-//
-// These tests guard against regressions introduced by the wholesale DTMF fix:
-// "accept_call() must call start_caller_ingress_monitor_if_needed() BEFORE
-// setting connected_callee, but only for bridge-based calls."
+// ─── accept_call connected_callee regression tests ───────────────────────────
 
 /// accept_call must set connected_callee for a plain P2P (Targets, no bridge) call.
 ///
@@ -757,10 +709,6 @@ async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
 }
 
 /// accept_call must set connected_callee for an Application-flow (IVR/Queue) call.
-///
-/// In the Application flow the ingress monitor is set up by execute_flow() before
-/// the callee connects.  accept_call() must not disrupt that nor prevent the
-/// connected_callee assignment.
 #[tokio::test]
 async fn test_accept_call_sets_connected_callee_for_application_ivr_flow() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
@@ -783,18 +731,7 @@ async fn test_accept_call_sets_connected_callee_for_application_ivr_flow() {
 }
 
 /// For bridge-based calls (Targets flow, e.g. wholesale with WebRTC caller),
-/// accept_call() must attempt to install the DTMF sink before setting
-/// connected_callee, so that the connected_callee guard inside
-/// start_caller_ingress_monitor_if_needed() does not short-circuit setup.
-///
-/// In unit tests there is no real BridgePeer, so the bridge path exits early
-/// after the "no bridge" check.  What we CAN assert is:
-/// 1. accept_call() completes without panic.
-/// 2. connected_callee is correctly set.
-/// 3. A subsequent call to start_caller_ingress_monitor_if_needed() returns
-///    immediately because connected_callee is now Some (guard fires) —
-///    verifiable via the absence of log-level side effects and by calling
-///    accept_call again idempotently.
+/// accept_call() must complete without panic and set connected_callee.
 #[tokio::test]
 async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
@@ -813,16 +750,10 @@ async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
     );
 }
 
-/// The guard in start_caller_ingress_monitor_if_needed must fire when
-/// connected_callee is already set — preventing duplicate DTMF sink installation.
-///
-/// We verify this by calling accept_call twice: the second call should succeed
+/// Calling accept_call twice (re-INVITE / transfer scenario) must succeed
 /// without panic, and connected_callee must be updated to the new value.
-/// If the guard were broken, a double-bridge-start or double-task-spawn would
-/// occur (causing a race or panic in production but likely just a silent no-op
-/// in unit tests).
 #[tokio::test]
-async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
+async fn test_accept_call_twice_updates_connected_callee() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_targets(crate::call::DialStrategy::Sequential(vec![]));
     let mut session = build_session(dialplan).await;
@@ -838,8 +769,6 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
     );
 
     // Second accept — callee B (re-INVITE / transfer scenario).
-    // The guard inside start_caller_ingress_monitor_if_needed must see
-    // connected_callee = Some and skip re-setup.
     session
         .accept_call(Some("sip:b@example.com".to_string()), None)
         .await
@@ -1797,21 +1726,10 @@ impl AppRuntime for FailQueueStartRuntime {
         false
     }
 
-    fn status(&self) -> AppStatus {
-        AppStatus::Idle
-    }
-
     fn current_app(&self) -> Option<String> {
         None
     }
 
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
 }
 
 #[tokio::test]

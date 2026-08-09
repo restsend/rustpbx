@@ -3,7 +3,6 @@
 //! This module provides shared types for session management:
 //! - `SessionId`: Unique session identifier
 //! - `BridgeConfig`: Bridge configuration for connecting legs
-//! - `SessionSnapshot`: Snapshot of session state
 //!
 //! The actual session implementation is in `crate::proxy::proxy_call::sip_session::SipSession`.
 
@@ -73,19 +72,6 @@ impl BridgeConfig {
         self.active = false;
         self.legs.clear();
     }
-}
-
-/// Snapshot of session state for external consumers
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionSnapshot {
-    pub id: SessionId,
-    pub state: crate::call::domain::SessionState,
-    pub leg_count: usize,
-    pub bridge_active: bool,
-    pub media_path: crate::call::domain::MediaPathMode,
-    /// Answer SDP from the first leg (for Re-INVITE handling)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answer_sdp: Option<String>,
 }
 
 #[cfg(test)]

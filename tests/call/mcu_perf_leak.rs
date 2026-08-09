@@ -273,7 +273,6 @@ fn strategy_ctx(sid: &str, legs: Vec<LegId>) -> MediaPathContext {
     MediaPathContext {
         session_id: SessionId::from(sid),
         active_legs: legs,
-        cancel_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 

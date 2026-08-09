@@ -19,18 +19,9 @@ pub use rwi_adapter::*;
 /// Common error type for adapter conversions
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
-    #[error("Unknown command type")]
-    UnknownCommand,
-
     #[error("Missing required field: {0}")]
     MissingField(&'static str),
 
-    #[error("Invalid value for field '{0}': {1}")]
-    InvalidValue(&'static str, String),
-
     #[error("Command not supported in current context: {0}")]
     NotSupported(String),
-
-    #[error("Session command without session context")]
-    NoSessionContext,
 }

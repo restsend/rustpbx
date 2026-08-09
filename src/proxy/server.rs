@@ -96,7 +96,6 @@ pub struct SipServerInner {
     /// IVR step trace collector (set by IVR Editor addon, accessed by StepIvrApp).
     pub ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
-    pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
     pub conference_server: Arc<crate::call::runtime::ConferenceServer>,
     pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
@@ -890,8 +889,6 @@ impl SipServerBuilder {
             });
         }
 
-        let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
-
         // Create conference manager with in-server audio mixing
         let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
         let conference_server = Arc::new(crate::call::runtime::ConferenceServer::new(
@@ -938,7 +935,6 @@ impl SipServerBuilder {
             rwi_gateway: self.rwi_gateway,
             ivr_trace: self.ivr_trace,
             tls_listener: tls_listener_clone,
-            queue_manager,
             conference_manager,
             conference_server,
             agent_registry: self.agent_registry,

@@ -38,8 +38,6 @@ pub enum HangupInitiator {
     Local {
         /// Source of the command (RWI, Console, etc.)
         source: String,
-        /// Optional command ID for tracking
-        command_id: Option<String>,
     },
     /// System initiated the hangup (timeout, error, etc.)
     System {
@@ -48,51 +46,20 @@ pub enum HangupInitiator {
         /// Additional details
         details: Option<String>,
     },
-    /// Media error caused the hangup
-    Media {
-        /// The leg with the media error
-        leg_id: LegId,
-        /// Error description
-        error: String,
-    },
 }
 
 /// System-level reasons for hangup
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemHangupReason {
-    /// Call timed out (no answer)
-    NoAnswer,
-    /// Session expired
-    SessionExpired,
-    /// Maximum call duration exceeded
-    MaxDurationExceeded,
-    /// Queue timeout
-    QueueTimeout,
-    /// No available agent
-    NoAgentAvailable,
-    /// System shutdown
-    SystemShutdown,
     /// Internal error
     InternalError,
-    /// Resource limit exceeded
-    ResourceLimit,
-    /// Rejected by policy
-    PolicyRejection,
 }
 
 impl std::fmt::Display for SystemHangupReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SystemHangupReason::NoAnswer => write!(f, "no_answer"),
-            SystemHangupReason::SessionExpired => write!(f, "session_expired"),
-            SystemHangupReason::MaxDurationExceeded => write!(f, "max_duration_exceeded"),
-            SystemHangupReason::QueueTimeout => write!(f, "queue_timeout"),
-            SystemHangupReason::NoAgentAvailable => write!(f, "no_agent_available"),
-            SystemHangupReason::SystemShutdown => write!(f, "system_shutdown"),
             SystemHangupReason::InternalError => write!(f, "internal_error"),
-            SystemHangupReason::ResourceLimit => write!(f, "resource_limit"),
-            SystemHangupReason::PolicyRejection => write!(f, "policy_rejection"),
         }
     }
 }
@@ -135,7 +102,6 @@ impl HangupCommand {
             cascade: HangupCascade::All,
             initiator: HangupInitiator::Local {
                 source: "unknown".to_string(),
-                command_id: None,
             },
             reason,
             code,
@@ -154,7 +120,6 @@ impl HangupCommand {
             cascade: HangupCascade::All,
             initiator: HangupInitiator::Local {
                 source: source.into(),
-                command_id: None,
             },
             reason,
             code,
@@ -183,32 +148,9 @@ impl HangupCommand {
         }
     }
 
-    /// Create a system-initiated hangup
-    pub fn system(reason: SystemHangupReason, details: Option<String>) -> Self {
-        Self {
-            leg_id: None,
-            cascade: HangupCascade::All,
-            initiator: HangupInitiator::System { reason, details },
-            reason: None,
-            code: Some(500),
-            rtp_timeout_side: None,
-        }
-    }
-
     /// Set the cascade mode
     pub fn with_cascade(mut self, cascade: HangupCascade) -> Self {
         self.cascade = cascade;
-        self
-    }
-
-    /// Set the command ID for tracking
-    pub fn with_command_id(mut self, id: impl Into<String>) -> Self {
-        if let HangupInitiator::Local { source, .. } = &mut self.initiator {
-            self.initiator = HangupInitiator::Local {
-                source: source.clone(),
-                command_id: Some(id.into()),
-            };
-        }
         self
     }
 

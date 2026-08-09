@@ -21,7 +21,7 @@
 use crate::call::adapters::console_to_call_command;
 use crate::call::adapters::rwi_to_call_command;
 use crate::call::domain::CallCommand;
-use crate::call::runtime::{CommandResult, CommandSource, ExecutionContext, MediaCapabilityCheck};
+use crate::call::runtime::CommandResult;
 #[cfg(feature = "console")]
 use crate::console::handlers::call_control::CallCommandPayload;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
@@ -30,16 +30,14 @@ use std::sync::Arc;
 
 /// Dispatch an RWI command using the unified path
 ///
-/// This function:
-/// 1. Converts RwiCommandPayload to CallCommand
-/// 2. Checks media capabilities
-/// 3. Dispatches to the session
+/// Converts RwiCommandPayload to CallCommand and dispatches to the session.
+/// Media capability checks happen inside the session (`execute_command`),
+/// which knows the real media profile.
 pub fn dispatch_rwi_command(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: Option<&str>,
     payload: RwiCommandPayload,
 ) -> anyhow::Result<CommandResult> {
-    // Step 1: Convert to CallCommand
     let command = match rwi_to_call_command(payload, session_id) {
         Ok(cmd) => cmd,
         Err(e) => {
@@ -52,24 +50,7 @@ pub fn dispatch_rwi_command(
         }
     };
 
-    // Step 2: Create execution context
-    let session_id = session_id.unwrap_or_default();
-    let ctx = ExecutionContext::new(session_id).with_source(CommandSource::Rwi);
-
-    // Step 3: Check media capabilities
-    match ctx.check_media_capability(&command) {
-        MediaCapabilityCheck::Denied { reason } => {
-            return Ok(CommandResult::not_supported(reason));
-        }
-        MediaCapabilityCheck::Degraded { reason: _ } => {
-            // Command can execute but with degraded functionality
-            // Continue execution, the result will indicate degradation
-        }
-        MediaCapabilityCheck::Allowed => {}
-    }
-
-    // Step 4: Dispatch to session
-    dispatch_command(registry, session_id, command)
+    dispatch_command(registry, session_id.unwrap_or_default(), command)
 }
 
 /// Dispatch a Console command using the unified path
@@ -79,24 +60,7 @@ pub fn dispatch_console_command(
     session_id: &str,
     payload: CallCommandPayload,
 ) -> anyhow::Result<CommandResult> {
-    // Step 1: Convert to CallCommand
     let command = console_to_call_command(payload, session_id)?;
-
-    // Step 2: Create execution context
-    let ctx = ExecutionContext::new(session_id).with_source(CommandSource::Console);
-
-    // Step 3: Check media capabilities
-    match ctx.check_media_capability(&command) {
-        MediaCapabilityCheck::Denied { reason } => {
-            return Ok(CommandResult::not_supported(reason));
-        }
-        MediaCapabilityCheck::Degraded { reason: _ } => {
-            // Continue with degraded functionality
-        }
-        MediaCapabilityCheck::Allowed => {}
-    }
-
-    // Step 4: Dispatch to session
     dispatch_command(registry, session_id, command)
 }
 
@@ -106,24 +70,6 @@ fn dispatch_command(
     session_id: &str,
     command: CallCommand,
 ) -> anyhow::Result<CommandResult> {
-    // Special handling for Bridge command: check session exists
-    if let CallCommand::Bridge { .. } = &command {
-        // For Bridge, we need to verify the session has both legs
-        // The legs are identified by leg_a and leg_b within the same session
-        let Some(handle) = registry.get_handle(session_id) else {
-            return Ok(CommandResult::failure(format!(
-                "session {} not found",
-                session_id
-            )));
-        };
-        // Send the bridge command
-        match handle.send_command(command) {
-            Ok(_) => return Ok(CommandResult::success()),
-            Err(e) => return Ok(CommandResult::failure(format!("failed to dispatch: {}", e))),
-        }
-    }
-
-    // Get the session handle from registry
     let Some(handle) = registry.get_handle(session_id) else {
         return Ok(CommandResult::failure(format!(
             "session {} not found",

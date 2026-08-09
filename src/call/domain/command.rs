@@ -156,20 +156,6 @@ pub enum CallCommand {
         digits: String,
     },
 
-    /// Collect DTMF digits from a leg and fire a dtmf_collected / dtmf_collect_timeout event.
-    DtmfCollect {
-        /// Target leg to collect from (None = caller)
-        leg_id: Option<LegId>,
-        /// Minimum digits required before a timeout fires a collected event
-        min_digits: u32,
-        /// Maximum digits to collect (stops immediately when reached)
-        max_digits: u32,
-        /// Inter-digit / overall timeout in milliseconds
-        timeout_ms: u64,
-        /// Optional terminator digit (not included in result)
-        terminator: Option<char>,
-    },
-
     /// Start recording
     StartRecording {
         /// Recording configuration
@@ -241,99 +227,6 @@ pub enum CallCommand {
         supervisor_leg: LegId,
     },
 
-    /// Create a conference
-    ConferenceCreate {
-        /// Conference ID
-        conf_id: String,
-        /// Conference options
-        options: ConferenceOptions,
-    },
-
-    /// Add a leg to a conference
-    ConferenceAdd {
-        /// Conference ID
-        conf_id: String,
-        /// Leg to add
-        leg_id: LegId,
-    },
-
-    /// Remove a leg from a conference
-    ConferenceRemove {
-        /// Conference ID
-        conf_id: String,
-        /// Leg to remove
-        leg_id: LegId,
-    },
-
-    /// Mute a leg in a conference
-    ConferenceMute {
-        /// Conference ID
-        conf_id: String,
-        /// Leg to mute
-        leg_id: LegId,
-    },
-
-    /// Unmute a leg in a conference
-    ConferenceUnmute {
-        /// Conference ID
-        conf_id: String,
-        /// Leg to unmute
-        leg_id: LegId,
-    },
-
-    /// Destroy a conference
-    ConferenceDestroy {
-        /// Conference ID
-        conf_id: String,
-    },
-
-    /// Host ends the entire conference (validates host identity)
-    ConferenceEnd {
-        /// Conference ID
-        conf_id: String,
-        /// Leg ID of the host requesting the end
-        host_leg_id: LegId,
-    },
-
-    /// Kick a participant from a conference (alias for remove with notification)
-    ConferenceKick {
-        /// Conference ID
-        conf_id: String,
-        /// Leg to kick
-        leg_id: LegId,
-    },
-
-    /// Mute all participants in a conference
-    ConferenceMuteAll {
-        /// Conference ID
-        conf_id: String,
-    },
-
-    /// Get conference info (participants, state, etc.)
-    ConferenceInfo {
-        /// Conference ID
-        conf_id: String,
-    },
-
-    /// List all conferences
-    ConferenceList,
-
-    /// Enqueue a leg into a queue
-    QueueEnqueue {
-        /// Leg to enqueue
-        leg_id: LegId,
-        /// Queue ID or name
-        queue_id: String,
-        /// Priority (higher = more important)
-        priority: Option<u32>,
-    },
-
-    /// Remove a leg from a queue
-    QueueDequeue {
-        /// Leg to dequeue
-        leg_id: LegId,
-    },
-
     /// Start an application (IVR, Voicemail, etc.)
     StartApp {
         /// Application name
@@ -363,9 +256,6 @@ pub enum CallCommand {
         /// New SDP
         sdp: String,
     },
-
-    /// Refresh the session (send re-INVITE)
-    RefreshSession,
 
     /// Mute a specific track
     MuteTrack {
@@ -577,17 +467,6 @@ pub struct RecordConfig {
     pub mono_caller_only: Option<bool>,
 }
 
-/// Conference options
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ConferenceOptions {
-    /// Maximum number of participants
-    pub max_participants: Option<u32>,
-    /// Whether to record the conference
-    pub record: bool,
-    /// Recording path (if recording)
-    pub record_path: Option<String>,
-}
-
 /// Application event for injection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -636,43 +515,6 @@ impl CallCommand {
         )
     }
 
-    /// Get the target leg ID if this command targets a specific leg
-    pub fn target_leg(&self) -> Option<&LegId> {
-        match self {
-            CallCommand::Answer { leg_id } => Some(leg_id),
-            CallCommand::Reject { leg_id, .. } => Some(leg_id),
-            CallCommand::Ring { leg_id, .. } => Some(leg_id),
-            CallCommand::Hangup(cmd) => cmd.leg_id.as_ref(),
-            CallCommand::Bridge { leg_a, .. } => Some(leg_a),
-            CallCommand::Unbridge { leg_id } => Some(leg_id),
-            CallCommand::Transfer { leg_id, .. } => Some(leg_id),
-            CallCommand::Hold { leg_id, .. } => Some(leg_id),
-            CallCommand::Unhold { leg_id } => Some(leg_id),
-            CallCommand::Play {
-                leg_id: Some(leg_id),
-                ..
-            } => Some(leg_id),
-            CallCommand::StopPlayback {
-                leg_id: Some(leg_id),
-            } => Some(leg_id),
-            CallCommand::SendDtmf { leg_id, .. } => Some(leg_id),
-            CallCommand::SupervisorListen { supervisor_leg, .. } => Some(supervisor_leg),
-            CallCommand::SupervisorWhisper { supervisor_leg, .. } => Some(supervisor_leg),
-            CallCommand::SupervisorBarge { supervisor_leg, .. } => Some(supervisor_leg),
-            CallCommand::SupervisorTakeover { supervisor_leg, .. } => Some(supervisor_leg),
-            CallCommand::SupervisorStop { supervisor_leg } => Some(supervisor_leg),
-            CallCommand::ConferenceAdd { leg_id, .. } => Some(leg_id),
-            CallCommand::ConferenceRemove { leg_id, .. } => Some(leg_id),
-            CallCommand::ConferenceMute { leg_id, .. } => Some(leg_id),
-            CallCommand::ConferenceUnmute { leg_id, .. } => Some(leg_id),
-            CallCommand::ConferenceKick { leg_id, .. } => Some(leg_id),
-            CallCommand::ConferenceEnd { host_leg_id, .. } => Some(host_leg_id),
-            CallCommand::QueueEnqueue { leg_id, .. } => Some(leg_id),
-            CallCommand::QueueDequeue { leg_id } => Some(leg_id),
-            CallCommand::HandleReInvite { leg_id, .. } => Some(leg_id),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -709,68 +551,4 @@ mod tests {
         assert!(!play.is_signaling_only());
     }
 
-    #[test]
-    fn call_command_target_leg() {
-        let answer = CallCommand::Answer {
-            leg_id: LegId::new("leg-1"),
-        };
-        assert_eq!(answer.target_leg().map(|l| l.as_str()), Some("leg-1"));
-
-        let start_recording = CallCommand::StartRecording {
-            config: RecordConfig {
-                path: "/tmp/rec.wav".to_string(),
-                max_duration_secs: None,
-                beep: false,
-                format: None,
-                channels: None,
-                mono_caller_only: None,
-            },
-        };
-        assert!(start_recording.target_leg().is_none());
-    }
-
-    #[test]
-    fn call_command_conference_new_variants() {
-        let kick = CallCommand::ConferenceKick {
-            conf_id: "conf-1".to_string(),
-            leg_id: LegId::new("leg-1"),
-        };
-        assert_eq!(kick.target_leg().map(|l| l.as_str()), Some("leg-1"));
-
-        let mute_all = CallCommand::ConferenceMuteAll {
-            conf_id: "conf-1".to_string(),
-        };
-        assert!(mute_all.target_leg().is_none());
-
-        let info = CallCommand::ConferenceInfo {
-            conf_id: "conf-1".to_string(),
-        };
-        assert!(info.target_leg().is_none());
-
-        let list = CallCommand::ConferenceList;
-        assert!(list.target_leg().is_none());
-    }
-
-    #[test]
-    fn call_command_serialization_roundtrip() {
-        let kick = CallCommand::ConferenceKick {
-            conf_id: "conf-1".to_string(),
-            leg_id: LegId::new("leg-1"),
-        };
-        let json = serde_json::to_string(&kick).unwrap();
-        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, CallCommand::ConferenceKick { .. }));
-
-        let mute_all = CallCommand::ConferenceMuteAll {
-            conf_id: "conf-1".to_string(),
-        };
-        let json = serde_json::to_string(&mute_all).unwrap();
-        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, CallCommand::ConferenceMuteAll { .. }));
-
-        let list = CallCommand::ConferenceList;
-        let json = serde_json::to_string(&list).unwrap();
-        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, CallCommand::ConferenceList));
-    }
 }

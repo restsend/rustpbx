@@ -21,7 +21,6 @@ pub struct SessionSnapshot {
     pub state: SessionState,
     pub leg_count: usize,
     pub bridge_active: bool,
-    pub caller_gate_open: bool,
     pub media_path: MediaPathMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_sdp: Option<String>,
@@ -315,7 +314,7 @@ pub struct SipSession {
     pub reporter: Option<CallReporter>,
     cdr_sent: Arc<std::sync::atomic::AtomicBool>,
 
-    pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
+    pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
     /// sharing. Cloned into every `CallSessionContext` so all hook callbacks
@@ -352,7 +351,7 @@ pub struct SipSessionHandle {
     session_id: SessionId,
     cmd_tx: mpsc::Sender<CallCommand>,
     snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
-    app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
+    app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 }
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
@@ -387,21 +386,14 @@ impl SipSessionHandle {
     }
 
     pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
-        let bridge = self.app_event_bridge.read();
-        if let Some(ref handle) = *bridge {
-            return handle.send_app_event(event);
-        }
-        false
+        self.app_event_bridge.send_app_event(event)
     }
 
     pub fn set_app_event_sender(
         &self,
         sender: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
     ) {
-        let bridge = self.app_event_bridge.read();
-        if let Some(ref handle) = *bridge {
-            handle.set_app_event_sender(sender);
-        }
+        self.app_event_bridge.set_app_event_sender(sender);
     }
 }
 
@@ -416,7 +408,7 @@ impl SipSessionHandle {
             session_id: SessionId::from(session_id.to_string()),
             cmd_tx,
             snapshot_cache: Arc::new(RwLock::new(None)),
-            app_event_bridge: Arc::new(RwLock::new(None)),
+            app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
         }
     }
 }
@@ -1051,7 +1043,7 @@ enum ConstructMode<'a> {
             session_id: id,
             cmd_tx,
             snapshot_cache,
-            app_event_bridge: Arc::new(RwLock::new(None)),
+            app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
         };
 
         (handle, cmd_rx)
@@ -1312,9 +1304,7 @@ enum ConstructMode<'a> {
         let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
-        let app_event_bridge: Arc<
-            RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>,
-        > = Arc::new(RwLock::new(None));
+        let app_event_bridge = crate::proxy::proxy_call::state::AppEventBridge::new();
 
         let sip_handle = SipSessionHandle {
             session_id: session_id.clone(),
@@ -1395,12 +1385,6 @@ enum ConstructMode<'a> {
             };
             gw.read().meta_store.insert(session_id_str.clone(), meta);
         }
-
-        // Create a shared bridge for app event delivery (send_app_event).
-        let bridge_shared = crate::proxy::proxy_call::state::AppEventBridgeShared::new();
-        let bridge_handle =
-            crate::proxy::proxy_call::state::AppEventBridge::with_shared(bridge_shared);
-        *app_event_bridge.write() = Some(bridge_handle.clone());
 
         let app_runtime: Arc<dyn AppRuntime> = Arc::new(
             DefaultAppRuntime::new(AppRuntimeConfig {
@@ -1865,19 +1849,20 @@ enum ConstructMode<'a> {
             crate::call::domain::RtpTimeoutSide::Callee => "callee",
         };
         let leg = self.legs.get(&LegId::from(leg_key));
-        let name = leg.and_then(|l| l.display_name.clone());
         let endpoint = leg.and_then(|l| l.endpoint.clone());
         let (name, endpoint) = match side {
             crate::call::domain::RtpTimeoutSide::Caller => {
-                let name = name.or_else(|| self.meta.routed_caller.clone());
+                let name = self.meta.routed_caller.clone();
                 let endpoint = endpoint
                     .or_else(|| self.meta.routed_caller.clone())
                     .or_else(|| Some(self.context.original_caller.clone()));
                 (name, endpoint)
             }
             crate::call::domain::RtpTimeoutSide::Callee => {
-                let name = name
-                    .or_else(|| self.meta.routed_callee.clone())
+                let name = self
+                    .meta
+                    .routed_callee
+                    .clone()
                     .or_else(|| self.meta.connected_callee.clone());
                 let endpoint = endpoint
                     .or_else(|| self.meta.connected_callee.clone())
@@ -2857,7 +2842,6 @@ enum ConstructMode<'a> {
             state: self.state,
             leg_count: self.legs.len(),
             bridge_active: self.bridge.active,
-            caller_gate_open: true,
             media_path: self.media_profile.path,
             answer_sdp: self.media.answer.clone(),
             callee_dialogs,
@@ -3922,7 +3906,6 @@ enum ConstructMode<'a> {
         .await
         .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
 
-        self.start_caller_ingress_monitor_if_needed().await;
 
         // Inject dial_next_agent to kick off sequential agent dialing
         // (parallel mode auto-dials in on_enter). Skip when no agents were
@@ -4064,10 +4047,8 @@ enum ConstructMode<'a> {
                             .unwrap_or(&format!("conf-{}", self.id.0))
                             .to_string();
                         self.join_conference_mixer(&conf_id).await;
-                        self.start_caller_ingress_monitor_if_needed().await;
-                    } else {
-                        self.start_caller_ingress_monitor_if_needed().await;
-                    }
+                                    } else {
+                                    }
                     Ok(())
                 }
             }
@@ -5859,21 +5840,6 @@ enum ConstructMode<'a> {
         None
     }
 
-    /// Ensure anchored media flows through the /* /* ForwardingTrack removed */ slow path removed */,
-    /// downgrading from the RTP fast-path on demand if necessary.
-    ///
-    /// Idempotent and cheap to call:
-    /// - If an app `media_bridge` is active, the call is already anchored —
-    ///   return immediately.
-    /// - If [`/* /* ForwardingTrack removed */ removed */`] is already wired — return.
-    /// - Only when the RTP fast-path relay (`RelayOnly`) is active do we tear
-    ///   down the transport-level rewrite bridge and wire the /* ForwardingTrack removed */
-    ///   chain for both legs. No re-INVITE is needed: clearing the rewrite
-    ///   hook restores the normal demux → depacketizer → track flow, and the
-    ///   /* ForwardingTrack removed */ reuses the already-negotiated transceivers/senders.
-    ///
-    /// Called by features that need to read or inject per-packet media
-    /// (currently VoipBridge; Play will follow).
     async fn find_audio_receiver_track(
         pc: &rustrtc::PeerConnection,
     ) -> Option<Arc<dyn rustrtc::media::MediaStreamTrack>> {
@@ -5886,12 +5852,6 @@ enum ConstructMode<'a> {
         }
         None
     }
-
-    async fn start_caller_ingress_monitor_if_needed(&mut self) {
-        // DTMF detection via MediaBridge IngressTap
-    }
-
-    async fn stop_caller_ingress_monitor(&mut self) {}
 
     fn resolve_effective_codecs(&self) -> Vec<CodecType> {
         if !self.context.dialplan.allow_codecs.is_empty() {
@@ -6160,8 +6120,7 @@ enum ConstructMode<'a> {
         sdp: Option<String>,
     ) -> Result<()> {
         if false {
-            self.start_caller_ingress_monitor_if_needed().await;
-        }
+            }
 
         self.meta.connected_callee = callee.clone();
         // A real callee/agent leg answered. Record this permanently so the
@@ -7218,16 +7177,15 @@ enum ConstructMode<'a> {
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         info!(session_id = %self.id, path = %path, duration = ?duration, file_size, "Recording stopped");
 
-        let bridge = self.app_event_bridge.read();
-        if let Some(ref handle) = *bridge {
-            let _ = handle.send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
+        let _ = self
+            .app_event_bridge
+            .send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
                 crate::call::app::RecordingInfo {
                     path: path.clone(),
                     duration,
                     size_bytes: file_size,
                 },
             ));
-        }
         Ok(())
     }
 
@@ -7256,7 +7214,6 @@ enum ConstructMode<'a> {
             lease.release_all();
         }
 
-        self.stop_caller_ingress_monitor().await;
 
         // Disarm any RTP inactivity timeouts on both legs.
         if let Some(mb) = self.media.bridge.as_mut() {
@@ -8370,8 +8327,7 @@ impl SipSession {
                     .await
                 {
                     Ok(()) => {
-                        self.start_caller_ingress_monitor_if_needed().await;
-                        self.sync_rtp_timeout_pause();
+                                        self.sync_rtp_timeout_pause();
                         CommandResult::success()
                     }
                     Err(e) => CommandResult::failure(e.to_string()),
@@ -8380,7 +8336,6 @@ impl SipSession {
 
             CallCommand::StopApp { reason } => match self.app_runtime.stop_app(reason).await {
                 Ok(()) => {
-                    self.stop_caller_ingress_monitor().await;
                     self.sync_rtp_timeout_pause();
                     CommandResult::success()
                 }
@@ -8549,102 +8504,6 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_supervisor_stop(supervisor_leg).await)
             }
 
-            CallCommand::ConferenceCreate { conf_id, options } => {
-                Self::ok_or_failure(self.handle_conference_create(conf_id, options).await)
-            }
-
-            CallCommand::ConferenceAdd { conf_id, leg_id } => {
-                Self::ok_or_failure(self.handle_conference_add(conf_id, leg_id).await)
-            }
-
-            CallCommand::ConferenceRemove { conf_id, leg_id } => {
-                Self::ok_or_failure(self.handle_conference_remove(conf_id, leg_id).await)
-            }
-
-            CallCommand::ConferenceMute { conf_id, leg_id } => {
-                Self::ok_or_failure(self.handle_conference_mute(conf_id, leg_id).await)
-            }
-
-            CallCommand::ConferenceUnmute { conf_id, leg_id } => {
-                Self::ok_or_failure(self.handle_conference_unmute(conf_id, leg_id).await)
-            }
-
-            CallCommand::ConferenceDestroy { conf_id } => {
-                Self::ok_or_failure(self.handle_conference_destroy(conf_id).await)
-            }
-
-            CallCommand::ConferenceEnd {
-                conf_id,
-                host_leg_id,
-            } => Self::ok_or_failure(self.handle_conference_end(conf_id, host_leg_id).await),
-
-            CallCommand::ConferenceKick { conf_id, leg_id } => {
-                Self::ok_or_failure(self.handle_conference_kick(conf_id, leg_id).await)
-            }
-
-            CallCommand::ConferenceMuteAll { conf_id } => {
-                Self::ok_or_failure(self.handle_conference_mute_all(conf_id).await)
-            }
-
-            CallCommand::ConferenceInfo { conf_id } => {
-                match self.handle_conference_info(conf_id).await {
-                    Ok(room) => {
-                        let mut data = serde_json::Map::new();
-                        data.insert(
-                            "conf_id".to_string(),
-                            serde_json::Value::String(room.id.0.clone()),
-                        );
-                        data.insert(
-                            "participant_count".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(
-                                room.participant_count(),
-                            )),
-                        );
-                        let participants: Vec<serde_json::Value> = room
-                            .participants
-                            .values()
-                            .map(|p| {
-                                serde_json::json!({
-                                    "leg_id": p.leg_id.as_str(),
-                                    "muted": p.muted,
-                                })
-                            })
-                            .collect();
-                        data.insert(
-                            "participants".to_string(),
-                            serde_json::Value::Array(participants),
-                        );
-                        CommandResult::success_with_data(serde_json::Value::Object(data))
-                    }
-                    Err(e) => CommandResult::failure(e.to_string()),
-                }
-            }
-
-            CallCommand::ConferenceList => {
-                let rooms = self.handle_conference_list().await;
-                let list: Vec<serde_json::Value> = rooms
-                    .iter()
-                    .map(|r| {
-                        serde_json::json!({
-                            "conf_id": r.id.0,
-                            "participant_count": r.participant_count(),
-                            "locked": r.locked,
-                        })
-                    })
-                    .collect();
-                CommandResult::success_with_data(serde_json::Value::Array(list))
-            }
-
-            CallCommand::QueueEnqueue {
-                leg_id,
-                queue_id,
-                priority,
-            } => Self::ok_or_failure(self.handle_queue_enqueue(leg_id, queue_id, priority).await),
-
-            CallCommand::QueueDequeue { leg_id } => {
-                Self::ok_or_failure(self.handle_queue_dequeue(leg_id).await)
-            }
-
             CallCommand::Reject { leg_id, reason } => {
                 Self::ok_or_failure(self.handle_reject(leg_id, reason).await)
             }
@@ -8747,16 +8606,14 @@ impl SipSession {
                     .get(&leg_id)
                     .and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
-                    let bridge = self.app_event_bridge.read();
-                    if let Some(ref h) = *bridge {
-                        h.send_app_event(crate::call::app::ControllerEvent::Custom(
+                    self.app_event_bridge
+                        .send_app_event(crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
                             }),
                         ));
-                    }
                 }
                 if let Some(sdp) = answer_sdp {
                     self.legs.set_answer(leg_id.clone(), sdp);
@@ -8787,9 +8644,8 @@ impl SipSession {
                     "agent_no_answer"
                 };
                 {
-                    let bridge = self.app_event_bridge.read();
-                    if let Some(ref h) = *bridge {
-                        h.send_app_event(crate::call::app::ControllerEvent::Custom(
+                    self.app_event_bridge
+                        .send_app_event(crate::call::app::ControllerEvent::Custom(
                             event_name.to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
@@ -8797,7 +8653,6 @@ impl SipSession {
                                 "reason": reason,
                             }),
                         ));
-                    }
                 }
 
                 // Surface agent rejection / no-answer in the call trace so
@@ -9136,7 +8991,6 @@ impl SipSession {
             }
         }
 
-        self.stop_caller_ingress_monitor().await;
         self.cancel_token.cancel();
 
         CommandResult::success()
@@ -9356,18 +9210,7 @@ impl SipSession {
             "Removing leg from session"
         );
 
-        if let Some(leg) = self.legs.remove(&leg_id) {
-            // Send BYE to SIP dialog if exists
-            let dialog_id = format!("{}-{}", self.id.0, leg_id);
-            if leg.dialog_id.is_some() {
-                if let Some(dlg) = self.server.dialog_layer.get_dialog_with(&dialog_id) {
-                    if let Err(e) = dlg.hangup().await {
-                        warn!(session_id = %self.id, %leg_id, %dialog_id, error = %e, "Failed to hangup SIP dialog");
-                    } else {
-                        info!(session_id = %self.id, %leg_id, %dialog_id, "SIP dialog hangup sent");
-                    }
-                }
-            }
+        if self.legs.remove(&leg_id).is_some() {
             info!(session_id = %self.id, %leg_id, "Leg removed");
         }
 
@@ -9696,7 +9539,6 @@ impl SipSession {
         let ctx = crate::call::runtime::MediaPathContext {
             session_id: self.id.clone(),
             active_legs: active_legs.clone(),
-            cancel_token: self.cancel_token.clone(),
         };
 
         let decision = match strategy.decide(&active_legs) {
@@ -9930,7 +9772,7 @@ impl SipSession {
     /// playback paths.
     #[allow(clippy::too_many_arguments)]
     fn dispatch_playback_completion(
-        app_event_bridge: &Arc<RwLock<Option<crate::proxy::proxy_call::state::AppEventBridge>>>,
+        app_event_bridge: &crate::proxy::proxy_call::state::AppEventBridge,
         rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
         session_id: &SessionId,
         event_leg_id_str: &Option<String>,
@@ -9938,12 +9780,10 @@ impl SipSession {
         interrupted: bool,
         handle_for_restore: &SipSessionHandle,
     ) {
-        if let Some(h) = app_event_bridge.read().as_ref() {
-            let _ = h.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
-                track_id: track_id.to_string(),
-                interrupted,
-            });
-        }
+        let _ = app_event_bridge.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
+            track_id: track_id.to_string(),
+            interrupted,
+        });
         if let Some(gw) = rwi_gateway {
             gw.read().send_to_owner(&crate::rwi::MediaPlayFinished {
                 call_id: session_id.to_string(),
@@ -10095,63 +9935,6 @@ impl SipSession {
         Ok(())
     }
 
-    async fn handle_queue_enqueue(
-        &mut self,
-        leg_id: LegId,
-        queue_id: String,
-        priority: Option<u32>,
-    ) -> Result<()> {
-        info!(session_id = %self.id, %leg_id, %queue_id, ?priority, "Enqueueing leg to queue");
-
-        self.require_leg(&leg_id)?;
-
-        self.update_leg_state(&leg_id, LegState::Hold);
-
-        let position = self
-            .server
-            .queue_manager
-            .enqueue(
-                queue_id.clone().into(),
-                leg_id.clone(),
-                self.id.clone(),
-                priority,
-            )
-            .await?;
-
-        info!(session_id = %self.id, %leg_id, %queue_id, position, "Leg enqueued successfully at position");
-        Ok(())
-    }
-
-    async fn handle_queue_dequeue(&mut self, leg_id: LegId) -> Result<()> {
-        info!(session_id = %self.id, %leg_id, "Dequeuing leg from queue");
-
-        self.require_leg(&leg_id)?;
-
-        let queue_manager = &self.server.queue_manager;
-        let queues = queue_manager.list_queues().await;
-
-        let mut dequeued = false;
-        for queue_id in queues {
-            if let Ok(_entry) = queue_manager.dequeue(&queue_id, &leg_id).await {
-                info!(session_id = %self.id, %leg_id, queue_id = %queue_id.0, "Leg dequeued from queue");
-                dequeued = true;
-
-                let _ = queue_manager.remove_queue_if_empty(&queue_id).await;
-
-                break;
-            }
-        }
-
-        if !dequeued {
-            warn!(session_id = %self.id, %leg_id, "Leg was not found in any queue");
-        }
-
-        self.update_leg_state(&leg_id, LegState::Connected);
-
-        info!(session_id = %self.id, %leg_id, "Leg dequeued successfully");
-        Ok(())
-    }
-
     async fn handle_reject(&mut self, leg_id: LegId, reason: Option<String>) -> Result<()> {
         info!(session_id = %self.id, %leg_id, ?reason, "Rejecting call");
 
@@ -10207,13 +9990,8 @@ impl SipSession {
 
         // DN event: extension ringing
 
-        let sdp = ringback.as_ref().and_then(|policy| match policy {
-            RingbackPolicy::Replace { .. } => self.media.caller_offer.clone(),
-            _ => None,
-        });
-
         if let Some(dialog) = self.caller_dialog.as_ref() {
-            if let Err(e) = dialog.ringing(None, sdp.map(|s| s.into_bytes())) {
+            if let Err(e) = dialog.ringing(None, None) {
                 warn!(session_id = %self.id, %leg_id, error = %e, "Failed to send ringing indication");
                 return Err(anyhow!("Failed to send ringing indication: {}", e));
             }
@@ -10311,25 +10089,7 @@ impl SipSession {
                 None => return Err(anyhow!("No connected callee dialog")),
             }
         } else {
-            match self
-                .legs
-                .get(&leg_id)
-                .and_then(|leg| leg.dialog_id.as_ref())
-            {
-                Some(dialog_id) => match self.server.dialog_layer.get_dialog_with(dialog_id) {
-                    Some(dlg) => {
-                        Self::send_info_to_dialog(&dlg, headers, dtmf_body.into_bytes()).await
-                    }
-                    None => {
-                        return Err(anyhow!(
-                            "Dialog not found for leg {}: {}",
-                            leg_id,
-                            dialog_id
-                        ));
-                    }
-                },
-                None => return Err(anyhow!("No dialog_id for leg: {}", leg_id)),
-            }
+            return Err(anyhow!("No dialog for leg: {}", leg_id));
         };
 
         match info_result {
@@ -11567,44 +11327,6 @@ mod tests {
 
         let received = cmd_rx.recv().await;
         assert!(matches!(received, Some(CallCommand::SendDtmf { .. })));
-
-        drop(handle);
-    }
-
-    #[tokio::test]
-    async fn test_queue_enqueue_command() {
-        use crate::call::runtime::SessionId;
-
-        let id = SessionId::from("test-queue-enqueue");
-        let (handle, mut cmd_rx) = SipSession::with_handle(id);
-
-        let result = handle.send_command(CallCommand::QueueEnqueue {
-            leg_id: LegId::from("caller"),
-            queue_id: "support-queue".to_string(),
-            priority: Some(1),
-        });
-        assert!(result.is_ok());
-
-        let received = cmd_rx.recv().await;
-        assert!(matches!(received, Some(CallCommand::QueueEnqueue { .. })));
-
-        drop(handle);
-    }
-
-    #[tokio::test]
-    async fn test_queue_dequeue_command() {
-        use crate::call::runtime::SessionId;
-
-        let id = SessionId::from("test-queue-dequeue");
-        let (handle, mut cmd_rx) = SipSession::with_handle(id);
-
-        let result = handle.send_command(CallCommand::QueueDequeue {
-            leg_id: LegId::from("caller"),
-        });
-        assert!(result.is_ok());
-
-        let received = cmd_rx.recv().await;
-        assert!(matches!(received, Some(CallCommand::QueueDequeue { .. })));
 
         drop(handle);
     }

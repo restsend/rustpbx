@@ -81,12 +81,14 @@ pub struct CallContext {
 }
 
 
+/// Delivers [`crate::call::app::ControllerEvent`]s to the running `CallApp`
+/// event loop. Cloneable/shareable: the sender slot has interior mutability.
 #[derive(Clone)]
-pub struct AppEventBridgeShared {
+pub struct AppEventBridge {
     app_event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>>>,
 }
 
-impl AppEventBridgeShared {
+impl AppEventBridge {
     pub fn new() -> Self {
         Self {
             app_event_tx: Arc::new(RwLock::new(None)),
@@ -103,6 +105,11 @@ impl AppEventBridgeShared {
         *self.app_event_tx.write() = sender;
     }
 
+    /// Send a [`crate::call::app::ControllerEvent`] directly to the running
+    /// `CallApp` event loop.
+    ///
+    /// Returns `true` if the event was delivered (i.e. an app is currently running
+    /// on this call and the channel is open).
     pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
         let slot = self.app_event_tx.read();
         if let Some(tx) = slot.as_ref() {
@@ -112,38 +119,9 @@ impl AppEventBridgeShared {
     }
 }
 
-impl Default for AppEventBridgeShared {
+impl Default for AppEventBridge {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Clone)]
-pub struct AppEventBridge {
-    shared: AppEventBridgeShared,
-}
-
-impl AppEventBridge {
-    /// Create a new bridge with the given shared state
-    pub fn with_shared(shared: AppEventBridgeShared) -> Self {
-        Self { shared }
-    }
-
-    /// Register (or clear) the sender used to deliver [`ControllerEvent`]s to the
-    /// running `CallApp`.
-    pub fn set_app_event_sender(
-        &self,
-        sender: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
-    ) {
-        self.shared.set_app_event_sender(sender);
-    }
-
-    /// Send a [`ControllerEvent`] directly to the running `CallApp` event loop.
-    ///
-    /// Returns `true` if the event was delivered (i.e. an app is currently running
-    /// on this call and the channel is open).
-    pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
-        self.shared.send_app_event(event)
     }
 }
 

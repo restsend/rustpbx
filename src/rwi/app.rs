@@ -1,7 +1,6 @@
 use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
-use crate::models::call_record::extract_sip_username;
 use crate::rwi::RwiEventSpec;
 use crate::rwi::RwiGatewayRef;
 use crate::rwi::gateway::SessionId;
@@ -102,30 +101,8 @@ impl CallApp for RwiApp {
     ) -> anyhow::Result<AppAction> {
         let call_id = context.call_info.session_id.clone();
 
-        // Populate CallMetaStore for event enrichment
-        let meta_store = self.gateway.read().meta_store.clone();
-        meta_store
-            .insert(
-                call_id.clone(),
-                crate::rwi::proto::CallMeta {
-                    caller: Some(context.call_info.caller.clone()),
-                    callee: Some(context.call_info.callee.clone()),
-                    direction: Some(context.call_info.direction.clone()),
-                    caller_name: extract_sip_username(&context.call_info.caller),
-                    callee_name: extract_sip_username(&context.call_info.callee),
-                    trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
-                    app_id: None,
-                    routing_target: None,
-                    root: Some(crate::rwi::proto::RootCallInfo {
-                        caller: Some(context.call_info.caller.clone()),
-                        caller_name: extract_sip_username(&context.call_info.caller),
-                        callee: Some(context.call_info.callee.clone()),
-                        callee_name: extract_sip_username(&context.call_info.callee),
-                        call_id: Some(call_id.clone()),
-                        start_time: Some(context.call_info.started_at.to_rfc3339()),
-                    }),
-                },
-            );
+        // CallMetaStore is populated at session construction (sip_session
+        // new_inner) — no need to re-insert here.
 
         self.send_typed_event(&crate::rwi::CallIncoming {
             call_id: call_id.clone(),

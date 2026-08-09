@@ -3126,7 +3126,7 @@ mod tests {
         caller: &str,
         callee: &str,
         direction: DialDirection,
-        conference_manager: Option<Arc<ConferenceManager>>,
+        _conference_manager: Option<Arc<ConferenceManager>>,
     ) -> crate::proxy::proxy_call::sip_session::SipSessionHandle {
         use crate::call::runtime::SessionId;
         use crate::proxy::proxy_call::sip_session::SipSession;
@@ -3134,33 +3134,7 @@ mod tests {
         let id = SessionId::from(session_id);
         let (handle, mut cmd_rx) = SipSession::with_handle(id);
 
-        if let Some(cm) = conference_manager {
-            crate::utils::spawn(async move {
-                while let Some(cmd) = cmd_rx.recv().await {
-                    match cmd {
-                        crate::call::domain::CallCommand::ConferenceAdd { conf_id, leg_id } => {
-                            let conf: crate::call::runtime::ConferenceId = conf_id.into();
-                            let _ = cm.add_participant(&conf, leg_id).await;
-                        }
-                        crate::call::domain::CallCommand::ConferenceRemove { conf_id, leg_id } => {
-                            let conf: crate::call::runtime::ConferenceId = conf_id.into();
-                            let _ = cm.remove_participant(&conf, &leg_id).await;
-                        }
-                        crate::call::domain::CallCommand::ConferenceMute { conf_id, leg_id } => {
-                            let conf: crate::call::runtime::ConferenceId = conf_id.into();
-                            let _ = cm.mute_participant(&conf, &leg_id).await;
-                        }
-                        crate::call::domain::CallCommand::ConferenceUnmute { conf_id, leg_id } => {
-                            let conf: crate::call::runtime::ConferenceId = conf_id.into();
-                            let _ = cm.unmute_participant(&conf, &leg_id).await;
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        } else {
-            crate::utils::spawn(async move { while let Some(_cmd) = cmd_rx.recv().await {} });
-        }
+        crate::utils::spawn(async move { while let Some(_cmd) = cmd_rx.recv().await {} });
 
         let entry = crate::proxy::active_call_registry::ActiveProxyCallEntry {
             session_id: session_id.to_string(),

@@ -179,7 +179,6 @@ mod tests {
         MediaPathContext {
             session_id: SessionId::from(session_id),
             active_legs: legs,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 

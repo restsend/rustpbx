@@ -54,14 +54,6 @@ pub struct Leg {
     pub state: LegState,
     /// SIP URI or endpoint identifier
     pub endpoint: Option<String>,
-    /// Display name (if available)
-    pub display_name: Option<String>,
-    /// Dialog ID (SIP Call-ID + tags)
-    pub dialog_id: Option<String>,
-    /// Whether this leg initiated the call
-    pub is_initiator: bool,
-    /// SDP answer (if available)
-    pub answer_sdp: Option<String>,
 }
 
 impl Leg {
@@ -70,10 +62,6 @@ impl Leg {
             id,
             state: LegState::default(),
             endpoint: None,
-            display_name: None,
-            dialog_id: None,
-            is_initiator: false,
-            answer_sdp: None,
         }
     }
 
@@ -82,34 +70,9 @@ impl Leg {
         self
     }
 
-    pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
-        self.display_name = Some(name.into());
-        self
-    }
-
-    pub fn with_dialog_id(mut self, dialog_id: impl Into<String>) -> Self {
-        self.dialog_id = Some(dialog_id.into());
-        self
-    }
-
-    pub fn as_initiator(mut self) -> Self {
-        self.is_initiator = true;
-        self
-    }
-
     /// Check if the leg is in an active state (can send/receive media)
     pub fn is_active(&self) -> bool {
         matches!(self.state, LegState::Connected | LegState::EarlyMedia)
-    }
-
-    /// Check if the leg can be answered
-    pub fn can_answer(&self) -> bool {
-        matches!(self.state, LegState::Ringing | LegState::EarlyMedia)
-    }
-
-    /// Check if the leg can be placed on hold
-    pub fn can_hold(&self) -> bool {
-        matches!(self.state, LegState::Connected)
     }
 }
 
@@ -123,13 +86,7 @@ mod tests {
         assert_eq!(leg.state, LegState::Initializing);
         assert!(!leg.is_active());
 
-        leg.state = LegState::Ringing;
-        assert!(leg.can_answer());
-        assert!(!leg.can_hold());
-
         leg.state = LegState::Connected;
         assert!(leg.is_active());
-        assert!(leg.can_hold());
-        assert!(!leg.can_answer());
     }
 }

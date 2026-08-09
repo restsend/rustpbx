@@ -501,64 +501,9 @@ impl Default for SessionConferenceBridge {
 mod tests {
     use super::*;
     use crate::call::domain::LegId;
+    use crate::call::runtime::test_utils::{MockAudioReceiver, MockAudioSender};
     use crate::media::conference_mixer::AudioFrame;
     use rustrtc::media::MediaSample;
-
-    /// Mock audio sender that records all sent samples.
-    struct MockAudioSender {
-        samples: std::sync::Arc<tokio::sync::Mutex<Vec<MediaSample>>>,
-    }
-
-    impl MockAudioSender {
-        fn new() -> Self {
-            Self {
-                samples: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            }
-        }
-
-        async fn get_samples(&self) -> Vec<MediaSample> {
-            self.samples.lock().await.clone()
-        }
-    }
-
-    impl AudioSender for MockAudioSender {
-        async fn send(
-            &self,
-            sample: rustrtc::media::MediaSample,
-        ) -> Result<(), mpsc::error::SendError<rustrtc::media::MediaSample>> {
-            self.samples.lock().await.push(sample);
-            Ok(())
-        }
-    }
-
-    /// Mock audio receiver that provides predefined PCM frames.
-    struct MockAudioReceiver {
-        frames: Vec<PcmAudioFrame>,
-        index: usize,
-    }
-
-    impl MockAudioReceiver {
-        fn new(frames: Vec<PcmAudioFrame>) -> Self {
-            Self { frames, index: 0 }
-        }
-    }
-
-    impl AudioReceiver for MockAudioReceiver {
-        fn recv(
-            &mut self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>>
-        {
-            Box::pin(async move {
-                if self.index < self.frames.len() {
-                    let frame = self.frames[self.index].clone();
-                    self.index += 1;
-                    Some(frame)
-                } else {
-                    None
-                }
-            })
-        }
-    }
 
     #[tokio::test]
     async fn test_start_bridge_requires_output_rx() {

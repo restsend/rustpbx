@@ -9,10 +9,10 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent};
-use crate::call::domain::{CallCommand, MediaCapability};
+use crate::call::domain::CallCommand;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 
-use super::{AppDescriptor, AppResult, AppRuntime, AppRuntimeError, AppStatus};
+use super::{AppResult, AppRuntime, AppRuntimeError};
 
 /// State for a running application
 #[derive(Clone)]
@@ -68,16 +68,6 @@ impl DefaultAppRuntime {
     pub fn with_factory(mut self, factory: Arc<dyn AppFactory>) -> Self {
         self.app_factory = Some(factory);
         self
-    }
-
-    /// Get app descriptor for known app types
-    fn get_descriptor(&self, app_name: &str) -> AppDescriptor {
-        match app_name {
-            "ivr" => AppDescriptor::ivr(),
-            "voicemail" => AppDescriptor::voicemail(),
-            "queue" => AppDescriptor::queue(),
-            _ => AppDescriptor::new(app_name).with_capabilities(vec![MediaCapability::Full]),
-        }
     }
 }
 
@@ -270,34 +260,12 @@ impl AppRuntime for DefaultAppRuntime {
         }
     }
 
-    fn status(&self) -> AppStatus {
-        if self.is_running() {
-            AppStatus::Running
-        } else {
-            AppStatus::Idle
-        }
-    }
-
     fn current_app(&self) -> Option<String> {
         if let Ok(guard) = self.running.try_read() {
             guard.as_ref().map(|r| r.name.clone())
         } else {
             None
         }
-    }
-
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        if let Ok(guard) = self.running.try_read()
-            && let Some(running) = guard.as_ref()
-        {
-            let descriptor = self.get_descriptor(&running.name);
-            return descriptor.required_capabilities;
-        }
-        vec![]
-    }
-
-    fn app_descriptor(&self, app_name: &str) -> Option<AppDescriptor> {
-        Some(self.get_descriptor(app_name))
     }
 
     fn get_queue_name(&self) -> Option<String> {

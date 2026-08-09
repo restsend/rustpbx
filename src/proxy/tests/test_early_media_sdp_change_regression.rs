@@ -165,13 +165,7 @@ async fn test_early_media_183_then_different_sdp_200ok_bridge_restarted() -> Res
     info!(
         session_id = %snapshot.id,
         state = ?snapshot.state,
-        caller_gate_open = snapshot.caller_gate_open,
         "Session snapshot after 200 OK with different SDP"
-    );
-
-    assert!(
-        snapshot.caller_gate_open,
-        "Caller gate must be open after 200 OK — fix: caller→callee audio must flow"
     );
 
     // ── 6. RTP exchange: both directions should work ─────────────────────────
