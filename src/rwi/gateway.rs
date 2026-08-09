@@ -1,7 +1,7 @@
 use crate::rwi::auth::RwiIdentity;
 use crate::rwi::event::{RwiEvent, RwiEventSpec, merge_event_context};
 use crate::rwi::proto::CallMetaStore;
-use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
+use crate::rwi::session::{OwnershipMode, RwiSession};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -26,15 +26,6 @@ pub struct EventCacheEntry {
 /// Sender for pushing JSON-serialized events to a WebSocket session.
 pub type WsEventSender = mpsc::UnboundedSender<serde_json::Value>;
 
-#[derive(Debug, Clone)]
-pub struct GatewayState {
-    pub session_id: SessionId,
-    pub call_id: CallId,
-    pub context: Option<Context>,
-    pub ownership: Option<OwnershipMode>,
-    pub supervisor_mode: Option<SupervisorMode>,
-}
-
 pub type RwiGatewayRef = StdArc<RwLock<RwiGateway>>;
 
 pub struct RwiGateway {
@@ -43,7 +34,6 @@ pub struct RwiGateway {
     session_event_senders: HashMap<SessionId, WsEventSender>,
     context_subscriptions: HashMap<Context, HashSet<SessionId>>,
     call_ownership: HashMap<CallId, SessionId>,
-    supervisor_calls: HashMap<CallId, SessionId>,
     event_cache: Mutex<EventCacheState>,
     max_cache_size: usize,
     max_cache_age_secs: u64,
@@ -66,13 +56,6 @@ pub struct RwiGateway {
 struct EventCacheState {
     cache: VecDeque<EventCacheEntry>,
     next_sequence: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct RwiEventMessage {
-    pub call_id: CallId,
-    pub event: RwiEvent,
-    pub target_sessions: Vec<SessionId>,
 }
 
 /// Delivery target for the unified [`RwiGateway::dispatch`] primitive.
@@ -106,7 +89,6 @@ impl RwiGateway {
             session_event_senders: HashMap::new(),
             context_subscriptions: HashMap::new(),
             call_ownership: HashMap::new(),
-            supervisor_calls: HashMap::new(),
             event_cache: Mutex::new(EventCacheState {
                 cache: VecDeque::new(),
                 next_sequence: 1,
@@ -125,8 +107,7 @@ impl RwiGateway {
     /// Create a new RWI session and return the Arc handle.
     /// The caller must call [`set_session_event_sender`] with the WS sender after this.
     pub fn create_session(&mut self, identity: RwiIdentity) -> Arc<RwLock<RwiSession>> {
-        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
-        let session = RwiSession::new(identity, command_tx);
+        let session = RwiSession::new(identity);
         let session_id = session.id.clone();
         let session = Arc::new(RwLock::new(session));
         self.sessions.insert(session_id.clone(), session.clone());
@@ -177,9 +158,6 @@ impl RwiGateway {
                 self.call_ownership.remove(call_id);
                 self.remove_call_vars(call_id);
                 cleanup_call_ids.push(call_id.clone());
-            }
-            for call_id in session.supervisor_targets.keys() {
-                self.supervisor_calls.remove(call_id);
             }
         }
         cleanup_call_ids
@@ -273,34 +251,6 @@ impl RwiGateway {
         false
     }
 
-    pub fn attach_supervisor(
-        &mut self,
-        session_id: &SessionId,
-        target_call_id: CallId,
-        mode: SupervisorMode,
-    ) -> bool {
-        if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write();
-            session.add_supervisor_target(target_call_id.clone(), mode);
-            self.supervisor_calls
-                .insert(target_call_id, session_id.clone());
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn detach_supervisor(&mut self, session_id: &SessionId, target_call_id: &CallId) -> bool {
-        if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write();
-            if session.remove_supervisor_target(target_call_id) {
-                self.supervisor_calls.remove(target_call_id);
-                return true;
-            }
-        }
-        false
-    }
-
     pub fn get_call_owner(&self, call_id: &CallId) -> Option<SessionId> {
         self.call_ownership.get(call_id).cloned()
     }
@@ -310,33 +260,6 @@ impl RwiGateway {
             .get(call_id)
             .map(|owner| owner == session_id)
             .unwrap_or(false)
-    }
-
-    pub fn is_supervisor(&self, call_id: &CallId) -> bool {
-        self.supervisor_calls.contains_key(call_id)
-    }
-
-    pub fn get_supervisor_session(&self, call_id: &CallId) -> Option<SessionId> {
-        self.supervisor_calls.get(call_id).cloned()
-    }
-
-    pub fn get_sessions_subscribed_to_context(&self, context: &str) -> Vec<SessionId> {
-        self.context_subscriptions
-            .get(context)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn get_all_sessions(&self) -> Vec<SessionId> {
-        self.sessions.keys().cloned().collect()
-    }
-
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
-    }
-
-    pub fn call_count(&self) -> usize {
-        self.call_ownership.len()
     }
 
     /// Fan an event entry out to the RWI webhook handler (if configured) and
@@ -518,17 +441,7 @@ impl RwiGateway {
             .collect()
     }
 
-    /// Check if event is still in cache window
-    pub fn is_sequence_in_cache(&self, sequence: u64) -> bool {
-        let cache_state = self.event_cache.lock();
 
-        if cache_state.cache.is_empty() {
-            return false;
-        }
-
-        let min_sequence = cache_state.cache.front().map(|e| e.sequence).unwrap_or(0);
-        sequence >= min_sequence && sequence < cache_state.next_sequence
-    }
 
     /// Get current sequence number
     pub fn current_sequence(&self) -> u64 {

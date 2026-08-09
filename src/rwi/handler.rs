@@ -4,7 +4,7 @@ use crate::proxy::server::SipServerRef;
 use crate::rwi::RwiGatewayRef;
 use crate::rwi::auth::{RwiAuth, RwiIdentity};
 use crate::rwi::processor::{CommandError, CommandResult, RwiCommandProcessor};
-use crate::rwi::session::{RwiCommandMessage, RwiCommandPayload};
+use crate::rwi::session::RwiCommandPayload;
 use axum::{
     Extension,
     extract::Query,
@@ -173,8 +173,6 @@ async fn handle_websocket(
         }
     });
 
-    let (command_tx, _command_rx) = mpsc::unbounded_channel::<RwiCommandMessage>();
-
     let session_id_clone = session_id.clone();
     let gateway_clone = gateway.clone();
     let ws_tx_clone = ws_tx.clone();
@@ -185,20 +183,10 @@ async fn handle_websocket(
                     let text = text.to_string();
                     handle_text_message(
                         &text,
-                        &command_tx,
                         processor.clone(),
                         &session_id_clone,
                         gateway_clone.clone(),
                         &ws_tx_clone,
-                    )
-                    .await;
-                }
-                Ok(Message::Binary(data)) => {
-                    handle_binary_message(
-                        &data,
-                        processor.clone(),
-                        &session_id_clone,
-                        gateway_clone.clone(),
                     )
                     .await;
                 }
@@ -222,7 +210,6 @@ async fn handle_websocket(
 /// Returns the JSON string to send back as a response (always — even for errors).
 async fn handle_text_message(
     text: &str,
-    _command_tx: &mpsc::UnboundedSender<RwiCommandMessage>,
     processor: Arc<RwiCommandProcessor>,
     session_id: &str,
     gateway: RwiGatewayRef,
@@ -313,9 +300,7 @@ async fn handle_text_message(
         }
         RwiCommandPayload::DetachCall { call_id } => {
             let mut gw = gateway.write();
-            if gw.release_call_ownership(&session_id.to_string(), call_id) {
-                gw.detach_supervisor(&session_id.to_string(), call_id);
-            }
+            gw.release_call_ownership(&session_id.to_string(), call_id);
         }
         _ => {}
     }
@@ -419,16 +404,6 @@ fn build_command_result_event(
                         "consultation_call_id": consultation_call_id
                     });
                 }
-                CommandResult::ConsultInitiated {
-                    call_id: orig,
-                    consultation_call_id,
-                } => {
-                    event["status"] = serde_json::json!("success");
-                    event["data"] = serde_json::json!({
-                        "call_id": orig,
-                        "consultation_call_id": consultation_call_id
-                    });
-                }
                 CommandResult::ConferenceCreated { conf_id } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({ "conf_id": conf_id });
@@ -500,68 +475,6 @@ fn build_command_result_event(
             event
         }
     }
-}
-
-async fn handle_binary_message(
-    data: &[u8],
-    _processor: Arc<RwiCommandProcessor>,
-    session_id: &str,
-    gateway: RwiGatewayRef,
-) {
-    if data.len() < 16 {
-        tracing::warn!(session_id = %session_id, "Received invalid binary frame: too small");
-        return;
-    }
-
-    let call_id_bytes = &data[0..8];
-    let call_id = String::from_utf8_lossy(call_id_bytes)
-        .trim_end_matches('\0')
-        .trim()
-        .to_string();
-
-    if call_id.is_empty() {
-        tracing::warn!(session_id = %session_id, "Received binary frame with empty call_id");
-        return;
-    }
-
-    let timestamp_ms = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as u64;
-    let sample_rate = u16::from_be_bytes([data[12], data[13]]);
-    let flags = u16::from_be_bytes([data[14], data[15]]);
-    let is_last_frame = (flags & 0x01) != 0;
-
-    let pcm_data = &data[16..];
-    let num_samples = pcm_data.len() / 2;
-
-    tracing::trace!(
-        session_id = %session_id,
-        call_id = %call_id,
-        timestamp_ms = timestamp_ms,
-        sample_rate = sample_rate,
-        is_last_frame = is_last_frame,
-        pcm_bytes = pcm_data.len(),
-        num_samples = num_samples,
-        "Received PCM binary frame"
-    );
-
-    let owns_call = {
-        let gw = gateway.read();
-        gw.session_owns_call(&session_id.to_string(), &call_id)
-    };
-
-    if !owns_call {
-        tracing::warn!(
-            session_id = %session_id,
-            call_id = %call_id,
-            "Session does not own call, dropping PCM frame"
-        );
-        return;
-    }
-
-    tracing::debug!(
-        call_id = %call_id,
-        pcm_bytes = pcm_data.len(),
-        "PCM frame received"
-    );
 }
 
 fn parse_action(
@@ -649,10 +562,6 @@ fn extract_call_id<'a>(cmd: &'a RwiCommandPayload) -> Option<&'a str> {
         RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::MediaPlay(r) => Some(r.call_id.as_str()),
         RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.as_str()),
-        RwiCommandPayload::MediaStreamStart(r) => Some(r.call_id.as_str()),
-        RwiCommandPayload::MediaStreamStop { call_id } => Some(call_id.as_str()),
-        RwiCommandPayload::MediaInjectStart(r) => Some(r.call_id.as_str()),
-        RwiCommandPayload::MediaInjectStop { call_id } => Some(call_id.as_str()),
         RwiCommandPayload::CallSendDtmf { call_id, .. } => Some(call_id.as_str()),
         RwiCommandPayload::DtmfCollect(r) => Some(r.call_id.as_str()),
         RwiCommandPayload::RecordStart(r) => Some(r.call_id.as_str()),
@@ -690,26 +599,10 @@ fn extract_call_id<'a>(cmd: &'a RwiCommandPayload) -> Option<&'a str> {
         RwiCommandPayload::ConferenceUnmute { conf_id, .. } => Some(conf_id.as_str()),
         RwiCommandPayload::ConferenceDestroy { conf_id } => Some(conf_id.as_str()),
         RwiCommandPayload::ConferenceEnd { conf_id, .. } => Some(conf_id.as_str()),
-        RwiCommandPayload::ConferenceKick { conf_id, .. } => Some(conf_id.as_str()),
-        RwiCommandPayload::ConferenceMuteAll { conf_id } => Some(conf_id.as_str()),
-        RwiCommandPayload::ConferenceInfo { conf_id } => Some(conf_id.as_str()),
-        RwiCommandPayload::ConferenceList => None,
         RwiCommandPayload::ConferenceMerge { conf_id, .. } => Some(conf_id.as_str()),
         RwiCommandPayload::ConferenceSeatReplace { conf_id, .. } => Some(conf_id.as_str()),
-        RwiCommandPayload::ParallelOriginate(req) => Some(req.operation_id.as_str()),
         RwiCommandPayload::SessionResume { .. } => None,
         RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.as_str()),
         // CC addon commands
-        RwiCommandPayload::AgentRegister { agent_id, .. } => Some(agent_id.as_str()),
-        RwiCommandPayload::AgentUnregister { agent_id } => Some(agent_id.as_str()),
-        RwiCommandPayload::AgentStatusUpdate { agent_id, .. } => Some(agent_id.as_str()),
-        RwiCommandPayload::AgentStats { agent_id } => agent_id.as_deref(),
-        RwiCommandPayload::QueueStats { queue_id } => queue_id.as_deref(),
-        RwiCommandPayload::ConsultInitiate { call_id, .. } => Some(call_id.as_str()),
-        RwiCommandPayload::ConsultMerge { call_id, .. } => Some(call_id.as_str()),
-        RwiCommandPayload::ConsultComplete { call_id, .. } => Some(call_id.as_str()),
-        RwiCommandPayload::ConsultCancel {
-            consultation_call_id,
-        } => Some(consultation_call_id.as_str()),
     }
 }

@@ -7,7 +7,6 @@ RWI is a JSON-over-WebSocket control plane for RustPBX call orchestration. It fo
 RWI provides:
 - **Command channel**: client → RustPBX
 - **Event channel**: RustPBX → client
-- **Optional media channel**: PCM binary frames (via separate media WebSocket)
 
 RWI does not replace SIP signaling. It controls call behavior through RustPBX internal `CallController` and `SessionAction` abstractions.
 
@@ -276,10 +275,6 @@ Valid `reason` values: `busy`, `forbidden`, `not_found`
 |---------|-------------|
 | `media.play` | Play audio file |
 | `media.stop` | Stop playback |
-| `media.stream_start` | Start PCM stream (receive) |
-| `media.stream_stop` | Stop PCM stream |
-| `media.inject_start` | Start PCM injection |
-| `media.inject_stop` | Stop PCM injection |
 
 **Play audio:**
 
@@ -306,27 +301,6 @@ Valid `reason` values: `busy`, `forbidden`, `not_found`
 { "type": "ringback" }
 ```
 
-**Start PCM stream:**
-
-```json
-{
-  "action": "media.stream_start",
-  "action_id": "req-050",
-  "params": {
-    "call_id": "c_92f4",
-    "direction": "recv",
-    "format": {
-      "codec": "PCMU",
-      "sample_rate": 8000,
-      "channels": 1,
-      "ptime_ms": 20
-    }
-  }
-}
-```
-
-Valid `direction` values: `send`, `recv`, `sendrecv`
-
 ### 5.4 Recording Commands
 
 | Command | Description |
@@ -349,7 +323,6 @@ Valid `direction` values: `send`, `recv`, `sendrecv`
     "beep": false,
     "max_duration_secs": 7200,
     "storage": {
-      "backend": "file",
       "path": "records/2026/03/13/c_92f4.wav"
     }
   }
@@ -379,9 +352,7 @@ Valid `mode` values: `mixed`, `separate_legs`
   "params": {
     "call_id": "c_92f4",
     "queue_id": "support_l1",
-    "priority": 5,
-    "skills": ["billing", "zh"],
-    "max_wait_secs": 300
+    "priority": 5
   }
 }
 ```
@@ -452,14 +423,10 @@ Valid `mode` values: `mixed`, `separate_legs`
   "action_id": "req-conf-01",
   "params": {
     "conf_id": "room_42",
-    "backend": "internal",
-    "max_members": 10,
-    "record": true
+    "max_members": 10
   }
 }
 ```
-
-Valid `backend` values: `internal`, `external` (external MCU)
 
 **Seat replacement (A -> A1):**
 
@@ -526,8 +493,6 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `media.ringback.passthrough.stopped` | Early media passthrough ended |
 | `media.play.started` | Playback started |
 | `media.play.finished` | Playback finished |
-| `media.stream.started` | PCM stream started |
-| `media.stream.stopped` | PCM stream stopped |
 
 ### 6.4 Recording Events
 

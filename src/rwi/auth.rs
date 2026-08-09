@@ -19,62 +19,7 @@ pub struct RwiContextConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransferConfig {
-    #[serde(default = "default_transfer_refer_enabled")]
-    pub refer_enabled: bool,
-    #[serde(default = "default_transfer_attended_enabled")]
-    pub attended_enabled: bool,
-    #[serde(default = "default_transfer_3pcc_fallback_enabled")]
-    pub three_pcc_fallback_enabled: bool,
-    #[serde(default = "default_transfer_refer_timeout_secs")]
-    pub refer_timeout_secs: u64,
-    #[serde(default = "default_transfer_3pcc_timeout_secs")]
-    pub three_pcc_timeout_secs: u64,
-    #[serde(default = "default_max_concurrent_transfers")]
-    pub max_concurrent_transfers: usize,
-}
-
-impl Default for TransferConfig {
-    fn default() -> Self {
-        Self {
-            refer_enabled: default_transfer_refer_enabled(),
-            attended_enabled: default_transfer_attended_enabled(),
-            three_pcc_fallback_enabled: default_transfer_3pcc_fallback_enabled(),
-            refer_timeout_secs: default_transfer_refer_timeout_secs(),
-            three_pcc_timeout_secs: default_transfer_3pcc_timeout_secs(),
-            max_concurrent_transfers: default_max_concurrent_transfers(),
-        }
-    }
-}
-
-fn default_transfer_refer_enabled() -> bool {
-    true
-}
-
-fn default_transfer_attended_enabled() -> bool {
-    true
-}
-
-fn default_transfer_3pcc_fallback_enabled() -> bool {
-    true
-}
-
-fn default_transfer_refer_timeout_secs() -> u64 {
-    30
-}
-
-fn default_transfer_3pcc_timeout_secs() -> u64 {
-    60
-}
-
-fn default_max_concurrent_transfers() -> usize {
-    1000
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RwiConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_rwi_max_connections")]
     pub max_connections: usize,
     #[serde(default = "default_rwi_max_calls_per_connection")]
@@ -87,21 +32,17 @@ pub struct RwiConfig {
     pub tokens: Vec<RwiTokenConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<RwiContextConfig>,
-    #[serde(default)]
-    pub transfer: TransferConfig,
 }
 
 impl Default for RwiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             max_connections: default_rwi_max_connections(),
             max_calls_per_connection: default_rwi_max_calls_per_connection(),
             orphan_hold_secs: default_orphan_hold_secs(),
             originate_rate_limit: default_originate_rate_limit(),
             tokens: Vec::new(),
             contexts: Vec::new(),
-            transfer: TransferConfig::default(),
         }
     }
 }
@@ -132,16 +73,6 @@ impl RwiConfig {
 pub struct RwiIdentity {
     pub token: String,
     pub scopes: Vec<String>,
-}
-
-impl RwiIdentity {
-    pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|s| s == "*" || s == scope)
-    }
-
-    pub fn has_any_scope(&self, scopes: &[&str]) -> bool {
-        scopes.iter().any(|s| self.has_scope(s))
-    }
 }
 
 pub struct RwiAuth {
@@ -176,10 +107,6 @@ impl RwiAuth {
     pub fn get_context(&self, name: &str) -> Option<&RwiContextConfig> {
         self.contexts.get(name)
     }
-
-    pub fn is_enabled(&self) -> bool {
-        !self.tokens.is_empty()
-    }
 }
 
 pub type RwiAuthRef = Arc<RwLock<RwiAuth>>;
@@ -194,7 +121,6 @@ mod tests {
 
     fn create_test_config() -> RwiConfig {
         RwiConfig {
-            enabled: true,
             max_connections: 100,
             max_calls_per_connection: 50,
             orphan_hold_secs: 30,
@@ -223,7 +149,6 @@ mod tests {
                     no_answer_transfer_target: Some("sip:voicemail@local".to_string()),
                 },
             ],
-            transfer: TransferConfig::default(),
         }
     }
 
@@ -249,14 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rwi_auth_is_enabled() {
-        let config = create_test_config();
-        let auth = RwiAuth::new(&config);
-
-        assert!(auth.is_enabled());
-    }
-
-    #[test]
     fn test_rwi_auth_get_context() {
         let config = create_test_config();
         let auth = RwiAuth::new(&config);
@@ -270,41 +187,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rwi_identity_has_scope() {
-        let identity = RwiIdentity {
-            token: "test".to_string(),
-            scopes: vec!["call.control".to_string(), "queue.control".to_string()],
-        };
-
-        assert!(identity.has_scope("call.control"));
-        assert!(identity.has_scope("queue.control"));
-        assert!(!identity.has_scope("admin"));
-    }
-
-    #[test]
-    fn test_rwi_identity_has_any_scope() {
-        let identity = RwiIdentity {
-            token: "test".to_string(),
-            scopes: vec!["call.control".to_string()],
-        };
-
-        assert!(identity.has_any_scope(&["call.control", "admin"]));
-
-        assert!(!identity.has_any_scope(&["admin", "superuser"]));
-    }
-
-    #[test]
     fn test_rwi_config_defaults() {
         let config = RwiConfig::default();
-        assert!(!config.enabled);
         assert_eq!(config.max_connections, 2000);
         assert_eq!(config.max_calls_per_connection, 200);
         assert_eq!(config.orphan_hold_secs, 30);
         assert_eq!(config.originate_rate_limit, 10);
         assert!(config.tokens.is_empty());
         assert!(config.contexts.is_empty());
-        assert!(config.transfer.refer_enabled);
-        assert!(config.transfer.attended_enabled);
-        assert!(config.transfer.three_pcc_fallback_enabled);
     }
 }

@@ -448,64 +448,8 @@ pub mod transfer {
         .increment(1);
     }
 
-    pub fn duration_seconds(duration_secs: f64, mode: &str) {
-        metrics::histogram!(
-            "rustpbx_transfer_duration_seconds",
-            "mode" => mode.to_string()
-        )
-        .record(duration_secs);
-    }
-
     pub fn set_active_transfers(count: usize) {
         metrics::gauge!("rustpbx_transfer_active").set(count as f64);
-    }
-
-    pub fn refer_received() {
-        metrics::counter!("rustpbx_transfer_refer_received_total").increment(1);
-    }
-
-    pub fn refer_accepted() {
-        metrics::counter!("rustpbx_transfer_refer_accepted_total").increment(1);
-    }
-
-    pub fn refer_rejected(reason: &str) {
-        metrics::counter!(
-            "rustpbx_transfer_refer_rejected_total",
-            "reason" => reason.to_string()
-        )
-        .increment(1);
-    }
-
-    pub fn three_pcc_fallback_triggered() {
-        metrics::counter!("rustpbx_transfer_3pcc_fallback_total").increment(1);
-    }
-
-    pub fn three_pcc_success() {
-        metrics::counter!("rustpbx_transfer_3pcc_success_total").increment(1);
-    }
-
-    pub fn three_pcc_failed(reason: &str) {
-        metrics::counter!(
-            "rustpbx_transfer_3pcc_failed_total",
-            "reason" => reason.to_string()
-        )
-        .increment(1);
-    }
-
-    pub fn notify_latency_seconds(duration_secs: f64) {
-        metrics::histogram!("rustpbx_transfer_notify_latency_seconds").record(duration_secs);
-    }
-
-    pub fn attended_consult_initiated() {
-        metrics::counter!("rustpbx_transfer_attended_consult_total").increment(1);
-    }
-
-    pub fn attended_completed() {
-        metrics::counter!("rustpbx_transfer_attended_completed_total").increment(1);
-    }
-
-    pub fn attended_cancelled() {
-        metrics::counter!("rustpbx_transfer_attended_cancelled_total").increment(1);
     }
 }
 

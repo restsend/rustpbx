@@ -1,7 +1,6 @@
 use crate::rwi::auth::RwiIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -10,8 +9,6 @@ pub struct RwiSession {
     pub identity: RwiIdentity,
     pub subscribed_contexts: HashSet<String>,
     pub owned_calls: HashMap<String, CallOwnership>,
-    pub supervisor_targets: HashMap<String, SupervisorMode>,
-    pub command_tx: mpsc::UnboundedSender<RwiCommandMessage>,
     pub created_at: std::time::Instant,
 }
 
@@ -36,13 +33,6 @@ pub enum SupervisorMode {
     Listen,
     Whisper,
     Barge,
-}
-
-#[derive(Debug, Clone)]
-pub struct RwiCommandMessage {
-    pub action_id: String,
-    pub call_id: Option<String>,
-    pub command: RwiCommandPayload,
 }
 
 #[derive(Debug, Clone)]
@@ -130,14 +120,6 @@ pub enum RwiCommandPayload {
         call_id: String,
         /// Target leg (None = all legs)
         leg_id: Option<String>,
-    },
-    MediaStreamStart(MediaStreamRequest),
-    MediaStreamStop {
-        call_id: String,
-    },
-    MediaInjectStart(MediaInjectRequest),
-    MediaInjectStop {
-        call_id: String,
     },
     CallSendDtmf {
         call_id: String,
@@ -261,17 +243,6 @@ pub enum RwiCommandPayload {
         conf_id: String,
         host_call_id: String,
     },
-    ConferenceKick {
-        conf_id: String,
-        call_id: String,
-    },
-    ConferenceMuteAll {
-        conf_id: String,
-    },
-    ConferenceInfo {
-        conf_id: String,
-    },
-    ConferenceList,
     ConferenceMerge {
         conf_id: String,
         call_id: String,
@@ -282,7 +253,6 @@ pub enum RwiCommandPayload {
         old_call_id: String,
         new_call_id: String,
     },
-    ParallelOriginate(ParallelOriginateRequest),
     SessionResume {
         last_sequence: Option<u64>,
     },
@@ -290,64 +260,6 @@ pub enum RwiCommandPayload {
         call_id: String,
         last_sequence: Option<u64>,
     },
-    // CC addon commands
-    AgentRegister {
-        agent_id: String,
-        tenant_id: String,
-        skills: Vec<String>,
-        max_concurrency: u32,
-    },
-    AgentUnregister {
-        agent_id: String,
-    },
-    AgentStatusUpdate {
-        agent_id: String,
-        status: String,
-        call_id: Option<String>,
-    },
-    AgentStats {
-        agent_id: Option<String>,
-    },
-    QueueStats {
-        queue_id: Option<String>,
-    },
-    ConsultInitiate {
-        call_id: String,
-        target: String,
-    },
-    ConsultMerge {
-        call_id: String,
-        consultation_call_id: String,
-    },
-    ConsultComplete {
-        call_id: String,
-        consultation_call_id: String,
-    },
-    ConsultCancel {
-        consultation_call_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ParallelOriginateRequest {
-    pub operation_id: String,
-    pub targets: Vec<OriginateTarget>,
-    pub caller_id: Option<String>,
-    pub timeout_secs: Option<u32>,
-    pub hold_music: Option<MediaSource>,
-    #[serde(default)]
-    pub extra_headers: HashMap<String, String>,
-    /// Optional explicit carrier-trunk override applied to every leg (see
-    /// OriginateRequest.trunk).
-    #[serde(default)]
-    pub trunk: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OriginateTarget {
-    pub call_id: String,
-    pub destination: String,
-    pub timeout_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -358,10 +270,6 @@ pub struct OriginateRequest {
     pub destination: String,
     pub caller_id: Option<String>,
     pub timeout_secs: Option<u32>,
-    pub hold_music: Option<MediaSource>,
-    pub hold_music_target: Option<String>,
-    pub ringback: Option<String>,
-    pub ringback_target: Option<String>,
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
     /// Optional explicit carrier-trunk override. When set, the originate is routed
@@ -404,62 +312,6 @@ pub struct MediaPlayRequest {
     pub leg_id: Option<String>,
     #[serde(default, alias = "loop")]
     pub loop_playback: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MediaStreamRequest {
-    #[serde(default)]
-    pub call_id: String,
-    #[serde(default = "default_direction")]
-    pub direction: String,
-    #[serde(default)]
-    pub format: MediaFormat,
-}
-
-fn default_direction() -> String {
-    "sendrecv".to_string()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MediaFormat {
-    #[serde(default = "default_codec")]
-    pub codec: String,
-    #[serde(default = "default_sample_rate")]
-    pub sample_rate: u32,
-    #[serde(default = "default_channels")]
-    pub channels: u32,
-    pub ptime_ms: Option<u32>,
-}
-
-impl Default for MediaFormat {
-    fn default() -> Self {
-        MediaFormat {
-            codec: default_codec(),
-            sample_rate: default_sample_rate(),
-            channels: default_channels(),
-            ptime_ms: None,
-        }
-    }
-}
-
-fn default_codec() -> String {
-    "PCMU".to_string()
-}
-
-fn default_sample_rate() -> u32 {
-    8000
-}
-
-fn default_channels() -> u32 {
-    1
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MediaInjectRequest {
-    #[serde(default)]
-    pub call_id: String,
-    #[serde(default)]
-    pub format: MediaFormat,
 }
 
 /// Request to collect DTMF digits from a call leg.
@@ -512,15 +364,12 @@ fn default_mode() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordStorage {
     #[serde(default)]
-    pub backend: String,
-    #[serde(default)]
     pub path: String,
 }
 
 impl Default for RecordStorage {
     fn default() -> Self {
         Self {
-            backend: "file".to_string(),
             path: String::new(),
         }
     }
@@ -533,20 +382,13 @@ pub struct QueueEnqueueRequest {
     #[serde(default)]
     pub queue_id: String,
     pub priority: Option<u32>,
-    pub skills: Option<Vec<String>>,
-    pub max_wait_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ConferenceCreateRequest {
     #[serde(default, alias = "conference_id")]
     pub conf_id: String,
-    #[serde(default = "default_backend")]
-    pub backend: String,
     pub max_members: Option<u32>,
-    #[serde(default)]
-    pub record: bool,
-    pub mcu_uri: Option<String>,
     pub host_call_id: Option<String>,
     pub max_duration_secs: Option<u64>,
 }
@@ -582,10 +424,6 @@ pub struct ConferenceSeatReplaceRequest {
     pub conf_id: Option<String>,
     pub old_call_id: Option<String>,
     pub new_call_id: Option<String>,
-}
-
-fn default_backend() -> String {
-    "internal".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -694,14 +532,6 @@ pub enum RwiRequestPayload {
         call_id: Option<String>,
         leg_id: Option<String>,
     },
-    #[serde(rename = "media.stream_start")]
-    MediaStreamStart(MediaStreamRequest),
-    #[serde(rename = "media.stream_stop")]
-    MediaStreamStop { call_id: Option<String> },
-    #[serde(rename = "media.inject_start")]
-    MediaInjectStart(MediaInjectRequest),
-    #[serde(rename = "media.inject_stop")]
-    MediaInjectStop { call_id: Option<String> },
     #[serde(rename = "call.send_dtmf")]
     CallSendDtmf {
         call_id: Option<String>,
@@ -874,7 +704,6 @@ impl From<RwiRequest> for RwiCommandPayload {
                     r.destination = String::new();
                 }
                 r.extra_headers = HashMap::new();
-                r.hold_music = None;
                 RwiCommandPayload::Originate(r)
             }
             RwiRequestPayload::Answer { call_id } => RwiCommandPayload::Answer {
@@ -970,24 +799,6 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequestPayload::MediaStop { call_id, leg_id } => RwiCommandPayload::MediaStop {
                 call_id: call_id.unwrap_or_default(),
                 leg_id,
-            },
-            RwiRequestPayload::MediaStreamStart(mut r) => {
-                if r.call_id.is_empty() {
-                    r.call_id = Uuid::new_v4().to_string();
-                }
-                RwiCommandPayload::MediaStreamStart(r)
-            }
-            RwiRequestPayload::MediaStreamStop { call_id } => RwiCommandPayload::MediaStreamStop {
-                call_id: call_id.unwrap_or_default(),
-            },
-            RwiRequestPayload::MediaInjectStart(mut r) => {
-                if r.call_id.is_empty() {
-                    r.call_id = Uuid::new_v4().to_string();
-                }
-                RwiCommandPayload::MediaInjectStart(r)
-            }
-            RwiRequestPayload::MediaInjectStop { call_id } => RwiCommandPayload::MediaInjectStop {
-                call_id: call_id.unwrap_or_default(),
             },
             RwiRequestPayload::CallSendDtmf {
                 call_id,
@@ -1206,17 +1017,12 @@ impl From<RwiRequest> for RwiCommandPayload {
 }
 
 impl RwiSession {
-    pub fn new(
-        identity: RwiIdentity,
-        command_tx: mpsc::UnboundedSender<RwiCommandMessage>,
-    ) -> Self {
+    pub fn new(identity: RwiIdentity) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             identity,
             subscribed_contexts: HashSet::new(),
             owned_calls: HashMap::new(),
-            supervisor_targets: HashMap::new(),
-            command_tx,
             created_at: std::time::Instant::now(),
         }
     }
@@ -1237,13 +1043,6 @@ impl RwiSession {
         self.owned_calls.contains_key(call_id)
     }
 
-    pub fn owns_call_in_mode(&self, call_id: &str, mode: &OwnershipMode) -> bool {
-        self.owned_calls
-            .get(call_id)
-            .map(|o| &o.mode == mode)
-            .unwrap_or(false)
-    }
-
     pub fn claim_call(&mut self, call_id: String, mode: OwnershipMode) -> bool {
         if self.owned_calls.contains_key(&call_id) {
             return false;
@@ -1261,35 +1060,8 @@ impl RwiSession {
         self.owned_calls.remove(call_id).is_some()
     }
 
-    pub fn add_supervisor_target(&mut self, target_call_id: String, mode: SupervisorMode) {
-        self.supervisor_targets.insert(target_call_id, mode);
-    }
-
-    pub fn remove_supervisor_target(&mut self, target_call_id: &str) -> bool {
-        self.supervisor_targets.remove(target_call_id).is_some()
-    }
-
-    pub fn is_supervisor_of(&self, call_id: &str) -> bool {
-        self.supervisor_targets.contains_key(call_id)
-    }
-
-    pub fn get_supervisor_mode(&self, call_id: &str) -> Option<&SupervisorMode> {
-        self.supervisor_targets.get(call_id)
-    }
-
     pub fn list_owned_calls(&self) -> Vec<String> {
         self.owned_calls.keys().cloned().collect()
-    }
-
-    pub fn can_control_call(&self, call_id: &str) -> bool {
-        self.owned_calls
-            .get(call_id)
-            .map(|o| o.mode == OwnershipMode::Control)
-            .unwrap_or(false)
-    }
-
-    pub fn can_listen_to_call(&self, call_id: &str) -> bool {
-        self.owns_call(call_id) || self.supervisor_targets.contains_key(call_id)
     }
 }
 
@@ -1297,7 +1069,6 @@ impl RwiSession {
 mod tests {
     use super::*;
     use crate::rwi::auth::RwiIdentity;
-    use tokio::sync::mpsc;
 
     fn create_test_identity() -> RwiIdentity {
         RwiIdentity {
@@ -1306,18 +1077,15 @@ mod tests {
         }
     }
 
-    fn create_test_session() -> (RwiSession, mpsc::UnboundedReceiver<RwiCommandMessage>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn create_test_session() -> RwiSession {
         let identity = create_test_identity();
-        let session = RwiSession::new(identity, tx);
-        (session, rx)
+        RwiSession::new(identity)
     }
 
     #[test]
     fn test_session_creation() {
         let identity = create_test_identity();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let session = RwiSession::new(identity.clone(), tx);
+        let session = RwiSession::new(identity.clone());
 
         assert!(!session.id.is_empty());
         assert_eq!(session.identity.token, "test-token");
@@ -1327,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_subscribe() {
-        let (mut session, _rx) = create_test_session();
+        let mut session = create_test_session();
         session.subscribe(vec!["context1".to_string(), "context2".to_string()]);
 
         assert!(session.subscribed_contexts.contains("context1"));
@@ -1337,7 +1105,7 @@ mod tests {
 
     #[test]
     fn test_unsubscribe() {
-        let (mut session, _rx) = create_test_session();
+        let mut session = create_test_session();
         session.subscribe(vec!["context1".to_string(), "context2".to_string()]);
         session.unsubscribe(&["context1".to_string()]);
 
@@ -1347,7 +1115,7 @@ mod tests {
 
     #[test]
     fn test_claim_call() {
-        let (mut session, _rx) = create_test_session();
+        let mut session = create_test_session();
 
         let result = session.claim_call("call-001".to_string(), OwnershipMode::Control);
         assert!(result);
@@ -1358,20 +1126,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claim_call_in_mode() {
-        let (mut session, _rx) = create_test_session();
-
-        session.claim_call("call-001".to_string(), OwnershipMode::Control);
-        assert!(session.owns_call_in_mode("call-001", &OwnershipMode::Control));
-        assert!(!session.owns_call_in_mode("call-001", &OwnershipMode::Listen));
-
-        session.claim_call("call-002".to_string(), OwnershipMode::Listen);
-        assert!(session.owns_call_in_mode("call-002", &OwnershipMode::Listen));
-    }
-
-    #[test]
     fn test_release_call() {
-        let (mut session, _rx) = create_test_session();
+        let mut session = create_test_session();
 
         session.claim_call("call-001".to_string(), OwnershipMode::Control);
         assert!(session.owns_call("call-001"));
@@ -1386,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_list_owned_calls() {
-        let (mut session, _rx) = create_test_session();
+        let mut session = create_test_session();
 
         session.claim_call("call-001".to_string(), OwnershipMode::Control);
         session.claim_call("call-002".to_string(), OwnershipMode::Listen);
@@ -1397,44 +1153,4 @@ mod tests {
         assert!(calls.contains(&"call-002".to_string()));
     }
 
-    #[test]
-    fn test_can_control_call() {
-        let (mut session, _rx) = create_test_session();
-
-        session.claim_call("call-001".to_string(), OwnershipMode::Control);
-        assert!(session.can_control_call("call-001"));
-
-        session.claim_call("call-002".to_string(), OwnershipMode::Listen);
-        assert!(!session.can_control_call("call-002"));
-        assert!(!session.can_control_call("nonexistent"));
-    }
-
-    #[test]
-    fn test_supervisor_targets() {
-        let (mut session, _rx) = create_test_session();
-
-        session.add_supervisor_target("call-001".to_string(), SupervisorMode::Listen);
-        assert!(session.is_supervisor_of("call-001"));
-
-        let mode = session.get_supervisor_mode("call-001");
-        assert!(mode.is_some());
-        assert!(matches!(mode.unwrap(), SupervisorMode::Listen));
-
-        let removed = session.remove_supervisor_target("call-001");
-        assert!(removed);
-        assert!(!session.is_supervisor_of("call-001"));
-    }
-
-    #[test]
-    fn test_can_listen_to_call() {
-        let (mut session, _rx) = create_test_session();
-
-        session.claim_call("call-001".to_string(), OwnershipMode::Control);
-        assert!(session.can_listen_to_call("call-001"));
-
-        session.add_supervisor_target("call-002".to_string(), SupervisorMode::Barge);
-        assert!(session.can_listen_to_call("call-002"));
-
-        assert!(!session.can_listen_to_call("nonexistent"));
-    }
 }

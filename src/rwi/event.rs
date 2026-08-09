@@ -50,6 +50,7 @@ pub trait RwiEventSpec: Serialize {
 }
 
 /// Build a flat payload from a spec, optionally enriched with context.
+#[cfg(test)]
 pub fn to_flat_payload<E: RwiEventSpec>(
     event: &E,
     ctx: Option<&EventCallContext>,
@@ -381,23 +382,6 @@ pub struct QueueWaitTimeout {
 rwi_event!(QueueWaitTimeout, "queue_wait_timeout");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct QueueOverflowed {
-    pub call_id: String,
-    pub original_queue_id: String,
-    pub overflow_queue_id: String,
-    pub reason: String,
-}
-rwi_event!(QueueOverflowed, "queue_overflowed");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QueueVoicemailRedirected {
-    pub call_id: String,
-    pub queue_id: String,
-    pub reason: String,
-}
-rwi_event!(QueueVoicemailRedirected, "queue_voicemail_redirected");
-
-#[derive(Debug, Clone, Serialize)]
 pub struct QueueCandidatesFound {
     pub call_id: String,
     pub queue_id: String,
@@ -453,18 +437,6 @@ pub struct SipNotifyReceived {
     pub body: String,
 }
 rwi_event!(SipNotifyReceived, "sip_notify_received");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MediaStreamStarted {
-    pub call_id: String,
-}
-rwi_event!(MediaStreamStarted, "media_stream_started");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MediaStreamStopped {
-    pub call_id: String,
-}
-rwi_event!(MediaStreamStopped, "media_stream_stopped");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SupervisorListenStarted {
@@ -523,79 +495,6 @@ impl RwiEventSpec for SupervisorModeStopped {
     const TYPE: &'static str = "supervisor_mode_stopped";
     fn call_id(&self) -> Option<&str> {
         Some(&self.target_call_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateStarted {
-    pub operation_id: String,
-    pub leg_count: u32,
-}
-impl RwiEventSpec for ParallelOriginateStarted {
-    const TYPE: &'static str = "parallel_originate_started";
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.operation_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateLegRinging {
-    pub operation_id: String,
-    pub call_id: String,
-    pub destination: String,
-}
-rwi_event!(
-    ParallelOriginateLegRinging,
-    "parallel_originate_leg_ringing"
-);
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateWinner {
-    pub operation_id: String,
-    pub call_id: String,
-    pub destination: String,
-}
-impl RwiEventSpec for ParallelOriginateWinner {
-    const TYPE: &'static str = "parallel_originate_winner";
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.operation_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateLegCancelled {
-    pub operation_id: String,
-    pub call_id: String,
-    pub reason: String,
-}
-impl RwiEventSpec for ParallelOriginateLegCancelled {
-    const TYPE: &'static str = "parallel_originate_leg_cancelled";
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.operation_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateCompleted {
-    pub operation_id: String,
-    pub winning_call_id: String,
-}
-impl RwiEventSpec for ParallelOriginateCompleted {
-    const TYPE: &'static str = "parallel_originate_completed";
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.operation_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ParallelOriginateFailed {
-    pub operation_id: String,
-    pub reason: String,
-}
-impl RwiEventSpec for ParallelOriginateFailed {
-    const TYPE: &'static str = "parallel_originate_failed";
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.operation_id)
     }
 }
 

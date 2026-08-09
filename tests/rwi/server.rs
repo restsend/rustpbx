@@ -45,7 +45,6 @@ const TEST_TOKEN: &str = "integ-test-token";
 /// Build a minimal `RwiAuth` that accepts a single hard-coded token.
 fn make_auth() -> RwiAuthRef {
     let config = RwiConfig {
-        enabled: true,
         tokens: vec![RwiTokenConfig {
             token: TEST_TOKEN.to_string(),
             scopes: vec!["call.control".to_string()],
@@ -665,28 +664,6 @@ async fn test_conference_create_duplicate_returns_error() {
 }
 
 #[tokio::test]
-async fn test_conference_create_external_requires_mcu_uri() {
-    let (url, _gw, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    let (_, json) = req(
-        "conference.create",
-        serde_json::json!({
-            "conf_id": "room-1",
-            "backend": "external"
-        }),
-    );
-    let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["status"], "error");
-    assert!(
-        v["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("external backend requires mcu_uri")
-    );
-}
-
-#[tokio::test]
 async fn test_conference_destroy_returns_success() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
@@ -976,100 +953,6 @@ async fn test_call_resume_returns_call_specific_events() {
             "should only have events for call-a"
         );
     }
-
-    ws.close(None).await.unwrap();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Binary PCM WebSocket
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_binary_pcm_frame_rejected_without_ownership() {
-    let (url, _gw, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Build a PCM binary frame
-    // Header: 8 bytes call_id + 4 bytes timestamp + 2 bytes sample_rate + 2 bytes flags
-    let mut frame = vec![0u8; 16];
-
-    // Call ID: "unowned" (padded)
-    frame[0..7].copy_from_slice(b"unowned");
-
-    // Timestamp (big-endian)
-    let timestamp: u32 = 12345;
-    frame[8..12].copy_from_slice(&timestamp.to_be_bytes());
-
-    // Sample rate: 8000 Hz
-    let sample_rate: u16 = 8000;
-    frame[12..14].copy_from_slice(&sample_rate.to_be_bytes());
-
-    // Flags: 0
-    frame[14..16].copy_from_slice(&[0u8, 0u8]);
-
-    // Add some PCM data (16-bit samples)
-    frame.extend_from_slice(&[0x00, 0x01, 0x00, 0x02]); // 2 samples
-
-    // Send binary frame - should not panic, but will be dropped (session doesn't own the call)
-    ws.send(Message::Binary(frame.into())).await.unwrap();
-
-    // Send a ping to ensure connection is still alive
-    let (_, json) = req("session.list_calls", serde_json::json!({}));
-    let v = send_recv(&mut ws, &json).await;
-    if v["status"] == "error" {
-        eprintln!("Error response: {:?}", v);
-    }
-    assert_eq!(
-        v["status"], "success",
-        "connection should remain alive after binary frame"
-    );
-
-    ws.close(None).await.unwrap();
-}
-
-#[tokio::test]
-async fn test_binary_pcm_frame_empty_call_id_rejected() {
-    let (url, _gw, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Build a PCM binary frame with empty call_id
-    let mut frame = vec![0u8; 16]; // All zeros = empty call_id
-
-    // Timestamp
-    let timestamp: u32 = 12345;
-    frame[8..12].copy_from_slice(&timestamp.to_be_bytes());
-
-    // Sample rate
-    let sample_rate: u16 = 8000;
-    frame[12..14].copy_from_slice(&sample_rate.to_be_bytes());
-
-    // Flags
-    frame[14..16].copy_from_slice(&[0u8, 0u8]);
-
-    // Send binary frame - should be silently dropped
-    ws.send(Message::Binary(frame.into())).await.unwrap();
-
-    // Connection should remain alive
-    let (_, json) = req("session.list_calls", serde_json::json!({}));
-    let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["status"], "success");
-
-    ws.close(None).await.unwrap();
-}
-
-#[tokio::test]
-async fn test_binary_pcm_frame_too_small_rejected() {
-    let (url, _gw, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Send a binary frame that's too small (less than 16 bytes header)
-    let small_frame = vec![0u8; 10];
-    ws.send(Message::Binary(small_frame.into())).await.unwrap();
-
-    // Connection should remain alive
-    let (_, json) = req("session.list_calls", serde_json::json!({}));
-    let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["status"], "success");
 
     ws.close(None).await.unwrap();
 }

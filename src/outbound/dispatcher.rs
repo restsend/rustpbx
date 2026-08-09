@@ -178,8 +178,6 @@ async fn dispatch_enqueue(
         call_id: call_id.to_string(),
         queue_id: queue.to_string(),
         priority,
-        skills: None,
-        max_wait_secs: None,
     };
     match processor
         .process_command(RwiCommandPayload::QueueEnqueue(req))
@@ -289,8 +287,6 @@ fn resolve_webhook_instruction(instr: &crate::outbound::webhook::WebhookInstruct
         WebhookActionType::Enqueue => OnAnswer::Enqueue {
             queue: instr.target.clone().unwrap_or_default(),
             priority: None,
-            skills: None,
-            max_wait_secs: None,
         },
         WebhookActionType::App => OnAnswer::App {
             app_name: instr.target.clone().unwrap_or_default(),
@@ -310,8 +306,6 @@ fn resolve_fallback(fallback: &FallbackAction) -> Option<OnAnswer> {
         FallbackAction::Enqueue { queue } => Some(OnAnswer::Enqueue {
             queue: queue.clone(),
             priority: None,
-            skills: None,
-            max_wait_secs: None,
         }),
     }
 }

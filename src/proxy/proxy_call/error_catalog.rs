@@ -219,17 +219,6 @@ pub const TRANSFER_REFER_REJECTED: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
-pub const TRANSFER_THREE_PCC_FAILED: CallErrInfo = CallErrInfo {
-    app: "transfer",
-    code: "transfer.three_pcc_failed",
-    message: "3PCC transfer failed",
-    sip_status: Some(500),
-    hangup_reason: CallRecordHangupReason::Failed,
-    severity: ErrSeverity::Error,
-    locale_key: "errors.transfer.three_pcc_failed",
-    remediation_key: None,
-};
-
 pub const TRANSFER_TIMEOUT: CallErrInfo = CallErrInfo {
     app: "transfer",
     code: "transfer.timeout",
@@ -271,17 +260,6 @@ pub const TRANSFER_INVALID_STATE: CallErrInfo = CallErrInfo {
     hangup_reason: CallRecordHangupReason::Failed,
     severity: ErrSeverity::Error,
     locale_key: "errors.transfer.invalid_state",
-    remediation_key: None,
-};
-
-pub const TRANSFER_BRIDGE_FAILED: CallErrInfo = CallErrInfo {
-    app: "transfer",
-    code: "transfer.bridge_failed",
-    message: "Transfer bridge failed",
-    sip_status: Some(500),
-    hangup_reason: CallRecordHangupReason::Failed,
-    severity: ErrSeverity::Error,
-    locale_key: "errors.transfer.bridge_failed",
     remediation_key: None,
 };
 
@@ -327,12 +305,10 @@ pub const CATALOG: &[CallErrInfo] = &[
     DIAL_NO_TARGETS,
     DIAL_NO_CALLER,
     TRANSFER_REFER_REJECTED,
-    TRANSFER_THREE_PCC_FAILED,
     TRANSFER_TIMEOUT,
     TRANSFER_CANCELLED,
     TRANSFER_INVALID_TARGET,
     TRANSFER_INVALID_STATE,
-    TRANSFER_BRIDGE_FAILED,
     TRANSFER_INTERNAL_ERROR,
     RTP_TIMEOUT,
 ];

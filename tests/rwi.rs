@@ -7,8 +7,6 @@
 
 mod helpers;
 
-#[path = "rwi/binary_pcm_e2e.rs"]
-mod binary_pcm_e2e;
 #[path = "rwi/comprehensive_event.rs"]
 mod comprehensive_event;
 #[path = "rwi/integration.rs"]

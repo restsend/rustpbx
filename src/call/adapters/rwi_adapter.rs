@@ -50,15 +50,6 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::SipOptionsPing { .. }
         | RwiCommandPayload::SessionResume { .. }
         | RwiCommandPayload::CallResume { .. }
-        | RwiCommandPayload::AgentRegister { .. }
-        | RwiCommandPayload::AgentUnregister { .. }
-        | RwiCommandPayload::AgentStatusUpdate { .. }
-        | RwiCommandPayload::QueueStats { .. }
-        | RwiCommandPayload::AgentStats { .. }
-        | RwiCommandPayload::ConsultInitiate { .. }
-        | RwiCommandPayload::ConsultMerge { .. }
-        | RwiCommandPayload::ConsultComplete { .. }
-        | RwiCommandPayload::ConsultCancel { .. }
         | RwiCommandPayload::LegAdd { .. }
         | RwiCommandPayload::LegRemove { .. }
         | RwiCommandPayload::AppStart { .. }
@@ -359,85 +350,17 @@ pub fn rwi_to_call_command(
         }
 
         // ========================================================================
-        // Conference Operations
+        // Conference Operations (handled at processor level via ConferenceManager)
         // ========================================================================
-        RwiCommandPayload::ConferenceCreate(req) => Ok(CallCommand::ConferenceCreate {
-            conf_id: req.conf_id,
-            options: ConferenceOptions {
-                max_participants: req.max_members,
-                record: req.record,
-                record_path: None,
-            },
-        }),
-
-        RwiCommandPayload::ConferenceAdd { conf_id, call_id } => Ok(CallCommand::ConferenceAdd {
-            conf_id,
-            leg_id: LegId::new(call_id),
-        }),
-
-        RwiCommandPayload::ConferenceRemove { conf_id, call_id } => {
-            Ok(CallCommand::ConferenceRemove {
-                conf_id,
-                leg_id: LegId::new(call_id),
-            })
-        }
-
-        RwiCommandPayload::ConferenceMute { conf_id, call_id } => Ok(CallCommand::ConferenceMute {
-            conf_id,
-            leg_id: LegId::new(call_id),
-        }),
-
-        RwiCommandPayload::ConferenceUnmute { conf_id, call_id } => {
-            Ok(CallCommand::ConferenceUnmute {
-                conf_id,
-                leg_id: LegId::new(call_id),
-            })
-        }
-
-        RwiCommandPayload::ConferenceDestroy { conf_id } => {
-            Ok(CallCommand::ConferenceDestroy { conf_id })
-        }
-
-        RwiCommandPayload::ConferenceKick { conf_id, call_id } => Ok(CallCommand::ConferenceKick {
-            conf_id,
-            leg_id: LegId::new(call_id),
-        }),
-
-        RwiCommandPayload::ConferenceMuteAll { conf_id } => {
-            Ok(CallCommand::ConferenceMuteAll { conf_id })
-        }
-
-        RwiCommandPayload::ConferenceInfo { conf_id } => {
-            Ok(CallCommand::ConferenceInfo { conf_id })
-        }
-
-        RwiCommandPayload::ConferenceList => Ok(CallCommand::ConferenceList),
-
-        // ========================================================================
-        // Conference Merge (handled at processor level, not session level)
-        // ========================================================================
-        RwiCommandPayload::ConferenceMerge { .. }
+        RwiCommandPayload::ConferenceCreate(_)
+        | RwiCommandPayload::ConferenceAdd { .. }
+        | RwiCommandPayload::ConferenceRemove { .. }
+        | RwiCommandPayload::ConferenceMute { .. }
+        | RwiCommandPayload::ConferenceUnmute { .. }
+        | RwiCommandPayload::ConferenceDestroy { .. }
+        | RwiCommandPayload::ConferenceMerge { .. }
         | RwiCommandPayload::ConferenceSeatReplace { .. } => Err(AdapterError::NotSupported(
-            "conference/transfer transaction requires separate handling".to_string(),
-        )
-        .into()),
-
-        // ========================================================================
-        // Media Streaming (not directly convertible to CallCommand)
-        // ========================================================================
-        RwiCommandPayload::MediaStreamStart { .. }
-        | RwiCommandPayload::MediaStreamStop { .. }
-        | RwiCommandPayload::MediaInjectStart { .. }
-        | RwiCommandPayload::MediaInjectStop { .. } => Err(AdapterError::NotSupported(
-            "media streaming requires separate handling".to_string(),
-        )
-        .into()),
-
-        // ========================================================================
-        // Parallel Originate (handled at processor level)
-        // ========================================================================
-        RwiCommandPayload::ParallelOriginate { .. } => Err(AdapterError::NotSupported(
-            "parallel originate requires processor-level handling".to_string(),
+            "conference command requires processor-level handling".to_string(),
         )
         .into()),
     }
@@ -532,51 +455,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_conference_kick_conversion() {
-        let payload = RwiCommandPayload::ConferenceKick {
-            conf_id: "conf-1".to_string(),
-            call_id: "leg-1".to_string(),
-        };
-        let cmd = rwi_to_call_command(payload, None).unwrap();
-        if let CallCommand::ConferenceKick { conf_id, leg_id } = cmd {
-            assert_eq!(conf_id, "conf-1");
-            assert_eq!(leg_id.as_str(), "leg-1");
-        } else {
-            panic!("Expected ConferenceKick command");
-        }
-    }
-
-    #[test]
-    fn test_conference_mute_all_conversion() {
-        let payload = RwiCommandPayload::ConferenceMuteAll {
-            conf_id: "conf-1".to_string(),
-        };
-        let cmd = rwi_to_call_command(payload, None).unwrap();
-        if let CallCommand::ConferenceMuteAll { conf_id } = cmd {
-            assert_eq!(conf_id, "conf-1");
-        } else {
-            panic!("Expected ConferenceMuteAll command");
-        }
-    }
-
-    #[test]
-    fn test_conference_info_conversion() {
-        let payload = RwiCommandPayload::ConferenceInfo {
-            conf_id: "conf-1".to_string(),
-        };
-        let cmd = rwi_to_call_command(payload, None).unwrap();
-        if let CallCommand::ConferenceInfo { conf_id } = cmd {
-            assert_eq!(conf_id, "conf-1");
-        } else {
-            panic!("Expected ConferenceInfo command");
-        }
-    }
-
-    #[test]
-    fn test_conference_list_conversion() {
-        let payload = RwiCommandPayload::ConferenceList;
-        let cmd = rwi_to_call_command(payload, None).unwrap();
-        assert!(matches!(cmd, CallCommand::ConferenceList));
-    }
 }

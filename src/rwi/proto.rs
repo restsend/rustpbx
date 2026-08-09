@@ -2,8 +2,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub const RWI_VERSION: &str = "1.0";
-
 /// Root call identity, constant across the call tree.
 ///
 /// Populated with the session's own call context (`root = self`): the call the
@@ -47,23 +45,6 @@ pub struct EventCallContext {
     pub routing_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootCallInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RwiEnvelope<T> {
-    #[serde(rename = "rwi")]
-    pub version: String,
-    #[serde(flatten)]
-    pub payload: T,
-}
-
-impl<T> RwiEnvelope<T> {
-    pub fn new(payload: T) -> Self {
-        Self {
-            version: RWI_VERSION.to_string(),
-            payload,
-        }
-    }
 }
 
 /// Type alias for RWI event sender.
@@ -123,11 +104,6 @@ impl CallMetaStore {
         self.store.insert(call_id, meta);
     }
 
-    pub fn get(&self, call_id: &str) -> Option<CallMeta> {
-        self.store.get(call_id).map(|r| r.clone())
-    }
-
-    /// Synchronous lookup (identical to `get` — both are sync with DashMap).
     pub fn get_sync(&self, call_id: &str) -> Option<CallMeta> {
         self.store.get(call_id).map(|r| r.clone())
     }
@@ -185,7 +161,7 @@ mod tests {
             },
         );
 
-        let meta = store.get("call-1").expect("meta must exist");
+        let meta = store.get_sync("call-1").expect("meta must exist");
         assert_eq!(meta.caller.as_deref(), Some("1001"));
         assert_eq!(meta.callee.as_deref(), Some("1002"));
         assert_eq!(meta.caller_name.as_deref(), Some("alice"));

@@ -158,7 +158,6 @@ impl TestPbx {
 
         // ── Build RWI components ─────────────────────────────────────────────
         let rwi_config = RwiConfig {
-            enabled: true,
             tokens: vec![RwiTokenConfig {
                 token: TEST_TOKEN.to_string(),
                 scopes: vec!["call.control".to_string()],

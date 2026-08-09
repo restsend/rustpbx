@@ -56,10 +56,6 @@ pub enum OnAnswer {
         queue: String,
         #[serde(default)]
         priority: Option<u32>,
-        #[serde(default)]
-        skills: Option<Vec<String>>,
-        #[serde(default)]
-        max_wait_secs: Option<u32>,
     },
     /// Run an IVR / call application by name.
     App {

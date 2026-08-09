@@ -33,7 +33,6 @@ const TEST_TOKEN: &str = "timeline-test-token";
 
 fn make_auth() -> RwiAuthRef {
     let config = RwiConfig {
-        enabled: true,
         tokens: vec![RwiTokenConfig {
             token: TEST_TOKEN.to_string(),
             scopes: vec!["call.control".to_string()],
