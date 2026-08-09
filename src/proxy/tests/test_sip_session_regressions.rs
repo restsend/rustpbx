@@ -8,6 +8,7 @@ use crate::call::{
     QueuePlan, TransactionCookie,
 };
 use crate::config::{MediaProxyMode, ProxyConfig};
+use crate::proxy::proxy_call::session_hooks::CallSessionContext;
 use crate::proxy::proxy_call::sip_session::SipSession;
 use crate::proxy::proxy_call::state::CallContext;
 use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
@@ -975,6 +976,203 @@ async fn test_resolve_final_hangup_reason_flags_queue_abandon_when_already_aband
             .any(|e| e.code.as_deref() == Some("queue.abandoned")),
         "abandon must append a queue.abandoned trace event"
     );
+
+    // The abandon trace must name the queue and carry it in the detail.
+    let abandon = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| e.code.as_deref() == Some("queue.abandoned"))
+        .expect("queue.abandoned trace present");
+    assert!(
+        abandon.message.contains("support"),
+        "abandon trace must name the queue, got: {}",
+        abandon.message
+    );
+    assert_eq!(
+        abandon
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("queue_name"))
+            .and_then(|v| v.as_str()),
+        Some("support"),
+        "abandon trace detail must carry queue_name"
+    );
+}
+
+/// A leg failure while the call is being driven by the queue must record an
+/// agent-rejection trace that names the agent, the SIP status and the queue —
+/// so the operator sees *why* the queue could not connect (e.g. 486 from an
+/// off-hours / 作息拒接 phone) instead of only a generic abandon.
+#[tokio::test]
+async fn test_leg_failed_in_queue_records_agent_rejection_trace() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    session.meta.queue_name = Some("support".to_string());
+
+    // Mirror the live queue state the queue app publishes via set_queue_name.
+    let runtime = session
+        .app_runtime
+        .as_any()
+        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
+        .expect("test session uses DefaultAppRuntime");
+    *runtime.context.queue_name.write().await = Some("support".to_string());
+
+    // Mirror custom-target resolution: agent AOR user part in session extensions.
+    let mut map = HashMap::new();
+    map.insert("resolved_agent_id".to_string(), "1001".to_string());
+    session.extensions.write().insert(map);
+
+    let agent_leg = LegId::from("queue-agent");
+    let leg = Leg::new(agent_leg.clone())
+        .with_endpoint("sip:3tmpv1bu@agent.invalid;transport=WS".to_string());
+    session.legs.insert(agent_leg.clone(), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Rejected with 486".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    let ev = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| {
+            e.kind == crate::call_errors::TraceKind::Queue && e.message.contains("Agent 1001")
+        })
+        .expect("agent rejection should be recorded in the trace");
+    assert_eq!(
+        ev.message, "Agent 1001 rejected (486)",
+        "rejection trace must name the agent and the SIP status"
+    );
+    let detail = ev
+        .detail
+        .as_ref()
+        .expect("rejection trace should carry detail");
+    assert_eq!(detail["agent"].as_str(), Some("1001"));
+    assert_eq!(detail["status"].as_str(), Some("486"));
+    assert_eq!(detail["queue_name"].as_str(), Some("support"));
+}
+
+/// A leg no-answer while queued must be recorded as an agent no-answer trace.
+#[tokio::test]
+async fn test_leg_no_answer_in_queue_records_agent_trace() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    session.meta.queue_name = Some("support".to_string());
+
+    let runtime = session
+        .app_runtime
+        .as_any()
+        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
+        .expect("test session uses DefaultAppRuntime");
+    *runtime.context.queue_name.write().await = Some("support".to_string());
+
+    let mut map = HashMap::new();
+    map.insert("resolved_agent_id".to_string(), "1001".to_string());
+    session.extensions.write().insert(map);
+
+    let agent_leg = LegId::from("queue-agent");
+    let leg = Leg::new(agent_leg.clone())
+        .with_endpoint("sip:3tmpv1bu@agent.invalid;transport=WS".to_string());
+    session.legs.insert(agent_leg.clone(), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Timeout".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    let ev = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| {
+            e.kind == crate::call_errors::TraceKind::Queue && e.message.contains("Agent 1001")
+        })
+        .expect("agent no-answer should be recorded in the trace");
+    assert_eq!(ev.message, "Agent 1001 no answer");
+}
+
+/// A caller hangup after the call was already served by an agent must NOT be
+/// classified as a queue abandon — even though the agent leg has since
+/// terminated (connected_callee cleared) and queue_name is still set. This
+/// reproduces the IVR → queue → agent answered → agent hung up → return IVR →
+/// caller hung up flow (see call fgkou895n0g5g0751g5v in dev.log).
+#[tokio::test]
+async fn test_resolve_final_hangup_reason_no_abandon_after_agent_connected() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut session = build_session(dialplan).await;
+
+    session.meta.queue_name = Some("to-agent".to_string());
+    session.meta.hangup_reason = Some(crate::callrecord::CallRecordHangupReason::ByCaller);
+    session.meta.ever_connected_callee = true;
+
+    session.resolve_final_hangup_reason().await;
+
+    assert_ne!(
+        session.meta.error_code.map(|info| info.code),
+        Some("queue.abandoned"),
+        "caller was served by an agent; must not be flagged as queue abandoned"
+    );
+    assert!(
+        !session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.code.as_deref() == Some("queue.abandoned")),
+        "served call must not append a queue.abandoned trace event"
+    );
+    assert_eq!(
+        session.meta.hangup_reason,
+        Some(crate::callrecord::CallRecordHangupReason::ByCaller),
+        "hangup reason must stay ByCaller after a served queue interaction"
+    );
+}
+
+/// A stale error_code from earlier in the call (e.g. a recovered queue error)
+/// must not leak into the call trace as "IVR ended: …" when the IVR ended via
+/// a continuation value (cancelled / transferred / chained).
+#[tokio::test]
+async fn test_resolve_final_hangup_reason_no_stale_ivr_end_trace() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut session = build_session(dialplan).await;
+
+    session.meta.error_code =
+        Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
+    let runtime = session
+        .app_runtime
+        .as_any()
+        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
+        .expect("test session uses DefaultAppRuntime");
+    runtime.context.set_var("ivr_end_reason", "cancelled");
+
+    session.resolve_final_hangup_reason().await;
+
+    assert!(
+        !session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.kind == crate::call_errors::TraceKind::Ivr
+                && e.code.as_deref() == Some("queue.abandoned")),
+        "IVR ended via continuation (cancelled) must not surface a stale queue.abandoned trace"
+    );
 }
 
 // ── parse_info_command pure function tests ──
@@ -1674,5 +1872,70 @@ async fn queue_transfer_start_failure_with_return_app_returns_to_ivr() {
         has_trace,
         "expected a queue.start_failed trace event; trace = {:?}",
         session.meta.trace
+    );
+}
+
+// ── cc_ringing for queue-dialed agents (dynamic leg 180 Ringing) ─────────────
+
+/// Recording hook that captures whether `on_call_ringing` fired.
+struct RingingRecordingHook {
+    ringing: Arc<AtomicUsize>,
+}
+
+impl RingingRecordingHook {
+    fn new() -> (Self, Arc<AtomicUsize>) {
+        let ringing = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                ringing: ringing.clone(),
+            },
+            ringing,
+        )
+    }
+}
+
+#[async_trait]
+impl crate::proxy::proxy_call::session_hooks::CallSessionHook for RingingRecordingHook {
+    async fn on_call_ringing(&self, _ctx: &CallSessionContext) {
+        self.ringing.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Regression: a dynamic leg (queue-dialed agent) that receives 180 Ringing
+/// must fire the `on_call_ringing` session hooks (which the CC addon turns into
+/// `cc_ringing`). Before the fix, `initiate_sip_leg`'s spawned task only handled
+/// 183 early media and never notified the session of a 180 Ringing, so
+/// queue-dialed agents produced no `cc_ringing`.
+#[tokio::test]
+async fn test_leg_ringing_fires_on_call_ringing_hook() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut server, _config) = create_test_server().await;
+    let (hook, ringing) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server)
+        .expect("server must be uniquely owned for hook registration")
+        .session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
+
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+
+    session
+        .execute_command(CallCommand::LegRinging {
+            leg_id: agent_leg.clone(),
+        }, None)
+        .await;
+
+    assert_eq!(
+        ringing.load(Ordering::SeqCst),
+        1,
+        "on_call_ringing hook must fire when a dynamic leg rings"
+    );
+    assert_eq!(
+        session.legs.get(&agent_leg).map(|l| l.state),
+        Some(LegState::Ringing),
+        "ringing leg should be marked LegState::Ringing"
     );
 }

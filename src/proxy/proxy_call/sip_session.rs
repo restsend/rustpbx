@@ -425,6 +425,9 @@ impl SipSessionHandle {
 /// Built-in factory that creates `CallApp` instances from app parameters.
 struct BuiltinAppFactory {
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    /// Server-level agent registry, handed to the QueueApp so it can resolve
+    /// the answering agent's display name for the service prompt.
+    agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
 }
 
 #[async_trait]
@@ -717,10 +720,12 @@ impl BuiltinAppFactory {
                 } else {
                     crate::call::DialStrategy::Sequential(agents)
                 };
-                Some(
-                    Box::new(crate::call::app::queue::QueueApp::new(plan, config))
-                        as Box<dyn crate::call::app::CallApp>,
-                )
+                let mut app = crate::call::app::queue::QueueApp::new(plan, config)
+                    .with_call_id(context.call_info.session_id.clone());
+                if let Some(ref registry) = self.agent_registry {
+                    app = app.with_agent_registry(registry.clone());
+                }
+                Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
             }
             _ => None,
         }
@@ -764,18 +769,19 @@ fn forward_dtmf_event(
         "digit": digit_str,
     });
     if let Err(e) = app_runtime.inject_event(event.clone()) {
-        warn!(session_id = %session_id, digit = %digit_str, error = %e, "Detected DTMF but failed to inject event");
-        return;
-    }
-    info!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
-    if let Some(gw) = rwi_gateway.as_ref() {
-        let g = gw.read();
-        g.send_to_owner(&crate::rwi::Dtmf {
-            call_id: session_id.to_string(),
-            digit: digit_str.clone(),
-            leg_id: Some(leg_id.to_string()),
-            extra: None,
-        });
+        debug!(session_id = %session_id, digit = %digit_str, error = %e,
+            "DTMF: app not running, still forwarding to bridge");
+    } else {
+        info!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
+        if let Some(gw) = rwi_gateway.as_ref() {
+            let g = gw.read();
+            g.send_to_owner(&crate::rwi::Dtmf {
+                call_id: session_id.to_string(),
+                digit: digit_str.clone(),
+                leg_id: Some(leg_id.to_string()),
+                extra: None,
+            });
+        }
     }
     if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
         let _ = tx.send(
@@ -811,6 +817,25 @@ fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
         .unwrap_or(5060);
      Some((host.to_string(), port))
  }
+
+/// Parse a dial target that may be either a bare SIP URI (e.g.
+/// `sip:1001@example.com;transport=ws`) or a full Contact header value as
+/// produced by the registrar's `contact_raw` (e.g.
+/// `<sip:1001@example.com;transport=ws>;+sip.ice;reg-id=1;expires=50`).
+///
+/// A plain URI parse is attempted first to preserve existing behavior for bare
+/// URIs (including their transport param); when that fails — typically because
+/// the string carries angle brackets and trailing contact-header params — it is
+/// parsed as a Contact header value and its URI extracted.
+fn parse_dial_target(target: &str) -> Result<rsipstack::sip::Uri> {
+    let trimmed = target.trim();
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed) {
+        return Ok(uri);
+    }
+    rsipstack::sip::typed::Contact::parse(trimmed)
+        .map(|c| c.uri)
+        .map_err(|e| anyhow!("invalid SIP target '{}': {}", target, e))
+}
 
 /// How the session was constructed: inbound (UAS, with a server dialog) or
 /// outbound (UAC, no server dialog).
@@ -1386,6 +1411,7 @@ enum ConstructMode<'a> {
             })
             .with_factory(Arc::new(BuiltinAppFactory {
                 addon_registry: server.addon_registry.clone(),
+                agent_registry: server.agent_registry.clone(),
             })),
         );
 
@@ -3187,6 +3213,7 @@ enum ConstructMode<'a> {
                             .unwrap_or(false),
                         track_id: None,
                         send_progress: false,
+                        side_only: false,
                     }),
                 })
             }
@@ -3851,10 +3878,7 @@ enum ConstructMode<'a> {
         };
 
         let is_parallel = matches!(plan.dial_strategy, Some(DialStrategy::Parallel(_)));
-        let agent_uris: Vec<String> = resolved_agents
-            .iter()
-            .map(|l| l.contact_raw.clone().unwrap_or_else(|| l.aor.to_string()))
-            .collect();
+        let agent_uris: Vec<String> = resolved_agents.iter().map(|l| l.aor.to_string()).collect();
 
         // The queue app dials from `plan.dial_strategy`, so write the resolved
         // locations back into the plan. Custom targets (skill-groups) that
@@ -6141,6 +6165,12 @@ enum ConstructMode<'a> {
         }
 
         self.meta.connected_callee = callee.clone();
+        // A real callee/agent leg answered. Record this permanently so the
+        // queue-abandon detector can tell "served then hung up" apart from
+        // "hung up while still waiting" even after this leg terminates.
+        if callee.is_some() {
+            self.meta.ever_connected_callee = true;
+        }
 
         if !self.app_runtime.is_running() {
             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
@@ -7406,6 +7436,7 @@ enum ConstructMode<'a> {
         let in_queue =
             self.meta.queue_name.is_some() || self.app_runtime.get_queue_name().is_some();
         if in_queue
+            && !self.meta.ever_connected_callee
             && self.meta.connected_callee.is_none()
             && matches!(
                 self.meta.hangup_reason,
@@ -7417,14 +7448,27 @@ enum ConstructMode<'a> {
         {
             self.meta.hangup_reason = Some(CallRecordHangupReason::Abandoned);
             self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
-            self.record_trace(
-                crate::call_errors::TraceEvent::new(
-                    crate::call_errors::TraceKind::Queue,
-                    "Caller abandoned the queue",
-                )
-                .severity(crate::call_errors::ErrSeverity::Warn)
-                .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code),
-            );
+            let queue_name = self
+                .meta
+                .queue_name
+                .clone()
+                .or_else(|| self.app_runtime.get_queue_name())
+                .unwrap_or_default();
+            let msg = if queue_name.is_empty() {
+                "Caller abandoned the queue".to_string()
+            } else {
+                format!("Caller abandoned queue '{}'", queue_name)
+            };
+            let mut ev = crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                msg,
+            )
+            .severity(crate::call_errors::ErrSeverity::Warn)
+            .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code);
+            if !queue_name.is_empty() {
+                ev = ev.detail(serde_json::json!({ "queue_name": queue_name }));
+            }
+            self.record_trace(ev);
         }
 
         // ── 2. IVR end reason bridge ────────────────────────────────
@@ -7475,17 +7519,21 @@ enum ConstructMode<'a> {
                 _ => None,
             };
 
-            if let Some(info) = self.meta.error_code {
-                self.record_trace(
-                    crate::call_errors::TraceEvent::new(
-                        crate::call_errors::TraceKind::Ivr,
-                        format!("IVR ended: {}", info.message),
-                    )
-                    .severity(info.severity)
-                    .code(info.code),
-                );
-            }
+            // Only record "IVR ended" for a terminal IVR outcome. For
+            // continuation values (transfer/chained/cancelled) the error code
+            // (if any) is stale state from earlier in the call and must not be
+            // attributed to the IVR's ending.
             if let Some(reason) = ivr_override {
+                if let Some(info) = self.meta.error_code {
+                    self.record_trace(
+                        crate::call_errors::TraceEvent::new(
+                            crate::call_errors::TraceKind::Ivr,
+                            format!("IVR ended: {}", info.message),
+                        )
+                        .severity(info.severity)
+                        .code(info.code),
+                    );
+                }
                 self.meta.hangup_reason = Some(reason);
             }
         }
@@ -8125,11 +8173,21 @@ enum ConstructMode<'a> {
             // Terminal End event — carries the hangup initiator and any
             // standardized error code so "why did the call end" is visible.
             {
+                let queue_ctx = self
+                    .meta
+                    .queue_name
+                    .clone()
+                    .or_else(|| self.app_runtime.get_queue_name())
+                    .map(|q| format!(" (queue '{}')", q));
                 let (severity, code, msg) = if let Some(info) = self.meta.error_code {
+                    let base = format!("Call ended: {}", info.message);
                     (
                         info.severity,
                         Some(info.code.to_string()),
-                        format!("Call ended: {}", info.message),
+                        match &queue_ctx {
+                            Some(ctx) => format!("{base}{ctx}"),
+                            None => base,
+                        },
                     )
                 } else {
                     let reason = self
@@ -8138,10 +8196,14 @@ enum ConstructMode<'a> {
                         .as_ref()
                         .map(|r| r.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let base = format!("Call ended: {}", reason);
                     (
                         crate::call_errors::ErrSeverity::Info,
                         None,
-                        format!("Call ended: {}", reason),
+                        match &queue_ctx {
+                            Some(ctx) => format!("{base}{ctx}"),
+                            None => base,
+                        },
                     )
                 };
                 let end =
@@ -8639,6 +8701,23 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_remove_leg(leg_id).await)
             }
 
+            CallCommand::LegRinging { leg_id } => {
+                info!(session_id = %self.id, %leg_id, "Leg ringing async notification");
+                // The agent leg is ringing — fire on_call_ringing session hooks
+                // so the CC addon can emit `cc_ringing` (agent Idle → Ringing).
+                self.update_leg_state(&leg_id, LegState::Ringing);
+                if !self.server.session_hooks.is_empty() {
+                    let ctx = self.session_hook_ctx();
+                    for hook in self.server.session_hooks.iter() {
+                        hook.on_call_ringing(&ctx).await;
+                    }
+                }
+                self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                    call_id: self.context.session_id.clone(),
+                });
+                CommandResult::success()
+            }
+
             CallCommand::LegConnected {
                 leg_id,
                 answer_sdp,
@@ -8721,6 +8800,69 @@ impl SipSession {
                         ));
                     }
                 }
+
+                // Surface agent rejection / no-answer in the call trace so
+                // operator-facing call records show *which* agent and *why*
+                // the queue could not connect (e.g. 486 from off-hours phone).
+                let in_queue = self
+                    .app_runtime
+                    .current_app()
+                    .as_deref()
+                    .is_some_and(|app| app == "queue")
+                    || self.app_runtime.get_queue_name().is_some();
+                if in_queue {
+                    use std::collections::HashMap;
+                    let resolved_agent_id = self
+                        .extensions
+                        .read()
+                        .get::<HashMap<String, String>>()
+                        .and_then(|m| m.get("resolved_agent_id").cloned())
+                        .unwrap_or_default();
+                    let agent_id = if !resolved_agent_id.is_empty() {
+                        resolved_agent_id
+                    } else {
+                        agent_uri
+                            .as_deref()
+                            .and_then(|u| u.strip_prefix("sip:"))
+                            .and_then(|u| u.split('@').next())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    };
+                    let status = reason
+                        .strip_prefix("Rejected with ")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| reason.clone());
+                    let queue_name = self
+                        .meta
+                        .queue_name
+                        .clone()
+                        .or_else(|| self.app_runtime.get_queue_name())
+                        .unwrap_or_default();
+                    let (msg, severity) = if event_name == "agent_busy" {
+                        (
+                            format!("Agent {} rejected ({})", agent_id, status),
+                            crate::call_errors::ErrSeverity::Warn,
+                        )
+                    } else {
+                        (
+                            format!("Agent {} no answer", agent_id),
+                            crate::call_errors::ErrSeverity::Warn,
+                        )
+                    };
+                    let ev = crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Queue,
+                        msg,
+                    )
+                    .severity(severity)
+                    .detail(serde_json::json!({
+                        "agent": agent_id,
+                        "status": status,
+                        "reason": reason,
+                        "queue_name": queue_name,
+                    }));
+                    self.record_trace(ev);
+                }
+
                 self.update_leg_state(&leg_id, LegState::Ended);
                 self.legs.remove(&leg_id);
                 self.update_media_path().await;
@@ -9083,8 +9225,41 @@ impl SipSession {
         }
     }
 
-    /// Add a new leg to the session dynamically.
+    /// Add a new leg to the session dynamically, recording any failure in the
+    /// call trace so operator-facing call records surface dial errors.
     async fn handle_add_leg(&mut self, target: String, leg_id: Option<LegId>) -> Result<LegId> {
+        match self.handle_add_leg_inner(target, leg_id).await {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                let in_queue = self
+                    .app_runtime
+                    .current_app()
+                    .as_deref()
+                    .is_some_and(|app| app == "queue")
+                    || self.app_runtime.get_queue_name().is_some();
+                let kind = if in_queue {
+                    crate::call_errors::TraceKind::Queue
+                } else {
+                    crate::call_errors::TraceKind::Transfer
+                };
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        kind,
+                        format!("Failed to add SIP leg: {}", e),
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Error),
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// Add a new leg to the session dynamically.
+    async fn handle_add_leg_inner(
+        &mut self,
+        target: String,
+        leg_id: Option<LegId>,
+    ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
 
@@ -9094,7 +9269,7 @@ impl SipSession {
             "Adding new SIP leg to session"
         );
 
-        let uri = rsipstack::sip::Uri::try_from(target.as_str())
+        let uri = parse_dial_target(&target)
             .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))?;
         let mut location = crate::call::Location {
             aor: uri.clone(),
@@ -9437,9 +9612,9 @@ impl SipSession {
                     state = state_rx.recv(), if state_rx_open => {
                         match state {
                             Some(rsipstack::dialog::dialog::DialogState::Early(_, ref resp)) => {
-                                info!(session_id = %session_id, %leg_id, "SIP leg early media (183)");
                                 let body = resp.body();
                                 if !body.is_empty() {
+                                    info!(session_id = %session_id, %leg_id, "SIP leg early media (183)");
                                     let sdp = String::from_utf8_lossy(body).to_string();
                                     if let Some(ref peer) = peer {
                                         if let Err(e) =
@@ -9454,6 +9629,14 @@ impl SipSession {
                                             info!(%leg_id, "Early media remote description set");
                                         }
                                     }
+                                } else {
+                                    // 180 Ringing (provisional response with no
+                                    // SDP) — notify the session so `on_call_ringing`
+                                    // hooks fire (cc_ringing for queue-dialed agents).
+                                    info!(session_id = %session_id, %leg_id, "SIP leg ringing (180)");
+                                    let _ = cmd_tx.send(CallCommand::LegRinging {
+                                        leg_id: leg_id.clone(),
+                                    }).await;
                                 }
                             }
                             Some(_) => {}
@@ -9828,9 +10011,12 @@ impl SipSession {
             .read()
             .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
             .is_some();
+        // Caller-exclusive prompts (e.g. the queue post-connect service
+        // announcement) must not be mirrored onto the opposite leg.
+        let side_only = options.as_ref().is_some_and(|o| o.side_only);
 
         if let Some(mb) = self.bridge_mut() {
-            let handle = if in_ivr_exec {
+            let handle = if in_ivr_exec || side_only {
                 mb.play_file_side_only(target_side, &file_path, loop_playback)
                     .await?
             } else {
@@ -10713,6 +10899,40 @@ mod tests {
     use super::*;
     use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ── parse_dial_target ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_dial_target_accepts_bare_uri_with_transport() {
+        let uri = parse_dial_target("sip:1001@10.0.0.1:5060;transport=udp").unwrap();
+        assert_eq!(uri.user().as_deref(), Some("1001"));
+        assert_eq!(uri.host().to_string(), "10.0.0.1");
+        assert!(
+            uri.params
+                .iter()
+                .any(|p| matches!(p, rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Udp))),
+            "bare URI transport param must be preserved"
+        );
+    }
+
+    #[test]
+    fn parse_dial_target_accepts_registered_contact_value() {
+        let target = "<sip:2itejs7c@k0euab21f8ta.invalid;transport=ws>;+sip.ice;reg-id=1;+sip.instance=\"<urn:uuid:86c49f5a-3fb1-428c-9a10-d218d87c4115>\";expires=50";
+        let uri = parse_dial_target(target).expect("contact value must parse");
+        assert_eq!(uri.user().as_deref(), Some("2itejs7c"));
+        assert_eq!(uri.host().to_string(), "k0euab21f8ta.invalid");
+        assert!(
+            uri.params
+                .iter()
+                .any(|p| matches!(p, rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Ws))),
+            "transport=ws inside the contact URI must be preserved"
+        );
+    }
+
+    #[test]
+    fn parse_dial_target_rejects_garbage() {
+        assert!(parse_dial_target("sip:1001@example.com;transport=bogus").is_err());
+    }
 
     // ── await_playback_done ────────────────────────────────────────────────
 
@@ -12952,6 +13172,7 @@ max_retries = 3
 
         let factory = BuiltinAppFactory {
             addon_registry: None,
+            agent_registry: None,
         };
 
         let params = Some(serde_json::json!({

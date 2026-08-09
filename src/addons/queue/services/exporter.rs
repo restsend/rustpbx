@@ -93,6 +93,7 @@ fn normalize_queue_audio_paths(queue_config: &mut RouteQueueConfig) {
         normalize_optional_audio_path(&mut prompts.busy_prompt);
         normalize_optional_audio_path(&mut prompts.off_hours_prompt);
         normalize_optional_audio_path(&mut prompts.no_answer_prompt);
+        normalize_optional_audio_path(&mut prompts.service_prompt);
     }
 }
 

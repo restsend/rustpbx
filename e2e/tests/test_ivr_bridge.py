@@ -26,7 +26,13 @@ import helpers as h
 pytestmark = [pytest.mark.ivr, pytest.mark.bridge]
 
 
-def _tree_ivr_toml(ws_url: str, greeting: str) -> str:
+def _tree_ivr_toml(ws_url: str, greeting: str, return_app: str | None = None,
+                   return_target: str | None = None) -> str:
+    ret = ""
+    if return_app:
+        ret += f'return_app = "{return_app}"\n'
+    if return_target:
+        ret += f'return_target = "{return_target}"\n'
     return f'''\
 [ivr]
 name = "ivr-bridge-e2e"
@@ -44,7 +50,7 @@ label = "Bridge"
 type = "bridge"
 create_room_uri = "{ws_url}"
 timeout_ms = 10000
-'''
+{ret}'''
 
 
 def _add_bridge_route(cb, file: str = "config/ivr/ivr-bridge-e2e.toml"):
@@ -163,7 +169,7 @@ async def test_tree_ivr_bridge_audio_accuracy(pbx, sipbot_pool, tmp_path, ws_bri
     await caller.wait_output_async(r"All bots finished", timeout=25)
     if caller_rec.exists() and caller_rec.stat().st_size > 44:
         try:
-            rx, _tx, sr = read_wav_mono(caller_rec)
+            rx, sr = read_wav_mono(caller_rec)
             assert has_audio_content(rx, -40.0), (
                 f"caller recording silent: {compute_rms_db(rx):.1f} dBFS"
             )
@@ -208,6 +214,88 @@ async def test_tree_ivr_bridge_dtmf_json(pbx, sipbot_pool, tmp_path, ws_bridge_s
         await asyncio.sleep(0.5)
     frames = ws_bridge_server.capture.dtmf_frames()
     assert frames, f"no DTMF JSON frames received: {frames}"
+
+
+# ---------------------------------------------------------------------------
+# Play-then-disconnect: bridge streams audio, closes, call returns to IVR
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_bridge_play_then_disconnect_returns_to_ivr(pbx, sipbot_pool, tmp_path):
+    """Bridge WS plays PCM16 demo audio then closes → call returns to IVR.
+
+    Models the Python example's `voip_bridge` demo: the bridge endpoint streams
+    a WAV (the example's `bridge-demo.wav`) to the caller, then disconnects.
+    rustpbx sees the disconnect and, because the bridge node carries
+    `return_app`/`return_target`, restarts the IVR app (replaying the greeting)
+    instead of hanging up the caller.
+    """
+    from helpers import generate_sine_wav
+    from helpers.ws_bridge_echo import WsBridgeEchoServer
+
+    greeting = tmp_path / "ivr_bridge_greeting.wav"
+    generate_sine_wav(greeting, 440.0, 1.5, 8000, 0.4)
+    demo_audio = tmp_path / "bridge_demo.wav"
+    generate_sine_wav(demo_audio, 330.0, 2.0, 8000, 0.5)
+
+    server = WsBridgeEchoServer(play_file=demo_audio)
+    server.start()
+    try:
+        pbx.config_builder.add_ivr(
+            "ivr-bridge-e2e",
+            _tree_ivr_toml(
+                server.ws_url, str(greeting),
+                return_app="ivr", return_target="ivr-bridge-e2e",
+            ),
+        )
+        pbx.config_builder.media_proxy = "all"
+        pbx.config_builder.add_route(
+            "to-ivr-bridge",
+            match={"to.user": "ivr-bridge"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/ivr-bridge-e2e.toml"},
+            auto_answer=True,
+        )
+        h.boot_pbx(pbx)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-bridge@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=14, dtmf_flows="2s:1",
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        await _wait_ws_connected(server)
+
+        # 1. The bridge server must stream the demo audio to the caller.
+        deadline = asyncio.get_event_loop().time() + 12
+        while server.capture.sent_pcm_bytes() < 1600 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+        assert server.capture.sent_pcm_bytes() >= 1600, (
+            f"bridge WS streamed too little PCM16 ({server.capture.sent_pcm_bytes()} bytes)"
+        )
+
+        # 2. Wait for the bridge to disconnect and the IVR to restart.
+        await asyncio.sleep(8)
+
+        log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
+        assert "starting return app" in log.lower(), (
+            f"expected return-app log after bridge disconnect:\n{log[-3000:]}"
+        )
+
+        # 3. The caller must survive the bridge disconnect (return to IVR, not hangup).
+        assert caller.is_alive, (
+            f"caller exited after bridge disconnect; expected return to IVR:\n{caller.output[-1500:]}"
+        )
+
+        # 4. The caller must have received audio (bridge demo + replayed greeting).
+        caller.wait(timeout=30)
+        stats = caller.get_rtp_stats()
+        assert stats.rx_packets > 0, (
+            f"caller RX=0 (no bridge/greeting audio reached the caller): {stats}"
+        )
+    finally:
+        server.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -331,3 +419,230 @@ timeout_secs = 5
         assert abs(freq - 440.0) < 60.0, f"step bridge WS dominant freq {freq:.1f} != ~440 Hz"
     finally:
         await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Gap-free verification: continuous tone → no stutter in caller recording
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_bridge_play_gap_free_audio(pbx, sipbot_pool, tmp_path):
+    """Bridge WS → caller: 3 s continuous 330 Hz tone must arrive without
+    silence gaps (validates the ChannelAudioSource + loop_playback CNG path
+    against stutter)."""
+    from helpers import generate_sine_wav, read_wav_mono, find_dominant_frequency, compute_rms_db
+    from helpers.ws_bridge_echo import WsBridgeEchoServer
+
+    greeting = tmp_path / "greeting.wav"
+    generate_sine_wav(greeting, 440.0, 1.5, 8000, 0.4)
+    tone = tmp_path / "tone.wav"
+    generate_sine_wav(tone, 330.0, 3.0, 8000, 0.5)
+    caller_rec = tmp_path / "rec.wav"
+
+    server = WsBridgeEchoServer(play_file=tone)
+    server.start()
+    try:
+        pbx.config_builder.add_ivr(
+            "ivr-bridge-e2e",
+            _tree_ivr_toml(server.ws_url, str(greeting),
+                           return_app="ivr", return_target="ivr-bridge-e2e"),
+        )
+        pbx.config_builder.media_proxy = "all"
+        pbx.config_builder.add_route(
+            "to-ivr-bridge",
+            match={"to.user": "ivr-bridge"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/ivr-bridge-e2e.toml"},
+            auto_answer=True,
+        )
+        h.boot_pbx(pbx)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-bridge@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=12, dtmf_flows="2s:1", record_file=str(caller_rec), audio_quality=True,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        await _wait_ws_connected(server)
+
+        # Ensure the bridge server streamed the tone.
+        deadline = asyncio.get_event_loop().time() + 12
+        while server.capture.sent_pcm_bytes() < 8000 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+        assert server.capture.sent_pcm_bytes() >= 8000, (
+            f"bridge streamed too little: {server.capture.sent_pcm_bytes()} bytes"
+        )
+
+        caller.wait(timeout=25)
+    finally:
+        server.stop()
+
+    # ── Analyse the caller recording for 330 Hz continuity ──────────────
+    if not caller_rec.exists() or caller_rec.stat().st_size < 1000:
+        pytest.skip("caller recording too small or missing")
+
+    rx, sr = read_wav_mono(caller_rec)
+    rx = rx.ravel()
+    assert len(rx) >= sr, f"recording too short: {len(rx)} samples"
+
+    W = sr // 50           # 20 ms window
+    min_rms = -45.0        # dB, anything lower is effectively silence
+    target = 330.0
+
+    # Pick all windows dominated by the bridge tone.
+    tone_blocks = []
+    for i in range(0, len(rx) - W, W):
+        chunk = rx[i:i + W]
+        rms = compute_rms_db(chunk)
+        if rms > min_rms:
+            f, _ = find_dominant_frequency(chunk, sr, 200, 450, 5)
+            if abs(f - target) < 50.0:
+                tone_blocks.append(i)
+
+    assert len(tone_blocks) >= 30, (
+        f"too few tone blocks ({len(tone_blocks)}); expected ~3 s of 330 Hz. "
+        f"The bridge audio may not have reached the caller at all."
+    )
+
+    # The tone region should be contiguous: no silent run > 3 windows (60 ms).
+    gaps = [b - a for a, b in zip(tone_blocks, tone_blocks[1:])]
+    max_gap = max(gaps) if gaps else 0
+    # Convert to ms: each W tick is 20 ms.
+    gap_ms = max_gap * 1000 / sr
+    assert gap_ms <= 60.0, (
+        f"bridge tone has stutter gap of {gap_ms:.0f} ms; "
+        f"all gaps: {[int(g * 1000 / sr) for g in gaps]} ms"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Full-duration playback: WS must stay open long enough for the whole prompt
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_bridge_play_full_duration(pbx, sipbot_pool, tmp_path):
+    """Bridge WS plays a 3 s tone; the caller recording must contain ≈3 s of
+    that tone (not truncated by an early WS close)."""
+    from helpers import generate_sine_wav, read_wav_mono, find_dominant_frequency, compute_rms_db
+    from helpers.ws_bridge_echo import WsBridgeEchoServer
+
+    greeting = tmp_path / "greeting.wav"
+    generate_sine_wav(greeting, 440.0, 1.0, 8000, 0.4)
+    tone = tmp_path / "tone.wav"
+    generate_sine_wav(tone, 330.0, 3.0, 8000, 0.5)
+    caller_rec = tmp_path / "rec.wav"
+
+    server = WsBridgeEchoServer(play_file=tone)
+    server.start()
+    try:
+        pbx.config_builder.add_ivr(
+            "ivr-bridge-e2e",
+            _tree_ivr_toml(server.ws_url, str(greeting),
+                           return_app="ivr", return_target="ivr-bridge-e2e"),
+        )
+        pbx.config_builder.media_proxy = "all"
+        pbx.config_builder.add_route(
+            "to-ivr-bridge",
+            match={"to.user": "ivr-bridge"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/ivr-bridge-e2e.toml"},
+            auto_answer=True,
+        )
+        h.boot_pbx(pbx)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-bridge@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=14, dtmf_flows="2s:1", record_file=str(caller_rec), audio_quality=True,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        await _wait_ws_connected(server)
+        caller.wait(timeout=25)
+    finally:
+        server.stop()
+
+    if not caller_rec.exists() or caller_rec.stat().st_size < 1000:
+        pytest.skip("caller recording too small or missing")
+
+    rx, sr = read_wav_mono(caller_rec)
+    rx = rx.ravel()
+
+    # Count 20 ms windows dominated by the 330 Hz tone.
+    W = sr // 50
+    tone_windows = 0
+    for i in range(0, len(rx) - W, W):
+        chunk = rx[i:i + W]
+        if compute_rms_db(chunk) > -40.0:
+            f, _ = find_dominant_frequency(chunk, sr, 200, 450, 5)
+            if abs(f - 330.0) < 50.0:
+                tone_windows += 1
+
+    tone_secs = tone_windows * 0.02
+    # The tone is 3 s; allow some tolerance for greeting/return overlap.
+    assert tone_secs >= 2.4, (
+        f"bridge tone only lasted {tone_secs:.1f} s (expected ~3 s); "
+        f"the WS likely closed before the egress drained the buffered audio"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DTMF during bridge play is forwarded to the WS server as JSON
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_bridge_play_dtmf_forwarded(pbx, sipbot_pool, tmp_path):
+    """DTMF pressed while the bridge is playing audio must be forwarded to the
+    WS server as a JSON text frame."""
+    from helpers import generate_sine_wav
+    from helpers.ws_bridge_echo import WsBridgeEchoServer
+
+    greeting = tmp_path / "greeting.wav"
+    generate_sine_wav(greeting, 440.0, 1.0, 8000, 0.4)
+    tone = tmp_path / "tone.wav"
+    generate_sine_wav(tone, 330.0, 4.0, 8000, 0.5)
+
+    server = WsBridgeEchoServer(play_file=tone)
+    server.start()
+    try:
+        pbx.config_builder.add_ivr(
+            "ivr-bridge-e2e",
+            _tree_ivr_toml(server.ws_url, str(greeting),
+                           return_app="ivr", return_target="ivr-bridge-e2e"),
+        )
+        pbx.config_builder.media_proxy = "all"
+        pbx.config_builder.add_route(
+            "to-ivr-bridge",
+            match={"to.user": "ivr-bridge"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/ivr-bridge-e2e.toml"},
+            auto_answer=True,
+        )
+        h.boot_pbx(pbx)
+
+        # DTMF '1' triggers the bridge; '7' is pressed during playback.
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-bridge@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=12, dtmf_flows="2s:1,4s:7",
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        await _wait_ws_connected(server)
+
+        # Wait for the DTMF '7' to be forwarded to the WS server.
+        deadline = asyncio.get_event_loop().time() + 10
+        while asyncio.get_event_loop().time() < deadline:
+            frames = server.capture.dtmf_frames()
+            if any("7" in f and "dtmf" in f for f in frames):
+                break
+            await asyncio.sleep(0.5)
+
+        frames = server.capture.dtmf_frames()
+        assert any("7" in f and "dtmf" in f for f in frames), (
+            f"DTMF '7' not forwarded to WS during bridge play; got: {frames}"
+        )
+        caller.wait(timeout=20)
+    finally:
+        server.stop()

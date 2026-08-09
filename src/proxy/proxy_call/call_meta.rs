@@ -63,6 +63,11 @@ pub struct CallMeta {
     /// True while a blind transfer is in progress (new B-leg ringing / REFER
     /// awaiting completion). The RTP watchdog is suppressed during this window.
     pub transfer_in_progress: bool,
+    /// Whether a real callee/agent leg ever answered (media path established
+    /// to a remote party), even if that leg has since terminated. Never reset.
+    /// Lets the queue-abandon detector distinguish "caller hung up while still
+    /// waiting for an agent" from "caller hung up after already being served".
+    pub ever_connected_callee: bool,
 }
 
 impl CallMeta {
@@ -91,6 +96,7 @@ impl CallMeta {
             rtp_timeout_leg: None,
             rtp_timeout_fired: false,
             transfer_in_progress: false,
+            ever_connected_callee: false,
         }
     }
 }

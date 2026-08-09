@@ -18,20 +18,12 @@ use std::time::Duration;
 /// Unified forward sink for the bridge: WS PCM16 → call. Two backing paths:
 /// - [`BridgeForwardSink::Track`]: a `VoiceEnginePeer` track sender (non-app
 ///   B2BUA path).
-/// - [`BridgeForwardSink::Inject`]: the MediaBridge A-leg injection channel
-///   (app-anchored flow, e.g. IVR bridge).
+/// - [`BridgeForwardSink::Pcm`]: a raw-PCM channel into the MediaBridge A leg's
+///   egress pipeline (app-anchored flow, e.g. IVR bridge). The egress encoder
+///   handles PCM→codec conversion — same "filetrack" mode as `play_file`.
 enum BridgeForwardSink {
     Track(SampleStreamSource),
-    Inject(tokio::sync::mpsc::Sender<rustrtc::media::MediaSample>),
-}
-
-impl BridgeForwardSink {
-    fn send(&self, sample: rustrtc::media::MediaSample) -> bool {
-        match self {
-            BridgeForwardSink::Track(s) => s.send(sample).is_ok(),
-            BridgeForwardSink::Inject(tx) => tx.try_send(sample).is_ok(),
-        }
-    }
+    Pcm(tokio::sync::mpsc::Sender<Vec<i16>>),
 }
 
 /// Raw return-app specification extracted from a transfer target's query
@@ -953,16 +945,26 @@ impl SipSession {
         }
 
         // App-anchored flow (IVR / queue / voicemail): caller media lives on
-        // the MediaBridge A leg, not on VoiceEnginePeer tracks. Forward audio
-        // via the A-leg injection channel and read call audio from its PC.
+        // the MediaBridge A leg, not on VoiceEnginePeer tracks. Use a raw-PCM
+        // channel source — the leg's egress pipeline encodes to the negotiated
+        // codec (same "filetrack" mode as play_file).
+        let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
         if forward_sink.is_none() || pc.is_none() {
             if let Some(mb) = self.media.bridge.as_ref()
                 && let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A)
             {
-                info!(session_id = %self.id, %leg_id, "Bridge sourcing caller media from MediaBridge A leg");
+                info!(session_id = %self.id, %leg_id, rate = ws_sample_rate,
+                    "Bridge sourcing caller media from MediaBridge A leg (raw PCM channel)");
                 if forward_sink.is_none() {
-                    if let Ok(tx) = mb.inject(crate::media::media_bridge::LegSide::A) {
-                        forward_sink = Some(BridgeForwardSink::Inject(tx));
+                    match mb.bridge_play_pcm(
+                        crate::media::media_bridge::LegSide::A,
+                        ws_sample_rate,
+                    )
+                    .await
+                    {
+                        Ok(tx) => forward_sink = Some(BridgeForwardSink::Pcm(tx)),
+                        Err(e) => warn!(session_id = %self.id, %leg_id, error = %e,
+                            "Failed to set up raw PCM channel for bridge forward"),
                     }
                 }
                 if pc.is_none() {
@@ -971,7 +973,7 @@ impl SipSession {
             }
         }
 
-        let forward_sink = forward_sink.ok_or_else(|| anyhow!("No track sender for Bridge"))?;
+        let forward_sink = forward_sink.ok_or_else(|| anyhow!("No forward sink for Bridge"))?;
         let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
 
         // ── 3. Create audio decoder (call → raw PCM) ────────────────
@@ -1059,7 +1061,11 @@ impl SipSession {
 
         let cmd_tx_for_fwd = self.cmd_tx.clone();
 
-        // ── 6. Forward loop: WS raw PCM16 → inject into call ─────────
+        // ── 6. Forward loop: WS raw PCM16 → call ─────────────────────
+        // Two paths:
+        //   Track (B2BUA): encode → push pre-encoded AudioFrame to PC track
+        //   Pcm   (app):   send raw PCM16 chunks to the leg's egress pipeline,
+        //                   which encodes to the negotiated codec (filetrack mode)
         let forward_cancel = cancel_token.child_token();
         let forward_handle = {
             let leg_id = leg_id.clone();
@@ -1068,16 +1074,20 @@ impl SipSession {
                 use audio_codec::create_encoder;
                 use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
 
-                let mut encoder = create_encoder(codec_type);
-                let enc_sample_rate = encoder.sample_rate();
-                let clock_rate = codec_type.clock_rate() as u32;
-                // `payload_type` is the caller-negotiated PT, resolved above.
-                let samples_per_frame = (enc_sample_rate * 20 / 1000) as usize;
-                let rtp_ticks_per_frame = clock_rate * 20 / 1000;
+                let samples_per_frame = (ws_sample_rate * 20 / 1000) as usize;
+                let mut buf: Vec<i16> = Vec::new();
 
+                // Track path: encoder + RTP state. Pcm path: none needed.
+                let mut encoder = if let BridgeForwardSink::Track(..) = &forward_sink {
+                    Some(create_encoder(codec_type))
+                } else {
+                    None
+                };
+                let enc_sample_rate = encoder.as_ref().map(|e| e.sample_rate()).unwrap_or(ws_sample_rate);
+                let clock_rate = codec_type.clock_rate() as u32;
+                let rtp_ticks_per_frame = clock_rate * 20 / 1000;
                 let mut rtp_ts: u32 = rand::random();
                 let mut seq: u16 = rand::random();
-                let mut buf: Vec<i16> = Vec::new();
 
                 loop {
                     tokio::select! {
@@ -1097,31 +1107,41 @@ impl SipSession {
 
                                     while buf.len() >= samples_per_frame {
                                         let chunk: Vec<i16> = buf.drain(..samples_per_frame).collect();
-                                        let chunk = if ws_sample_rate != enc_sample_rate {
-                                            crate::call::runtime::conference_media_bridge::resample_linear(
-                                                &chunk, ws_sample_rate, enc_sample_rate,
-                                            )
-                                        } else {
-                                            chunk
-                                        };
-                                        let encoded = encoder.encode(&chunk);
-                                        let frame = RtcAudioFrame {
-                                            rtp_timestamp: rtp_ts,
-                                            clock_rate,
-                                            data: encoded.into(),
-                                            sequence_number: Some(seq),
-                                            payload_type: Some(payload_type),
-                                            marker: false,
-                                            header_extension: None,
-                                            raw_packet: None,
-                                            source_addr: None,
-                                        };
-                                        if !forward_sink.send(MediaSample::Audio(frame)) {
-                                            warn!(session_id = %session_id, %leg_id, "Bridge forward: audio sender closed");
-                                            return;
+
+                                        if let BridgeForwardSink::Pcm(tx) = &forward_sink {
+                                            if tx.send(chunk).await.is_err() {
+                                                info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
+                                                return;
+                                            }
+                                        } else if let BridgeForwardSink::Track(sender) = &forward_sink {
+                                            let chunk = if ws_sample_rate != enc_sample_rate {
+                                                crate::call::runtime::conference_media_bridge::resample_linear(
+                                                    &chunk, ws_sample_rate, enc_sample_rate,
+                                                )
+                                            } else {
+                                                chunk
+                                            };
+                                            if let Some(ref mut enc) = encoder {
+                                                let encoded = enc.encode(&chunk);
+                                                let frame = RtcAudioFrame {
+                                                    rtp_timestamp: rtp_ts,
+                                                    clock_rate,
+                                                    data: encoded.into(),
+                                                    sequence_number: Some(seq),
+                                                    payload_type: Some(payload_type),
+                                                    marker: false,
+                                                    header_extension: None,
+                                                    raw_packet: None,
+                                                    source_addr: None,
+                                                };
+                                                if sender.send(MediaSample::Audio(frame)).is_err() {
+                                                    warn!(%session_id, %leg_id, "Bridge forward: track sender closed");
+                                                    return;
+                                                }
+                                                rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
+                                                seq = seq.wrapping_add(1);
+                                            }
                                         }
-                                        rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
-                                        seq = seq.wrapping_add(1);
                                     }
                                 }
                                 Some(Ok(Message::Text(txt))) => {

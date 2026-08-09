@@ -223,6 +223,40 @@ impl CallController {
                 interrupt_on_dtmf: interruptible,
                 track_id: Some(track_id.clone()),
                 send_progress: false,
+                side_only: false,
+            }),
+        })?;
+
+        Ok(PlaybackToken {
+            track_id,
+            file_path: path,
+        })
+    }
+
+    /// Play an audio file to the caller leg only (no mirror onto the opposite
+    /// leg), for caller-exclusive announcements the agent must not hear.
+    pub async fn play_audio_caller_only(
+        &self,
+        file: impl Into<String>,
+        interruptible: bool,
+    ) -> anyhow::Result<PlaybackToken> {
+        let path = file.into();
+        let track_id = uuid::Uuid::new_v4().to_string();
+        let source = if path.starts_with("http://") || path.starts_with("https://") {
+            MediaSource::Url { url: path.clone() }
+        } else {
+            MediaSource::File { path: path.clone() }
+        };
+        self.session.send_command(CallCommand::Play {
+            leg_id: None,
+            source,
+            options: Some(PlayOptions {
+                loop_playback: false,
+                await_completion: false,
+                interrupt_on_dtmf: interruptible,
+                track_id: Some(track_id.clone()),
+                send_progress: false,
+                side_only: true,
             }),
         })?;
 

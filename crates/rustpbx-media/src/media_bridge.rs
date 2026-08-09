@@ -824,10 +824,34 @@ impl MediaBridge {
         // Spawn the switch so we don't block the session loop on the egress
         // command channel.
         tokio::spawn(async move {
-            let _ = leg.set_egress_source(EgressSource::Inject {
-                rx: parking_lot::Mutex::new(rx),
-            });
+            if let Err(e) = leg
+                .set_egress_source(EgressSource::Inject {
+                    rx: parking_lot::Mutex::new(rx),
+                })
+                .await
+            {
+                warn!(error = ?e, side = ?side, "inject: failed to switch leg egress to Inject");
+            }
         });
+        Ok(tx)
+    }
+
+    /// Set up a raw-PCM channel audio source on the given leg. The returned
+    /// sender feeds the egress pipeline via [`ChannelAudioSource`]; on empty
+    /// ticks the egress emits comfort-noise (CNG) instead of dead silence,
+    /// courtesy of `loop_playback=true`.
+    ///
+    /// The source does NOT pre-encode — the leg's egress encoder converts
+    /// PCM→codec at its own 20 ms cadence ("filetrack mode").
+    pub async fn bridge_play_pcm(
+        &self,
+        side: LegSide,
+        sample_rate: u32,
+    ) -> Result<tokio::sync::mpsc::Sender<Vec<i16>>> {
+        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let source = Box::new(crate::audio_source::ChannelAudioSource::new(rx, sample_rate));
+        leg.play(source, true, None).await?;
         Ok(tx)
     }
 

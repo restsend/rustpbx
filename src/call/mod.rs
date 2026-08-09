@@ -89,6 +89,9 @@ pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.w
 pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
 pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "sounds/queue-no-answer-zh.wav";
 pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "sounds/queue-no-answer-en.wav";
+/// Played to the caller only, right after the agent connects.
+pub const DEFAULT_QUEUE_SERVICE_PROMPT_ZH: &str = "sounds/queue-service-zh.wav";
+pub const DEFAULT_QUEUE_SERVICE_PROMPT_EN: &str = "sounds/queue-service-en.wav";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoicePrompts {
@@ -115,6 +118,12 @@ pub struct VoicePrompts {
     /// Multi-stage comfort/reassurance prompts played during wait.
     #[serde(default)]
     pub comfort_prompts: Vec<ComfortPrompt>,
+    /// Prompt played to the caller only, right after the agent connects.
+    /// Accepts a local audio file path or an http(s) URL (e.g. a TTS-over-HTTP
+    /// endpoint). Both forms may contain an `{agent}` placeholder replaced with
+    /// the answering agent's display name (percent-encoded inside URLs).
+    #[serde(default)]
+    pub service_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +151,7 @@ impl VoicePrompts {
             wait_time_prompt: None,
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
+            service_prompt: None,
         }
     }
 
@@ -155,6 +165,7 @@ impl VoicePrompts {
             wait_time_prompt: None,
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
+            service_prompt: None,
         }
     }
 }

@@ -373,6 +373,39 @@ endblock %}
                         </div>
                     </div>
 
+                    <!-- Service prompt (post-connect, caller only, optional) -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_service')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_service_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpServiceType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpServiceType === 'custom'" x-model.trim="vpServiceCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpServiceType === 'custom' && vpServiceCustom.startsWith('http')"
+                                    @click="downloadAudio(vpServiceCustom, 'service')"
+                                    :disabled="downloadingService"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingService ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('service')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpServicePath || ''"></span>
+                        </div>
+                    </div>
+
                     <!-- Busy prompt -->
                     <div class="rounded-lg border border-slate-200 p-4">
                         <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_busy')"></h3>
@@ -621,18 +654,22 @@ endblock %}
 
             // Voice prompts
             vpTransferType: 'none',
+            vpServiceType: 'none',
             vpBusyType: 'none',
             vpOffHoursType: 'none',
             vpNoAnswerType: 'none',
             vpTransferCustom: '',
+            vpServiceCustom: '',
             vpBusyCustom: '',
             vpOffHoursCustom: '',
             vpNoAnswerCustom: '',
             vpTransferPath: '',
+            vpServicePath: '',
             vpBusyPath: '',
             vpOffHoursPath: '',
             vpNoAnswerPath: '',
             downloadingTransfer: false,
+            downloadingService: false,
             downloadingBusy: false,
             downloadingOffHours: false,
             downloadingNoAnswer: false,
@@ -880,6 +917,7 @@ endblock %}
             },
             VP_PATHS: {
                 transfer: { zh: 'sounds/queue-transfer-zh.wav', en: 'sounds/queue-transfer-en.wav' },
+                service: { zh: 'sounds/queue-service-zh.wav', en: 'sounds/queue-service-en.wav' },
                 busy: { zh: 'sounds/queue-busy-zh.wav', en: 'sounds/queue-busy-en.wav' },
                 offhours: { zh: 'sounds/queue-off-hours-zh.wav', en: 'sounds/queue-off-hours-en.wav' },
                 noanswer: { zh: 'sounds/queue-no-answer-zh.wav', en: 'sounds/queue-no-answer-en.wav' },
@@ -896,14 +934,17 @@ endblock %}
             loadVoicePrompts(vp) {
                 if (!vp || typeof vp !== 'object') return;
                 this.vpTransferType = this.vpTypeFor(vp.transfer_prompt);
+                this.vpServiceType = this.vpTypeFor(vp.service_prompt);
                 this.vpBusyType = this.vpTypeFor(vp.busy_prompt);
                 this.vpOffHoursType = this.vpTypeFor(vp.off_hours_prompt);
                 this.vpNoAnswerType = this.vpTypeFor(vp.no_answer_prompt);
                 this.vpTransferPath = vp.transfer_prompt || '';
+                this.vpServicePath = vp.service_prompt || '';
                 this.vpBusyPath = vp.busy_prompt || '';
                 this.vpOffHoursPath = vp.off_hours_prompt || '';
                 this.vpNoAnswerPath = vp.no_answer_prompt || '';
                 if (this.vpTransferType === 'custom') this.vpTransferCustom = vp.transfer_prompt;
+                if (this.vpServiceType === 'custom') this.vpServiceCustom = vp.service_prompt;
                 if (this.vpBusyType === 'custom') this.vpBusyCustom = vp.busy_prompt;
                 if (this.vpOffHoursType === 'custom') this.vpOffHoursCustom = vp.off_hours_prompt;
                 if (this.vpNoAnswerType === 'custom') this.vpNoAnswerCustom = vp.no_answer_prompt;
@@ -914,10 +955,12 @@ endblock %}
             buildVoicePrompts() {
                 const result = {};
                 const transfer = this.resolvePrompt('transfer', this.vpTransferType, this.vpTransferCustom);
+                const service = this.resolvePrompt('service', this.vpServiceType, this.vpServiceCustom);
                 const busy = this.resolvePrompt('busy', this.vpBusyType, this.vpBusyCustom);
                 const offhours = this.resolvePrompt('offhours', this.vpOffHoursType, this.vpOffHoursCustom);
                 const noanswer = this.resolvePrompt('noanswer', this.vpNoAnswerType, this.vpNoAnswerCustom);
                 if (transfer) result.transfer_prompt = transfer;
+                if (service) result.service_prompt = service;
                 if (busy) result.busy_prompt = busy;
                 if (offhours) result.off_hours_prompt = offhours;
                 if (noanswer) result.no_answer_prompt = noanswer;
@@ -932,6 +975,7 @@ endblock %}
             },
             async downloadAudio(url, type) {
                 const loadingKey = type === 'transfer' ? 'downloadingTransfer'
+                    : type === 'service' ? 'downloadingService'
                     : type === 'busy' ? 'downloadingBusy'
                     : type === 'noanswer' ? 'downloadingNoAnswer' : 'downloadingOffHours';
                 this[loadingKey] = true;
@@ -945,6 +989,7 @@ endblock %}
                     if (!resp.ok) throw new Error(data?.message || 'Download failed');
                     const path = data.path;
                     if (type === 'transfer') { this.vpTransferCustom = path; this.vpTransferPath = path; }
+                    else if (type === 'service') { this.vpServiceCustom = path; this.vpServicePath = path; }
                     else if (type === 'busy') { this.vpBusyCustom = path; this.vpBusyPath = path; }
                     else if (type === 'noanswer') { this.vpNoAnswerCustom = path; this.vpNoAnswerPath = path; }
                     else { this.vpOffHoursCustom = path; this.vpOffHoursPath = path; }
@@ -957,10 +1002,12 @@ endblock %}
             },
             previewAudio(type) {
                 let path = type === 'transfer' ? this.vpTransferPath
+                    : type === 'service' ? this.vpServicePath
                     : type === 'busy' ? this.vpBusyPath
                     : type === 'noanswer' ? this.vpNoAnswerPath : this.vpOffHoursPath;
                 if (!path) {
                     const lang = type === 'transfer' ? this.vpTransferType
+                        : type === 'service' ? this.vpServiceType
                         : type === 'busy' ? this.vpBusyType
                         : type === 'noanswer' ? this.vpNoAnswerType : this.vpOffHoursType;
                     if (lang && lang !== 'none' && lang !== 'custom') {

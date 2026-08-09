@@ -88,6 +88,10 @@ PROMPT_COPY = {
     "invalid": "Sorry, that option is invalid. Please try again.",
     "timeout": "No input received. Please try again.",
     "goodbye": "Goodbye.",
+    "bridge-demo": (
+        "Bridge demo. Playing example audio through the WebSocket bridge. "
+        "The bridge will now disconnect and return to the IVR menu."
+    ),
 }
 
 
@@ -117,14 +121,18 @@ def generate_prompts(prompts_dir: Path, voice: str = "en-US-JennyNeural") -> Non
 # ── G.711 a-law helpers (no audioop on Python 3.13) ──────────────────────────
 
 def alaw2linear(b: int) -> int:
-    """Decode one 8-bit a-law byte to a 16-bit linear PCM sample (ITU G.711)."""
+    """Decode one 8-bit a-law byte to a 16-bit linear PCM sample (ITU G.711).
+    Matches the standard FFmpeg / libavcodec implementation."""
     b ^= 0x55
-    sign = b & 0x80
     exponent = (b >> 4) & 0x07
-    mantissa = b & 0x0F
-    sample = ((mantissa << 4) + 8) << exponent
-    sample = sample - 8 if sample > 0 else 0
-    return -sample if sign else sample
+    mantissa = (b & 0x0F) << 4
+    if exponent == 0:
+        sample = mantissa + 8
+    elif exponent == 1:
+        sample = mantissa + 0x108
+    else:
+        sample = (mantissa + 0x108) << (exponent - 1)
+    return sample if (b & 0x80) else -sample
 
 
 def wav_info(path: Path) -> tuple:
@@ -183,14 +191,19 @@ def action_prompt(file=None, tts_text=None, interruptible=False):
     return node
 
 
-def action_bridge(ws_endpoint: str):
-    return {
+def action_bridge(ws_endpoint: str, return_app: str | None = None, return_target: str | None = None):
+    node = {
         "type": "voip_bridge",
         "create_room_uri": ws_endpoint,
         "timeout_ms": 10000,
         "step_id": "bridge",
         "step_name": "VoIP bridge",
     }
+    if return_app:
+        node["return_app"] = return_app
+    if return_target:
+        node["return_target"] = return_target
+    return node
 
 
 def action_hangup():
@@ -200,11 +213,12 @@ def action_hangup():
 class IvrSession:
     """Per-call state machine. rustpbx calls POST /ivr/step on each event."""
 
-    def __init__(self, caller, callee, base_url, ws_endpoint):
+    def __init__(self, caller, callee, base_url, ws_endpoint, ws_play_endpoint=None):
         self.caller = caller
         self.callee = callee
         self.base_url = base_url  # http://host:port — audio URLs are built from it
         self.ws_endpoint = ws_endpoint
+        self.ws_play_endpoint = ws_play_endpoint or (ws_endpoint.rstrip("/") + "/play")
         self._state = "start"
         self._retries = 0
 
@@ -259,7 +273,9 @@ class IvrSession:
         if digit == "3":
             return {"type": "queue", "target": "sales"}
         if digit == "4":
-            return action_bridge(self.ws_endpoint)
+            return action_bridge(
+                self.ws_play_endpoint, return_app="ivr", return_target="main"
+            )
         if digit == "0":
             return self._hangup_with_prompt()
 
@@ -294,13 +310,18 @@ class _EchoStats:
 ECHO_STATS = _EchoStats()
 
 
-def _ws_handshake(sock) -> bool:
+def _ws_handshake(sock) -> str | None:
+    """Complete a WS upgrade handshake; return the request path (e.g. '/echo')."""
     f = sock.makefile("rb", 0)
     headers = {}
+    path = "/"
     try:
         start_line = f.readline().decode("latin-1").strip()
         if not start_line.startswith("GET "):
-            return False
+            return None
+        parts = start_line.split(" ")
+        if len(parts) > 1:
+            path = parts[1].split("?")[0] or "/"
         while True:
             line = f.readline().decode("latin-1").strip()
             if not line:
@@ -312,7 +333,7 @@ def _ws_handshake(sock) -> bool:
         f.close()
     key = headers.get("sec-websocket-key")
     if not key:
-        return False
+        return None
     accept = base64.b64encode(
         hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
     ).decode("ascii")
@@ -324,7 +345,7 @@ def _ws_handshake(sock) -> bool:
             f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
         ).encode("ascii")
     )
-    return True
+    return path
 
 
 def _recv_exactly(sock, n):
@@ -390,9 +411,6 @@ def _write_frame(sock, opcode, payload, mask=False):
 
 def _echo_conn(sock, addr):
     try:
-        sock.settimeout(15.0)
-        if not _ws_handshake(sock):
-            return
         with ECHO_STATS.lock:
             ECHO_STATS.connections += 1
         print(f"[WS Echo] connection from {addr}")
@@ -418,11 +436,18 @@ def _echo_conn(sock, addr):
                         ECHO_STATS.last_samples = list(
                             struct.unpack("<%dh" % (len(payload) // 2), payload)
                         )
-                if opcode == 0x1:  # text → DTMF JSON from caller
+                if opcode == 0x1:  # text → JSON message (DTMF or other CTI control)
                     try:
                         data = json.loads(payload.decode("utf-8"))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         data = None
+                    if isinstance(data, dict):
+                        print(
+                            "[WS Echo] JSON message:\n"
+                            + json.dumps(data, indent=2, ensure_ascii=False)
+                        )
+                    else:
+                        print(f"[WS Echo] text: {payload.decode('utf-8', 'replace')}")
                     if isinstance(data, dict) and data.get("type") == "dtmf":
                         digit = data.get("digit", "?")
                         leg = data.get("leg_id", "?")
@@ -437,11 +462,137 @@ def _echo_conn(sock, addr):
                                 ECHO_STATS.outbound_dtmf = "5"
                             sent_outbound = True
                         continue
-                    # Unknown JSON: echo it back as text.
+                    # Unknown JSON / non-JSON text: echo it back as text.
                     _write_frame(sock, 0x1, payload)
                     continue
                 # Binary → echo back as PCM16 round-trip.
                 _write_frame(sock, 0x2, payload)
+    except (OSError, struct.error):
+        pass
+
+
+def _play_conn(sock, addr, path):
+    """Play a committed PCMA prompt as PCM16 binary frames, then close.
+
+    The server streams all audio immediately (burst mode) so the rustpbx
+    forward loop fills the internal channel buffer ahead of the egress's
+    20 ms cadence, absorbing network jitter.  Incoming text frames (DTMF
+    JSON) are drained after the payload is sent.
+    """
+    import select as _select
+
+    wav = PROMPTS_DIR / "bridge-demo.wav"
+    if not wav.is_file():
+        print(f"[WS Play] missing {wav.name} — run --generate-prompts")
+        _write_frame(sock, 0x8, b"")
+        return
+    tag, _, rate, bits, _ = wav_info(wav)
+    if tag != 6 or bits != 8:
+        print(f"[WS Play] {wav.name} is not PCMA 8-bit (tag={tag} bits={bits})")
+        _write_frame(sock, 0x8, b"")
+        return
+    pcm = bytearray()
+    data = wav.read_bytes()
+    off = 12
+    while off + 8 <= len(data):
+        cid = data[off : off + 4]
+        size = int.from_bytes(data[off + 4 : off + 8], "little")
+        if cid == b"data":
+            chunk = data[off + 8 : off + 8 + size]
+            pcm = b"".join(struct.pack("<h", alaw2linear(b)) for b in chunk)
+            break
+        off += 8 + size + (size & 1)
+    if not pcm:
+        print(f"[WS Play] {wav.name} has no data chunk")
+        _write_frame(sock, 0x8, b"")
+        return
+    print(f"[WS Play] streaming {wav.name} ({len(pcm) // 2} PCM16 samples) to {addr}")
+    frame_size = rate // 50  # 20 ms per frame
+
+    # Burst-send all audio frames immediately so the forward loop fills its
+    # channel buffer and the egress drains at its own pace (filetrack mode).
+    for i in range(0, len(pcm), frame_size * 2):
+        _write_frame(sock, 0x2, bytes(pcm[i : i + frame_size * 2]))
+        # Drain any incoming text/close frames without blocking.
+        while _select.select([sock], [], [], 0)[0]:
+            try:
+                frame = _read_frame(sock)
+            except (BlockingIOError, OSError, ValueError):
+                break
+            if frame is None:
+                break
+            opcode, payload = frame
+            if opcode == 0x1:  # text → JSON (DTMF etc.)
+                try:
+                    data = json.loads(payload.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    data = None
+                if isinstance(data, dict):
+                    print(
+                        "[WS Play] JSON message:\n"
+                        + json.dumps(data, indent=2, ensure_ascii=False)
+                    )
+                    if data.get("type") == "dtmf":
+                        print(
+                            f"[WS Play] DTMF from {data.get('leg_id','?')}: "
+                            f"'{data.get('digit','?')}'"
+                        )
+                else:
+                    print(f"[WS Play] text: {payload.decode('utf-8', 'replace')}")
+            elif opcode == 0x8:  # client closed early
+                return
+
+    # The egress drains the burst-buffered audio at real-time pace.  Keep the
+    # connection open for the full audio duration so the forward loop keeps
+    # feeding the channel — closing early truncates the tail of the prompt.
+    audio_secs = len(pcm) / 2 / rate
+    deadline = time.time() + audio_secs
+    while time.time() < deadline:
+        # Drain any incoming text/close frames without blocking.
+        while _select.select([sock], [], [], 0)[0]:
+            try:
+                frame = _read_frame(sock)
+            except (BlockingIOError, OSError, ValueError):
+                break
+            if frame is None:
+                break
+            opcode, payload = frame
+            if opcode == 0x1:  # text → JSON (DTMF etc.)
+                try:
+                    data = json.loads(payload.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    data = None
+                if isinstance(data, dict):
+                    print(
+                        "[WS Play] JSON message:\n"
+                        + json.dumps(data, indent=2, ensure_ascii=False)
+                    )
+                    if data.get("type") == "dtmf":
+                        print(
+                            f"[WS Play] DTMF from {data.get('leg_id','?')}: "
+                            f"'{data.get('digit','?')}'"
+                        )
+                else:
+                    print(f"[WS Play] text: {payload.decode('utf-8', 'replace')}")
+            elif opcode == 0x8:  # client closed early
+                print(f"[WS Play] client closed early {addr}")
+                return
+        time.sleep(0.02)
+    print(f"[WS Play] done, closing {addr}")
+    _write_frame(sock, 0x8, b"")
+
+
+def _handle_ws_conn(sock, addr):
+    """WS dispatcher: perform the handshake, then route by request path."""
+    try:
+        sock.settimeout(15.0)
+        path = _ws_handshake(sock)
+        if path is None:
+            return
+        if path.rstrip("/").endswith("/play"):
+            _play_conn(sock, addr, path)
+        else:
+            _echo_conn(sock, addr)
     except (OSError, struct.error):
         pass
     finally:
@@ -452,13 +603,13 @@ def _echo_conn(sock, addr):
 
 
 def _ws_serve(srv):
-    print(f"[WS Echo] listening on ws://0.0.0.0:{srv.getsockname()[1]} (raw PCM16 binary echo)")
+    print(f"[WS Echo] listening on ws://0.0.0.0:{srv.getsockname()[1]} (raw PCM16 binary echo + /play demo)")
     while True:
         try:
             sock, addr = srv.accept()
         except OSError:
             break
-        threading.Thread(target=_echo_conn, args=(sock, addr), daemon=True).start()
+        threading.Thread(target=_handle_ws_conn, args=(sock, addr), daemon=True).start()
 
 
 def start_ws_echo(port: int) -> tuple:
@@ -565,6 +716,7 @@ class UnifiedIvrHandler(BaseHTTPRequestHandler):
     sessions_lock = Lock()
     base_url = "http://127.0.0.1:8080"
     ws_endpoint = "ws://127.0.0.1:9090"
+    ws_play_endpoint = "ws://127.0.0.1:9090/play"
     prompts_dir = PROMPTS_DIR
 
     # ---- GET /audio/<name>.wav ------------------------------------------------
@@ -606,7 +758,7 @@ class UnifiedIvrHandler(BaseHTTPRequestHandler):
         with self.sessions_lock:
             self.sessions[sid] = IvrSession(
                 body.get("caller", ""), body.get("callee", ""),
-                self.base_url, self.ws_endpoint,
+                self.base_url, self.ws_endpoint, self.ws_play_endpoint,
             )
         self._send_json(200, {"status": "ok"})
 
@@ -625,7 +777,7 @@ class UnifiedIvrHandler(BaseHTTPRequestHandler):
         if session is None:
             session = IvrSession(
                 body.get("caller", ""), body.get("callee", ""),
-                self.base_url, self.ws_endpoint,
+                self.base_url, self.ws_endpoint, self.ws_play_endpoint,
             )
             with self.sessions_lock:
                 self.sessions[sid] = session
@@ -665,10 +817,12 @@ def serve(ivr_port: int, ws_port: int, host: str):
     ivr_actual = server.server_address[1]
     UnifiedIvrHandler.base_url = f"http://{host}:{ivr_actual}"
     UnifiedIvrHandler.ws_endpoint = f"ws://{host}:{ws_actual}"
+    UnifiedIvrHandler.ws_play_endpoint = f"ws://{host}:{ws_actual}/play"
     UnifiedIvrHandler.prompts_dir = PROMPTS_DIR
     print(f"[IVR] step provider on http://0.0.0.0:{ivr_actual}/ivr/step")
     print(f"[IVR] audio on http://{host}:{ivr_actual}/audio/<name>.wav")
     print(f"[IVR] bridge target = ws://{host}:{ws_actual}")
+    print(f"[IVR] bridge play demo = ws://{host}:{ws_actual}/play (plays bridge-demo.wav, then closes → return to IVR)")
     print()
     print("[IVR] Add this route (e.g. config/routes/unified-ivr.toml):")
     print("    [[routes]]")
@@ -740,6 +894,52 @@ def _ws_client_echo(url: str, samples: list) -> list:
             pass
 
 
+def _ws_client_play(url: str, timeout: float = 15.0) -> bytes:
+    """Connect to a WS `/play` endpoint, collect binary PCM16 frames until the
+    server closes, and return the concatenated payload bytes."""
+    import socket as _s
+    from urllib.parse import urlsplit as _us
+
+    parts = _us(url)
+    sock = _s.create_connection((parts.hostname, parts.port or 80), timeout=timeout)
+    received = bytearray()
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(
+            (
+                f"GET {parts.path or '/'} HTTP/1.1\r\n"
+                f"Host: {parts.hostname}:{parts.port or 80}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii")
+        )
+        f = sock.makefile("rb", 0)
+        status = f.readline().decode("latin-1").strip()
+        if "101" not in status:
+            raise RuntimeError(f"WS handshake failed: {status}")
+        while True:
+            line = f.readline().decode("latin-1").strip()
+            if not line:
+                break
+        f.close()
+        while True:
+            frame = _read_frame(sock)
+            if frame is None:
+                break
+            opcode, payload = frame
+            if opcode == 0x8:  # close frame → server done
+                break
+            if opcode == 0x2:  # binary PCM16
+                received.extend(payload)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return bytes(received)
+
+
 def _check_prompts(prompts_dir: Path) -> list:
     failures = []
     for name in PROMPT_COPY:
@@ -771,6 +971,7 @@ def self_test(ivr_port: int, ws_port: int, host: str) -> int:
     ivr_actual = server.server_address[1]
     UnifiedIvrHandler.base_url = f"http://{host}:{ivr_actual}"
     UnifiedIvrHandler.ws_endpoint = f"ws://{host}:{ws_actual}"
+    UnifiedIvrHandler.ws_play_endpoint = f"ws://{host}:{ws_actual}/play"
     UnifiedIvrHandler.prompts_dir = PROMPTS_DIR
     srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
     srv_thread.start()
@@ -826,6 +1027,10 @@ def self_test(ivr_port: int, ws_port: int, host: str) -> int:
     r = step_on(fresh_session("b4"), "b4-dtmf4", {"type": "dtmf", "digit": "4"})
     if r.get("type") != "voip_bridge" or not r.get("create_room_uri", "").startswith(f"ws://{host}:"):
         failures.append(f"dtmf-4: expected voip_bridge to WS, got {r}")
+    if not (r.get("create_room_uri") or "").endswith("/play"):
+        failures.append(f"dtmf-4: expected bridge to /play endpoint, got {r.get('create_room_uri')}")
+    if r.get("return_app") != "ivr" or r.get("return_target") != "main":
+        failures.append(f"dtmf-4: expected return_app/return_target, got {r}")
 
     r = step_on(fresh_session("b0"), "b0-dtmf0", {"type": "dtmf", "digit": "0"})
     if r.get("type") != "play_and_hangup" or r.get("code") != 200:
@@ -851,6 +1056,21 @@ def self_test(ivr_port: int, ws_port: int, host: str) -> int:
     snap = ECHO_STATS.snapshot()
     print(f"[trace] WS stats: {snap['connections']} conn(s), "
           f"{snap['frames_received']} frame(s)")
+
+    # 6. WS /play endpoint: server streams bridge-demo.wav as PCM16, then closes.
+    play_url = f"ws://127.0.0.1:{ws_actual}/play"
+    play_bytes = _ws_client_play(play_url)
+    if len(play_bytes) < 160:
+        failures.append(f"WS /play received too little PCM16 ({len(play_bytes)} bytes)")
+    elif len(play_bytes) % 2 != 0:
+        failures.append(f"WS /play PCM16 length not even ({len(play_bytes)} bytes)")
+    else:
+        n = len(play_bytes) // 2
+        pcm = struct.unpack("<%dh" % n, play_bytes)
+        rms = (sum(s * s for s in pcm) / n) ** 0.5
+        print(f"[trace] WS /play: received {n} PCM16 samples, RMS {rms:.0f}")
+        if rms < 100:
+            failures.append(f"WS /play audio silent (rms={rms:.0f})")
 
     # ── Print the trace table ──────────────────────────────────────────────
     print("\n" + "-" * 72)
@@ -925,7 +1145,9 @@ class TestIvrSession(unittest.TestCase):
         self.sess.next_action({"type": "session_start"})
         node = self.sess.next_action({"type": "dtmf", "digit": "4"})
         self.assertEqual(node["type"], "voip_bridge")
-        self.assertEqual(node["create_room_uri"], "ws://127.0.0.1:9090")
+        self.assertEqual(node["create_room_uri"], "ws://127.0.0.1:9090/play")
+        self.assertEqual(node["return_app"], "ivr")
+        self.assertEqual(node["return_target"], "main")
 
     def test_dtmf_0_returns_play_and_hangup(self):
         self.sess.next_action({"type": "session_start"})
@@ -962,19 +1184,22 @@ class TestIvrSession(unittest.TestCase):
 
 class TestAlaw(unittest.TestCase):
     def test_alaw2linear_known_values(self):
-        # 0xD5 is a-law silence (equivalent of 0x55 xor → 0x80 → sign=1, exp=0, mant=0).
-        self.assertEqual(alaw2linear(0xD5), 0)
-        # Standard checkpoints: 0x00 → ~-128-ish quiet, 0x7F/0xFF → +/-
-        self.assertNotEqual(alaw2linear(0x55), alaw2linear(0x54))
+        # Verified against the standard G.711 A-law → linear table
+        # (FFmpeg libavcodec / ITU-T G.711 reference).
+        self.assertEqual(alaw2linear(0xD5), 8)       # A-law silence / near-zero
+        self.assertEqual(alaw2linear(0x55), -8)       # softest negative step
+        self.assertEqual(alaw2linear(0x2A), -32256)   # loud negative
+        self.assertEqual(alaw2linear(0xAA), 32256)    # loud positive
+        self.assertEqual(alaw2linear(0x60), -1376)    # moderate negative
+        # 0x7F ≠ 0xFF → decoder is not degenerate.
+        self.assertNotEqual(alaw2linear(0x7F), alaw2linear(0xFF))
 
     def test_alaw_round_trip_bounded_error(self):
-        # Encode→decode round-trip must stay within G.711's max step (~512 LSB).
-        enc = {v: ((v ^ 0x55) & 0xFF) for v in range(256)}
         for code in range(256):
             dec = alaw2linear(code)
-            # decode(encode(x)) is not meaningful here (no encoder), but the
-            # decoder must be monotonic with the sign convention.
-            assert -32768 <= dec <= 32767
+            # Decoder output stays within 16-bit range.
+            self.assertGreaterEqual(dec, -32768)
+            self.assertLessEqual(dec, 32767)
 
 
 class TestWavInfo(unittest.TestCase):

@@ -3,7 +3,7 @@ use audio_codec::{CodecType, Resampler, create_decoder};
 use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, warn};
 
 use crate::wav_reader::{WavFormat, WavReader, format_issues};
@@ -304,6 +304,51 @@ impl AudioSource for SilenceSource {
     fn reset(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Audio source backed by a tokio mpsc channel of raw PCM16 sample chunks.
+/// The sender (bridge forward loop) pushes chunks of arbitrary size; the
+/// egress pipeline reads at its own 20 ms cadence.
+///
+/// When the channel is momentarily empty (sender still alive) the source
+/// returns 0.  With `loop_playback=true` on the leg, the egress's
+/// `encode_silence` path takes over — emitting comfort-noise (CNG) for
+/// codecs that support it — so the caller experiences smooth continuity
+/// instead of dead-silence gaps.
+pub struct ChannelAudioSource {
+    rx: parking_lot::Mutex<mpsc::Receiver<Vec<i16>>>,
+    rate: u32,
+}
+
+impl ChannelAudioSource {
+    pub fn new(rx: mpsc::Receiver<Vec<i16>>, sample_rate: u32) -> Self {
+        Self { rx: parking_lot::Mutex::new(rx), rate: sample_rate }
+    }
+}
+
+impl AudioSource for ChannelAudioSource {
+    fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+        match self.rx.lock().try_recv() {
+            Ok(chunk) => {
+                let n = chunk.len().min(buffer.len());
+                buffer[..n].copy_from_slice(&chunk[..n]);
+                n
+            }
+            Err(_) => 0,
+        }
+    }
+
+    fn sample_rate(&self) -> u32 { self.rate }
+    fn channels(&self) -> u16 { 1 }
+
+    fn has_data(&self) -> bool {
+        // Always true: the source is "alive" as long as the sender exists.
+        // EOF is signalled by read_samples→0 at the bottom of the egress
+        // next_frame, and loop_playback=true keeps the source active (CNG).
+        true
+    }
+
+    fn reset(&mut self) -> Result<()> { Ok(()) }
 }
 
 pub struct ResamplingAudioSource {
@@ -1063,6 +1108,75 @@ mod tests {
         // Too few samples → never flagged.
         assert!(!looks_like_pcm_bytes_under_g711(WavFormat::Pcmu, &samples[..100]));
     }
+
+        // ── ChannelAudioSource ────────────────────────────────────────────
+
+    #[test]
+    fn channel_source_empty_returns_zero() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0, "empty channel → 0 (egress uses CNG)");
+        assert!(src.has_data());
+    }
+
+    #[test]
+    fn channel_source_drains_available_data() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+        tx.try_send(vec![1i16; 160]).unwrap();
+        tx.try_send(vec![2i16; 160]).unwrap();
+        tx.try_send(vec![3i16; 160]).unwrap();
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 1); assert_eq!(buf[159], 1);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 2); assert_eq!(buf[159], 2);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 3); assert_eq!(buf[159], 3);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0);
+        drop(tx);
+    }
+
+    #[test]
+    fn channel_source_variable_chunk_sizes() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+
+        tx.try_send(vec![7i16; 80]).unwrap();
+
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 80);
+        assert_eq!(buf[0], 7);
+        assert_eq!(buf[79], 7);
+
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0);
+
+        drop(tx);
+    }
+
+    #[test]
+    fn channel_source_disconnected_returns_zero() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+        tx.try_send(vec![1i16; 160]).unwrap();
+        drop(tx);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 1);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0);
+    }
+
+
 }
 
 #[cfg(test)]

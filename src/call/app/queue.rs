@@ -236,8 +236,9 @@ pub enum QueueState {
     Answering,
     /// Playing hold music while waiting for an agent.
     PlayingHold { attempt: u32 },
-    /// Playing the transfer prompt before connecting to an agent.
-    PlayingTransferPrompt { agent_uri: String },
+    /// Playing the pre-connect transfer prompt while the agent is being
+    /// dialed. `connected_agent` is set when the agent answers mid-prompt.
+    PlayingTransferPrompt { connected_agent: Option<String> },
     /// Playing the busy prompt before executing fallback.
     PlayingBusyPrompt,
     /// Playing the no-answer prompt before executing fallback.
@@ -246,6 +247,8 @@ pub enum QueueState {
     DialingAgents { attempt: u32 },
     /// Call connected to an agent.
     Connected { agent_uri: String },
+    /// Playing the caller-only service prompt after connect; exits on completion.
+    PlayingServicePrompt { agent_uri: String },
     /// Executing fallback action.
     ExecutingFallback,
     /// Playing comfort/reassurance prompt during hold.
@@ -314,6 +317,17 @@ pub struct QueueApp {
     /// webhook events). Captured in `on_enter` so that `on_exit` (which has no
     /// context) can still emit abandon events.
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
+    /// Transfer prompt already started for this queue entry (no replays on
+    /// agent retries / escalation re-dials).
+    transfer_prompt_played: bool,
+    /// In-flight prompt tokens; completions are matched by track id so stale
+    /// events cannot advance the wrong state.
+    transfer_token: Option<PlaybackToken>,
+    service_token: Option<PlaybackToken>,
+    busy_token: Option<PlaybackToken>,
+    no_answer_token: Option<PlaybackToken>,
+    comfort_token: Option<PlaybackToken>,
+    final_token: Option<PlaybackToken>,
 }
 
 impl QueueApp {
@@ -337,6 +351,13 @@ impl QueueApp {
             last_comfort_played: None,
             escalated_groups: Vec::new(),
             rwi_gateway: None,
+            transfer_prompt_played: false,
+            transfer_token: None,
+            service_token: None,
+            busy_token: None,
+            no_answer_token: None,
+            comfort_token: None,
+            final_token: None,
         }
     }
 
@@ -686,7 +707,8 @@ impl QueueApp {
         if let Some(path) = prompts.and_then(|p| p.busy_prompt.as_ref()) {
             info!("Queue: playing busy prompt before fallback");
             self.state = QueueState::PlayingBusyPrompt;
-            ctrl.play_audio(path.clone(), false).await?;
+            let token = ctrl.play_audio(path.clone(), false).await?;
+            self.busy_token = Some(token);
             return Ok(AppAction::Continue);
         }
 
@@ -729,7 +751,8 @@ impl QueueApp {
         if let Some(path) = prompts.and_then(|p| p.no_answer_prompt.as_ref()) {
             info!("Queue: playing no-answer prompt before fallback");
             self.state = QueueState::PlayingNoAnswerPrompt;
-            ctrl.play_audio(path.clone(), false).await?;
+            let token = ctrl.play_audio(path.clone(), false).await?;
+            self.no_answer_token = Some(token);
             return Ok(AppAction::Continue);
         }
 
@@ -750,7 +773,8 @@ impl QueueApp {
         if let Some(path) = prompts.and_then(|p| p.final_destination_prompt.as_ref()) {
             info!("Queue: playing final destination prompt before fallback");
             self.state = QueueState::PlayingFinalPrompt;
-            ctrl.play_audio(path.clone(), false).await?;
+            let token = ctrl.play_audio(path.clone(), false).await?;
+            self.final_token = Some(token);
             return Ok(AppAction::Continue);
         }
         self.execute_fallback().await
@@ -782,7 +806,8 @@ impl QueueApp {
                         "Queue: playing comfort prompt"
                     );
                     self.state = QueueState::PlayingComfortPrompt;
-                    ctrl.play_audio(prompt.audio_file.clone(), false).await?;
+                    let token = ctrl.play_audio(prompt.audio_file.clone(), false).await?;
+                    self.comfort_token = Some(token);
                     self.comfort_index += 1;
                     self.last_comfort_played = Some(now);
                     return Ok(());
@@ -800,10 +825,10 @@ impl QueueApp {
             warn!("Queue: no more agents to dial");
             return self.play_busy_and_then_fallback(ctrl).await;
         }
-        let uri = agents[self.current_agent_idx]
-            .contact_raw
-            .clone()
-            .unwrap_or_else(|| agents[self.current_agent_idx].aor.to_string());
+        // Dial by addr-spec (RFC 3261 Request-URI). `contact_raw` is the raw
+        // Contact header value (a `contact-addr` with `<...>` and contact-params)
+        // and is not valid as a dial target; `aor` is the registered URI.
+        let uri = agents[self.current_agent_idx].aor.to_string();
         info!(
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
@@ -822,6 +847,7 @@ impl QueueApp {
         self.state = QueueState::DialingAgents {
             attempt: self.dial_attempts,
         };
+        self.maybe_start_transfer_prompt(ctrl).await?;
         Ok(AppAction::Continue)
     }
 
@@ -900,6 +926,138 @@ impl QueueApp {
         }
 
         Ok(())
+    }
+
+    fn track_matches(token: Option<&PlaybackToken>, track_id: &str) -> bool {
+        token.is_none_or(|t| t.track_id == track_id)
+    }
+
+    /// Play the transfer prompt on the first originate of this queue entry:
+    /// the caller hears it while the agent is being dialed, before any
+    /// connection. Caller-only; replaces the hold music.
+    async fn maybe_start_transfer_prompt(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<()> {
+        if self.transfer_prompt_played {
+            return Ok(());
+        }
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        let Some(path) = prompts.and_then(|p| p.transfer_prompt.clone()) else {
+            return Ok(());
+        };
+        self.transfer_prompt_played = true;
+
+        self._stop_hold_music(ctrl).await;
+        info!(
+            queue = %self.config.name,
+            file = %path,
+            "Queue: playing transfer prompt before connecting agent"
+        );
+        let token = ctrl.play_audio_caller_only(path, false).await?;
+        self.transfer_token = Some(token);
+        self.state = QueueState::PlayingTransferPrompt {
+            connected_agent: None,
+        };
+        Ok(())
+    }
+
+    /// Display name of the answering agent (registry lookup by URI, falling
+    /// back to the URI user part).
+    async fn resolve_agent_display_name(&self, agent_uri: &str) -> String {
+        let user_part = agent_uri
+            .strip_prefix("sips:")
+            .or_else(|| agent_uri.strip_prefix("sip:"))
+            .unwrap_or(agent_uri)
+            .split('@')
+            .next()
+            .unwrap_or(agent_uri)
+            .to_string();
+        let Some(ref registry) = self.agent_registry else {
+            return user_part;
+        };
+        let agents = registry.list_agents().await;
+        let uri_user = |uri: &str| {
+            uri.strip_prefix("sips:")
+                .or_else(|| uri.strip_prefix("sip:"))
+                .unwrap_or(uri)
+                .split('@')
+                .next()
+                .unwrap_or(uri)
+                .to_string()
+        };
+        agents
+            .iter()
+            .find(|a| a.uri == agent_uri)
+            .or_else(|| agents.iter().find(|a| uri_user(&a.uri) == user_part))
+            .map(|a| {
+                if a.display_name.is_empty() {
+                    user_part.clone()
+                } else {
+                    a.display_name.clone()
+                }
+            })
+            .unwrap_or(user_part)
+    }
+
+    /// Post-connect flow: play the caller-only service prompt when configured,
+    /// otherwise exit. The app exits once the prompt finishes.
+    async fn play_service_prompt_or_exit(
+        &mut self,
+        ctrl: &mut CallController,
+        agent_uri: String,
+    ) -> anyhow::Result<AppAction> {
+        if !self.answered {
+            ctrl.answer().await?;
+            self.answered = true;
+        }
+
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        let Some(template) = prompts.and_then(|p| p.service_prompt.clone()) else {
+            self.state = QueueState::Connected {
+                agent_uri: agent_uri.clone(),
+            };
+            let queue_id = self.config.name.clone();
+            let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            info!(
+                queue = %queue_id,
+                agent = %agent_uri,
+                wait_secs,
+                "Queue: call connected to agent (exiting app, bridge is established by SipSession)"
+            );
+            return Ok(AppAction::Exit);
+        };
+
+        let agent_name = self.resolve_agent_display_name(&agent_uri).await;
+        // Template = local audio path or http(s) URL; the agent name is
+        // percent-encoded inside URLs.
+        let is_url = template.starts_with("http://") || template.starts_with("https://");
+        let replacement = if is_url {
+            urlencoding::encode(&agent_name).into_owned()
+        } else {
+            agent_name.clone()
+        };
+        let path = template.replace("{agent}", &replacement);
+
+        info!(
+            queue = %self.config.name,
+            agent = %agent_uri,
+            agent_name = %agent_name,
+            file = %path,
+            "Queue: playing caller-only service prompt after connect"
+        );
+        let token = ctrl.play_audio_caller_only(path, false).await?;
+        self.service_token = Some(token);
+        self.state = QueueState::PlayingServicePrompt { agent_uri };
+        Ok(AppAction::Continue)
     }
 }
 
@@ -1008,6 +1166,8 @@ impl CallApp for QueueApp {
                     .originate_call(&agent.uri, Some(self.call_id.clone()))
                     .await?;
 
+                self.maybe_start_transfer_prompt(ctrl).await?;
+
                 // Notify external systems
                 ctrl.notify_event(
                     "queue.agent_ringing",
@@ -1065,10 +1225,7 @@ impl CallApp for QueueApp {
                 );
                 let mut pending = Vec::with_capacity(agents.len());
                 for (idx, agent) in agents.iter().enumerate() {
-                    let uri = agent
-                        .contact_raw
-                        .clone()
-                        .unwrap_or_else(|| agent.aor.to_string());
+                    let uri = agent.aor.to_string();
                     match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
                         Ok(call_id) => {
                             info!(
@@ -1095,6 +1252,8 @@ impl CallApp for QueueApp {
                 let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
                 ctrl.set_timeout("agent_ring_timeout", ring_timeout);
 
+                self.maybe_start_transfer_prompt(ctrl).await?;
+
                 return Ok(AppAction::Continue);
             }
         }
@@ -1120,26 +1279,54 @@ impl CallApp for QueueApp {
 
     async fn on_audio_complete(
         &mut self,
-        _track_id: String,
+        track_id: String,
         ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        debug!("Queue: audio playback completed");
+        debug!(track_id = %track_id, "Queue: audio playback completed");
 
         match &self.state {
             QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. } => {
+                if !Self::track_matches(self.hold_playback.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (hold)");
+                    return Ok(AppAction::Continue);
+                }
                 // Hold music loop completed or starting — check comfort/EWT scheduling
                 self.maybe_play_comfort_or_ewt(ctrl).await?;
                 self.start_hold_music(ctrl).await?;
             }
-            QueueState::PlayingTransferPrompt { agent_uri } => {
-                let agent_uri = agent_uri.clone();
-                ctrl.stop_audio().await?;
-                // Answer the caller if not already answered
-                if !self.answered {
-                    ctrl.answer().await?;
-                    self.answered = true;
+            QueueState::PlayingTransferPrompt { connected_agent } => {
+                if !Self::track_matches(self.transfer_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (transfer prompt)");
+                    return Ok(AppAction::Continue);
                 }
+                self.transfer_token = None;
+                match connected_agent {
+                    // The prompt finished while the agent is still ringing —
+                    // resume hold music and keep waiting for the answer.
+                    None => {
+                        info!("Queue: transfer prompt completed before agent answered, resuming hold music");
+                        self.state = QueueState::DialingAgents {
+                            attempt: self.dial_attempts,
+                        };
+                        self.start_hold_music(ctrl).await?;
+                    }
+                    // The agent answered while the prompt was playing and the
+                    // connection flow already ran; this late natural completion
+                    // only needs to advance past the prompt state.
+                    Some(agent_uri) => {
+                        let agent_uri = agent_uri.clone();
+                        return self.play_service_prompt_or_exit(ctrl, agent_uri).await;
+                    }
+                }
+            }
+            QueueState::PlayingServicePrompt { agent_uri } => {
+                if !Self::track_matches(self.service_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (service prompt)");
+                    return Ok(AppAction::Continue);
+                }
+                self.service_token = None;
+                let agent_uri = agent_uri.clone();
                 self.state = QueueState::Connected {
                     agent_uri: agent_uri.clone(),
                 };
@@ -1149,21 +1336,41 @@ impl CallApp for QueueApp {
                     queue = %queue_id,
                     agent = %agent_uri,
                     wait_secs,
-                    "Queue: call connected to agent (after prompt)"
+                    "Queue: service prompt finished, call in progress"
                 );
                 return Ok(AppAction::Exit);
             }
             QueueState::PlayingBusyPrompt => {
+                if !Self::track_matches(self.busy_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (busy prompt)");
+                    return Ok(AppAction::Continue);
+                }
+                self.busy_token = None;
                 return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
             QueueState::PlayingNoAnswerPrompt => {
+                if !Self::track_matches(self.no_answer_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (no-answer prompt)");
+                    return Ok(AppAction::Continue);
+                }
+                self.no_answer_token = None;
                 return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
             QueueState::PlayingComfortPrompt => {
+                if !Self::track_matches(self.comfort_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (comfort prompt)");
+                    return Ok(AppAction::Continue);
+                }
+                self.comfort_token = None;
                 // Return to hold music; next comfort will be scheduled by maybe_play_comfort_or_ewt
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingFinalPrompt => {
+                if !Self::track_matches(self.final_token.as_ref(), &track_id) {
+                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (final prompt)");
+                    return Ok(AppAction::Continue);
+                }
+                self.final_token = None;
                 return self.execute_fallback().await;
             }
             _ => {}
@@ -1223,40 +1430,9 @@ impl CallApp for QueueApp {
                             let _ = registry.start_call(agent_id).await;
                         }
 
-                        let prompts = self
-                            .plan
-                            .voice_prompts
-                            .as_ref()
-                            .or(self.config.voice_prompts.as_ref());
-                        if let Some(path) = prompts.and_then(|p| p.transfer_prompt.as_ref()) {
-                            info!("Queue: playing transfer prompt before connecting agent");
-                            self.state = QueueState::PlayingTransferPrompt {
-                                agent_uri: agent_uri.to_string(),
-                            };
-                            ctrl.play_audio(path.clone(), false).await?;
-                            return Ok(AppAction::Continue);
-                        }
-
-                        self.state = QueueState::Connected {
-                            agent_uri: agent_uri.to_string(),
-                        };
-
-                        // Answer the caller if not already answered (needed when accept_immediately=false)
-                        if !self.answered {
-                            ctrl.answer().await?;
-                            self.answered = true;
-                        }
-
-                        info!(
-                            queue = %queue_id,
-                            agent = %agent_uri,
-                            wait_secs,
-                            "Queue: call connected to agent (exiting app, bridge is established by SipSession)"
-                        );
-
-                        // Emit RWI queue lifecycle events: agent connected, then
-                        // the call left the queue (dequeue). This mirrors the
-                        // ACD engine's Connected/CallDequeued emission.
+                        // Emit RWI queue lifecycle events at connect time: agent
+                        // connected, then the call left the queue (dequeue). This
+                        // mirrors the ACD engine's Connected/CallDequeued emission.
                         let connected_agent_id = data
                             .get("agent_id")
                             .and_then(|v| v.as_str())
@@ -1273,10 +1449,22 @@ impl CallApp for QueueApp {
                             reason: Some("connected".to_string()),
                         });
 
-                        // Exit the app — the agent is already connected via LegAdd/LegConnected
-                        // and the media bridge is set up by SipSession's update_media_path().
-                        // No need for Transfer (which would create a new call).
-                        return Ok(AppAction::Exit);
+                        // The pre-connect transfer prompt may still be playing
+                        // (it starts when dialing began). Connect immediately:
+                        // cut the prompt — the interrupted completion is
+                        // swallowed by the event loop, and any late natural
+                        // completion is ignored via track-id matching.
+                        if matches!(self.state, QueueState::PlayingTransferPrompt { .. }) {
+                            info!("Queue: agent answered during transfer prompt — cutting prompt and connecting");
+                            ctrl.stop_audio().await?;
+                        }
+
+                        // The agent is already connected via LegAdd/LegConnected and
+                        // the media bridge is set up by SipSession. Play the
+                        // caller-only service prompt if configured, then exit.
+                        return self
+                            .play_service_prompt_or_exit(ctrl, agent_uri.to_string())
+                            .await;
                     }
                     Ok(AppAction::Continue)
                 }
@@ -1443,11 +1631,19 @@ impl CallApp for QueueApp {
     async fn on_exit(&mut self, reason: super::ExitReason) -> anyhow::Result<()> {
         info!(?reason, "Queue: exiting queue application");
 
-        // Update statistics if call was not connected (abandoned)
-        if !matches!(
+        // Update statistics if call was not connected (abandoned). A transfer
+        // prompt with `connected_agent: Some(_)` means the agent already
+        // answered; `None` means the caller left while the agent was ringing.
+        let was_connected = matches!(
             self.state,
-            QueueState::Connected { .. } | QueueState::PlayingTransferPrompt { .. }
-        ) {
+            QueueState::Connected { .. } | QueueState::PlayingServicePrompt { .. }
+        ) || matches!(
+            self.state,
+            QueueState::PlayingTransferPrompt {
+                connected_agent: Some(_)
+            }
+        );
+        if !was_connected {
             let queue_id = self.config.name.clone();
 
             self.update_stats(&queue_id, |stats| {

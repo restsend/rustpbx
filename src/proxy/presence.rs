@@ -17,52 +17,101 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
-// PIDF-XML (RFC 3863) and RPID (RFC 4480) support
-#[derive(Debug, Serialize, Deserialize)]
+// ── PIDF-XML (RFC 3863) and RPID (RFC 4480) support ─────────────────────
+//
+// Deserialization and serialization use separate structs because quick-xml
+// strips XML namespace prefixes when matching element names on deserialize
+// but emits the `rename` verbatim on serialize.  RPID input carries
+// prefixed elements (`<rpid:activities>`) and we must output the same
+// canonical prefixed form in NOTIFY bodies.
+
+// ── Deserialization (inbound PUBLISH) ────────────────────────────────────
+//
+// quick-xml matches element local names, so RPID elements are matched
+// by `activities`, `away`, `busy`, `on-the-phone`.  The `@entity` and
+// `@xmlns` attributes are optional — cc-phone omits them in PUBLISH.
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename = "presence")]
+struct IncomingPresence {
+    #[serde(rename = "tuple", default)]
+    tuples: Vec<IncomingTuple>,
+    #[serde(rename = "note", default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct IncomingTuple {
+    status: Option<IncomingStatus>,
+    #[serde(rename = "note", default)]
+    note: Option<String>,
+    #[serde(rename = "activities", default)]
+    activities: Option<RpidActivities>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct IncomingStatus {
+    basic: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RpidActivities {
+    #[serde(rename = "away", default)]
+    away: Option<RpidEmpty>,
+    #[serde(rename = "busy", default)]
+    busy: Option<RpidEmpty>,
+    #[serde(rename = "on-the-phone", default)]
+    on_the_phone: Option<RpidEmpty>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RpidEmpty {}
+
+// ── Serialization (outbound NOTIFY PIDF-XML) ────────────────────────────
+
+#[derive(Debug, Serialize)]
 #[serde(rename = "presence")]
 struct PidfPresence {
     #[serde(rename = "@xmlns")]
     xmlns: String,
-    #[serde(rename = "@xmlns:rpid", default)]
+    #[serde(rename = "@xmlns:rpid", default, skip_serializing_if = "Option::is_none")]
     xmlns_rpid: Option<String>,
     #[serde(rename = "@entity")]
     entity: String,
     #[serde(rename = "tuple", default)]
     tuples: Vec<PidfTuple>,
-    #[serde(rename = "note", default)]
-    notes: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PidfTuple {
     #[serde(rename = "@id")]
     id: String,
     status: PidfStatus,
-    #[serde(rename = "note")]
+    #[serde(rename = "note", skip_serializing_if = "Option::is_none")]
     note: Option<String>,
-    #[serde(rename = "contact")]
+    #[serde(rename = "contact", skip_serializing_if = "Option::is_none")]
     contact: Option<String>,
-    #[serde(rename = "rpid:activities", default)]
-    activities: Option<RpidActivities>,
+    #[serde(rename = "rpid:activities", default, skip_serializing_if = "Option::is_none")]
+    activities: Option<OutputActivities>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PidfStatus {
-    basic: String, // "open" or "closed"
+    basic: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct RpidActivities {
-    #[serde(rename = "rpid:away", default)]
-    away: Option<RpidEmpty>,
-    #[serde(rename = "rpid:busy", default)]
-    busy: Option<RpidEmpty>,
-    #[serde(rename = "rpid:on-the-phone", default)]
-    on_the_phone: Option<RpidEmpty>,
+#[derive(Debug, Serialize, Default)]
+struct OutputActivities {
+    #[serde(rename = "rpid:away", default, skip_serializing_if = "Option::is_none")]
+    away: Option<RpidEmptySer>,
+    #[serde(rename = "rpid:busy", default, skip_serializing_if = "Option::is_none")]
+    busy: Option<RpidEmptySer>,
+    #[serde(rename = "rpid:on-the-phone", default, skip_serializing_if = "Option::is_none")]
+    on_the_phone: Option<RpidEmptySer>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct RpidEmpty {}
+#[derive(Debug, Serialize, Default)]
+struct RpidEmptySer {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -86,13 +135,7 @@ impl std::fmt::Display for PresenceStatus {
             PresenceStatus::Ringing => write!(f, "ringing"),
             PresenceStatus::Wrapup => write!(f, "wrapup"),
             PresenceStatus::Dnd => write!(f, "dnd"),
-            PresenceStatus::Away(detail) => {
-                if detail.is_empty() {
-                    write!(f, "away")
-                } else {
-                    write!(f, "away:{}", detail)
-                }
-            }
+            PresenceStatus::Away(_) => write!(f, "away"),
             PresenceStatus::Offline => write!(f, "offline"),
         }
     }
@@ -721,12 +764,17 @@ impl PresenceModule {
 
         if expires == 0 {
             current.status = PresenceStatus::Offline;
-        } else if let Ok(pidf) = quick_xml::de::from_str::<PidfPresence>(&body) {
+        } else if let Ok(pidf) = quick_xml::de::from_str::<IncomingPresence>(&body) {
             let mut status = PresenceStatus::Offline;
             let mut activity_note = None;
 
             for tuple in &pidf.tuples {
-                if tuple.status.basic == "open" {
+                if tuple
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.basic.as_deref())
+                    == Some("open")
+                {
                     status = PresenceStatus::Idle;
 
                     // Try to refine status from RPID activities
@@ -1019,7 +1067,12 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
                 // Away states carry the canonical status string in the note
                 // (e.g. "away:lunch") so subscribers see one consistent
                 // vocabulary regardless of what the publisher sent.
-                PresenceStatus::Away(_) => Some(state.status.to_string()),
+                PresenceStatus::Away(_) => {
+                    state
+                        .note
+                        .clone()
+                        .or_else(|| Some("away".to_string()))
+                }
                 _ => state
                     .note
                     .clone()
@@ -1027,22 +1080,21 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
             },
             contact: Some(format!("sip:{}@{}", identity, domain)),
             activities: match state.status {
-                PresenceStatus::Busy | PresenceStatus::Dnd => Some(RpidActivities {
-                    busy: Some(RpidEmpty {}),
+                PresenceStatus::Busy | PresenceStatus::Dnd => Some(OutputActivities {
+                    busy: Some(RpidEmptySer {}),
                     ..Default::default()
                 }),
-                PresenceStatus::Ringing | PresenceStatus::Wrapup => Some(RpidActivities {
-                    on_the_phone: Some(RpidEmpty {}),
+                PresenceStatus::Ringing | PresenceStatus::Wrapup => Some(OutputActivities {
+                    on_the_phone: Some(RpidEmptySer {}),
                     ..Default::default()
                 }),
-                PresenceStatus::Away(_) => Some(RpidActivities {
-                    away: Some(RpidEmpty {}),
+                PresenceStatus::Away(_) => Some(OutputActivities {
+                    away: Some(RpidEmptySer {}),
                     ..Default::default()
                 }),
                 _ => None,
             },
         }],
-        notes: vec![],
     };
 
     match quick_xml::se::to_string(&pidf) {
@@ -1163,7 +1215,7 @@ mod tests {
         assert_eq!(PresenceStatus::Away(String::new()).to_string(), "away");
         assert_eq!(
             PresenceStatus::Away("lunch".to_string()).to_string(),
-            "away:lunch"
+            "away"
         );
     }
 
@@ -1210,7 +1262,8 @@ mod tests {
 
     #[test]
     fn test_build_pidf_body_away_with_detail() {
-        let state = make_state(PresenceStatus::Away("lunch".to_string()));
+        let mut state = make_state(PresenceStatus::Away("lunch".to_string()));
+        state.note = Some("away:lunch".to_string());
         let body = build_pidf_body("1001", "pbx.example.com", &state);
         assert!(body.contains("<basic>open</basic>"));
         assert!(body.contains("<note>away:lunch</note>"));
@@ -1250,5 +1303,153 @@ mod tests {
             &make_state(PresenceStatus::Idle),
         );
         assert!(body.contains(r#"entity="sip:agent42@sip.example.net""#));
+    }
+
+    // ── PIDF parse tests ──────────────────────────────────────────────────
+
+    /// The exact PIDF body from a cc-phone PUBLISH (no `entity`, prefixed
+    /// RPID elements).  The parser must extract the detail from the <note>
+    /// and produce `Away("meeting")`.
+    #[test]
+    fn test_parse_publish_away_with_detail() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>away:meeting</note></tuple></presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
+            .expect("should parse cc-phone PIDF with no entity attrib");
+        assert_eq!(pidf.tuples.len(), 1);
+        assert_eq!(
+            pidf.tuples[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.basic.as_deref()),
+            Some("open")
+        );
+        assert_eq!(pidf.tuples[0].note.as_deref(), Some("away:meeting"));
+        assert!(pidf.tuples[0]
+            .activities
+            .as_ref()
+            .and_then(|a| a.away.as_ref())
+            .is_some());
+        // Verify the detail extraction logic matches
+        let note = pidf.tuples[0].note.clone().unwrap_or_default();
+        let detail = note
+            .strip_prefix("away:")
+            .or_else(|| note.strip_prefix("custom:"))
+            .unwrap_or(&note);
+        assert_eq!(detail, "meeting");
+    }
+
+    /// PIDF with missing `entity` and `xmlns` attributes parses cleanly.
+    #[test]
+    fn test_parse_publish_away_bare() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence><tuple id="presence"><status><basic>open</basic></status><note>away:lunch</note></tuple></presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
+            .expect("should parse minimal PIDF");
+        assert_eq!(pidf.tuples[0].note.as_deref(), Some("away:lunch"));
+        assert!(pidf.tuples[0].status.as_ref().is_some());
+    }
+
+    /// `<rpid:busy/>` maps correctly through RPID activities.
+    #[test]
+    fn test_parse_publish_busy_with_rpid() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:busy/></rpid:activities></tuple></presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
+            .expect("should parse RPID busy");
+        assert!(pidf.tuples[0]
+            .activities
+            .as_ref()
+            .and_then(|a| a.busy.as_ref())
+            .is_some());
+    }
+
+    /// `<rpid:on-the-phone/>` maps correctly.
+    #[test]
+    fn test_parse_publish_on_the_phone_with_rpid() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:on-the-phone/></rpid:activities></tuple></presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
+            .expect("should parse RPID on-the-phone");
+        assert!(pidf.tuples[0]
+            .activities
+            .as_ref()
+            .and_then(|a| a.on_the_phone.as_ref())
+            .is_some());
+    }
+
+    /// The full Publish flow strips the `away:` prefix from the note and
+    /// stores the bare detail.  Simulates what `handle_publish` does.
+    #[test]
+    fn test_full_handle_publish_away_detail_flow() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>away:meeting</note></tuple></presence>"#;
+
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body).unwrap();
+
+        let mut status = PresenceStatus::Offline;
+        let mut activity_note: Option<String> = None;
+
+        for tuple in &pidf.tuples {
+            if tuple
+                .status
+                .as_ref()
+                .and_then(|s| s.basic.as_deref())
+                == Some("open")
+            {
+                status = PresenceStatus::Idle;
+                if let Some(activities) = &tuple.activities {
+                    if activities.busy.is_some() || activities.on_the_phone.is_some() {
+                        status = PresenceStatus::Busy;
+                    } else if activities.away.is_some() {
+                        let note = tuple.note.clone().unwrap_or_default();
+                        let detail = note
+                            .strip_prefix("away:")
+                            .or_else(|| note.strip_prefix("custom:"))
+                            .unwrap_or(&note);
+                        status = PresenceStatus::Away(detail.to_string());
+                    }
+                }
+                if let Some(note) = &tuple.note {
+                    activity_note = Some(note.clone());
+                }
+                break;
+            }
+        }
+
+        assert!(matches!(status, PresenceStatus::Away(ref d) if d == "meeting"));
+        assert_eq!(activity_note.as_deref(), Some("away:meeting"));
+    }
+
+    /// A PUBLISH with a bare custom note (no prefix) is treated as detail.
+    #[test]
+    fn test_full_handle_publish_away_custom_detail() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>lunch</note></tuple></presence>"#;
+
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body).unwrap();
+        let tuple = &pidf.tuples[0];
+        let note = tuple.note.clone().unwrap_or_default();
+        let detail = note
+            .strip_prefix("away:")
+            .or_else(|| note.strip_prefix("custom:"))
+            .unwrap_or(&note);
+        assert_eq!(detail, "lunch");
+    }
+
+    /// Verify that the serialized NOTIFY body for an away state only
+    /// contains `<rpid:away/>` — no `<rpid:busy/>` or `<rpid:on-the-phone/>`.
+    #[test]
+    fn test_build_pidf_body_away_activities_exclusive() {
+        let state = make_state(PresenceStatus::Away("meeting".to_string()));
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<rpid:away/>"));
+        assert!(!body.contains("rpid:busy"));
+        assert!(!body.contains("rpid:on-the-phone"));
+    }
+
+    /// Verify that the serialized NOTIFY body for a busy state only
+    /// contains `<rpid:busy/>`.
+    #[test]
+    fn test_build_pidf_body_busy_activities_exclusive() {
+        let state = make_state(PresenceStatus::Busy);
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<rpid:busy/>"));
+        assert!(!body.contains("rpid:away"));
+        assert!(!body.contains("rpid:on-the-phone"));
     }
 }

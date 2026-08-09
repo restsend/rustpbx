@@ -435,6 +435,14 @@ pub enum CallCommand {
         dialog_id: Option<String>,
     },
 
+    /// Leg received 180 Ringing (async notification from the dynamic-leg
+    /// INVITE task). Lets the session fire `on_call_ringing` session hooks so
+    /// the CC addon can emit `cc_ringing` for queue-dialed agents.
+    LegRinging {
+        /// Leg ID that is ringing
+        leg_id: LegId,
+    },
+
     /// Leg dial failed (async notification)
     LegFailed {
         /// Leg ID that failed
@@ -528,6 +536,10 @@ pub struct PlayOptions {
     pub track_id: Option<String>,
     /// Whether to send progress (183) before playing
     pub send_progress: bool,
+    /// Play on the target leg only, without mirroring the announcement onto
+    /// the opposite leg (caller-exclusive prompts).
+    #[serde(default)]
+    pub side_only: bool,
 }
 
 impl Default for PlayOptions {
@@ -538,6 +550,7 @@ impl Default for PlayOptions {
             interrupt_on_dtmf: true,
             track_id: None,
             send_progress: false,
+            side_only: false,
         }
     }
 }

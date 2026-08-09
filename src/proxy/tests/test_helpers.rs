@@ -93,6 +93,17 @@ pub fn register_standard_modules(builder: SipServerBuilder) -> SipServerBuilder 
         })
 }
 
+/// Like `register_standard_modules` but also registers the `presence` module.
+pub fn register_modules_with_presence(builder: SipServerBuilder) -> SipServerBuilder {
+    use crate::proxy::presence::PresenceModule;
+    register_standard_modules(builder).register_module("presence", PresenceModule::create)
+}
+
+/// A test proxy config with `auth`, `registrar`, `call`, and `presence` modules.
+pub fn test_proxy_config_with_presence(port: u16) -> ProxyConfig {
+    test_proxy_config_with_modules(port, &["presence"])
+}
+
 pub fn build_sdp(ip: &str, port: u16, codecs: &[(u8, &str)]) -> String {
     let pt_list: Vec<String> = codecs.iter().map(|(pt, _)| pt.to_string()).collect();
     let rtpmap_lines: Vec<String> = codecs

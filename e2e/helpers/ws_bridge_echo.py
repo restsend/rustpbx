@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import wave
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -33,6 +35,7 @@ class WsBridgeCapture:
         self._connections = 0
         self._pcm_chunks: list[bytes] = []
         self._dtmf: list[str] = []
+        self._sent_pcm_bytes = 0
 
     def connection_opened(self) -> None:
         with self._lock:
@@ -47,6 +50,14 @@ class WsBridgeCapture:
     def add_dtmf(self, text: str) -> None:
         with self._lock:
             self._dtmf.append(text)
+
+    def sent_pcm(self, data: bytes) -> None:
+        with self._lock:
+            self._sent_pcm_bytes += len(data)
+
+    def sent_pcm_bytes(self) -> int:
+        with self._lock:
+            return self._sent_pcm_bytes
 
     def connection_count(self) -> int:
         with self._lock:
@@ -73,6 +84,7 @@ class WsBridgeCapture:
             self._connections = 0
             self._pcm_chunks.clear()
             self._dtmf.clear()
+            self._sent_pcm_bytes = 0
 
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -80,9 +92,41 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     capture: WsBridgeCapture = request.app["capture"]
     echo: bool = request.app.get("echo", True)
+    play_file: Optional[Path] = request.app.get("play_file")
     capture.connection_opened()
     logger.info("bridge ws connected (total=%d)", capture.connection_count())
     try:
+        if play_file:
+            # "Play demo audio then close" mode: burst-stream the PCM16 payload
+            # of a WAV file, then keep the connection open for the full audio
+            # duration so the egress drains the buffered audio at real-time
+            # pace. Incoming text frames (DTMF JSON) are captured during the wait.
+            with wave.open(str(play_file), "rb") as wf:
+                framerate = wf.getframerate()
+                n_frames = wf.getnframes()
+                while True:
+                    frames = wf.readframes(800)  # 100 ms @ 8 kHz
+                    if not frames:
+                        break
+                    await ws.send_bytes(frames)
+                    capture.sent_pcm(frames)
+            audio_secs = n_frames / framerate if framerate else 0
+            logger.info("play_file sent %d bytes, holding open %.1fs",
+                        capture.sent_pcm_bytes(), audio_secs)
+            deadline = asyncio.get_event_loop().time() + audio_secs
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                if msg.type == web.WSMsgType.TEXT:
+                    capture.add_dtmf(msg.data)
+                    logger.info("play_file received text: %s", msg.data[:120])
+                elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING,
+                                  web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
+                    break
+            await ws.close()
+            return ws
         async for msg in ws:
             if msg.type == web.WSMsgType.BINARY:
                 capture.add_pcm(msg.data)
@@ -99,22 +143,30 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-def _create_app(capture: WsBridgeCapture, echo: bool) -> web.Application:
+def _create_app(capture: WsBridgeCapture, echo: bool, play_file: Optional[Path]) -> web.Application:
     app = web.Application()
     app["capture"] = capture
     app["echo"] = echo
+    app["play_file"] = play_file
     app.router.add_get("/ws", _ws_handler)
     app.router.add_get("/health", lambda r: web.json_response({"ok": True}))
     return app
 
 
 class WsBridgeEchoServer:
-    """Lifecycle manager for the aiohttp WS bridge echo/capture server."""
+    """Lifecycle manager for the aiohttp WS bridge echo/capture server.
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0, echo: bool = True):
+    `play_file`: when set, each connection receives the PCM16 payload of the
+    WAV streamed to it and the server closes the WS afterwards (used to model
+    the Python example's "play demo audio → disconnect → return to IVR" bridge).
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 0, echo: bool = True,
+                 play_file: Optional[Path] = None):
         self.host = host
         self.port = port
         self.echo = echo
+        self.play_file = play_file
         self.capture = WsBridgeCapture()
         self._runner: Optional[web.AppRunner] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -141,7 +193,7 @@ class WsBridgeEchoServer:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        app = _create_app(self.capture, self.echo)
+        app = _create_app(self.capture, self.echo, self.play_file)
         self._runner = web.AppRunner(app)
         loop.run_until_complete(self._runner.setup())
         site = web.TCPSite(self._runner, self.host, self.port)

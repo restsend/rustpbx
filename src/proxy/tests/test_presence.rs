@@ -202,3 +202,116 @@ async fn test_presence_notify_body_generation() {
     assert!(body.contains("<basic>closed</basic>"));
     assert!(body.contains("<note>offline</note>"));
 }
+
+#[tokio::test]
+async fn test_presence_publish_away_with_detail() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+
+    // cc-phone PIDF PUBLISH: away with "meeting" detail
+    let mut publish = create_test_request(
+        rsipstack::sip::Method::Publish,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    publish.body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>away:meeting</note></tuple></presence>"#.as_bytes().to_vec();
+
+    let (mut tx_pub, _) = create_transaction(publish).await;
+    let result = module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx_pub,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, ProxyAction::Abort));
+
+    let state = manager.get_state("bob");
+    assert!(
+        matches!(state.status, PresenceStatus::Away(ref d) if d == "meeting"),
+        "expected Away(\"meeting\"), got {:?}",
+        state.status
+    );
+    assert_eq!(state.note.as_deref(), Some("away:meeting"));
+}
+
+#[tokio::test]
+async fn test_presence_publish_away_to_idle_transition() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+
+    // First go away
+    let mut away_pub = create_test_request(
+        rsipstack::sip::Method::Publish,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    away_pub.body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>away:lunch</note></tuple></presence>"#.as_bytes().to_vec();
+
+    let (mut tx, _) = create_transaction(away_pub).await;
+    module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(manager.get_state("bob").status, PresenceStatus::Away(ref d) if d == "lunch")
+    );
+
+    // Then go idle (no away activity)
+    let mut idle_pub = create_test_request(
+        rsipstack::sip::Method::Publish,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    idle_pub.body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf"><tuple id="presence"><status><basic>open</basic></status><note>idle</note></tuple></presence>"#.as_bytes().to_vec();
+
+    let (mut tx2, _) = create_transaction(idle_pub).await;
+    module
+        .on_transaction_begin(CancellationToken::new(), &mut tx2, TransactionCookie::default())
+        .await
+        .unwrap();
+
+    assert_eq!(manager.get_state("bob").status, PresenceStatus::Idle);
+    assert_eq!(manager.get_state("bob").note.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
+async fn test_presence_publish_away_custom_detail_legacy() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+
+    // Legacy bare detail (no "away:" prefix) — cc-phone may send custom break names
+    let mut publish = create_test_request(
+        rsipstack::sip::Method::Publish,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    publish.body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:away/></rpid:activities><note>training</note></tuple></presence>"#.as_bytes().to_vec();
+
+    let (mut tx, _) = create_transaction(publish).await;
+    module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+        .await
+        .unwrap();
+
+    let state = manager.get_state("bob");
+    assert!(
+        matches!(state.status, PresenceStatus::Away(ref d) if d == "training"),
+        "expected Away(\"training\"), got {:?}",
+        state.status
+    );
+    assert_eq!(state.note.as_deref(), Some("training"));
+}

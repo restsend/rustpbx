@@ -99,6 +99,71 @@ impl E2eTestServer {
         })
     }
 
+    /// Start an E2E test server with the presence module registered
+    /// (in addition to auth, registrar, call).
+    pub async fn start_with_presence(mode: MediaProxyMode) -> Result<Self> {
+        let port = portpicker::pick_unused_port().unwrap_or(15060);
+        let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
+
+        let mut proxy_config = test_helpers::test_proxy_config_with_presence(port);
+        proxy_config.media_proxy = mode;
+        proxy_config.ensure_user = Some(false);
+        proxy_config.enable_latching = false;
+        let config = Arc::new(proxy_config);
+
+        let (cdr_capture, cdr_sender) = CdrCapture::new();
+
+        let user_backend = MemoryUserBackend::new(None);
+        for user in test_helpers::standard_test_users() {
+            user_backend.create_user(user).await?;
+        }
+
+        let locator = MemoryLocator::new();
+        let cancel_token = CancellationToken::new();
+
+        let builder = test_helpers::register_modules_with_presence(
+            SipServerBuilder::new(config)
+                .with_user_backend(Box::new(user_backend))
+                .with_locator(Box::new(locator))
+                .with_cancel_token(cancel_token.clone())
+                .with_callrecord_sender(Some(cdr_sender)),
+        );
+
+        let server = Arc::new(builder.build().await?);
+        let server_ref = server.get_inner();
+        let registry = server_ref.active_call_registry.clone();
+
+        let cancel_token_clone = cancel_token.clone();
+        let join_handle = crate::utils::spawn(async move {
+            tokio::select! {
+                _ = cancel_token_clone.cancelled() => {
+                    info!("E2E test server cancelled");
+                }
+                result = server.serve() => {
+                    if let Err(e) = result {
+                        warn!("E2E test server error: {:?}", e);
+                    }
+                }
+            }
+        });
+        let _server_abort = Some(join_handle.abort_handle());
+
+        sleep(Duration::from_millis(200)).await;
+
+        info!(port, ?mode, "E2E test server with presence started");
+
+        Ok(Self {
+            port,
+            proxy_addr,
+            server_ref,
+            cdr_capture,
+            registry,
+            media_proxy_mode: mode,
+            cancel_token,
+            _server_abort,
+        })
+    }
+
     /// Start with a custom ProxyConfig, allowing injection of trunks, routes, etc.
     pub async fn start_with_config(mut proxy_config: ProxyConfig) -> Result<Self> {
         let port = portpicker::pick_unused_port().unwrap_or(15060);

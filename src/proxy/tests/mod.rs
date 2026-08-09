@@ -5,6 +5,7 @@ mod test_auth;
 mod test_cluster_home_proxy_e2e;
 mod test_media_proxy;
 mod test_presence;
+mod test_presence_e2e;
 mod test_proxy;
 mod test_proxy_integration;
 mod test_queue;

@@ -2286,6 +2286,7 @@ impl RwiCommandProcessor {
                     interrupt_on_dtmf: _interrupt_on_dtmf,
                     track_id: Some(track_id.clone()),
                     send_progress: false,
+                    side_only: false,
                 }),
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
@@ -2679,6 +2680,7 @@ impl RwiCommandProcessor {
                     interrupt_on_dtmf: false,
                     track_id: None,
                     send_progress: false,
+                    side_only: false,
                 }),
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;

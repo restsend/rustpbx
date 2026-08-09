@@ -307,16 +307,19 @@ mod tests {
             })
             .await;
 
+        let hold_cmd = stack.next_cmd(200).await.expect("hold music Play");
+        let hold_tid = play_track_id(&hold_cmd);
+
+        // Hold music completed with a matching track id → restarted.
+        stack.audio_complete(hold_tid);
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(200, "PlayPrompt-restart", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
-        // Simulate hold music completing
-        // The app calls on_audio_complete but doesn't restart the music automatically
-        // It waits for external events like agent_connected
-        stack.audio_complete("default");
-
-        // App should be idle waiting for events
+        // A completion with a foreign track id is ignored (no restart).
+        stack.audio_complete("foreign-track");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         stack.cancel();
@@ -844,13 +847,9 @@ mod tests {
             .await;
 
         // Should play the busy prompt since all agents are busy/unavailable
-        stack
-            .assert_cmd(200, "PlayPrompt-busy-auto", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
 
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         // Should then execute fallback (hangup)
         stack
@@ -887,13 +886,9 @@ mod tests {
             .await;
 
         // Should play the busy prompt since no agents resolved
-        stack
-            .assert_cmd(200, "PlayPrompt-busy-skill", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
 
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         // Should then execute fallback (hangup)
         stack
@@ -996,12 +991,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_transfer_prompt() {
-        let plan = build_simple_queue();
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
-            "caller",
-            "1000",
-        );
+        let config = config_with_service_prompt("sounds/queue-service-zh.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
@@ -1015,30 +1007,158 @@ mod tests {
             })
             .await;
 
-        stack.custom(
-            "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
-        );
-
-        // Hold music stops when the agent answers.
+        // Dialing starts → transfer prompt plays BEFORE any connection.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
         stack
             .assert_cmd(200, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
+        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        assert!(
+            play_path(&transfer_cmd).ends_with("queue-transfer-zh.wav"),
+            "expected the ZH transfer prompt"
+        );
+        assert!(play_is_side_only(&transfer_cmd), "transfer prompt must be caller-only");
+        let transfer_tid = play_track_id(&transfer_cmd);
 
+        // Agent answers mid-prompt → prompt cut, caller-only service prompt next.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "StopTransfer", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        assert!(
+            play_path(&service_cmd).ends_with("queue-service-zh.wav"),
+            "expected the ZH service prompt"
+        );
+        assert!(play_is_side_only(&service_cmd), "service prompt must be caller-only");
+        let service_tid = play_track_id(&service_cmd);
+
+        // Late natural completion of the cut transfer prompt must be ignored.
+        stack.audio_complete(transfer_tid);
+
+        stack.audio_complete(service_tid);
+
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_queue_transfer_prompt_completes_before_agent_answers() {
+        let config = config_with_service_prompt("sounds/queue-service-zh.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-hold", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_tid = play_track_id(&transfer_cmd);
+
+        // Prompt finishes while the agent is still ringing → hold music resumes.
+        stack.audio_complete(transfer_tid);
+        let hold_cmd = stack.next_cmd(200).await.expect("hold music resume Play");
+        assert!(
+            play_path(&hold_cmd).ends_with("hold_music.wav"),
+            "hold music must resume after the transfer prompt"
+        );
+
+        // Agent answers later → connect with the service prompt.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "StopHold2", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        let service_tid = play_track_id(&service_cmd);
+        stack.audio_complete(service_tid);
+
+        stack.join().await.expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_no_service_prompt_connects_directly() {
+        // Default prompts without service_prompt: connect right after cutting
+        // the transfer prompt, no post-connect announcement.
+        let plan = build_simple_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-hold", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
         stack
             .assert_cmd(200, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
 
-        stack.audio_complete("default");
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "StopTransfer", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
 
         stack
             .join()
             .await
-            .expect("should exit after transfer prompt");
+            .expect("should exit immediately without a service prompt");
     }
 
     #[tokio::test]
@@ -1092,13 +1212,8 @@ mod tests {
 
         stack.custom("all_agents_busy", serde_json::json!({}));
 
-        stack
-            .assert_cmd(200, "PlayPrompt-busy", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1130,21 +1245,32 @@ mod tests {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
+        // First originate starts the pre-connect transfer prompt.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        assert!(play_is_side_only(&transfer_cmd));
+
         stack.custom("agent_busy", serde_json::json!({}));
         stack
             .assert_cmd(200, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
+        // Retry must NOT replay the transfer prompt.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            stack.drain_cmds().is_empty(),
+            "transfer prompt must play only once per queue entry"
+        );
+
         stack.custom("agent_busy", serde_json::json!({}));
 
-        stack
-            .assert_cmd(200, "PlayPrompt-busy", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1154,7 +1280,10 @@ mod tests {
     #[tokio::test]
     async fn test_queue_transfer_prompt_english() {
         let mut config = build_simple_queue_config();
-        config.voice_prompts = Some(VoicePrompts::en());
+        config.voice_prompts = Some(VoicePrompts {
+            service_prompt: Some("sounds/queue-service-en.wav".to_string()),
+            ..VoicePrompts::en()
+        });
 
         let plan = config.to_plan();
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
@@ -1168,30 +1297,44 @@ mod tests {
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
-        stack.custom(
-            "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
-        );
-
-        // Hold music stops when the agent answers.
+        // Dialing starts → EN transfer prompt before connect.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
         stack
             .assert_cmd(200, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
+        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        assert!(
+            play_path(&transfer_cmd).ends_with("queue-transfer-en.wav"),
+            "expected the EN transfer prompt"
+        );
 
+        // Agent answers → EN service prompt after connect.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
         stack
-            .assert_cmd(200, "PlayPrompt-en-transfer", |c| {
-                matches!(c, CallCommand::Play { .. })
+            .assert_cmd(200, "StopTransfer", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
+        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        assert!(
+            play_path(&service_cmd).ends_with("queue-service-en.wav"),
+            "expected the EN service prompt"
+        );
 
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&service_cmd));
 
         stack
             .join()
             .await
-            .expect("should exit after english transfer prompt");
+            .expect("should exit after english service prompt");
     }
 
     #[tokio::test]
@@ -1221,13 +1364,8 @@ mod tests {
             })
             .await;
 
-        stack
-            .assert_cmd(200, "PlayPrompt-busy-timeout", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1260,6 +1398,17 @@ mod tests {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
+        // First originate starts the pre-connect transfer prompt.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
             .assert_cmd(200, "LegAdd-agent3", |c| {
@@ -1269,13 +1418,8 @@ mod tests {
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should play no-answer prompt (not busy prompt)
-        stack
-            .assert_cmd(200, "PlayPrompt-noanswer", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let na_cmd = stack.next_cmd(200).await.expect("no-answer prompt Play");
+        stack.audio_complete(play_track_id(&na_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1308,6 +1452,17 @@ mod tests {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
+        // First originate starts the pre-connect transfer prompt.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
             .assert_cmd(200, "LegAdd-agent3", |c| {
@@ -1317,13 +1472,8 @@ mod tests {
         stack.custom("agent_busy", serde_json::json!({}));
 
         // Last one was busy, so should play busy prompt
-        stack
-            .assert_cmd(200, "PlayPrompt-busy-mixed", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1385,13 +1535,8 @@ mod tests {
         // Ring timeout triggers no-answer path (only 1 agent in simple queue)
         stack.timeout("agent_ring_timeout");
 
-        stack
-            .assert_cmd(200, "PlayPrompt-noanswer-timeout", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        stack.audio_complete("default");
+        let na_cmd = stack.next_cmd(200).await.expect("no-answer prompt Play");
+        stack.audio_complete(play_track_id(&na_cmd));
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
@@ -1583,14 +1728,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         // No agents → busy prompt is none → final destination prompt
-        stack
-            .assert_cmd(200, "PlayFinalPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
+        let final_cmd = stack.next_cmd(200).await.expect("final prompt Play");
 
         // Final prompt audio completes → fallback (hangup)
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&final_cmd));
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
@@ -1681,6 +1822,35 @@ mod tests {
                 ..
             } => path.clone(),
             other => panic!("expected CallCommand::Play with File source, got {other:?}"),
+        }
+    }
+
+    fn play_url(cmd: &CallCommand) -> String {
+        match cmd {
+            CallCommand::Play {
+                source: MediaSource::Url { url },
+                ..
+            } => url.clone(),
+            other => panic!("expected CallCommand::Play with Url source, got {other:?}"),
+        }
+    }
+
+    fn play_track_id(cmd: &CallCommand) -> String {
+        match cmd {
+            CallCommand::Play { options, .. } => options
+                .as_ref()
+                .and_then(|o| o.track_id.clone())
+                .expect("Play command without track_id"),
+            other => panic!("expected CallCommand::Play, got {other:?}"),
+        }
+    }
+
+    fn play_is_side_only(cmd: &CallCommand) -> bool {
+        match cmd {
+            CallCommand::Play { options, .. } => {
+                options.as_ref().is_some_and(|o| o.side_only)
+            }
+            other => panic!("expected CallCommand::Play, got {other:?}"),
         }
     }
 
@@ -2053,7 +2223,12 @@ mod tests {
             eprintln!("skipping: config/sounds/ not present");
             return;
         }
-        let (plan, config) = build_plan_and_config_with_default_audio();
+        let (_, mut config) = build_plan_and_config_with_default_audio();
+        config.voice_prompts = Some(VoicePrompts {
+            service_prompt: Some(crate::call::DEFAULT_QUEUE_SERVICE_PROMPT_ZH.to_string()),
+            ..VoicePrompts::zh()
+        });
+        let plan = config.to_plan();
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
@@ -2064,13 +2239,11 @@ mod tests {
         // discard hold music
         let _ = stack.next_cmd(200).await.expect("hold music");
 
-        // Simulate an agent coming online and accepting the call.
-        stack.custom(
-            "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
-        );
-
-        // Hold music is stopped first.
+        // Dialing starts → pre-connect transfer prompt.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
         stack
             .assert_cmd(200, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
@@ -2084,11 +2257,34 @@ mod tests {
         let path = play_path(&transfer_cmd);
         assert!(
             path.ends_with("queue-transfer-zh.wav"),
-            "online agent should trigger the ZH transfer prompt, got {path}"
+            "dialing an online agent should trigger the ZH transfer prompt, got {path}"
         );
         assert_spec_is_playable("transfer", &path).await;
+        assert!(play_is_side_only(&transfer_cmd));
 
-        stack.audio_complete("default");
+        // Agent answers → caller-only service prompt after connect.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "StopTransfer", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let service_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected service-prompt Play command");
+        let path = play_path(&service_cmd);
+        assert!(
+            path.ends_with("queue-service-zh.wav"),
+            "connect should trigger the ZH service prompt, got {path}"
+        );
+        assert_spec_is_playable("service", &path).await;
+        assert!(play_is_side_only(&service_cmd));
+
+        stack.audio_complete(play_track_id(&service_cmd));
         let _ = stack.join().await;
     }
 
@@ -2131,7 +2327,7 @@ mod tests {
         );
         assert_spec_is_playable("busy", &path).await;
 
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&busy_cmd));
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
@@ -2165,6 +2361,17 @@ mod tests {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
+        // First originate starts the pre-connect transfer prompt.
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
             .assert_cmd(200, "LegAdd-agent3", |c| {
@@ -2184,9 +2391,219 @@ mod tests {
         );
         assert_spec_is_playable("no-answer", &path).await;
 
-        stack.audio_complete("default");
+        stack.audio_complete(play_track_id(&na_cmd));
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
+    }
+
+    fn config_with_service_prompt(service_prompt: &str) -> QueueConfig {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts {
+            service_prompt: Some(service_prompt.to_string()),
+            ..VoicePrompts::zh()
+        });
+        config
+    }
+
+    async fn drive_to_service_prompt(stack: &mut MockCallStack) -> CallCommand {
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .next_cmd(200)
+            .await
+            .expect("expected service-prompt Play command")
+    }
+
+    #[tokio::test]
+    async fn test_service_prompt_agent_name_from_registry() {
+        use crate::call::app::agent_registry::memory::MemoryRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(
+                "agent-001".into(),
+                "小张".into(),
+                "sip:agent1@example.com".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+
+        let config = config_with_service_prompt("sounds/agents/{agent}-service.wav");
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config).with_agent_registry(registry);
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        assert_eq!(play_path(&service_cmd), "sounds/agents/小张-service.wav");
+        assert!(play_is_side_only(&service_cmd));
+
+        stack.audio_complete(play_track_id(&service_cmd));
+        stack.join().await.expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_service_prompt_url_template_percent_encodes_name() {
+        use crate::call::app::agent_registry::memory::MemoryRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(
+                "agent-001".into(),
+                "张 三".into(),
+                "sip:agent1@example.com".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+
+        let config = config_with_service_prompt("http://tts.local/say?text={agent}为您服务");
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config).with_agent_registry(registry);
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        let url = play_url(&service_cmd);
+        assert!(
+            url.starts_with("http://tts.local/say?text="),
+            "URL template must be kept intact, got {url}"
+        );
+        assert!(
+            url.contains("%E5%BC%A0%20%E4%B8%89"),
+            "agent name must be percent-encoded inside URLs, got {url}"
+        );
+
+        stack.audio_complete(play_track_id(&service_cmd));
+        stack.join().await.expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_service_prompt_without_registry_uses_uri_user() {
+        let config = config_with_service_prompt("sounds/agents/{agent}-service.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        assert_eq!(play_path(&service_cmd), "sounds/agents/agent1-service.wav");
+
+        stack.audio_complete(play_track_id(&service_cmd));
+        stack.join().await.expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_interrupted_prompt_event_after_connect_is_ignored() {
+        let config = config_with_service_prompt("sounds/svc.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        let service_tid = play_track_id(&service_cmd);
+
+        // Bridge-cut interruption of the (never started) transfer prompt and
+        // foreign completions must not disturb the service-prompt state.
+        stack.audio_interrupted("transfer-track");
+        stack.audio_complete("foreign-track");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        stack.audio_complete(service_tid);
+        stack.join().await.expect("should exit after service prompt");
+    }
+
+    #[tokio::test]
+    async fn test_parallel_dial_plays_transfer_prompt_once() {
+        let mut config = build_parallel_queue_config();
+        config.voice_prompts = Some(VoicePrompts {
+            service_prompt: Some("sounds/queue-service-zh.wav".to_string()),
+            ..VoicePrompts::zh()
+        });
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        stack
+            .assert_cmd(200, "LegAdd-agent1", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .await;
+
+        stack
+            .assert_cmd(200, "StopHold", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        assert!(play_is_side_only(&transfer_cmd));
+
+        // No further prompt commands while both agents ring.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(stack.drain_cmds().is_empty(), "transfer prompt must play once");
+
+        // First answer connects; the other leg is cancelled, prompt cut.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
+        stack
+            .assert_cmd(200, "LegRemove-agent2", |c| {
+                matches!(c, CallCommand::LegRemove { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "StopTransfer", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        assert!(play_is_side_only(&service_cmd));
+
+        stack.audio_complete(play_track_id(&service_cmd));
+        stack.join().await.expect("should exit after service prompt");
     }
 }
