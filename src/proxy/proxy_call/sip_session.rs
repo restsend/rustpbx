@@ -335,7 +335,6 @@ pub struct SipSession {
     pub bridge_dtmf_tx:
         Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 
-    #[allow(dead_code)]
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
     /// This session's own handle (used to send commands back into the session

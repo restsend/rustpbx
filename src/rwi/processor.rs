@@ -23,14 +23,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-struct CommandCacheEntry {
-    action_id: String,
-    received_at: Instant,
-    result: Option<String>,
-}
-
 /// Soft cap that triggers opportunistic eviction of expired dedup-cache
 /// entries inside [`CommandDeduplicationCache::record`]. Picked generously to
 /// avoid any per-command overhead in normal operation while still bounding
@@ -39,11 +31,10 @@ const COMMAND_DEDUP_SOFT_CAP: usize = 256;
 
 #[derive(Clone)]
 struct CommandDeduplicationCache {
-    entries: Arc<DashMap<String, CommandCacheEntry>>,
+    entries: Arc<DashMap<String, Instant>>,
     ttl: Duration,
 }
 
-#[allow(dead_code)] // `len()` is only exercised by tests in non-test builds
 impl CommandDeduplicationCache {
     fn new(ttl_secs: u64) -> Self {
         Self {
@@ -56,41 +47,31 @@ impl CommandDeduplicationCache {
         Self::new(60)
     }
 
-    async fn is_duplicate(&self, action_id: &str) -> bool {
-        if let Some(entry) = self.entries.get(action_id)
-            && entry.received_at.elapsed() < self.ttl
-        {
-            return true;
-        }
-        false
+    fn is_duplicate(&self, action_id: &str) -> bool {
+        self.entries
+            .get(action_id)
+            .is_some_and(|received_at| received_at.elapsed() < self.ttl)
     }
 
-    async fn record(&self, action_id: String, result: Option<String>) {
+    fn record(&self, action_id: String) {
         // Opportunistic GC: when the cache grows past a soft cap, evict expired
         // entries before inserting the new one. Keeps memory bounded for
         // long-lived sessions without adding a background task.
         if self.entries.len() >= COMMAND_DEDUP_SOFT_CAP {
             let now = Instant::now();
             self.entries
-                .retain(|_, entry| now.duration_since(entry.received_at) < self.ttl);
+                .retain(|_, received_at| now.duration_since(*received_at) < self.ttl);
         }
-        self.entries.insert(
-            action_id.clone(),
-            CommandCacheEntry {
-                action_id,
-                received_at: Instant::now(),
-                result,
-            },
-        );
+        self.entries.insert(action_id, Instant::now());
     }
 
-    async fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.entries.len()
     }
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct QueueState {
     queue_id: String,
     priority: Option<u32>,
@@ -103,7 +84,6 @@ struct QueueState {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct AgentSkill {
     agent_id: String,
     skills: Vec<String>,
@@ -112,7 +92,6 @@ struct AgentSkill {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct QueueOverflowConfig {
     max_calls: u32,
     max_wait_secs: u32,
@@ -151,7 +130,6 @@ struct RingbackState {
 const RINGBACK_STATES_SOFT_CAP: usize = 64;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct SupervisorState {
     supervisor_call_id: String,
     target_call_id: String,
@@ -176,7 +154,6 @@ pub struct RwiCommandProcessor {
     queue_overflow_configs: Arc<DashMap<String, QueueOverflowConfig>>,
 }
 
-#[allow(dead_code)]
 impl RwiCommandProcessor {
     pub fn new(
         call_registry: Arc<ActiveProxyCallRegistry>,
@@ -218,18 +195,18 @@ impl RwiCommandProcessor {
         self
     }
 
-    pub async fn is_duplicate_action(&self, action_id: &str) -> bool {
+    pub fn is_duplicate_action(&self, action_id: &str) -> bool {
         if action_id.is_empty() {
             return false;
         }
-        self.command_dedup_cache.is_duplicate(action_id).await
+        self.command_dedup_cache.is_duplicate(action_id)
     }
 
-    pub async fn record_action(&self, action_id: String, result: Option<String>) {
+    pub fn record_action(&self, action_id: String) {
         if action_id.is_empty() {
             return;
         }
-        self.command_dedup_cache.record(action_id, result).await;
+        self.command_dedup_cache.record(action_id);
     }
 
     fn conference_manager(&self) -> Arc<ConferenceManager> {
@@ -5427,16 +5404,14 @@ mod tests {
         // insert 256 fresh entries (which are NOT yet expired) plus one more,
         // then verify the cache size stays bounded by the soft cap.
         for i in 0..COMMAND_DEDUP_SOFT_CAP {
-            cache
-                .record(format!("action-{i}"), Some(format!("result-{i}")))
-                .await;
+            cache.record(format!("action-{i}"));
         }
         // None are expired yet, so the cache must hold all of them.
-        assert_eq!(cache.len().await, COMMAND_DEDUP_SOFT_CAP);
+        assert_eq!(cache.len(), COMMAND_DEDUP_SOFT_CAP);
         // Recording one more triggers cleanup_expired; since nothing is
         // expired, size grows to SOFT_CAP + 1.
-        cache.record("action-trigger".into(), None).await;
-        assert_eq!(cache.len().await, COMMAND_DEDUP_SOFT_CAP + 1);
+        cache.record("action-trigger".into());
+        assert_eq!(cache.len(), COMMAND_DEDUP_SOFT_CAP + 1);
 
         // Now wait past TTL so subsequent records evict everything old.
         // Use a fresh short-TTL cache to keep the test fast and deterministic.
@@ -5444,11 +5419,11 @@ mod tests {
         // TTL of 0 means any entry is immediately expired; record once to
         // populate, then push past the cap and confirm eviction occurs.
         for i in 0..(COMMAND_DEDUP_SOFT_CAP + 1) {
-            short.record(format!("old-{i}"), None).await;
+            short.record(format!("old-{i}"));
         }
         // With TTL=0 every entry is expired by the time we cross the cap,
         // so after the final record the cache must contain only that record.
-        let len = short.len().await;
+        let len = short.len();
         assert!(len <= 1, "expected at most 1 entry after GC, got {}", len);
     }
 

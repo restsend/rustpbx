@@ -278,7 +278,7 @@ async fn handle_text_message(
         return;
     }
 
-    if processor.is_duplicate_action(&action_id).await {
+    if processor.is_duplicate_action(&action_id) {
         tracing::info!(%action_id, "Duplicate command detected, ignoring");
         return;
     }
@@ -370,7 +370,7 @@ async fn handle_text_message(
         let _ = ws_tx.send(json);
     }
 
-    processor.record_action(action_id, None).await;
+    processor.record_action(action_id);
 }
 
 fn build_command_result_event(
