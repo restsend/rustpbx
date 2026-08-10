@@ -889,6 +889,14 @@ async fn test_resolve_final_hangup_reason_flags_queue_abandon_when_already_aband
 
     session.meta.queue_name = Some("support".to_string());
     session.meta.hangup_reason = Some(crate::callrecord::CallRecordHangupReason::Abandoned);
+    // Mirror the resolved agent from the queue app's target resolution.
+    {
+        use std::collections::HashMap;
+        let mut ext = session.extensions.write();
+        let mut map = HashMap::new();
+        map.insert("resolved_agent_id".to_string(), "1001".to_string());
+        ext.insert(map);
+    }
 
     session.resolve_final_hangup_reason().await;
 
@@ -926,6 +934,15 @@ async fn test_resolve_final_hangup_reason_flags_queue_abandon_when_already_aband
             .and_then(|v| v.as_str()),
         Some("support"),
         "abandon trace detail must carry queue_name"
+    );
+    assert_eq!(
+        abandon
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("agent"))
+            .and_then(|v| v.as_str()),
+        Some("1001"),
+        "abandon trace detail must carry resolved agent id"
     );
 }
 
@@ -1101,6 +1118,67 @@ async fn test_resolve_final_hangup_reason_no_stale_ivr_end_trace() {
             .any(|e| e.kind == crate::call_errors::TraceKind::Ivr
                 && e.code.as_deref() == Some("queue.abandoned")),
         "IVR ended via continuation (cancelled) must not surface a stale queue.abandoned trace"
+    );
+}
+
+/// Starting the queue app must record a "Entered queue '<name>'" trace event
+/// so the call trace correctly shows every lifecycle transition (IVR →
+/// Entered queue → caller abandoned → end) instead of jumping straight from
+/// "answered" to "queue.abandoned".
+#[tokio::test]
+async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "support".to_string(),
+        RouteQueueConfig {
+            name: Some("support".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:nonexistent".to_string(),
+                    label: Some("no-agents".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer("support", None, Vec::new())
+        .await
+        .expect("queue app should start");
+
+    let entered = session
+        .meta
+        .trace
+        .iter()
+        .find(|e| {
+            e.kind == crate::call_errors::TraceKind::Queue
+                && e.message == "Entered queue 'support'"
+        })
+        .expect("queue entry must be recorded in the trace");
+    assert!(
+        entered.code.is_none(),
+        "queue entry is informational, not an error"
+    );
+    assert_eq!(
+        entered
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("queue_name"))
+            .and_then(|v| v.as_str()),
+        Some("support"),
+        "queue entry detail must carry queue_name"
+    );
+    assert_eq!(
+        session.meta.app_name.as_deref(),
+        Some("queue"),
+        "terminal phase must be attributed to the queue app, not a stale IVR"
     );
 }
 

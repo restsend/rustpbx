@@ -168,6 +168,105 @@ target = "{target}"
 
 
 # ---------------------------------------------------------------------------
+# Premature hangup → ivr_node_exited
+# ---------------------------------------------------------------------------
+
+async def _wait_ivr_exit_events(event_checker, timeout=20):
+    exited = await event_checker.expect_webhook_event("ivr_node_exited", timeout=timeout)
+    completed = await event_checker.expect_webhook_event("ivr_flow_completed", timeout=timeout)
+    return exited, completed
+
+
+@pytest.mark.asyncio
+async def test_ivr_hangup_mid_playback_node_exited(
+    pbx, sipbot_pool, event_checker, webhook_server, tmp_path
+):
+    """Caller hangs up while the IVR greeting is still playing.
+
+    The session must emit `ivr_node_exited` identifying the node the caller was
+    on (root greeting) plus a premature-hangup marker, NOT a normal
+    terminal-action completion (transfer / deliberate hangup).
+    """
+    from helpers import generate_sine_wav
+
+    # 10s greeting; the caller hangs up at ~4s so playback is still running.
+    greeting = tmp_path / "long_greeting.wav"
+    generate_sine_wav(greeting, 440.0, 10.0, 8000, 0.4)
+
+    ivr = f'''\
+[ivr]
+name = "ivr-e2e"
+ivr_mode = "tree"
+
+[ivr.root]
+greeting = "{greeting}"
+timeout_ms = 8000
+max_retries = 3
+'''
+    _add_ivr_route(pbx.config_builder, ivr)
+    h.boot_pbx(pbx, webhook_url=webhook_server.url)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=4,
+    )
+    assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+    exited, completed = await _wait_ivr_exit_events(event_checker)
+    p = exited.payload or {}
+
+    # Which node was the caller on when they hung up.
+    assert p.get("node_id") == "root", p
+    assert p.get("node_name") == "root", p
+    # Premature hangup marker: the flow did not end via a terminal action.
+    assert p.get("call_result") == "hangup", p
+    # On a caller BYE the sip_session cancels the app's cancel token, so the
+    # session-termination label is "cancelled" (not "remote_hangup", which only
+    # appears when a ControllerEvent::Hangup is pushed to the app).
+    assert p.get("hangup_reason") == "cancelled", p
+    # Hangup happened mid-playback: node duration is far below the 10s greeting.
+    assert p.get("duration_ms", 0) < 10_000, p
+
+    cp = completed.payload or {}
+    assert cp.get("final_result") == "cancelled", cp
+    assert cp.get("total_duration_ms", 0) < 10_000, cp
+
+
+@pytest.mark.asyncio
+async def test_ivr_hangup_waiting_dtmf_node_exited(
+    pbx, sipbot_pool, event_checker, webhook_server
+):
+    """Caller hangs up while the IVR is waiting for DTMF (after greeting done).
+
+    Same contract as mid-playback: `ivr_node_exited` for the current node with
+    a hangup marker — here the node is exited from the WaitingDtmf state.
+    """
+    ivr = _ivr_toml("Press 1 to continue.", "1002").replace(
+        'greeting_text = "Press 1 to continue."',
+        'greeting_text = "Press 1."',
+    )
+    _add_ivr_route(pbx.config_builder, ivr)
+    h.boot_pbx(pbx, webhook_url=webhook_server.url)
+
+    # Short TTS greeting; no DTMF is ever sent. The caller hangs up at ~5s,
+    # well after playback finished but before the 8s dtmf timeout.
+    caller = sipbot_pool.caller(
+        target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=5,
+    )
+    assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+    exited, completed = await _wait_ivr_exit_events(event_checker)
+    p = exited.payload or {}
+
+    assert p.get("node_id") == "root", p
+    assert p.get("call_result") == "hangup", p
+    assert p.get("hangup_reason") == "cancelled", p
+    cp = completed.payload or {}
+    assert cp.get("final_result") == "cancelled", cp
+
+
+# ---------------------------------------------------------------------------
 # Step mode IVR (external HTTP provider)
 # ---------------------------------------------------------------------------
 

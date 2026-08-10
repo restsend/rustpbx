@@ -3911,6 +3911,24 @@ enum ConstructMode<'a> {
         .await
         .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
 
+        // The queue app now drives the session. Attribute the terminal phase to
+        // the queue and record the queue entry so the call trace shows the full
+        // timeline (IVR → … → Entered queue → caller abandoned → end) instead
+        // of jumping straight from "answered" to "queue.abandoned".
+        self.meta.app_name = Some("queue".to_string());
+        let queue_name = plan.queue_name.clone();
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                if queue_name.is_empty() {
+                    "Entered queue".to_string()
+                } else {
+                    format!("Entered queue '{}'", queue_name)
+                },
+            )
+            .severity(crate::call_errors::ErrSeverity::Info)
+            .detail(serde_json::json!({ "queue_name": queue_name })),
+        );
 
         // Inject dial_next_agent to kick off sequential agent dialing
         // (parallel mode auto-dials in on_enter). Skip when no agents were
@@ -7429,9 +7447,21 @@ enum ConstructMode<'a> {
             )
             .severity(crate::call_errors::ErrSeverity::Warn)
             .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code);
+            let mut detail = serde_json::json!({});
             if !queue_name.is_empty() {
-                ev = ev.detail(serde_json::json!({ "queue_name": queue_name }));
+                detail["queue_name"] = serde_json::Value::String(queue_name);
             }
+            let resolved_agent_id = self
+                .extensions
+                .read()
+                .get::<std::collections::HashMap<String, String>>()
+                .and_then(|m| m.get("resolved_agent_id").cloned())
+                .unwrap_or_default();
+            if !resolved_agent_id.is_empty() {
+                detail["agent"] =
+                    serde_json::Value::String(resolved_agent_id);
+            }
+            ev = ev.detail(detail);
             self.record_trace(ev);
         }
 
