@@ -87,6 +87,27 @@ pub struct RwiCommandProcessor {
     command_dedup_cache: CommandDeduplicationCache,
 }
 
+/// Removes a REFER NOTIFY subscription from the server-wide subscriber list
+/// when dropped, so disconnected WebSocket sessions never leak listeners.
+pub struct TransferNotifyListener {
+    server: SipServerRef,
+    tx: crate::call::domain::ReferNotifyTx,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for TransferNotifyListener {
+    fn drop(&mut self) {
+        // Stop the consumer task; its receiver then drops, closing our sender.
+        self.cancel.cancel();
+        let server = self.server.clone();
+        let tx = self.tx.clone();
+        crate::utils::spawn(async move {
+            let mut subscribers = server.transfer_notify_subscribers.lock().await;
+            subscribers.retain(|s| !s.is_closed() || s.same_channel(&tx));
+        });
+    }
+}
+
 impl RwiCommandProcessor {
     pub fn new(
         call_registry: Arc<ActiveProxyCallRegistry>,
@@ -144,33 +165,49 @@ impl RwiCommandProcessor {
     /// Register this processor as a subscriber for REFER NOTIFY events from
     /// `SipSession` and spawn a background task to feed them into the
     /// `TransferController`.
-    pub async fn register_transfer_notify_listener(&self) {
-        let Some(ref server) = self.sip_server else {
-            return;
-        };
+    ///
+    /// Returns a guard that removes the subscription and stops the task when
+    /// dropped, so a disconnected WebSocket never leaks a listener.
+    pub async fn register_transfer_notify_listener(
+        &self,
+    ) -> Option<TransferNotifyListener> {
+        let server = self.sip_server.clone()?;
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::call::domain::ReferNotifyEvent>();
         {
             let mut subscribers = server.transfer_notify_subscribers.lock().await;
-            subscribers.push(tx);
+            // Opportunistically prune dead (disconnected) subscribers so the
+            // vec stays bounded across many connect/disconnect cycles.
+            subscribers.retain(|tx| !tx.is_closed());
+            subscribers.push(tx.clone());
         }
 
         let controller = self.transfer_controller.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
         crate::utils::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                let c = controller.read().await;
-                match event.event_type {
-                    crate::call::domain::ReferNotifyEventType::ReferResponse => {
-                        c.handle_refer_response_by_call_id(&event.call_id, event.sip_status)
-                            .await;
-                    }
-                    crate::call::domain::ReferNotifyEventType::Notify => {
-                        c.handle_notify_by_call_id(&event.call_id, event.sip_status)
-                            .await;
+            loop {
+                tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    event = rx.recv() => {
+                        let Some(event) = event else { break };
+                        let c = controller.read().await;
+                        match event.event_type {
+                            crate::call::domain::ReferNotifyEventType::ReferResponse => {
+                                c.handle_refer_response_by_call_id(&event.call_id, event.sip_status)
+                                    .await;
+                            }
+                            crate::call::domain::ReferNotifyEventType::Notify => {
+                                c.handle_notify_by_call_id(&event.call_id, event.sip_status)
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
         });
+
+        Some(TransferNotifyListener { server, tx, cancel })
     }
 
     fn dispatch_unified_command(

@@ -142,7 +142,9 @@ async fn handle_websocket(
         Arc::new(p)
     };
 
-    processor.register_transfer_notify_listener().await;
+    // Dropped when the WebSocket closes: removes the REFER NOTIFY listener so
+    // disconnected sessions don't leak a subscriber + consumer task.
+    let _transfer_listener = processor.register_transfer_notify_listener().await;
 
     let session_id = {
         let mut gw = gateway.write();
