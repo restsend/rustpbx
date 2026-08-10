@@ -208,40 +208,8 @@ impl TransferController {
         call_id: String,
         target: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
-        if !self.config.refer_enabled {
-            return Err(TransferFailureReason::InternalError);
-        }
-
-        // Record metric
-        crate::metrics::transfer::attempt_total("refer", "blind");
-
-        self.verify_call_state_for_transfer(&call_id).await?;
-
-        let mut transaction =
-            TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::SipRefer);
-        transaction.update_status(TransferStatus::Accepted);
-
-        if self.transactions.len() >= self.config.max_concurrent_transfers {
-            crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
-            return Err(TransferFailureReason::InternalError);
-        }
-        self.transactions
-            .insert(transaction.transfer_id.clone(), transaction.clone());
-
-        crate::metrics::transfer::set_active_transfers(self.transactions.len());
-
-        let _handle = self
-            .get_handle(&call_id)
+        self.initiate_transfer(call_id, target, TransferMode::SipRefer, "blind")
             .await
-            .ok_or(TransferFailureReason::InvalidState)?;
-
-        let gw = self.gateway.read();
-        gw.send_to_owner(&crate::rwi::CallTransferAccepted {
-            call_id: call_id.clone(),
-            transfer_target: Some(target.clone()),
-        });
-
-        Ok(transaction)
     }
 
     pub async fn initiate_replace_transfer(
@@ -249,16 +217,26 @@ impl TransferController {
         call_id: String,
         target: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
+        self.initiate_transfer(call_id, target, TransferMode::Replaces, "replace")
+            .await
+    }
+
+    async fn initiate_transfer(
+        &self,
+        call_id: String,
+        target: String,
+        mode: TransferMode,
+        direction: &'static str,
+    ) -> Result<TransferTransaction, TransferFailureReason> {
         if !self.config.refer_enabled {
             return Err(TransferFailureReason::InternalError);
         }
 
-        crate::metrics::transfer::attempt_total("refer", "replace");
+        crate::metrics::transfer::attempt_total("refer", direction);
 
         self.verify_call_state_for_transfer(&call_id).await?;
 
-        let mut transaction =
-            TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::Replaces);
+        let mut transaction = TransferTransaction::new(call_id.clone(), target.clone(), mode);
         transaction.update_status(TransferStatus::Accepted);
 
         if self.transactions.len() >= self.config.max_concurrent_transfers {
@@ -301,15 +279,34 @@ impl TransferController {
         call_id: String,
         target: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
-        // Step 1: Create transaction and verify state
+        self.execute_transfer(call_id, target, TransferMode::SipRefer, false)
+            .await
+    }
+
+    pub async fn execute_replace_transfer(
+        &self,
+        call_id: String,
+        target: String,
+    ) -> Result<TransferTransaction, TransferFailureReason> {
+        self.execute_transfer(call_id, target, TransferMode::Replaces, true)
+            .await
+    }
+
+    async fn execute_transfer(
+        &self,
+        call_id: String,
+        target: String,
+        mode: TransferMode,
+        attended: bool,
+    ) -> Result<TransferTransaction, TransferFailureReason> {
+        let direction: &'static str = if attended { "replace" } else { "blind" };
         let tx = self
-            .initiate_blind_transfer(call_id.clone(), target.clone())
+            .initiate_transfer(call_id.clone(), target.clone(), mode, direction)
             .await?;
 
-        info!(transfer_id = %tx.transfer_id, %call_id, %target, "Dispatching blind transfer command");
+        info!(transfer_id = %tx.transfer_id, %call_id, %target, attended, "Dispatching transfer command");
 
-        // Step 2: Send the Transfer command – result is async via RWI events
-        match self.try_refer_transfer(&tx).await {
+        match self.try_refer_transfer(&tx, attended).await {
             Ok(_) => {
                 info!(transfer_id = %tx.transfer_id, "Transfer command dispatched successfully");
                 Ok(tx)
@@ -321,33 +318,9 @@ impl TransferController {
                 Err(TransferFailureReason::InternalError)
             }
             Err(_) => {
-                // Should not happen with the new fire-and-forget implementation,
+                // Should not happen with the fire-and-forget implementation,
                 // but handle defensively.
                 warn!(transfer_id = %tx.transfer_id, "Unexpected error dispatching transfer");
-                self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
-                    .await;
-                Err(TransferFailureReason::InternalError)
-            }
-        }
-    }
-
-    pub async fn execute_replace_transfer(
-        &self,
-        call_id: String,
-        target: String,
-    ) -> Result<TransferTransaction, TransferFailureReason> {
-        let tx = self
-            .initiate_replace_transfer(call_id.clone(), target.clone())
-            .await?;
-
-        match self.try_refer_transfer_with_replaces(&tx).await {
-            Ok(_) => Ok(tx),
-            Err(ReferTransferResult::InternalError(_)) => {
-                self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
-                    .await;
-                Err(TransferFailureReason::InternalError)
-            }
-            Err(_) => {
                 self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
                     .await;
                 Err(TransferFailureReason::InternalError)
@@ -365,6 +338,7 @@ impl TransferController {
     async fn try_refer_transfer(
         &self,
         tx: &TransferTransaction,
+        attended: bool,
     ) -> Result<(), ReferTransferResult> {
         let handle = self
             .get_handle(&tx.call_id)
@@ -374,42 +348,17 @@ impl TransferController {
         // The transfer command targets the session's caller leg. RWI identifies
         // calls by their session id (`tx.call_id`), but SipSession legs are
         // named "caller"/"callee" — passing the call_id as the leg_id would make
-        // `handle_transfer` fail at `require_leg`. The transferee in a blind
-        // transfer is the caller leg.
+        // `handle_transfer` fail at `require_leg`. The transferee is the caller leg.
         let leg_id = LegId::new("caller");
         handle
             .send_command(CallCommand::Transfer {
                 leg_id,
                 target: tx.target.clone(),
-                attended: false,
+                attended,
             })
             .map_err(|e| {
                 ReferTransferResult::InternalError(format!(
                     "Failed to send transfer command: {}",
-                    e
-                ))
-            })
-    }
-
-    async fn try_refer_transfer_with_replaces(
-        &self,
-        tx: &TransferTransaction,
-    ) -> Result<(), ReferTransferResult> {
-        let handle = self
-            .get_handle(&tx.call_id)
-            .await
-            .ok_or_else(|| ReferTransferResult::InternalError("Call not found".to_string()))?;
-
-        let leg_id = LegId::new(&tx.call_id);
-        handle
-            .send_command(CallCommand::Transfer {
-                leg_id,
-                target: tx.target.clone(),
-                attended: true,
-            })
-            .map_err(|e| {
-                ReferTransferResult::InternalError(format!(
-                    "Failed to send replace transfer command: {}",
                     e
                 ))
             })
@@ -944,7 +893,9 @@ mod tests {
                 target: t,
                 attended,
             } => {
-                assert_eq!(leg_id.as_str(), call_id);
+                // The transfer targets the session's caller leg (legs are
+                // named "caller"/"callee", never the call id).
+                assert_eq!(leg_id.as_str(), "caller");
                 assert_eq!(t, target);
                 assert!(attended, "replace transfer must have attended=true");
             }

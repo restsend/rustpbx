@@ -3,9 +3,10 @@
 //! Converts `CallCommandPayload` (from HTTP API) to unified `CallCommand`.
 
 use crate::call::domain::*;
-use crate::callrecord::CallRecordHangupReason;
 use crate::console::handlers::call_control::{CallCommandPayload, ConsoleMediaSource};
 use anyhow::Result;
+
+use super::parse_hangup_reason;
 
 fn convert_console_source(src: ConsoleMediaSource) -> MediaSource {
     match src {
@@ -20,21 +21,6 @@ fn convert_console_source(src: ConsoleMediaSource) -> MediaSource {
             duration_ms,
         },
     }
-}
-
-/// Convert hangup reason string to CallRecordHangupReason
-fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
-    reason.and_then(|r| match r.to_lowercase().as_str() {
-        "by_caller" | "caller" => Some(CallRecordHangupReason::ByCaller),
-        "by_callee" | "callee" => Some(CallRecordHangupReason::ByCallee),
-        "by_system" | "system" => Some(CallRecordHangupReason::BySystem),
-        "no_answer" => Some(CallRecordHangupReason::NoAnswer),
-        "rejected" => Some(CallRecordHangupReason::Rejected),
-        "canceled" => Some(CallRecordHangupReason::Canceled),
-        "failed" => Some(CallRecordHangupReason::Failed),
-        "abandoned" => Some(CallRecordHangupReason::Abandoned),
-        _ => None,
-    })
 }
 
 /// Convert Console CallCommandPayload to unified CallCommand

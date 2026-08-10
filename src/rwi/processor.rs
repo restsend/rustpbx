@@ -2548,40 +2548,44 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
-    async fn supervisor_listen(
+    /// Shared driver for supervisor listen/whisper/barge/takeover: dispatch the
+    /// mode command to the target session and fan the "started" event out to
+    /// the supervisor, target, and (optionally) agent-owner sessions.
+    async fn start_supervisor_mode<E>(
         &self,
+        action: &str,
+        command: CallCommand,
+        event: E,
         supervisor_call_id: &str,
         target_call_id: &str,
-    ) -> Result<CommandResult, CommandError> {
+        agent_leg: Option<&str>,
+    ) -> Result<CommandResult, CommandError>
+    where
+        E: crate::rwi::RwiEventSpec,
+    {
         let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
         tracing::info!(
-            "supervisor_listen: creating mixer id={} sup={} target={}",
+            "supervisor_{}: creating mixer id={} sup={} target={}",
+            action,
             mixer_id,
             supervisor_call_id,
             target_call_id
         );
 
         if let Ok(handle) = self.get_handle(target_call_id).await {
-            let _ = handle.send_command(CallCommand::SupervisorListen {
-                supervisor_leg: LegId::new(supervisor_call_id),
-                target_leg: LegId::new(target_call_id),
-                supervisor_session_id: Some(supervisor_call_id.to_string()),
-            });
+            let _ = handle.send_command(command);
         }
 
         info!(
             audit_event = "supervisor_action",
-            action = "listen_start",
+            action = %format!("{}_start", action),
             supervisor_call_id = %supervisor_call_id,
             target_call_id = %target_call_id,
+            agent_leg = ?agent_leg,
             result = "success",
-            "Supervisor listen mode started"
+            "Supervisor {} mode started", action
         );
 
-        let event = crate::rwi::SupervisorListenStarted {
-            supervisor_call_id: supervisor_call_id.to_string(),
-            target_call_id: target_call_id.to_string(),
-        };
         self.gateway
             .read()
             .send_to_owner_at(&supervisor_call_id.to_string(), &event);
@@ -2590,7 +2594,38 @@ impl RwiCommandProcessor {
                 .read()
                 .send_to_owner_at(&target_call_id.to_string(), &event);
         }
+        if let Some(agent_leg) = agent_leg
+            && !agent_leg.is_empty()
+            && self.get_handle(agent_leg).await.is_ok()
+        {
+            self.gateway
+                .read()
+                .send_to_owner_at(&agent_leg.to_string(), &event);
+        }
         Ok(CommandResult::Success)
+    }
+
+    async fn supervisor_listen(
+        &self,
+        supervisor_call_id: &str,
+        target_call_id: &str,
+    ) -> Result<CommandResult, CommandError> {
+        self.start_supervisor_mode(
+            "listen",
+            CallCommand::SupervisorListen {
+                supervisor_leg: LegId::new(supervisor_call_id),
+                target_leg: LegId::new(target_call_id),
+                supervisor_session_id: Some(supervisor_call_id.to_string()),
+            },
+            crate::rwi::SupervisorListenStarted {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+            },
+            supervisor_call_id,
+            target_call_id,
+            None,
+        )
+        .await
     }
 
     async fn supervisor_whisper(
@@ -2599,50 +2634,22 @@ impl RwiCommandProcessor {
         target_call_id: &str,
         agent_leg: &str,
     ) -> Result<CommandResult, CommandError> {
-        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
-        tracing::info!(
-            "supervisor_whisper: creating mixer id={} sup={} target={}",
-            mixer_id,
-            supervisor_call_id,
-            target_call_id
-        );
-
-        if let Ok(handle) = self.get_handle(target_call_id).await {
-            let _ = handle.send_command(CallCommand::SupervisorWhisper {
+        self.start_supervisor_mode(
+            "whisper",
+            CallCommand::SupervisorWhisper {
                 supervisor_leg: LegId::new(supervisor_call_id),
                 target_leg: LegId::new(target_call_id),
                 supervisor_session_id: None,
-            });
-        }
-
-        info!(
-            audit_event = "supervisor_action",
-            action = "whisper_start",
-            supervisor_call_id = %supervisor_call_id,
-            target_call_id = %target_call_id,
-            agent_leg = %agent_leg,
-            result = "success",
-            "Supervisor whisper mode started"
-        );
-
-        let event = crate::rwi::SupervisorWhisperStarted {
-            supervisor_call_id: supervisor_call_id.to_string(),
-            target_call_id: target_call_id.to_string(),
-        };
-        self.gateway
-            .read()
-            .send_to_owner_at(&supervisor_call_id.to_string(), &event);
-        if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway
-                .read()
-                .send_to_owner_at(&target_call_id.to_string(), &event);
-        }
-        if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            self.gateway
-                .read()
-                .send_to_owner_at(&agent_leg.to_string(), &event);
-        }
-        Ok(CommandResult::Success)
+            },
+            crate::rwi::SupervisorWhisperStarted {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+            },
+            supervisor_call_id,
+            target_call_id,
+            Some(agent_leg),
+        )
+        .await
     }
 
     async fn supervisor_barge(
@@ -2651,50 +2658,22 @@ impl RwiCommandProcessor {
         target_call_id: &str,
         agent_leg: &str,
     ) -> Result<CommandResult, CommandError> {
-        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
-        tracing::info!(
-            "supervisor_barge: creating mixer id={} sup={} target={}",
-            mixer_id,
-            supervisor_call_id,
-            target_call_id
-        );
-
-        if let Ok(handle) = self.get_handle(target_call_id).await {
-            let _ = handle.send_command(CallCommand::SupervisorBarge {
+        self.start_supervisor_mode(
+            "barge",
+            CallCommand::SupervisorBarge {
                 supervisor_leg: LegId::new(supervisor_call_id),
                 target_leg: LegId::new(target_call_id),
                 supervisor_session_id: None,
-            });
-        }
-
-        info!(
-            audit_event = "supervisor_action",
-            action = "barge_start",
-            supervisor_call_id = %supervisor_call_id,
-            target_call_id = %target_call_id,
-            agent_leg = %agent_leg,
-            result = "success",
-            "Supervisor barge mode started"
-        );
-
-        let event = crate::rwi::SupervisorBargeStarted {
-            supervisor_call_id: supervisor_call_id.to_string(),
-            target_call_id: target_call_id.to_string(),
-        };
-        self.gateway
-            .read()
-            .send_to_owner_at(&supervisor_call_id.to_string(), &event);
-        if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway
-                .read()
-                .send_to_owner_at(&target_call_id.to_string(), &event);
-        }
-        if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            self.gateway
-                .read()
-                .send_to_owner_at(&agent_leg.to_string(), &event);
-        }
-        Ok(CommandResult::Success)
+            },
+            crate::rwi::SupervisorBargeStarted {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+            },
+            supervisor_call_id,
+            target_call_id,
+            Some(agent_leg),
+        )
+        .await
     }
 
     async fn supervisor_takeover(
@@ -2702,44 +2681,22 @@ impl RwiCommandProcessor {
         supervisor_call_id: &str,
         target_call_id: &str,
     ) -> Result<CommandResult, CommandError> {
-        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
-        tracing::info!(
-            "supervisor_takeover: creating mixer id={} sup={} target={}",
-            mixer_id,
-            supervisor_call_id,
-            target_call_id
-        );
-
-        if let Ok(handle) = self.get_handle(target_call_id).await {
-            let _ = handle.send_command(CallCommand::SupervisorTakeover {
+        self.start_supervisor_mode(
+            "takeover",
+            CallCommand::SupervisorTakeover {
                 supervisor_leg: LegId::new(supervisor_call_id),
                 target_leg: LegId::new(target_call_id),
                 supervisor_session_id: None,
-            });
-        }
-
-        info!(
-            audit_event = "supervisor_action",
-            action = "takeover_start",
-            supervisor_call_id = %supervisor_call_id,
-            target_call_id = %target_call_id,
-            result = "success",
-            "Supervisor takeover mode started"
-        );
-
-        let event = crate::rwi::SupervisorTakeoverStarted {
-            supervisor_call_id: supervisor_call_id.to_string(),
-            target_call_id: target_call_id.to_string(),
-        };
-        self.gateway
-            .read()
-            .send_to_owner_at(&supervisor_call_id.to_string(), &event);
-        if self.get_handle(target_call_id).await.is_ok() {
-            self.gateway
-                .read()
-                .send_to_owner_at(&target_call_id.to_string(), &event);
-        }
-        Ok(CommandResult::Success)
+            },
+            crate::rwi::SupervisorTakeoverStarted {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+            },
+            supervisor_call_id,
+            target_call_id,
+            None,
+        )
+        .await
     }
 
     async fn supervisor_stop(

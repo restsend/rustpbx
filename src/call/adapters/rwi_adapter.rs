@@ -3,26 +3,10 @@
 //! Converts `RwiCommandPayload` to unified `CallCommand`.
 
 use crate::call::domain::*;
-use crate::callrecord::CallRecordHangupReason;
 use crate::rwi::session::RwiCommandPayload;
 use anyhow::Result;
 
-use super::AdapterError;
-
-/// Convert RWI hangup reason string to CallRecordHangupReason
-fn parse_hangup_reason(reason: Option<&str>) -> Option<CallRecordHangupReason> {
-    reason.and_then(|r| match r.to_lowercase().as_str() {
-        "by_caller" | "caller" => Some(CallRecordHangupReason::ByCaller),
-        "by_callee" | "callee" => Some(CallRecordHangupReason::ByCallee),
-        "by_system" | "system" => Some(CallRecordHangupReason::BySystem),
-        "no_answer" => Some(CallRecordHangupReason::NoAnswer),
-        "rejected" => Some(CallRecordHangupReason::Rejected),
-        "canceled" => Some(CallRecordHangupReason::Canceled),
-        "failed" => Some(CallRecordHangupReason::Failed),
-        "abandoned" => Some(CallRecordHangupReason::Abandoned),
-        _ => None,
-    })
-}
+use super::{AdapterError, parse_hangup_reason};
 
 /// Convert RWI command to unified CallCommand
 ///
