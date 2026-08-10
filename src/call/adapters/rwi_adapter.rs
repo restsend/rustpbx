@@ -52,31 +52,33 @@ pub fn rwi_to_call_command(
         // ========================================================================
         // Basic Call Control
         // ========================================================================
-        RwiCommandPayload::Answer { call_id } => {
-            let sid = session_id
-                .or(Some(&call_id))
+        RwiCommandPayload::Answer { call_id: _ } => {
+            // RWI identifies calls by session id, but SipSession legs are named
+            // "caller"/"callee" — these commands target the caller leg.
+            session_id
+                .or(Some("caller"))
                 .ok_or(AdapterError::MissingField("session_id or call_id"))?;
             Ok(CallCommand::Answer {
-                leg_id: LegId::new(sid),
+                leg_id: LegId::new("caller"),
             })
         }
 
-        RwiCommandPayload::Reject { call_id, reason } => {
-            let sid = session_id
-                .or(Some(&call_id))
+        RwiCommandPayload::Reject { call_id: _, reason } => {
+            session_id
+                .or(Some("caller"))
                 .ok_or(AdapterError::MissingField("session_id or call_id"))?;
             Ok(CallCommand::Reject {
-                leg_id: LegId::new(sid),
+                leg_id: LegId::new("caller"),
                 reason,
             })
         }
 
-        RwiCommandPayload::Ring { call_id } => {
-            let sid = session_id
-                .or(Some(&call_id))
+        RwiCommandPayload::Ring { call_id: _ } => {
+            session_id
+                .or(Some("caller"))
                 .ok_or(AdapterError::MissingField("session_id or call_id"))?;
             Ok(CallCommand::Ring {
-                leg_id: LegId::new(sid),
+                leg_id: LegId::new("caller"),
                 ringback: None,
             })
         }

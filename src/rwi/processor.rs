@@ -252,6 +252,7 @@ impl RwiCommandProcessor {
         &self,
         command: RwiCommandPayload,
     ) -> Result<CommandResult, CommandError> {
+        // Bridge requires both legs to exist up-front.
         if let RwiCommandPayload::Bridge { leg_a, leg_b } = &command {
             if self.call_registry.get_handle(leg_a).is_none() {
                 return Err(CommandError::CallNotFound(leg_a.clone()));
@@ -261,11 +262,11 @@ impl RwiCommandProcessor {
             }
         }
 
-        if let RwiCommandPayload::Originate(req) = &command {
-            return self.originate_call(req.clone()).await;
-        }
-
+        // Commands handled entirely at the processor level (no session dispatch).
         match &command {
+            RwiCommandPayload::Originate(req) => {
+                return self.originate_call(req.clone()).await;
+            }
             RwiCommandPayload::CallHold { call_id, music } => {
                 return self.call_hold(call_id, music.clone()).await;
             }
@@ -297,10 +298,6 @@ impl RwiCommandProcessor {
             } => {
                 return self.queue_requeue(call_id, queue_id, *priority).await;
             }
-            _ => {}
-        }
-
-        match &command {
             RwiCommandPayload::RecordStart(req) => {
                 return self.record_start(req.clone()).await;
             }
@@ -313,10 +310,6 @@ impl RwiCommandProcessor {
             RwiCommandPayload::RecordStop { call_id } => {
                 return self.record_stop(call_id).await;
             }
-            _ => {}
-        }
-
-        match &command {
             RwiCommandPayload::SetRingbackSource {
                 target_call_id,
                 source_call_id,
@@ -381,11 +374,6 @@ impl RwiCommandProcessor {
                     .supervisor_stop(supervisor_call_id, target_call_id)
                     .await;
             }
-            _ => {}
-        }
-
-        // Handle transfer commands via TransferController
-        match &command {
             RwiCommandPayload::Transfer { call_id, target } => {
                 return self
                     .handle_transfer(call_id.clone(), target.clone(), false)
@@ -417,6 +405,7 @@ impl RwiCommandProcessor {
             _ => {}
         }
 
+        // Unified session dispatch (Answer/Reject/Ring/Hangup/Bridge/Unbridge).
         if let Some(call_id) = command.dispatch_call_id()
             && let Some(result) = self.dispatch_unified_command(call_id, command.clone())
         {
@@ -446,6 +435,7 @@ impl RwiCommandProcessor {
             return result;
         }
 
+        // Processor-level commands that are not session-dispatchable.
         match &command {
             RwiCommandPayload::ListCalls => {
                 let calls = self.list_calls().await;
@@ -509,14 +499,12 @@ impl RwiCommandProcessor {
                     .conference_seat_replace(conf_id, old_call_id, new_call_id)
                     .await;
             }
-
             RwiCommandPayload::Subscribe { .. } => {
                 return Ok(CommandResult::Success);
             }
             RwiCommandPayload::Unsubscribe { .. } => {
                 return Ok(CommandResult::Success);
             }
-
             RwiCommandPayload::SetVar {
                 call_id,
                 key,
@@ -534,7 +522,6 @@ impl RwiCommandProcessor {
                     value,
                 });
             }
-
             RwiCommandPayload::SipMessage {
                 call_id,
                 content_type,
@@ -591,65 +578,8 @@ impl RwiCommandProcessor {
                     .send_dtmf(call_id.clone(), leg_id.clone(), digits.clone())
                     .await;
             }
-
             RwiCommandPayload::DtmfCollect(req) => {
                 return self.dtmf_collect(req.clone()).await;
-            }
-
-            RwiCommandPayload::QueueEnqueue(req) => {
-                return self.queue_enqueue(req.clone()).await;
-            }
-            RwiCommandPayload::QueueDequeue { call_id } => {
-                return self.queue_dequeue(call_id).await;
-            }
-            RwiCommandPayload::QueueHold { call_id } => {
-                return self.queue_hold(call_id).await;
-            }
-            RwiCommandPayload::QueueUnhold { call_id } => {
-                return self.queue_unhold(call_id).await;
-            }
-            RwiCommandPayload::QueueSetPriority { call_id, priority } => {
-                return self.queue_set_priority(call_id, *priority).await;
-            }
-            RwiCommandPayload::QueueAssignAgent { call_id, agent_id } => {
-                return self.queue_assign_agent(call_id, agent_id).await;
-            }
-            RwiCommandPayload::QueueRequeue {
-                call_id,
-                queue_id,
-                priority,
-            } => {
-                return self.queue_requeue(call_id, queue_id, *priority).await;
-            }
-
-            RwiCommandPayload::RecordStart(req) => {
-                return self.record_start(req.clone()).await;
-            }
-            RwiCommandPayload::RecordPause { call_id } => {
-                return self.record_pause(call_id).await;
-            }
-            RwiCommandPayload::RecordResume { call_id } => {
-                return self.record_resume(call_id).await;
-            }
-            RwiCommandPayload::RecordStop { call_id } => {
-                return self.record_stop(call_id).await;
-            }
-
-            RwiCommandPayload::SetRingbackSource {
-                target_call_id,
-                source_call_id,
-            } => {
-                return self
-                    .set_ringback_source(target_call_id, source_call_id)
-                    .await;
-            }
-            RwiCommandPayload::SupervisorStop {
-                supervisor_call_id,
-                target_call_id,
-            } => {
-                return self
-                    .supervisor_stop(supervisor_call_id, target_call_id)
-                    .await;
             }
             RwiCommandPayload::MediaPlay(req) => {
                 return self
@@ -665,56 +595,14 @@ impl RwiCommandProcessor {
             RwiCommandPayload::MediaStop { call_id, leg_id } => {
                 return self.media_stop(call_id, leg_id.clone()).await;
             }
-            _ => {}
-        }
-
-        // Handle session/call resume via gateway event cache
-        match &command {
             RwiCommandPayload::SessionResume { last_sequence } => {
-                let gw = self.gateway.read();
-                let (entries, current_seq) = gw.resume_session(*last_sequence);
-                let replayed_count = entries.len() as u64;
-                let events: Vec<serde_json::Value> = entries
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "sequence": e.sequence,
-                            "timestamp": e.cached_at.to_rfc3339(),
-                            "call_id": e.call_id,
-                            "event": e.event,
-                        })
-                    })
-                    .collect();
-                return Ok(CommandResult::SessionResumed {
-                    replayed_count,
-                    current_sequence: current_seq,
-                    events,
-                });
+                return self.handle_session_resume(*last_sequence);
             }
             RwiCommandPayload::CallResume {
                 call_id,
                 last_sequence,
             } => {
-                let gw = self.gateway.read();
-                let (entries, current_seq) = gw.resume_call(call_id, *last_sequence);
-                let replayed_count = entries.len() as u64;
-                let events: Vec<serde_json::Value> = entries
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "sequence": e.sequence,
-                            "timestamp": e.cached_at.to_rfc3339(),
-                            "call_id": e.call_id,
-                            "event": e.event,
-                        })
-                    })
-                    .collect();
-                return Ok(CommandResult::CallResumed {
-                    call_id: call_id.clone(),
-                    replayed_count,
-                    current_sequence: current_seq,
-                    events,
-                });
+                return self.handle_call_resume(call_id, *last_sequence);
             }
             _ => {}
         }
@@ -732,6 +620,55 @@ impl RwiCommandProcessor {
         Err(CommandError::CommandFailed(
             "command requires call_id".to_string(),
         ))
+    }
+
+    fn handle_session_resume(&self, last_sequence: Option<u64>) -> Result<CommandResult, CommandError> {
+        let gw = self.gateway.read();
+        let (entries, current_seq) = gw.resume_session(last_sequence);
+        let replayed_count = entries.len() as u64;
+        let events: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "sequence": e.sequence,
+                    "timestamp": e.cached_at.to_rfc3339(),
+                    "call_id": e.call_id,
+                    "event": e.event,
+                })
+            })
+            .collect();
+        Ok(CommandResult::SessionResumed {
+            replayed_count,
+            current_sequence: current_seq,
+            events,
+        })
+    }
+
+    fn handle_call_resume(
+        &self,
+        call_id: &String,
+        last_sequence: Option<u64>,
+    ) -> Result<CommandResult, CommandError> {
+        let gw = self.gateway.read();
+        let (entries, current_seq) = gw.resume_call(call_id, last_sequence);
+        let replayed_count = entries.len() as u64;
+        let events: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "sequence": e.sequence,
+                    "timestamp": e.cached_at.to_rfc3339(),
+                    "call_id": e.call_id,
+                    "event": e.event,
+                })
+            })
+            .collect();
+        Ok(CommandResult::CallResumed {
+            call_id: call_id.to_string(),
+            replayed_count,
+            current_sequence: current_seq,
+            events,
+        })
     }
 
     /// Normalize an RWI-supplied `caller_id` into a valid SIP URI string for the
