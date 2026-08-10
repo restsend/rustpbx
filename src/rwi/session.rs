@@ -262,6 +262,81 @@ pub enum RwiCommandPayload {
     },
 }
 
+impl RwiCommandPayload {
+    /// The call/session id this command targets, used to route event delivery
+    /// and the unified-dispatch path. Conference commands return `None`: they
+    /// are handled at the processor level (ConferenceManager) and never flow
+    /// through the session command dispatch.
+    pub fn dispatch_call_id(&self) -> Option<&str> {
+        match self {
+            RwiCommandPayload::Answer { call_id }
+            | RwiCommandPayload::Hangup { call_id, .. }
+            | RwiCommandPayload::Reject { call_id, .. }
+            | RwiCommandPayload::Ring { call_id }
+            | RwiCommandPayload::CallHold { call_id, .. }
+            | RwiCommandPayload::CallUnhold { call_id }
+            | RwiCommandPayload::Unbridge { call_id }
+            | RwiCommandPayload::Transfer { call_id, .. }
+            | RwiCommandPayload::TransferReplace { call_id, .. }
+            | RwiCommandPayload::TransferAttended { call_id, .. }
+            | RwiCommandPayload::TransferComplete { call_id, .. }
+            | RwiCommandPayload::SetRingbackSource { target_call_id: call_id, .. }
+            | RwiCommandPayload::MediaStop { call_id, .. }
+            | RwiCommandPayload::AttachCall { call_id, .. }
+            | RwiCommandPayload::DetachCall { call_id }
+            | RwiCommandPayload::RecordPause { call_id }
+            | RwiCommandPayload::RecordResume { call_id }
+            | RwiCommandPayload::RecordStop { call_id }
+            | RwiCommandPayload::QueueDequeue { call_id }
+            | RwiCommandPayload::QueueHold { call_id }
+            | RwiCommandPayload::QueueUnhold { call_id }
+            | RwiCommandPayload::QueueSetPriority { call_id, .. }
+            | RwiCommandPayload::QueueAssignAgent { call_id, .. }
+            | RwiCommandPayload::QueueRequeue { call_id, .. }
+            | RwiCommandPayload::SupervisorListen { target_call_id: call_id, .. }
+            | RwiCommandPayload::SupervisorWhisper { target_call_id: call_id, .. }
+            | RwiCommandPayload::SupervisorBarge { target_call_id: call_id, .. }
+            | RwiCommandPayload::SupervisorTakeover { target_call_id: call_id, .. }
+            | RwiCommandPayload::SupervisorStop { target_call_id: call_id, .. }
+            | RwiCommandPayload::SipMessage { call_id, .. }
+            | RwiCommandPayload::SipNotify { call_id, .. }
+            | RwiCommandPayload::SipOptionsPing { call_id }
+            | RwiCommandPayload::LegAdd { call_id, .. }
+            | RwiCommandPayload::LegRemove { call_id, .. }
+            | RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.as_str()),
+            RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.as_str()),
+            RwiCommandPayload::TransferCancel {
+                consultation_call_id,
+            } => Some(consultation_call_id.as_str()),
+            RwiCommandPayload::MediaPlay(req) => Some(req.call_id.as_str()),
+            RwiCommandPayload::Originate(req) => Some(req.call_id.as_str()),
+            RwiCommandPayload::RecordStart(req) => Some(req.call_id.as_str()),
+            RwiCommandPayload::QueueEnqueue(req) => Some(req.call_id.as_str()),
+            RwiCommandPayload::DtmfCollect(req) => Some(req.call_id.as_str()),
+            RwiCommandPayload::SetVar { call_id, .. } | RwiCommandPayload::GetVar { call_id, .. } => {
+                Some(call_id.as_str())
+            }
+            RwiCommandPayload::CallSendDtmf { call_id, .. }
+            | RwiCommandPayload::AppStart { call_id, .. }
+            | RwiCommandPayload::AppStop { call_id, .. }
+            | RwiCommandPayload::AppChain { call_id, .. } => Some(call_id.as_str()),
+            RwiCommandPayload::ConferenceCreate(_)
+            | RwiCommandPayload::ConferenceDestroy { .. }
+            | RwiCommandPayload::ConferenceEnd { .. }
+            | RwiCommandPayload::ConferenceSeatReplace { .. }
+            | RwiCommandPayload::ConferenceAdd { .. }
+            | RwiCommandPayload::ConferenceRemove { .. }
+            | RwiCommandPayload::ConferenceMute { .. }
+            | RwiCommandPayload::ConferenceUnmute { .. }
+            | RwiCommandPayload::ConferenceMerge { .. }
+            | RwiCommandPayload::Subscribe { .. }
+            | RwiCommandPayload::Unsubscribe { .. }
+            | RwiCommandPayload::ListCalls
+            | RwiCommandPayload::SessionResume { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct OriginateRequest {
     #[serde(default)]

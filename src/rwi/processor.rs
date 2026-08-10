@@ -380,7 +380,7 @@ impl RwiCommandProcessor {
             _ => {}
         }
 
-        if let Some(call_id) = self.extract_call_id(&command)
+        if let Some(call_id) = command.dispatch_call_id()
             && let Some(result) = self.dispatch_unified_command(call_id, command.clone())
         {
             tracing::debug!(
@@ -682,7 +682,7 @@ impl RwiCommandProcessor {
             _ => {}
         }
 
-        if let Some(call_id) = self.extract_call_id(&command) {
+        if let Some(call_id) = command.dispatch_call_id() {
             if self.call_registry.get_handle(call_id).is_some() {
                 return Err(CommandError::CommandFailed(
                     "command not implemented in unified runtime".to_string(),
@@ -695,71 +695,6 @@ impl RwiCommandProcessor {
         Err(CommandError::CommandFailed(
             "command requires call_id".to_string(),
         ))
-    }
-
-    fn extract_call_id<'a>(&self, command: &'a RwiCommandPayload) -> Option<&'a str> {
-        match command {
-            RwiCommandPayload::Answer { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::Hangup { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::Reject { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::Ring { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::CallUnhold { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.as_str()),
-            RwiCommandPayload::Unbridge { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::Transfer { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::TransferReplace { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::TransferAttended { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::TransferComplete { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::TransferCancel {
-                consultation_call_id,
-            } => Some(consultation_call_id.as_str()),
-            RwiCommandPayload::SetRingbackSource { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::MediaPlay(req) => Some(req.call_id.as_str()),
-            RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::Originate(req) => Some(req.call_id.as_str()),
-            RwiCommandPayload::AttachCall { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::DetachCall { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::RecordStart(req) => Some(req.call_id.as_str()),
-            RwiCommandPayload::RecordPause { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::RecordResume { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::RecordStop { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueEnqueue(req) => Some(req.call_id.as_str()),
-            RwiCommandPayload::QueueDequeue { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueHold { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueUnhold { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueSetPriority { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueAssignAgent { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::QueueRequeue { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::SupervisorListen { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::SupervisorBarge { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::SupervisorStop { target_call_id, .. } => {
-                Some(target_call_id.as_str())
-            }
-            RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.as_str()),
-            RwiCommandPayload::LegAdd { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::LegRemove { call_id, .. } => Some(call_id.as_str()),
-
-            RwiCommandPayload::ConferenceCreate(_) => None,
-            RwiCommandPayload::ConferenceDestroy { .. } => None,
-            RwiCommandPayload::ConferenceEnd { .. } => None,
-            RwiCommandPayload::ConferenceSeatReplace { .. } => None,
-            _ => None,
-        }
     }
 
     /// Normalize an RWI-supplied `caller_id` into a valid SIP URI string for the

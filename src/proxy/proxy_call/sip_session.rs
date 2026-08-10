@@ -3473,7 +3473,12 @@ enum ConstructMode<'a> {
 
         // 2. Hold callee + play music (use override_music if provided, else default).
         if hold_agent {
-            self.propagate_hold_to_callee(&[], override_music).await?;
+            self.propagate_hold_to_side(
+                crate::media::media_bridge::LegSide::B,
+                &[],
+                override_music,
+            )
+            .await?;
         }
 
         // 3. Start the app on the caller leg.
@@ -6601,25 +6606,28 @@ enum ConstructMode<'a> {
     // ── Hold/Unhold propagation helpers ──
 
     /// Called when caller initiates hold (sendonly/inactive).
-    /// Propagates the hold to the callee side: updates leg state, sends hold
-    /// re-INVITE (if no media bridge), and starts hold music (if media bridge).
-    ///
-    /// `override_music`, if `Some`, is used instead of the normal
-    /// header/extension/config resolution chain.
-    async fn propagate_hold_to_callee(
+    /// Propagate a hold to a side: updates leg state, sends a hold re-INVITE
+    /// (no media bridge) or starts hold music (media bridge). `override_music`,
+    /// if `Some`, is used instead of the normal header/extension/config chain.
+    async fn propagate_hold_to_side(
         &mut self,
+        side: crate::media::media_bridge::LegSide,
         request_headers: &[rsipstack::sip::Header],
         override_music: Option<crate::call::domain::MediaSource>,
     ) -> Result<()> {
-        info!(session_id = %self.id, "Propagating hold to callee");
+        let leg_key = if matches!(side, crate::media::media_bridge::LegSide::B) {
+            "callee"
+        } else {
+            "caller"
+        };
+        info!(session_id = %self.id, %leg_key, "Propagating hold");
 
-        self.update_leg_state(&LegId::from("callee"), LegState::Hold);
+        self.update_leg_state(&LegId::from(leg_key), LegState::Hold);
 
         let music = override_music.or_else(|| self.resolve_hold_music(request_headers));
         let session_id = self.id.clone();
 
         if let Some(mb) = self.bridge_mut() {
-            let side = crate::media::media_bridge::LegSide::B;
             mb.pause_rtp_timeout(side);
             if let Some(music) = music {
                 let path = match &music {
@@ -6637,56 +6645,42 @@ enum ConstructMode<'a> {
                 mb.hold(side, None).await?;
             }
         } else {
-            let hold_sdp = self.generate_callee_hold_sdp()?;
-            if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&hold_sdp).await? {
-                self.media.callee_answer_sdp = Some(response_sdp);
-            }
-        }
-        Ok(())
-    }
-
-    /// Called when caller initiates unhold (sendrecv).
-    async fn propagate_unhold_to_callee(&mut self) -> Result<()> {
-        info!(session_id = %self.id, "Propagating unhold to callee");
-        self.update_leg_state(&LegId::from("callee"), LegState::Connected);
-        if let Some(mb) = self.bridge_mut() {
-            mb.resume(crate::media::media_bridge::LegSide::B).await?;
-            mb.resume_rtp_timeout(crate::media::media_bridge::LegSide::B);
-        } else {
-            let unhold_sdp = self.generate_callee_unhold_sdp()?;
-            if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&unhold_sdp).await? {
-                self.media.callee_answer_sdp = Some(response_sdp);
-            }
-        }
-        Ok(())
-    }
-
-    /// Called when callee initiates hold (sendonly/inactive).
-    async fn propagate_hold_to_caller(&mut self) -> Result<()> {
-        info!(session_id = %self.id, "Propagating hold to caller");
-        self.update_leg_state(&LegId::from("caller"), LegState::Hold);
-        if let Some(mb) = self.bridge_mut() {
-            mb.pause_rtp_timeout(crate::media::media_bridge::LegSide::A);
-            mb.hold(crate::media::media_bridge::LegSide::A, None)
-                .await?;
-        } else {
-            let hold_sdp = self.generate_hold_sdp().await?;
-            if let Err(e) = self.send_reinvite_to_caller(hold_sdp).await {
+            let hold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), true)?;
+            if matches!(side, crate::media::media_bridge::LegSide::B) {
+                if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&hold_sdp).await? {
+                    self.media.callee_answer_sdp = Some(response_sdp);
+                }
+            } else if let Err(e) = self.send_reinvite_to_leg(&LegId::from("caller"), hold_sdp).await {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to send hold re-INVITE to caller");
             }
         }
         Ok(())
     }
 
-    async fn propagate_unhold_to_caller(&mut self) -> Result<()> {
-        info!(session_id = %self.id, "Propagating unhold to caller");
-        self.update_leg_state(&LegId::from("caller"), LegState::Connected);
-        if let Some(mb) = self.bridge_mut() {
-            mb.resume(crate::media::media_bridge::LegSide::A).await?;
-            mb.resume_rtp_timeout(crate::media::media_bridge::LegSide::A);
+    async fn propagate_unhold_to_side(
+        &mut self,
+        side: crate::media::media_bridge::LegSide,
+    ) -> Result<()> {
+        let leg_key = if matches!(side, crate::media::media_bridge::LegSide::B) {
+            "callee"
         } else {
-            let unhold_sdp = self.generate_unhold_sdp().await?;
-            if let Err(e) = self.send_reinvite_to_caller(unhold_sdp).await {
+            "caller"
+        };
+        info!(session_id = %self.id, %leg_key, "Propagating unhold");
+        self.update_leg_state(&LegId::from(leg_key), LegState::Connected);
+        if let Some(mb) = self.bridge_mut() {
+            mb.resume(side).await?;
+            mb.resume_rtp_timeout(side);
+        } else {
+            let unhold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), false)?;
+            if matches!(side, crate::media::media_bridge::LegSide::B) {
+                if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&unhold_sdp).await?
+                {
+                    self.media.callee_answer_sdp = Some(response_sdp);
+                }
+            } else if let Err(e) =
+                self.send_reinvite_to_leg(&LegId::from("caller"), unhold_sdp).await
+            {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to send unhold re-INVITE to caller");
             }
         }
@@ -6750,10 +6744,19 @@ enum ConstructMode<'a> {
                 };
                 if let Some(is_hold) = callee_transition {
                     if is_hold {
-                        if let Err(e) = self.propagate_hold_to_callee(request_headers, None).await {
+                        if let Err(e) = self
+                            .propagate_hold_to_side(
+                                crate::media::media_bridge::LegSide::B,
+                                request_headers,
+                                None,
+                            )
+                            .await
+                        {
                             warn!(session_id = %self.id, error = %e, "Failed to propagate hold to callee");
                         }
-                    } else if let Err(e) = self.propagate_unhold_to_callee().await {
+                    } else if let Err(e) =
+                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::B).await
+                    {
                         warn!(session_id = %self.id, error = %e, "Failed to propagate unhold to callee");
                     }
                 }
@@ -6767,10 +6770,19 @@ enum ConstructMode<'a> {
                 };
                 if let Some(is_hold) = caller_transition {
                     if is_hold {
-                        if let Err(e) = self.propagate_hold_to_caller().await {
+                        if let Err(e) = self
+                            .propagate_hold_to_side(
+                                crate::media::media_bridge::LegSide::A,
+                                request_headers,
+                                None,
+                            )
+                            .await
+                        {
                             warn!(session_id = %self.id, error = %e, "Failed to propagate hold to caller");
                         }
-                    } else if let Err(e) = self.propagate_unhold_to_caller().await {
+                    } else if let Err(e) =
+                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::A).await
+                    {
                         warn!(session_id = %self.id, error = %e, "Failed to propagate unhold to caller");
                     }
                 }
@@ -6820,28 +6832,24 @@ enum ConstructMode<'a> {
         }
     }
 
-    /// Generate hold SDP for the callee side (sendonly).
-    fn generate_callee_hold_sdp(&self) -> Result<String> {
-        let base_sdp = self
-            .media
-            .callee_answer_sdp
-            .as_deref()
-            .or(self.media.callee_offer.as_deref())
-            .ok_or_else(|| anyhow!("No SDP available for callee hold"))?;
-        let hold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendonly");
-        Ok(hold_sdp)
-    }
-
-    /// Generate unhold SDP for the callee side (sendrecv).
-    fn generate_callee_unhold_sdp(&self) -> Result<String> {
-        let base_sdp = self
-            .media
-            .callee_answer_sdp
-            .as_deref()
-            .or(self.media.callee_offer.as_deref())
-            .ok_or_else(|| anyhow!("No SDP available for callee unhold"))?;
-        let unhold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendrecv");
-        Ok(unhold_sdp)
+    /// Generate hold (sendonly) / unhold (sendrecv) SDP for a side, reusing
+    /// that side's last negotiated SDP (answer, else offer).
+    fn generate_sdp_for_side(&self, side: &LegId, sendonly: bool) -> Result<String> {
+        let base_sdp = if side.0 == "callee" {
+            self.media
+                .callee_answer_sdp
+                .as_deref()
+                .or(self.media.callee_offer.as_deref())
+        } else {
+            self.media
+                .answer
+                .as_ref()
+                .or(self.media.caller_offer.as_ref())
+                .map(|s| s.as_str())
+        }
+        .ok_or_else(|| anyhow!("No SDP available for {} hold/unhold", side.0))?;
+        let direction = if sendonly { "sendonly" } else { "sendrecv" };
+        Ok(rustrtc::modify_sdp_direction(base_sdp, direction))
     }
 
     /// Send a re-INVITE with given SDP body to all callee dialogs and return
@@ -8778,7 +8786,9 @@ impl SipSession {
             // Unhold leg if requested.
             if let Some(leg_id) = &completion.unhold_leg {
                 if leg_id.as_str() == "callee" {
-                    if let Err(e) = self.propagate_unhold_to_callee().await {
+                    if let Err(e) =
+                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::B).await
+                    {
                         warn!(session_id = %self.id,
                             session_id = %self.context.session_id,
                             error = %e,
@@ -10259,7 +10269,7 @@ impl SipSession {
 
         self.update_leg_state(&leg_id, LegState::Hold);
 
-        let hold_sdp = self.generate_hold_sdp().await?;
+        let hold_sdp = self.generate_sdp_for_side(&leg_id, true)?;
 
         match self.send_reinvite_to_leg(&leg_id, hold_sdp).await {
             Ok(_) => {
@@ -10340,7 +10350,7 @@ impl SipSession {
             mb.resume_rtp_timeout(side);
         }
 
-        let unhold_sdp = self.generate_unhold_sdp().await?;
+        let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;
 
         match self.send_reinvite_to_leg(&leg_id, unhold_sdp).await {
             Ok(_) => {
@@ -10363,30 +10373,6 @@ impl SipSession {
         }
     }
 
-    async fn generate_hold_sdp(&self) -> Result<String> {
-        let base_sdp = self
-            .media
-            .answer
-            .as_ref()
-            .or(self.media.caller_offer.as_ref())
-            .ok_or_else(|| anyhow!("No SDP available for hold"))?;
-
-        let hold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendonly");
-        Ok(hold_sdp)
-    }
-
-    async fn generate_unhold_sdp(&self) -> Result<String> {
-        let base_sdp = self
-            .media
-            .answer
-            .as_ref()
-            .or(self.media.caller_offer.as_ref())
-            .ok_or_else(|| anyhow!("No SDP available for unhold"))?;
-
-        let unhold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendrecv");
-        Ok(unhold_sdp)
-    }
-
     /// Send a re-INVITE (e.g. hold/unhold SDP) to the dialog of the target leg
     /// ("caller" → the primary caller dialog; "callee" → the callee dialog).
     async fn send_reinvite_to_leg(&self, leg_id: &LegId, sdp: String) -> Result<()> {
@@ -10406,33 +10392,6 @@ impl SipSession {
             return Ok(());
         };
         match dialog.reinvite(Some(headers), Some(sdp.into_bytes())).await {
-            Ok(Some(response)) => {
-                let status = response.status_code.code();
-                if StatusCode::from(status).kind() == rsipstack::sip::StatusCodeKind::Successful {
-                    info!(session_id = %self.id, status = %status, "re-INVITE accepted");
-                    Ok(())
-                } else {
-                    Err(anyhow!("re-INVITE rejected with status {}", status))
-                }
-            }
-            Ok(None) => Err(anyhow!("re-INVITE timed out")),
-            Err(e) => Err(anyhow!("re-INVITE failed: {}", e)),
-        }
-    }
-
-    async fn send_reinvite_to_caller(&self, sdp: String) -> Result<()> {
-        let headers = Self::sdp_headers();
-
-        let Some(server_dialog) = self.caller_dialog.as_ref() else {
-            // UAC mode: no inbound caller to re-INVITE; media hold/unhold is
-            // handled entirely on the MediaBridge.
-            debug!(session_id = %self.id, "Skipping caller re-INVITE (UAC mode)");
-            return Ok(());
-        };
-        match server_dialog
-            .reinvite(Some(headers), Some(sdp.into_bytes()))
-            .await
-        {
             Ok(Some(response)) => {
                 let status = response.status_code.code();
                 if StatusCode::from(status).kind() == rsipstack::sip::StatusCodeKind::Successful {
@@ -12718,7 +12677,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
         // The method reads answer first, then caller_offer
         session.media.answer = Some(sendrecv_sdp);
 
-        let hold_sdp = session.generate_hold_sdp().await.expect("hold SDP");
+        let hold_sdp = session.generate_sdp_for_side(&LegId::from("caller"), true).expect("hold SDP");
         assert!(
             hold_sdp.contains("a=sendonly"),
             "hold SDP must be sendonly, got: {}",
@@ -12729,7 +12688,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             "hold SDP must NOT contain sendrecv"
         );
 
-        let unhold_sdp = session.generate_unhold_sdp().await.expect("unhold SDP");
+        let unhold_sdp = session.generate_sdp_for_side(&LegId::from("caller"), false).expect("unhold SDP");
         assert!(
             unhold_sdp.contains("a=sendrecv"),
             "unhold SDP must be sendrecv, got: {}",
