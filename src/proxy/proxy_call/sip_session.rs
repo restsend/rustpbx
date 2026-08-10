@@ -840,6 +840,7 @@ enum ConstructMode<'a> {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+    const CALLER_REJECTION_ACK_TIMEOUT: Duration = Duration::from_secs(3);
     const MID_DIALOG_TIMEOUT: Duration = Duration::from_secs(30);
     /// Minimum length (ms) a `tone://` cue is rendered for. Shorter specs are
     /// padded up to this so a failure tone is always audible before the reject.
@@ -1667,6 +1668,7 @@ enum ConstructMode<'a> {
             .clamp(Duration::from_secs(30), Duration::from_secs(120))
             + Duration::from_secs(15); // backstop after the session's ring-timeout
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
+        let mut session_cancelled = false;
 
         loop {
             tokio::select! {
@@ -1680,8 +1682,16 @@ enum ConstructMode<'a> {
                     }
                     break;
                 }
-                _ = cancel_token.cancelled() => {
+                _ = cancel_token.cancelled(), if !session_cancelled => {
                     debug!(session_id = %session_id, "Call cancelled via token");
+                    if matches!(
+                        server_dialog_clone.state(),
+                        DialogState::Terminated(_, TerminatedReason::UasDecline)
+                    ) {
+                        session_cancelled = true;
+                        timeout = tokio::time::sleep(Self::CALLER_REJECTION_ACK_TIMEOUT).boxed();
+                        continue;
+                    }
                     if !server_dialog_clone.state().is_terminated() {
                         if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
                             warn!(session_id = %session_id, error = %e, "Failed to reply 487 on cancel");
