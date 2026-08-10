@@ -45,7 +45,11 @@ async def test_queue_sequential_agent_answers(pbx, sipbot_pool):
         target=f"sip:support@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
-    await h.wait_rtp(caller, "caller", 20)
+    # Assert the *agent* receives RTP from the caller — proves the caller↔agent
+    # media bridge is active. Checking only the caller's `has_rx or has_tx`
+    # would pass on hold-music RTP alone even if the bridge never activated.
+    await h.wait_rtp_rx(agent, "agent", 20)
+    await h.wait_rtp(caller, "caller", 10)
     stats = caller.get_rtp_stats()
     assert stats.has_rx or stats.has_tx, f"no RTP: {stats}"
 

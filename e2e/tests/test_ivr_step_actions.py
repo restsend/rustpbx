@@ -221,6 +221,10 @@ async def test_step_ivr_queue_action_routes_to_agent(pbx, sipbot_pool, tmp_path)
         assert await agent.wait_output_async(r"200 OK|Call established", timeout=30), (
             f"agent 1002 never received the queued call:\n{agent.output[-1500:]}"
         )
+        # Media bridge must be active: the agent must receive RTP from the
+        # caller. A `has_rx or has_tx` check on the caller would pass on
+        # hold-music RTP even if the caller↔agent bridge never activated.
+        await h.wait_rtp_rx(agent, "agent", 25)
     finally:
         await cleanup()
 

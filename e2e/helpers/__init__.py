@@ -81,6 +81,23 @@ async def wait_rtp(ua, label: str = "UA", timeout: float = 20):
     raise AssertionError(f"{label}: no RTP after {timeout}s — {ua.get_rtp_stats()}")
 
 
+async def wait_rtp_rx(ua, label: str = "UA", timeout: float = 20):
+    """Poll until the sipbot UA reports received RTP packets.
+
+    Unlike :func:`wait_rtp`, this proves a *peer* is actually sending media
+    toward the UA (RX). Used to verify a media bridge is active between two
+    parties — a broken/unactivated bridge leaves RX at 0.
+    """
+    import asyncio
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if ua.get_rtp_stats().has_rx:
+            return
+        await asyncio.sleep(0.3)
+    raise AssertionError(f"{label}: no RTP RX after {timeout}s — {ua.get_rtp_stats()}")
+
+
 async def wait_audio(ua, label: str = "UA", timeout: float = 20):
     """Wait for sipbot's AudioQuality has_audio=true (reliable only for RTP media)."""
     ok = await ua.wait_output_async(r"has_audio=true", timeout=timeout)

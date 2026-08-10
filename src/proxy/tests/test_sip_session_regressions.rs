@@ -1444,6 +1444,76 @@ async fn handle_play_returns_immediately_when_not_awaited() {
     );
 }
 
+// ─── queue agent connect activates the caller↔agent media bridge ─────────────
+//
+// Regression: when a queue agent answers (dynamic leg), the MediaBridge B leg
+// is created with only a local offer (create_callee_track) and the agent's
+// answer SDP was never applied to it, and neither leg was accepted / bridged.
+// So the caller and agent both showed "connected" but no audio flowed in
+// either direction (the recording captured only hold music / silence).
+// The `LegConnected` handler must apply the answer SDP, accept both legs and
+// activate the bridge.
+
+#[tokio::test]
+async fn queue_agent_connect_activates_media_bridge() {
+    use crate::media::leg::{LegConfig, LegInner};
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // Caller side: a valid PCMU offer as the inbound INVITE body.
+    let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
+    session.media.caller_offer = Some(caller_offer);
+
+    // `create_callee_track` builds the B leg on the MediaBridge and returns the
+    // agent-offer SDP that would be sent in the queue agent INVITE.
+    let agent_offer = session
+        .create_callee_track(false)
+        .await
+        .expect("create callee track");
+    assert!(agent_offer.contains("m=audio"), "agent offer must carry audio m-line");
+
+    // Simulate the agent answering: build a scratch RTP/PCMU leg to answer the
+    // offer, yielding the agent's answer SDP.
+    let agent_scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu()).unwrap();
+    let agent_answer = agent_scratch
+        .answer(&agent_offer)
+        .await
+        .expect("agent answer");
+    assert!(agent_answer.contains("m=audio"), "agent answer must carry audio m-line");
+
+    // Register the dynamic queue-agent leg, then feed LegConnected.
+    let agent_leg = LegId::from("queue-agent-1");
+    session.legs.insert(
+        agent_leg.clone(),
+        Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
+    );
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: agent_leg,
+                answer_sdp: Some(agent_answer),
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
+
+    // The media bridge must now be active (both legs accepted + relay armed).
+    let mb = session.media.bridge.as_ref().expect("media bridge present");
+    assert!(
+        mb.is_bridged(),
+        "queue agent connect must activate the caller<->agent media bridge"
+    );
+
+    if let Some(mb) = session.media.bridge.as_mut() {
+        mb.close();
+    }
+}
+
 // ─── proxy queue fallback routing (no agents) ───────────────────────────────
 //
 // Covers the path the original bug report exercised: IVR → queue transfer →

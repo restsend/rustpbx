@@ -379,6 +379,11 @@ impl LegInner {
         self.pc.wait_for_gathering_complete().await;
         let offer = self.pc.create_offer().await?;
         let sdp = set_local(&self.pc, offer)?;
+        debug!(
+            leg = %self.id,
+            sdp = %sdp,
+            "leg SDP offer created",
+        );
         Ok(sdp)
     }
 
@@ -387,6 +392,12 @@ impl LegInner {
     /// answer as UAC). Also extracts and stores the negotiated profile and
     /// refreshes the egress codec + DTMF payload types.
     pub async fn apply_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<String> {
+        debug!(
+            leg = %self.id,
+            sdp_type = ?sdp_type,
+            sdp = %remote,
+            "leg SDP applied",
+        );
         let desc = SessionDescription::parse(sdp_type, remote)
             .map_err(|e| anyhow!("failed to parse remote sdp: {:?}", e))?;
         self.pc

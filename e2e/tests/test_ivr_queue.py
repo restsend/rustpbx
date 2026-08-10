@@ -95,10 +95,11 @@ target = "support"
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"call not answered:\n{caller.output[-1500:]}"
 
-    await h.wait_rtp(caller, "caller", 25)
-
-    stats = caller.get_rtp_stats()
-    assert stats.has_rx or stats.has_tx, f"no RTP after IVR→queue→agent: {stats}"
+    # The caller-side `has_rx or has_tx` check is weak: the caller already
+    # receives IVR/hold-music RTP and sends DTMF, so it passes even when the
+    # caller↔agent media bridge was never activated. Assert the *agent*
+    # receives RTP from the caller — that only happens if the bridge is live.
+    await h.wait_rtp_rx(agent, "agent", 25)
 
 
 @pytest.mark.asyncio

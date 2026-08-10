@@ -8668,9 +8668,28 @@ impl SipSession {
                             }),
                         ));
                 }
-                if let Some(sdp) = answer_sdp {
+                if let Some(sdp) = answer_sdp.clone() {
                     self.legs.set_answer(leg_id.clone(), sdp);
                 }
+
+                // Queue agent connected: apply the agent's answer SDP to the
+                // shared MediaBridge B leg (created by create_callee_track when
+                // the agent INVITE was generated) and activate the A<->B relay.
+                // The "callee" leg is handled above (attach_callee_dialog);
+                // the "caller" leg never generates a LegConnected event.
+                // mb.leg(B).is_some() is the structural signal that this is
+                // the queue-agent media path (B leg exists iff create_callee_track
+                // ran in the queue originate flow).
+                if leg_id != LegId::from("callee")
+                    && let (Some(sdp), Some(mb)) = (answer_sdp.as_deref(), self.bridge_mut())
+                    && let Some(leg_b) = mb.leg(crate::media::media_bridge::LegSide::B)
+                {
+                    let _ = leg_b.apply_sdp(sdp, rustrtc::SdpType::Answer).await;
+                    mb.accept(crate::media::media_bridge::LegSide::B).await;
+                    mb.accept(crate::media::media_bridge::LegSide::A).await;
+                    let _ = mb.bridge().await;
+                }
+
                 self.update_leg_state(&leg_id, LegState::Connected);
                 self.update_media_path().await;
                 CommandResult::success()
@@ -9461,7 +9480,7 @@ impl SipSession {
                                                     info!(%leg_id, "Remote description set successfully");
                                                 }
                                             } else {
-                                                debug!(%leg_id, "Queue agent answer will be applied to the shared media path by setup_bridge");
+                                                debug!(%leg_id, "Queue agent answer will be applied to the shared media path by LegConnected");
                                             }
                                             Some(sdp)
                                         } else {
