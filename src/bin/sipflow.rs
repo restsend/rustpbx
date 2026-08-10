@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
                                                         level,
                                                     );
                                                 }
-                                                // RTP: 包小压缩比极低，跳过以节省 CPU
+                                                // RTP: small packet, skip to save CPU
                                                 MsgType::Rtp => {}
                                             }
                                         }

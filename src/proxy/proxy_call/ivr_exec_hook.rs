@@ -155,7 +155,8 @@ impl CallSessionHook for IvrExecHook {
             });
         }
 
-        // 消费后清理 extensions，防止同一 session 后续 app 退出时重复触发。
+        // Clean up extensions after consumption to prevent re-triggering
+        // when a subsequent app exits in the same session.
         {
             let mut guard = ctx.extensions.write();
             guard.remove::<IvrExecState>();

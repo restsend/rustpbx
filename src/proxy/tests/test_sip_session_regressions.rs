@@ -932,7 +932,7 @@ async fn test_resolve_final_hangup_reason_flags_queue_abandon_when_already_aband
 /// A leg failure while the call is being driven by the queue must record an
 /// agent-rejection trace that names the agent, the SIP status and the queue —
 /// so the operator sees *why* the queue could not connect (e.g. 486 from an
-/// off-hours / 作息拒接 phone) instead of only a generic abandon.
+/// off-hours / time-of-day rejection) instead of only a generic abandon.
 #[tokio::test]
 async fn test_leg_failed_in_queue_records_agent_rejection_trace() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {

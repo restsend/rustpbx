@@ -1713,7 +1713,7 @@ mod tests {
             .await;
     }
 
-    // ── 最终提示（Final Destination Prompt） ──
+    // ── Final Destination Prompt ──
 
     #[tokio::test]
     async fn test_final_destination_prompt_no_agents_plays_prompt() {
@@ -1739,7 +1739,7 @@ mod tests {
         stack.join().await.unwrap();
     }
 
-    // ── 升级策略（Escalation） ──
+    // ── Escalation ──
 
     #[tokio::test]
     async fn test_cumulative_escalation_does_not_crash() {

@@ -144,7 +144,7 @@ pub struct QueueConfig {
     pub metrics_enabled: bool,
     /// Built-in voice prompts for queue events.
     pub voice_prompts: Option<VoicePrompts>,
-    // ── 升级策略 (Escalation) ──
+    // ── Escalation ──
     /// Escalation mode: Replace or Cumulative.
     pub escalation_mode: EscalationMode,
     /// Escalation timeline: ordered steps of (threshold_secs, skill_group_id).
@@ -306,11 +306,11 @@ pub struct QueueApp {
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
-    // ── Comfort 播报 ──
+    // ── Comfort announcement ──
     /// Comfort prompt playback state.
     comfort_index: usize,
     last_comfort_played: Option<Instant>,
-    // ── 升级策略 ──
+    // ── Escalation ──
     /// Skill groups already escalated (to avoid duplicates).
     escalated_groups: Vec<String>,
     /// RWI gateway captured from the application context (for queue lifecycle
