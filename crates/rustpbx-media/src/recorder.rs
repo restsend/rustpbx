@@ -18,10 +18,6 @@ use tracing::debug;
 pub struct RecorderOption {
     #[serde(default)]
     pub recorder_file: String,
-    #[serde(default)]
-    pub samplerate: u32,
-    #[serde(default)]
-    pub ptime: u32,
 }
 
 impl RecorderOption {
@@ -37,8 +33,6 @@ impl Default for RecorderOption {
     fn default() -> Self {
         Self {
             recorder_file: "".to_string(),
-            samplerate: 16000,
-            ptime: 200,
         }
     }
 }
@@ -352,10 +346,7 @@ impl Recorder {
 
     fn leg_end_ts(&self, leg: Leg) -> u32 {
         let (samples_per_block, bytes_per_block) = self.block_info();
-        let buffered_end = match leg {
-            Leg::A => self.buffer_a.last_key_value(),
-            Leg::B => self.buffer_b.last_key_value(),
-        }
+        let buffered_end = self.leg_buffer(leg).last_key_value()
         .map(|(k, v)| k + (v.len() / bytes_per_block) as u32 * samples_per_block)
         .unwrap_or(self.next_flush_ts);
 
@@ -407,43 +398,23 @@ impl Recorder {
     }
 
     fn overlay_dtmf_range(&mut self, leg: Leg, start_ts: u32, end_ts: u32, encoded: Bytes) {
-        let overlapping_keys: Vec<u32> = match leg {
-            Leg::A => self.buffer_a.range(..end_ts).map(|(k, _)| *k).collect(),
-            Leg::B => self.buffer_b.range(..end_ts).map(|(k, _)| *k).collect(),
-        };
+        let overlapping_keys: Vec<u32> = self.leg_buffer_mut(leg).range(..end_ts).map(|(k, _)| *k).collect();
 
         for key in overlapping_keys {
-            let data = match leg {
-                Leg::A => self.buffer_a.remove(&key),
-                Leg::B => self.buffer_b.remove(&key),
-            };
+            let data = self.leg_buffer_mut(leg).remove(&key);
             let Some(data) = data else {
                 continue;
             };
             let block_end = key.saturating_add(self.block_span_samples(&data));
             if block_end <= start_ts || key >= end_ts {
-                match leg {
-                    Leg::A => {
-                        self.buffer_a.insert(key, data);
-                    }
-                    Leg::B => {
-                        self.buffer_b.insert(key, data);
-                    }
-                }
+                self.leg_buffer_mut(leg).insert(key, data);
                 continue;
             }
 
             if key < start_ts
                 && let Some(prefix) = self.trim_back(&data, start_ts - key)
             {
-                match leg {
-                    Leg::A => {
-                        self.buffer_a.insert(key, prefix);
-                    }
-                    Leg::B => {
-                        self.buffer_b.insert(key, prefix);
-                    }
-                }
+                self.leg_buffer_mut(leg).insert(key, prefix);
             }
 
             if block_end > end_ts
@@ -451,25 +422,11 @@ impl Recorder {
                     self.trim_front(&data, end_ts.saturating_sub(key))
             {
                 let suffix_ts = key.saturating_add(trimmed_samples);
-                match leg {
-                    Leg::A => {
-                        self.buffer_a.insert(suffix_ts, suffix);
-                    }
-                    Leg::B => {
-                        self.buffer_b.insert(suffix_ts, suffix);
-                    }
-                }
+                self.leg_buffer_mut(leg).insert(suffix_ts, suffix);
             }
         }
 
-        match leg {
-            Leg::A => {
-                self.buffer_a.insert(start_ts, encoded);
-            }
-            Leg::B => {
-                self.buffer_b.insert(start_ts, encoded);
-            }
-        }
+        self.leg_buffer_mut(leg).insert(start_ts, encoded);
     }
 
     fn insert_audio_block(&mut self, leg: Leg, start_ts: u32, encoded: Bytes) {
@@ -784,6 +741,20 @@ impl Recorder {
         self.block_info().0
     }
 
+    fn leg_buffer(&self, leg: Leg) -> &BTreeMap<u32, Bytes> {
+        match leg {
+            Leg::A => &self.buffer_a,
+            Leg::B => &self.buffer_b,
+        }
+    }
+
+    fn leg_buffer_mut(&mut self, leg: Leg) -> &mut BTreeMap<u32, Bytes> {
+        match leg {
+            Leg::A => &mut self.buffer_a,
+            Leg::B => &mut self.buffer_b,
+        }
+    }
+
     fn get_silence_bytes(&mut self, _leg: Leg, blocks: usize) -> Result<Bytes> {
         let (samples_per_block, _) = self.block_info();
         let mut num_samples = (blocks as u32 * samples_per_block) as usize;
@@ -812,10 +783,7 @@ impl Recorder {
         let flush_to = self.next_flush_ts + samples;
 
         while current_ts < flush_to {
-            let next_ts = match leg {
-                Leg::A => self.buffer_a.first_key_value().map(|(k, _)| *k),
-                Leg::B => self.buffer_b.first_key_value().map(|(k, _)| *k),
-            };
+            let next_ts = self.leg_buffer_mut(leg).first_key_value().map(|(k, _)| *k);
 
             if let Some(ts) = next_ts {
                 if ts < flush_to {
@@ -835,10 +803,7 @@ impl Recorder {
                         current_ts = ts;
                     }
 
-                    let data = match leg {
-                        Leg::A => self.buffer_a.pop_first().unwrap().1,
-                        Leg::B => self.buffer_b.pop_first().unwrap().1,
-                    };
+                    let data = self.leg_buffer_mut(leg).pop_first().unwrap().1;
                     let data_samples = (data.len() / bytes_per_block) as u32 * samples_per_block;
                     if current_ts + data_samples > flush_to {
                         let keep_samples = flush_to - current_ts;
@@ -860,11 +825,7 @@ impl Recorder {
                             }
                             current_ts += keep_blocks * samples_per_block;
                         } else {
-                            // Put it all back
-                            match leg {
-                                Leg::A => self.buffer_a.insert(ts, data),
-                                Leg::B => self.buffer_b.insert(ts, data),
-                            };
+                            self.leg_buffer_mut(leg).insert(ts, data);
                             break;
                         }
                     } else {

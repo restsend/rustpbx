@@ -13,10 +13,6 @@ pub struct CommandResult {
     pub message: Option<String>,
     /// The leg that was affected (if any)
     pub affected_leg: Option<LegId>,
-    /// Whether media capabilities were degraded
-    pub media_degraded: bool,
-    /// Degradation reason (if media was degraded)
-    pub degradation_reason: Option<String>,
     /// Optional structured data payload
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
@@ -29,8 +25,6 @@ impl CommandResult {
             success: true,
             message: None,
             affected_leg: None,
-            media_degraded: false,
-            degradation_reason: None,
             data: None,
         }
     }
@@ -41,8 +35,6 @@ impl CommandResult {
             success: true,
             message: None,
             affected_leg: Some(leg),
-            media_degraded: false,
-            degradation_reason: None,
             data: None,
         }
     }
@@ -53,32 +45,6 @@ impl CommandResult {
             success: false,
             message: Some(message.into()),
             affected_leg: None,
-            media_degraded: false,
-            degradation_reason: None,
-            data: None,
-        }
-    }
-
-    /// Create a degraded result (command succeeded but with limited capability)
-    pub fn degraded(reason: impl Into<String>) -> Self {
-        Self {
-            success: true,
-            message: None,
-            affected_leg: None,
-            media_degraded: true,
-            degradation_reason: Some(reason.into()),
-            data: None,
-        }
-    }
-
-    /// Create a not supported result (for bypass mode media commands)
-    pub fn not_supported(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            message: Some(message.into()),
-            affected_leg: None,
-            media_degraded: false,
-            degradation_reason: None,
             data: None,
         }
     }
@@ -89,8 +55,6 @@ impl CommandResult {
             success: true,
             message: None,
             affected_leg: None,
-            media_degraded: false,
-            degradation_reason: None,
             data: Some(data),
         }
     }
@@ -196,7 +160,6 @@ mod tests {
         let result = CommandResult::success();
         assert!(result.success);
         assert!(result.message.is_none());
-        assert!(!result.media_degraded);
     }
 
     #[test]
@@ -204,14 +167,6 @@ mod tests {
         let result = CommandResult::failure("test error");
         assert!(!result.success);
         assert_eq!(result.message, Some("test error".to_string()));
-    }
-
-    #[test]
-    fn command_result_degraded() {
-        let result = CommandResult::degraded("bypass mode");
-        assert!(result.success);
-        assert!(result.media_degraded);
-        assert_eq!(result.degradation_reason, Some("bypass mode".to_string()));
     }
 
     #[test]

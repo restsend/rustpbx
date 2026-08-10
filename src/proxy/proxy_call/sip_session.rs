@@ -8230,25 +8230,18 @@ impl SipSession {
     ) -> CommandResult {
         let capability_check = self.check_capability(&command);
 
-        let degradation_reason = match capability_check {
+        match capability_check {
             MediaCapabilityCheck::Denied { reason } => {
-                return CommandResult::degraded(&reason);
+                warn!(session_id = %self.id, reason = %reason, "Media capability denied");
+                return CommandResult::success();
             }
             MediaCapabilityCheck::Degraded { reason } => {
                 warn!(session_id = %self.id, reason = %reason, "Executing in degraded mode");
-                Some(reason)
             }
-            MediaCapabilityCheck::Allowed => None,
-        };
-
-        let mut result = self.process_command(command, callee_state_rx).await;
-
-        if let Some(reason) = degradation_reason {
-            result.media_degraded = true;
-            result.degradation_reason = Some(reason);
+            MediaCapabilityCheck::Allowed => {}
         }
 
-        result
+        self.process_command(command, callee_state_rx).await
     }
 
     fn check_capability(&self, command: &CallCommand) -> MediaCapabilityCheck {
@@ -8354,7 +8347,7 @@ impl SipSession {
                 let event_value = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
                 match self.app_runtime.inject_event(event_value) {
                     Ok(()) => CommandResult::success(),
-                    Err(e) => CommandResult::degraded(e.to_string()),
+                    Err(e) => CommandResult::failure(e.to_string()),
                 }
             }
 
@@ -8757,7 +8750,7 @@ impl SipSession {
                 body,
             } => Self::ok_or_failure(self.handle_send_info(leg_id, content_type, body).await),
 
-            _ => CommandResult::not_supported("Command not yet implemented"),
+            _ => CommandResult::failure("Command not yet implemented".to_string()),
         }
     }
 

@@ -603,33 +603,7 @@ impl MediaBridge {
         loop_playback: bool,
     ) -> Result<PlaybackHandle> {
         self.unbridge().await?;
-        let leg = self
-            .leg(side)
-            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
-        // Pause the RTP inactivity timeout while playing: during playback the
-        // peer may stay silent, so an armed timeout would fire spuriously.
-        leg.pause_rtp_timeout();
-        let leg_for_end = leg.clone();
-        let (handle, done_tx) = PlaybackHandle::new();
-        self.active_play.lock().insert(side);
-        let active_registry = self.active_play.clone();
-        let done_tx = Arc::new(parking_lot::Mutex::new(Some(done_tx)));
-        let on_end = Arc::new(move |interrupted: bool| {
-            // Clear the active-play marker for this side on completion.
-            active_registry.lock().remove(&side);
-            // Resume the RTP inactivity timeout once playback ends.
-            leg_for_end.resume_rtp_timeout();
-            if let Some(tx) = done_tx.lock().take() {
-                let _ = tx.send(PlaybackResult { interrupted });
-            }
-        });
-        leg.set_egress_source(EgressSource::Media {
-            audio,
-            loop_playback,
-            on_end: Some(on_end),
-        })
-        .await?;
-        Ok(handle)
+        self.play_side_only(side, audio, loop_playback).await
     }
 
     /// Play a media source on a leg **without** breaking the opposite leg's

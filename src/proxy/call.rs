@@ -1081,12 +1081,6 @@ impl CallModule {
                 if existing.recorder_file.is_empty() {
                     existing.recorder_file = recorder_option.recorder_file.clone();
                 }
-                if let Some(rate) = policy.samplerate {
-                    existing.samplerate = rate;
-                }
-                if let Some(ptime) = policy.ptime {
-                    existing.ptime = ptime;
-                }
             } else {
                 dialplan.recording.option = Some(recorder_option);
             }
@@ -1204,13 +1198,7 @@ impl CallModule {
         path.push(sanitized);
         path.set_extension("wav");
 
-        let mut option = RecorderOption::new(path.to_string_lossy().to_string());
-        if let Some(rate) = policy.samplerate {
-            option.samplerate = rate;
-        }
-        if let Some(ptime) = policy.ptime {
-            option.ptime = ptime;
-        }
+        let option = RecorderOption::new(path.to_string_lossy().to_string());
         Some(option)
     }
 

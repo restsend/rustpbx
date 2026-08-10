@@ -148,17 +148,7 @@ enum EgressCmd {
 impl EgressPipeline {
     /// Spawn the pacing task. `sender` is the push side of the track added to
     /// the PeerConnection. `initial` is the first source (commonly
-    /// [`EgressSource::Silence`]).
-    pub fn start(
-        sender: SampleStreamSource,
-        codec: EgressCodec,
-        initial: EgressSource,
-        ptime_ms: Option<u32>,
-    ) -> Self {
-        Self::start_with_gate(sender, codec, initial, ptime_ms, None)
-    }
-
-    /// [`Self::start`] with an optional gate. While the gate is held (true),
+    /// [`EgressSource::Silence`]). While the gate is held (true),
     /// the pipeline parks (produces no frames) so a leg never emits audio to
     /// its remote peer before the call is answered — the rewrite relay opens
     /// the gate via [`EgressGate`] when both legs accept.
@@ -571,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn silence_pipeline_emits_frames_at_ptime() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start(sender, pcmu_codec(), EgressSource::Silence, Some(20));
+        let pipe = EgressPipeline::start_with_gate(sender, pcmu_codec(), EgressSource::Silence, Some(20), None);
 
         // Let a few ticks elapse, then stop and inspect via the shared sender
         // drop_count isn't exposed; instead we just assert the task runs and
@@ -622,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn switch_source_from_silence_to_media() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start(sender, pcmu_codec(), EgressSource::Silence, Some(20));
+        let pipe = EgressPipeline::start_with_gate(sender, pcmu_codec(), EgressSource::Silence, Some(20), None);
         // Switch to a looping media source mid-stream.
         pipe.set_source(EgressSource::Media {
             audio: Box::new(LoopingBeep { rate: 8000, pos: 0 }),
@@ -677,7 +667,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start(sender, codec, EgressSource::Silence, Some(20));
+        let pipe = EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
 
         let consumed = Arc::new(AtomicUsize::new(0));
         pipe.set_source(EgressSource::Media {
