@@ -66,6 +66,24 @@ pub fn substitute_vars(s: &str, vars: &HashMap<String, String>) -> String {
     result
 }
 
+/// Resolve the effective `return_app` for a transfer-like action.
+///
+/// `return_app` wins when set and non-empty. Otherwise, when a `return_target`
+/// is present (including the legacy `return_to_ivr` alias), the call is
+/// returned to the `"ivr"` app with that target.
+pub fn effective_return_app<'a>(
+    return_app: &'a Option<String>,
+    return_target: &'a Option<String>,
+) -> Option<&'a str> {
+    if let Some(app) = return_app.as_deref().filter(|s| !s.is_empty()) {
+        Some(app)
+    } else if return_target.as_deref().filter(|s| !s.is_empty()).is_some() {
+        Some("ivr")
+    } else {
+        None
+    }
+}
+
 pub fn resolve_audio_path(
     file: Option<&str>,
     tts_text: Option<&str>,
@@ -226,7 +244,7 @@ pub async fn execute_action(
                 }
                 query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
             }
-            if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+            if let Some(app) = effective_return_app(return_app, return_target) {
                 if !query.is_empty() {
                     query.push('&');
                 }
@@ -247,7 +265,7 @@ pub async fn execute_action(
             return_target,
         } => {
             let mut t = substitute_vars(target, &sess.variables);
-            if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+            if let Some(app) = effective_return_app(return_app, return_target) {
                 t.push_str(&format!("?return_app={}", urlencoding::encode(app)));
                 if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
                     t.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
@@ -584,7 +602,7 @@ pub async fn execute_action(
                     .insert(format!("bridge_hdr_{}", k), v.clone());
             }
             let mut uri = uri;
-            if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+            if let Some(app) = effective_return_app(return_app, return_target) {
                 let sep = if uri.contains('?') { "&" } else { "?" };
                 uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
                 if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
@@ -686,6 +704,32 @@ mod tests {
         let vars = HashMap::new();
         let result = substitute_vars("url=$missing$", &vars);
         assert_eq!(result, "url=$missing$");
+    }
+
+    #[test]
+    fn test_effective_return_app_explicit_wins() {
+        assert_eq!(
+            effective_return_app(&Some("ivr".into()), &Some("main".into())),
+            Some("ivr")
+        );
+        assert_eq!(
+            effective_return_app(&Some("csat".into()), &None),
+            Some("csat")
+        );
+    }
+
+    #[test]
+    fn test_effective_return_app_defaults_to_ivr() {
+        // Legacy `return_to_ivr` surfaces as `return_target` only; no explicit
+        // `return_app` -> default to the `"ivr"` app.
+        assert_eq!(
+            effective_return_app(&None, &Some("step-ivr".into())),
+            Some("ivr")
+        );
+        // Empty values are ignored.
+        assert_eq!(effective_return_app(&Some("".into()), &None), None);
+        assert_eq!(effective_return_app(&None, &Some("".into())), None);
+        assert_eq!(effective_return_app(&None, &None), None);
     }
 
     #[test]

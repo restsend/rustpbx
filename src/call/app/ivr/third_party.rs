@@ -20,17 +20,7 @@ pub struct ThirdPartyNode {
     #[serde(default)]
     pub children: HashMap<String, String>,
     #[serde(default)]
-    pub forwardid: HashMap<String, String>,
-    #[serde(default)]
-    pub priority: HashMap<String, String>,
-    #[serde(default)]
-    pub ivrid: HashMap<String, String>,
-    #[serde(default)]
     pub controltype: String,
-    #[serde(default)]
-    pub create_room_uri: Option<String>,
-    #[serde(default)]
-    pub interaction_link_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,48 +204,6 @@ impl ThirdPartyTreeProvider {
                 scene: node.nodename.clone(),
                 timeout_ms: node.nodevalue.parse().unwrap_or(5000),
             },
-
-            "TransferBridgeVoip" => EntryAction::Bridge {
-                create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
-                headers: HashMap::new(),
-                timeout_ms: None,
-                return_app: None, return_target: None,
-                success: None,
-                failure: None,
-            },
-
-            "TRouteBridge" => {
-                let has_success = node
-                    .children
-                    .get("0")
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
-                let has_failure = node
-                    .children
-                    .get("1")
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
-                EntryAction::Bridge {
-                    create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
-                    headers: HashMap::new(),
-                    timeout_ms: None,
-                    return_app: None, return_target: None,
-                    success: if has_success {
-                        Some(Box::new(ActionNode::new(EntryAction::Repeat)))
-                    } else {
-                        None
-                    },
-                    failure: if has_failure {
-                        Some(Box::new(ActionNode::new(EntryAction::Hangup {
-                            prompt: None,
-                            prompt_text: None,
-                            prompt_voice: None,
-                        })))
-                    } else {
-                        None
-                    },
-                }
-            }
 
             _ => {
                 warn!(nodetype = %node.nodetype, "unknown third-party node type, treating as hangup");
@@ -522,14 +470,6 @@ fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
         "input_voice" => EntryAction::InputVoice {
             scene: node.nodename.clone(),
             timeout_ms: node.nodevalue.parse().unwrap_or(5000),
-        },
-        "TransferBridgeVoip" | "TRouteBridge" => EntryAction::Bridge {
-            create_room_uri: node.create_room_uri.clone().unwrap_or_default(),
-            headers: HashMap::new(),
-            timeout_ms: None,
-            return_app: None, return_target: None,
-            success: None,
-            failure: None,
         },
         _ => EntryAction::Hangup {
             prompt: None,
@@ -812,9 +752,6 @@ mod tests {
                 "nodevalue": "",
                 "businessnodeid": "710000",
                 "children": {"0": "api_1"},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": "ivr001"},
                 "controltype": ""
             },
             "api_1": {
@@ -823,9 +760,6 @@ mod tests {
                 "nodevalue": "",
                 "businessnodeid": "200001",
                 "children": {"0": "prompt_1", "1": "menu_1"},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": "ivr002", "1": "ivr003"},
                 "controltype": ""
             },
             "prompt_1": {
@@ -834,9 +768,6 @@ mod tests {
                 "nodevalue": "",
                 "businessnodeid": "200002",
                 "children": {"0": "menu_1"},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": "ivr004"},
                 "controltype": ""
             },
             "menu_1": {
@@ -845,9 +776,6 @@ mod tests {
                 "nodevalue": "3",
                 "businessnodeid": "200003",
                 "children": {"1": "agent_1", "0": "ivr_1"},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": "ivr005", "1": "ivr006"},
                 "controltype": ""
             },
             "agent_1": {
@@ -856,9 +784,6 @@ mod tests {
                 "nodevalue": "from_gate:2618",
                 "businessnodeid": "200004",
                 "children": {"0": ""},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": ""},
                 "controltype": ""
             },
             "ivr_1": {
@@ -867,9 +792,6 @@ mod tests {
                 "nodevalue": "",
                 "businessnodeid": "200005",
                 "children": {"0": ""},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": ""},
                 "controltype": ""
             },
             "hangup_1": {
@@ -878,9 +800,6 @@ mod tests {
                 "nodevalue": "",
                 "businessnodeid": "200006",
                 "children": {"0": ""},
-                "forwardid": {"0": ""},
-                "priority": {"0": ""},
-                "ivrid": {"0": ""},
                 "controltype": ""
             }
         }"#

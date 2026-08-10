@@ -553,7 +553,9 @@ impl IvrApp {
                     }
                     query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
-                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(app) =
+                    super::common::effective_return_app(return_app, return_target)
+                {
                     if !query.is_empty() {
                         query.push('&');
                     }
@@ -590,7 +592,9 @@ impl IvrApp {
                 self.ivr_flow_completed(ctx, "transferred", "queue", Some(target))
                     .await;
                 self.state = IvrState::Done;
-                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(app) =
+                    super::common::effective_return_app(return_app, return_target)
+                {
                     let mut query = format!("return_app={}", urlencoding::encode(app));
                     if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
                         query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
@@ -648,7 +652,9 @@ impl IvrApp {
                     ctx.session_vars
                         .insert("bridge_branch".into(), "true".into());
                 }
-                if let Some(app) = return_app.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(app) =
+                    super::common::effective_return_app(return_app, return_target)
+                {
                     let sep = if uri.contains('?') { "&" } else { "?" };
                     uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
                     if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
@@ -1412,6 +1418,9 @@ impl CallApp for IvrApp {
                 }
             } else {
                 warn!(ivr = %self.definition.name, menu = %menu_key, "Menu not found during DTMF handling");
+                // The menu is being abandoned (hangup): suppress the pending
+                // ivr_dtmf_timeout so it doesn't fire against the now-dead flow.
+                ctrl.cancel_timeout("ivr_dtmf_timeout");
                 self.state = IvrState::Done;
                 Ok(AppAction::Hangup {
                     reason: None,
@@ -1682,8 +1691,9 @@ mod tests {
     use super::*;
     use crate::call::app::ivr::config::MenuNode;
     use crate::call::app::testing::MockCallStack;
-    use crate::call::app::{CallInfo, ExitReason};
+    use crate::call::app::{CallInfo, ControllerEvent, ExitReason};
     use crate::config::Config;
+    use crate::proxy::proxy_call::sip_session::SipSessionHandle;
     use sea_orm::DatabaseConnection;
     use std::collections::HashMap;
 
@@ -1827,6 +1837,39 @@ mod tests {
         assert!(
             vars.get("ivr_end_reason").is_none(),
             "must not re-publish end reason when flow already completed"
+        );
+    }
+
+    /// DTMF arriving while in WaitingDtmf for a menu that no longer exists in
+    /// the definition must hang up cleanly. The pending `ivr_dtmf_timeout` is
+    /// cancelled so it can't fire into the now-dead flow (regression guard for
+    /// the timeout-lifecycle bug).
+    #[tokio::test]
+    async fn test_dtmf_in_unknown_menu_hangs_up_cleanly() {
+        let mut app = IvrApp::new(test_definition());
+        app.state = IvrState::WaitingDtmf {
+            menu_key: "missing".to_string(),
+            retry_count: 0,
+        };
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
+        let handle = SipSessionHandle::new_for_test("test-session", cmd_tx);
+        let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
+        let (controller, _timer_rx) = CallController::new(handle, event_rx);
+        let mut controller = controller;
+        let ctx = test_context();
+
+        let action = app
+            .on_dtmf("1".to_string(), &mut controller, &ctx)
+            .await
+            .expect("on_dtmf must not error");
+        assert!(
+            matches!(action, AppAction::Hangup { .. }),
+            "DTMF in an unknown menu must hang up, got {action:?}"
+        );
+        assert!(
+            matches!(app.state, IvrState::Done),
+            "unknown-menu hangup must set state to Done"
         );
     }
 }

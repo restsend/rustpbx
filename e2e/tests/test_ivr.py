@@ -103,7 +103,7 @@ async def test_ivr_dtmf_transfer_routing(pbx, sipbot_pool):
     _add_ivr_route(pbx.config_builder, _ivr_toml("Press 1 to continue.", "1002"))
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15120, "1002")
+    callee = await _reg_callee(sipbot_pool, pbx, 15120, "1002")
     caller = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",
@@ -111,6 +111,10 @@ async def test_ivr_dtmf_transfer_routing(pbx, sipbot_pool):
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
     # After DTMF '1' -> transfer to 1002, the caller is bridged to the target echo.
     await h.wait_rtp(caller, "caller", 25)
+    # The transfer must actually connect the callee.
+    assert await callee.wait_output_async(r"200 OK|Call established", timeout=20), (
+        f"callee 1002 never received the transferred call:\n{callee.output[-2000:]}"
+    )
 
 
 @pytest.mark.asyncio
@@ -149,22 +153,28 @@ target = "{target}"
     h.boot_pbx(pbx)
 
     write_v("1002")
-    await _reg_callee(sipbot_pool, pbx, 15121, "1002")
+    callee_v1 = await _reg_callee(sipbot_pool, pbx, 15121, "1002")
     caller1 = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",
     )
     await h.wait_rtp(caller1, "caller1", 25)
+    assert await callee_v1.wait_output_async(r"200 OK|Call established", timeout=20), (
+        f"callee 1002 never received the transferred call (v1):\n{callee_v1.output[-2000:]}"
+    )
     caller1.terminate()
 
     # Publish v2 without any reload.
     write_v("1003")
-    await _reg_callee(sipbot_pool, pbx, 15122, "1003")
+    callee_v2 = await _reg_callee(sipbot_pool, pbx, 15122, "1003")
     caller2 = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",
     )
     await h.wait_rtp(caller2, "caller2", 25)
+    assert await callee_v2.wait_output_async(r"200 OK|Call established", timeout=20), (
+        f"callee 1003 never received the transferred call (v2):\n{callee_v2.output[-2000:]}"
+    )
 
 
 # ---------------------------------------------------------------------------

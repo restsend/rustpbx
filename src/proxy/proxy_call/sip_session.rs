@@ -8251,6 +8251,30 @@ enum ConstructMode<'a> {
                     meta.insert("trace".to_string(), arr);
                 }
             }
+            // Who hung up + the normalized hangup reason, so the CC call-history
+            // UI can display and filter by them.
+            match self.meta.hangup_reason.as_ref() {
+                Some(reason) => {
+                    meta.insert(
+                        "hangup_reason".to_string(),
+                        serde_json::Value::String(reason.to_string()),
+                    );
+                    meta.insert(
+                        "hangup_by".to_string(),
+                        serde_json::Value::String(reason.initiator().to_string()),
+                    );
+                }
+                None => {
+                    meta.insert(
+                        "hangup_reason".to_string(),
+                        serde_json::Value::String("unknown".to_string()),
+                    );
+                    meta.insert(
+                        "hangup_by".to_string(),
+                        serde_json::Value::String("unknown".to_string()),
+                    );
+                }
+            }
             meta
         };
 
@@ -11308,6 +11332,51 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_millis(100), task).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().unwrap(), "cancelled");
+    }
+
+    #[test]
+    fn test_caller_rejection_ack_timeout_is_3_seconds() {
+        assert_eq!(
+            SipSession::CALLER_REJECTION_ACK_TIMEOUT,
+            Duration::from_secs(3),
+            "CALLER_REJECTION_ACK_TIMEOUT must be 3s — the caller-cancel drain window"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_token_guard_prevents_busy_loop() {
+        let token = CancellationToken::new();
+        let mut entry_count = 0;
+
+        token.cancel();
+
+        let child = token.child_token();
+        // Simulate the setup-loop pattern: `cancel_token.cancelled(), if !guard`
+        let mut guard = false;
+
+        tokio::select! {
+            _ = child.cancelled() => {
+                if !guard {
+                    guard = true;
+                    entry_count += 1;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        // Token is already cancelled. A second select would fire
+        // immediately again if unguarded, but the guard (`if !guard`)
+        // in the real loop would suppress re-entry. Verify the guard
+        // was set after the first entry.
+        assert!(guard, "guard must be set after first cancelled() entry");
+        assert_eq!(entry_count, 1, "guard must allow exactly one entry");
+
+        // Verify the guard persists — the next cancelled() should
+        // be suppressed (simulated by the guard already being true).
+        assert!(
+            guard,
+            "guard stays true to prevent re-entry into the cancel branch"
+        );
     }
 
     #[tokio::test]

@@ -1030,3 +1030,82 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     info!("test_trunk_b2bua_rtp_timeout_no_bye_tears_down PASSED");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: 486 reject stress — repeated rejection to catch teardown races
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Regression coverage for the caller-cancel drain fix (origin/main 940178e7):
+// when the setup loop's cancel_token fires after a reject has already queued a
+// final response (UasDecline), the transaction must stay alive long enough to
+// flush the response and receive the caller's ACK. This is the same scenario
+// that the deleted `test_b2bua_flow.rs::test_callee_reject_passthrough_486_busy_here`
+// covered. Repeating the reject-flow multiple times makes the caller-dialog
+// teardown race easier to catch.
+
+#[tokio::test]
+async fn test_trunk_b2bua_callee_reject_486_stress() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
+
+    let dummy_sdp =
+        "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n"
+            .to_string();
+
+    let caller_ua = Arc::new(server.create_ua("alice").await?);
+    let callee_ua = Arc::new(server.create_ua("bob").await?);
+
+    info!("Starting 486 reject stress — 5 iterations");
+    for attempt in 1..=5 {
+        let callee_reject = callee_ua.clone();
+        let reject_handle = crate::utils::spawn(async move {
+            for _ in 0..50 {
+                let events = callee_reject.process_dialog_events().await.unwrap_or_default();
+                for event in events {
+                    if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                        info!(attempt, "Callee rejecting with 486");
+                        callee_reject
+                            .reject_call_with_reason(
+                                &dialog_id,
+                                Some(486),
+                                Some("Busy Here".to_string()),
+                            )
+                            .await
+                            .unwrap();
+                        return Ok::<_, anyhow::Error>(dialog_id);
+                    }
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(anyhow::anyhow!(
+                "No incoming call received on attempt {attempt}"
+            ))
+        });
+
+        let caller_sdp = dummy_sdp.clone();
+        let caller_clone = caller_ua.clone();
+        let call_handle = crate::utils::spawn(async move {
+            caller_clone.make_call("bob", Some(caller_sdp)).await
+        });
+
+        let (call_result, _) = tokio::join!(call_handle, reject_handle);
+
+        let err = match call_result {
+            Ok(inner) => inner.unwrap_err(),
+            Err(join_err) => anyhow::anyhow!("Join error: {}", join_err),
+        };
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("486"),
+            "Attempt {attempt}: expected 486 BusyHere, got: {err_str}"
+        );
+        info!(attempt, "486 propagated correctly");
+    }
+
+    server.stop();
+    info!("test_trunk_b2bua_callee_reject_486_stress PASSED");
+    Ok(())
+}

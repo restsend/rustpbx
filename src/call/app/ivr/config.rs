@@ -162,14 +162,14 @@ pub enum EntryAction {
         params: HashMap<String, String>,
         #[serde(default)]
         return_app: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "return_to_ivr")]
         return_target: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
         return_app: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "return_to_ivr")]
         return_target: Option<String>,
     },
     Menu {
@@ -364,7 +364,7 @@ pub enum EntryAction {
         timeout_ms: Option<u64>,
         #[serde(default)]
         return_app: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "return_to_ivr")]
         return_target: Option<String>,
         #[serde(default)]
         success: Option<Box<ActionNode>>,
@@ -428,14 +428,14 @@ pub enum WebhookResponse {
         target: String,
         #[serde(default)]
         return_app: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "return_to_ivr")]
         return_target: Option<String>,
     },
     Queue {
         target: String,
         #[serde(default)]
         return_app: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "return_to_ivr")]
         return_target: Option<String>,
     },
     Menu {
@@ -860,6 +860,44 @@ action = { type = "menu", menu = "root" }
         let json = r#"{"type":"voip_bridge","create_room_uri":"wss://voip.example.com/ws"}"#;
         let node: ActionNode = serde_json::from_str(json).unwrap();
         assert!(matches!(node.action, EntryAction::Bridge { .. }));
+    }
+
+    #[test]
+    fn test_bridge_return_to_ivr_alias_deserialize() {
+        // Legacy CCF contract: `return_to_ivr` maps onto `return_target`.
+        let json = r#"{"type":"bridge","create_room_uri":"wss://voip.example.com/ws","return_to_ivr":"step-ivr"}"#;
+        let node: ActionNode = serde_json::from_str(json).unwrap();
+        match node.action {
+            EntryAction::Bridge { return_app, return_target, .. } => {
+                assert_eq!(return_app, None);
+                assert_eq!(return_target.as_deref(), Some("step-ivr"));
+            }
+            other => panic!("expected Bridge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_transfer_return_to_ivr_alias_deserialize() {
+        let json = r#"{"type":"transfer","target":"1001","return_to_ivr":"step-ivr"}"#;
+        let node: ActionNode = serde_json::from_str(json).unwrap();
+        match node.action {
+            EntryAction::Transfer { return_target, .. } => {
+                assert_eq!(return_target.as_deref(), Some("step-ivr"));
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_queue_return_to_ivr_alias_deserialize() {
+        let json = r#"{"type":"queue","target":"q1","return_to_ivr":"step-ivr"}"#;
+        let node: ActionNode = serde_json::from_str(json).unwrap();
+        match node.action {
+            EntryAction::Queue { return_target, .. } => {
+                assert_eq!(return_target.as_deref(), Some("step-ivr"));
+            }
+            other => panic!("expected Queue, got {other:?}"),
+        }
     }
 
     #[test]

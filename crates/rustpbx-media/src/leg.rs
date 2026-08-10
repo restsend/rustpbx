@@ -381,7 +381,7 @@ impl LegInner {
         let sdp = set_local(&self.pc, offer)?;
         debug!(
             leg = %self.id,
-            sdp = %sdp,
+            sdp = ?sdp,
             "leg SDP offer created",
         );
         Ok(sdp)
@@ -395,7 +395,7 @@ impl LegInner {
         debug!(
             leg = %self.id,
             sdp_type = ?sdp_type,
-            sdp = %remote,
+            sdp = ?remote,
             "leg SDP applied",
         );
         let desc = SessionDescription::parse(sdp_type, remote)
@@ -463,6 +463,18 @@ impl LegInner {
         }
         self.apply_profile(&profile);
 
+        let remote_dtmf_pts: Vec<u8> = negotiate::MediaNegotiator::extract_dtmf_codecs(remote)
+            .iter()
+            .map(|c| c.payload_type)
+            .collect();
+        if !remote_dtmf_pts.is_empty() {
+            let mut all_pts: Vec<u8> = profile.dtmf_pts().into_iter().collect();
+            all_pts.extend(remote_dtmf_pts);
+            all_pts.sort();
+            all_pts.dedup();
+            self.tap.set_dtmf_payload_types(all_pts);
+        }
+
         Ok(local_sdp)
     }
 
@@ -508,7 +520,11 @@ impl LegInner {
 
         match &source {
             // Switching TO RewriteRelay: (re)arm the rewrite bridge on this PC.
-            EgressSource::RewriteRelay { peer_pc, options, rules } => {
+            EgressSource::RewriteRelay {
+                peer_pc,
+                options,
+                rules,
+            } => {
                 // The rewrite bridge needs both RTP transports ready (they are
                 // created during SDP negotiation / DTLS start). Block until
                 // they exist instead of proceeding and failing
@@ -554,7 +570,8 @@ impl LegInner {
                     self.pc.wait_for_rtp_transport_ready(timeout).await?;
                     peer_pc.wait_for_rtp_transport_ready(timeout).await?;
                     self.pc.clear_rtp_rewrite_bridge();
-                    self.pc.bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
+                    self.pc
+                        .bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
                 }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
@@ -686,9 +703,7 @@ impl LegInner {
     /// regardless of `active`; used while an app drives the session or during a
     /// blind transfer (both periods where a leg may legitimately stay silent).
     pub fn set_app_paused(&self, paused: bool) {
-        self.rtp_timeout
-            .app_paused
-            .store(paused, Ordering::Release);
+        self.rtp_timeout.app_paused.store(paused, Ordering::Release);
     }
 
     /// Disarm the timeout. Drops the fire sender → a pending receiver gets
@@ -1065,6 +1080,78 @@ mod tests {
             "answer lacks any a=ssrc (video demux delay):\n{}",
             answer
         );
+        leg.stop();
+    }
+
+    /// Regression: when the caller leg answers an offer whose telephone-event
+    /// PTs are not in the local answer (rustrtc's answer formats come from
+    /// media_capabilities.audio which excludes telephone-event), the ingress
+    /// tap must still detect DTMF on the PTs the remote peer actually sends.
+    /// baresip / sipbot both fall back to their offered telephone-event PT
+    /// (e.g. 101) even when the answer omits it.
+    #[tokio::test]
+    async fn caller_leg_detects_dtmf_from_remote_offer_telephone_event_pt() {
+        use rustrtc::peer_connection::RtpObserver;
+        use rustrtc::rtp::{RtpHeader, RtpPacket};
+        use std::net::SocketAddr;
+
+        let cfg = LegConfig {
+            transport: TransportMode::Rtp,
+            codecs: vec![
+                CodecInfo {
+                    payload_type: 9,
+                    codec: CodecType::G722,
+                    clock_rate: 8000,
+                    channels: 1,
+                    fmtp: None,
+                },
+                CodecInfo {
+                    payload_type: 0,
+                    codec: CodecType::PCMU,
+                    clock_rate: 8000,
+                    channels: 1,
+                    fmtp: None,
+                },
+            ],
+            video_codecs: Vec::new(),
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: Some("dtmf-remote-pt".to_string()),
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+        };
+
+        let leg = LegInner::new("caller-dtmf", &cfg).expect("leg");
+
+        let offer = "v=0\r\n\
+            o=- 1 1 IN IP4 10.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 8000 RTP/AVP 9 0 101\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=fmtp:101 0-16\r\n";
+
+        let _answer = leg
+            .apply_sdp(offer, SdpType::Offer)
+            .await
+            .expect("leg answers baresip/sipbot offer");
+
+        let tap = leg.ingress_tap();
+        let mut rx = tap.subscribe_dtmf();
+        let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+
+        // DTMF "5" on PT 101 — the PT offered by a baresip / sipbot caller.
+        let pkt = RtpPacket::new(RtpHeader::new(101, 1, 0, 1234), vec![5u8, 0x80, 10, 0xA0]);
+        tap.on_ingress(&pkt, addr);
+        let ev = rx
+            .try_recv()
+            .expect("DTMF on offered PT 101 must be detected after apply_sdp");
+        assert_eq!(ev.digit, '5');
+
         leg.stop();
     }
 }

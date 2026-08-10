@@ -5,6 +5,21 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::wav_reader::{WavFormat, WavReader, format_issues};
+
+/// Return the path portion of a URL/file string, stripping any query string
+/// (e.g. `?expire=...&signature=...`) so extension detection on a signed/
+/// expiring URL only sees the real file extension. Non-URL filesystem paths
+/// pass through unchanged.
+fn path_without_query(file_path: &str) -> String {
+    match url::Url::parse(file_path) {
+        Ok(u) => match u.path() {
+            p if !p.is_empty() => p.to_string(),
+            _ => file_path.to_string(),
+        },
+        Err(_) => file_path.to_string(),
+    }
+}
+
 pub trait AudioSource: Send + Sync {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize;
     fn sample_rate(&self) -> u32;
@@ -45,7 +60,7 @@ impl FileAudioSource {
                 (b, file_path.clone())
             };
 
-        let extension = Path::new(&file_path)
+        let extension = Path::new(&path_without_query(&file_path))
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
@@ -83,7 +98,23 @@ impl FileAudioSource {
 /// Decode an in-memory audio byte buffer (wav / mp3 / raw) into mono PCM at
 /// the source's native sample rate. Pure computation — no file I/O.
 fn decode_bytes(bytes: &[u8], extension: &str, label: &str) -> Result<(Vec<i16>, u16, u32)> {
-    match extension {
+    // Prefer the extension when it names a recognized container/raw codec;
+    // otherwise sniff the real format from the bytes so content served from
+    // an extensionless or signed URL (e.g. `file.wav?expire=...`) still
+    // decodes as the actual format instead of being assumed PCMU.
+    let container = if matches!(extension, "wav" | "mp3") || is_raw_codec_extension(extension) {
+        extension.to_string()
+    } else {
+        match sniff_audio_format(bytes) {
+            Some(fmt) => {
+                debug!(file = %label, extension = %extension, detected = %fmt, "Detected audio format from content");
+                fmt.to_string()
+            }
+            None => extension.to_string(),
+        }
+    };
+
+    match container.as_str() {
         "wav" => {
             let mut reader = WavReader::new(std::io::Cursor::new(bytes.to_vec()))?;
             let (channels, sample_rate, format) = {
@@ -131,13 +162,13 @@ fn decode_bytes(bytes: &[u8], extension: &str, label: &str) -> Result<(Vec<i16>,
             Ok((pcm, 1, sample_rate))
         }
         _ => {
-            let codec = match CodecType::try_from(extension) {
+            let codec = match CodecType::try_from(container.as_str()) {
                 Ok(c) => c,
-                Err(_) => match extension {
+                Err(_) => match container.as_str() {
                     "u" | "ulaw" => CodecType::PCMU,
                     "a" | "alaw" => CodecType::PCMA,
                     _ => {
-                        warn!(extension = %extension, "Unknown raw extension, assuming PCMU");
+                        warn!(extension = %container, "Unknown raw extension, assuming PCMU");
                         CodecType::PCMU
                     }
                 },
@@ -157,6 +188,39 @@ fn decode_bytes(bytes: &[u8], extension: &str, label: &str) -> Result<(Vec<i16>,
             Ok((pcm, 1, rate))
         }
     }
+}
+
+/// True when `ext` names a raw wire codec extension handled by the fallback
+/// branch (e.g. `pcmu`, `ulaw`, `g722`, `g729`).
+fn is_raw_codec_extension(ext: &str) -> bool {
+    CodecType::try_from(ext).is_ok() || matches!(ext, "u" | "ulaw" | "a" | "alaw")
+}
+
+/// Sniff the actual audio container from the leading bytes when the file
+/// extension gives no hint. Detects RIFF/WAVE (`.wav`) and MPEG audio
+/// (`.mp3` via an ID3 tag or an MPEG audio frame sync word).
+fn sniff_audio_format(bytes: &[u8]) -> Option<&'static str> {
+    // WAV: "RIFF" <size> "WAVE"
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return Some("wav");
+    }
+    // MP3: ID3v2 tag, or an MPEG audio frame sync (11 bits set) whose header
+    // bits encode a sane version/layer/bitrate/sample-rate.
+    if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
+        return Some("mp3");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        let version = (bytes[1] >> 3) & 0x03;
+        let layer = (bytes[1] >> 1) & 0x03;
+        let bitrate_idx = (bytes[2] >> 4) & 0x0F;
+        let sample_rate_idx = (bytes[2] >> 2) & 0x03;
+        if version != 0b01 && layer != 0b00 && bitrate_idx != 0 && bitrate_idx != 0x0F
+            && sample_rate_idx != 0b11
+        {
+            return Some("mp3");
+        }
+    }
+    None
 }
 
 /// Mix interleaved multichannel PCM down to mono.
@@ -425,7 +489,7 @@ impl AudioSource for ResamplingAudioSource {
 pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
     use std::path::Path;
 
-    let ext = Path::new(file_path)
+    let ext = Path::new(&path_without_query(file_path))
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
@@ -879,6 +943,187 @@ mod tests {
             "Unknown extension 16000-byte file: expected ~1000 ms, got {} ms",
             dur.as_millis()
         );
+    }
+
+    #[test]
+    fn test_sniff_audio_format_detects_wav_and_mp3() {
+        let wav = build_wav(0x0001, 8000, 1, 16, &[0u8; 16]);
+        assert_eq!(sniff_audio_format(&wav), Some("wav"));
+
+        let mut id3 = Vec::new();
+        id3.extend_from_slice(b"ID3\x04\x00\x00\x00\x00\x00\x00");
+        id3.extend_from_slice(&[0u8; 16]);
+        assert_eq!(sniff_audio_format(&id3), Some("mp3"));
+
+        // MPEG1 Layer III, 128 kbps, 44.1 kHz frame sync without an ID3 tag.
+        let mut frame = vec![0xFFu8, 0xFB, 0x90, 0x00];
+        frame.extend_from_slice(&[0u8; 128]);
+        assert_eq!(sniff_audio_format(&frame), Some("mp3"));
+
+        // Random/garbage bytes must not be mistaken for a container.
+        assert_eq!(sniff_audio_format(&[0u8; 64]), None);
+        assert_eq!(sniff_audio_format(&[0xFF, 0xFF, 0xFF]), None);
+        assert_eq!(sniff_audio_format(&[]), None);
+    }
+
+    #[test]
+    fn test_decode_bytes_unknown_extension_sniffs_wav() {
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let (decoded, channels, rate) = decode_bytes(&wav, "", "extensionless").unwrap();
+        assert_eq!(rate, 8000);
+        assert_eq!(channels, 1);
+        assert_eq!(decoded.len(), pcm.len());
+    }
+
+    #[test]
+    fn test_decode_bytes_unknown_extension_sniffs_mp3() {
+        let path = Path::new("config/sounds/service_unavailable_en.mp3");
+        if !path.exists() {
+            eprintln!("skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)");
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let (decoded, channels, rate) = decode_bytes(&bytes, "", "extensionless").unwrap();
+        assert_eq!(rate, 44100);
+        assert_eq!(channels, 1);
+        assert!(
+            decoded.len() > 0,
+            "MP3 sniffed from an unknown extension must produce PCM"
+        );
+    }
+
+    #[test]
+    fn test_decode_bytes_unknown_extension_raw_falls_back_pcmu() {
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let ulaw = create_encoder(CodecType::PCMU).encode(&pcm);
+        let (decoded, channels, rate) = decode_bytes(&ulaw, "", "extensionless").unwrap();
+        assert_eq!(rate, 8000);
+        assert_eq!(channels, 1);
+        assert!(!decoded.is_empty());
+    }
+
+    fn pcm_bytes(pcm: &[i16]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(pcm.len() * 2);
+        for s in pcm {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn test_path_without_query_strips_signed_url_query() {
+        // A signed URL resolves to its path portion (query removed).
+        let stripped = path_without_query(
+            "https://cdn.example.com/sounds/greeting.wav?expire=1786455378&signature=7s96ldsp5",
+        );
+        assert_eq!(stripped, "/sounds/greeting.wav");
+        // Extension extracted from the stripped path must be the real one.
+        assert_eq!(
+            Path::new(&stripped).extension().and_then(|s| s.to_str()),
+            Some("wav")
+        );
+
+        assert_eq!(
+            path_without_query("https://cdn.example.com/sounds/greeting.mp3"),
+            "/sounds/greeting.mp3"
+        );
+
+        // Filesystem paths (absolute and relative) pass through unchanged.
+        assert_eq!(path_without_query("/tmp/announce.wav"), "/tmp/announce.wav");
+        assert_eq!(path_without_query("sounds/announce.wav"), "sounds/announce.wav");
+        // A bare relative name with '?' is not a URL: leave it untouched.
+        assert_eq!(
+            path_without_query("announce.wav?x=1"),
+            "announce.wav?x=1"
+        );
+        // Extensionless URL paths yield an empty extension (triggers sniffing).
+        assert_eq!(
+            path_without_query("https://cdn.example.com/audio?token=abc"),
+            "/audio"
+        );
+    }
+
+    #[test]
+    fn test_is_raw_codec_extension() {
+        for ext in ["pcmu", "pcma", "ulaw", "alaw", "u", "a", "g722", "g729"] {
+            assert!(is_raw_codec_extension(ext), "{ext} should be a raw codec ext");
+        }
+        for ext in ["wav", "mp3", "xyz", "", "WAV"] {
+            assert!(!is_raw_codec_extension(ext), "{ext} should not be a raw codec ext");
+        }
+    }
+
+    /// Bind a one-shot HTTP server that serves `body` once and returns the
+    /// base URL (`http://127.0.0.1:<port>`) it listens on.
+    fn serve_bytes(body: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            use std::io::Read;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                use std::io::Write;
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_audio_source_download_signed_url_with_query_decodes_wav() {
+        // Regression: `file.wav?expire=...&signature=...` used to leave the
+        // whole query in the extension, so the WAV was treated as raw PCMU.
+        let pcm = sine_pcm(1600, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let base = serve_bytes(wav);
+        let url = format!("{base}/greeting.wav?expire=1786455378&signature=7s96ldsp5");
+
+        let mut src = FileAudioSource::new(url, false)
+            .await
+            .expect("download signed URL as wav");
+        assert_eq!(src.sample_rate(), 8000);
+        assert_eq!(src.channels(), 1);
+
+        let mut buf = vec![0i16; pcm.len()];
+        let read = src.read_samples(&mut buf);
+        assert_eq!(read, pcm.len(), "signed-URL wav must decode all samples");
+        for (decoded, original) in buf.iter().zip(pcm.iter()) {
+            assert_eq!(
+                decoded, original,
+                "signed-URL wav must decode exact PCM (not raw PCMU bytes)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audio_source_download_extensionless_url_sniffs_wav() {
+        // A signed URL whose path carries no extension (e.g. `/audio?token=…`)
+        // must fall back to content sniffing and still decode as WAV.
+        let pcm = sine_pcm(800, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let base = serve_bytes(wav);
+        let url = format!("{base}/audio?token=abc123");
+
+        let mut src = FileAudioSource::new(url, false)
+            .await
+            .expect("download extensionless URL as wav");
+        assert_eq!(src.sample_rate(), 8000);
+        assert_eq!(src.channels(), 1);
+
+        let mut buf = vec![0i16; pcm.len()];
+        let read = src.read_samples(&mut buf);
+        assert_eq!(read, pcm.len(), "extensionless URL wav must decode all samples");
+        for (decoded, original) in buf.iter().zip(pcm.iter()) {
+            assert_eq!(decoded, original, "extensionless URL wav must decode exact PCM");
+        }
     }
 
     #[tokio::test]

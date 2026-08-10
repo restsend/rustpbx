@@ -441,6 +441,14 @@ impl StepIvrApp {
     ) -> anyhow::Result<AppAction> {
         let node = self.current_node.as_ref().unwrap().clone();
 
+        // Executing a node means the flow has left any DtmfMenu waiting state.
+        // Cancel the `ivr_dtmf_timeout` that was armed while the menu awaited
+        // input. If it were left running it would fire `dtmf_timeout` at
+        // whatever node runs next (e.g. a PROMPT_BREAK step before a
+        // to-agent transfer), which the provider doesn't expect and answers
+        // with hangup — killing the call before the transfer ever starts.
+        ctrl.cancel_timeout("ivr_dtmf_timeout");
+
         // Reset the awaiting_dtmf flag unless this node is a DtmfMenu (which
         // will re-arm it via execute_node once the greeting finishes).
         if !node.action.is_dtmf_menu() {
@@ -1309,6 +1317,15 @@ impl CallApp for StepIvrApp {
             return Ok(AppAction::Continue);
         }
 
+        // A stale timer can fire if a menu was exited without cancelling it
+        // (e.g. a valid DTMF already moved the flow to the next node before
+        // the old timeout elapsed). With no menu pending there is nothing to
+        // time out — ignore it instead of forwarding `dtmf_timeout` to the
+        // provider, which would derail whatever node is currently running.
+        if self.pending_menu.is_none() {
+            return Ok(AppAction::Continue);
+        }
+
         self.awaiting_dtmf = false;
         // Mark that this step was exited due to a DTMF timeout. If the
         // resulting provider action is Hangup, `on_exit` will classify the
@@ -1336,6 +1353,19 @@ impl CallApp for StepIvrApp {
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
+            // handle_menu_timeout returned None — local menu retry (no
+            // timeout_action configured, retries remaining).  The pending_menu
+            // was re-created internally.  Re-arm the timeout and stay in the
+            // menu instead of forwarding DtmfTimeout to the provider, which
+            // would leave the stale pending_menu intercepting future DTMF.
+            if let Some(ref menu) = self.pending_menu {
+                self.awaiting_dtmf = true;
+                ctrl.set_timeout(
+                    "ivr_dtmf_timeout",
+                    Duration::from_millis(menu.timeout_ms),
+                );
+            }
+            return Ok(AppAction::Continue);
         }
 
         self.current_node = Some(self.request_next(Some(ProviderEvent::DtmfTimeout)).await?);
@@ -2772,6 +2802,326 @@ mod tests {
                 "transfer",
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
+            .await;
+    }
+
+    /// Regression (bug): after a valid DTMF resolves a DtmfMenu and moves the
+    /// flow to the next node, the old `ivr_dtmf_timeout` (armed when the
+    /// greeting finished) must be cancelled. If it is left running it fires
+    /// `dtmf_timeout` at the *current* node — e.g. a PROMPT_BREAK step before
+    /// the to-agent transfer — which the provider doesn't expect and answers
+    /// with hangup, killing the call before the transfer ever starts.
+    #[tokio::test]
+    async fn test_stale_menu_timeout_after_valid_dtmf_is_ignored() {
+        let mut entries = HashMap::new();
+        // Matched key → a non-terminal prompt chain (mirrors PROMPT_BREAK →
+        // toagent_by_kfb). The stale menu timeout must NOT derail it.
+        entries.insert(
+            "1".into(),
+            ActionNode::with_next(
+                EntryAction::Prompt {
+                    file: Some("prompt_break.wav".into()),
+                    tts_text: None,
+                    tts_voice: None,
+                    record_name_list: None,
+                    interruptible: false,
+                    tts_api_url: None,
+                },
+                ActionNode::new(EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None, return_target: None,
+                }),
+            ),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 3000,
+            max_retries: 3,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        // Greeting finishes → menu waits for input and arms ivr_dtmf_timeout.
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Valid key press → local menu match → next node (prompt_break) runs.
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play prompt_break", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "prompt_break.wav"
+                )
+            })
+            .await;
+
+        // The stale 3s menu timeout now fires while prompt_break is playing.
+        // It must be ignored — no hangup, no provider contact, no commands.
+        stack.timeout("ivr_dtmf_timeout");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "stale menu timeout must not derail the current node, got: {cmds:?}"
+        );
+
+        // The current node chain completes normally → to-agent transfer fires.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// A *legitimate* menu timeout (no DTMF pressed, pending_menu still set)
+    /// must keep working: the timeout_action executes and the flow moves on.
+    /// Guards against the stale-timeout guard accidentally swallowing real
+    /// timeouts.
+    #[tokio::test]
+    async fn test_local_menu_legit_timeout_fires_timeout_action() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2002".into(),
+                params: HashMap::new(),
+                return_app: None, return_target: None,
+            }),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 3000,
+            max_retries: 3,
+            entries,
+            timeout_action: Some(Box::new(ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None, return_target: None,
+            }))),
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // No DTMF — the menu genuinely times out → timeout_action (Transfer) runs.
+        stack.timeout("ivr_dtmf_timeout");
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// Provider-driven DtmfMenu: a DTMF digit is forwarded to the provider and
+    /// the flow moves to a non-terminal node. The stale `ivr_dtmf_timeout`
+    /// armed while the menu waited must be cancelled so it can't fire
+    /// `dtmf_timeout` at the provider-driven node.
+    #[tokio::test]
+    async fn test_provider_driven_menu_dtmf_no_stale_timeout() {
+        // Provider sequence: session_start → provider-driven DtmfMenu (empty
+        // entries); dtmf → non-terminal Prompt chained to Transfer.
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 3000,
+            max_retries: 3,
+            entries: HashMap::new(),
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        let prompt = ActionNode::with_next(
+            EntryAction::Prompt {
+                file: Some("prompt_break.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+            },
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None, return_target: None,
+            }),
+        );
+
+        let mut stack =
+            MockCallStack::run(Box::new(mock_app(vec![menu, prompt])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Digit forwarded to provider → provider returns prompt_break node.
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play prompt_break", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "prompt_break.wav"
+                )
+            })
+            .await;
+
+        // Stale menu timeout must be ignored — no commands emitted.
+        stack.timeout("ivr_dtmf_timeout");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "stale menu timeout must not derail provider-driven node, got: {cmds:?}"
+        );
+
+        // prompt_break chain completes → Transfer fires.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    /// Local menu with no timeout_action: each timeout must retry silently
+    /// (re-arm the timeout and stay in the menu) instead of forwarding
+    /// DtmfTimeout to the provider, which would leave stale pending_menu
+    /// intercepting future DTMF.
+    #[tokio::test]
+    async fn test_local_menu_timeout_retry_without_timeout_action() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2002".into(),
+                params: HashMap::new(),
+                return_app: None, return_target: None,
+            }),
+        );
+
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 100,
+            max_retries: 2,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path }, ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // First timeout (retry_count 0→1, not yet >= max_retries=2):
+        // must stay in menu, re-arm timeout, no commands emitted.
+        stack.timeout("ivr_dtmf_timeout");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.is_empty(),
+            "timeout retry without timeout_action must not contact provider, got: {cmds:?}"
+        );
+
+        // Second timeout (retry_count 1→2, >= max_retries=2):
+        // must fall through to Hangup.
+        stack.timeout("ivr_dtmf_timeout");
+        stack
+            .assert_cmd(200, "hangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
             .await;
     }
 

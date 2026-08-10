@@ -1,0 +1,2862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CC SIP Phone (jssip 3.10.0)</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #f1f5f9;
+            --panel: #ffffff;
+            --panel-2: #f1f5f9;
+            --border: #dbe2ec;
+            --text: #1e293b;
+            --muted: #64748b;
+            --accent: #2563eb;
+            --accent-h: #1d4ed8;
+            --green: #16a34a;
+            --red: #dc2626;
+            --amber: #d97706;
+            --cyan: #0891b2;
+            --mono: 'Consolas', 'Monaco', 'Courier New', monospace;
+        }
+        html, body { height: 100%; }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+
+        .app { height: 100vh; display: flex; flex-direction: column; }
+
+        /* ===== Top bar ===== */
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .brand { font-size: 15px; display: flex; align-items: center; gap: 8px; font-weight: 700; }
+        .brand .sub { font-size: 11px; color: var(--muted); font-weight: 400; }
+        .topbar-right { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .topbar .status { max-width: 42vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        .status {
+            padding: 4px 12px; border-radius: 999px; font-size: 11px; font-weight: 600;
+            background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc;
+        }
+        .status.success { background: #dcfce7; color: #15803d; border-color: #86efac; }
+        .status.error   { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+        .status.warning { background: #fef3c7; color: #a16207; border-color: #fcd34d; }
+
+        /* ===== Main layout ===== */
+        .main { flex: 1; display: flex; gap: 10px; padding: 10px; overflow: hidden; min-height: 0; }
+        .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+        .left-pane {
+            flex: 0 0 52%; display: flex; flex-direction: column; gap: 8px;
+            padding: 10px; overflow-y: auto; min-height: 0;
+        }
+        .right-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+        /* ===== Registration (collapsible, left-top) ===== */
+        .reg-box {
+            border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
+            padding: 8px 10px; flex-shrink: 0;
+        }
+        .reg-box summary {
+            cursor: pointer; font-weight: 700; font-size: 13px; color: var(--accent);
+            list-style: none; user-select: none; display: flex; align-items: center; gap: 6px;
+        }
+        .reg-box summary::-webkit-details-marker { display: none; }
+        .reg-box summary::before { content: '▸'; transition: transform .15s; }
+        .reg-box[open] summary::before { content: '▾'; }
+        .reg-box .reg-form { margin-top: 8px; }
+        .saved-accounts { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+        .saved-head { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+        .saved-list { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; }
+        .saved-item { display: flex; gap: 4px; align-items: center; }
+        .saved-load {
+            flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+            padding: 4px 8px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px;
+            background: var(--panel); color: var(--text); cursor: pointer; text-align: left;
+            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+        }
+        .saved-load:hover { border-color: var(--accent); }
+        .saved-load .ico { width: 14px; height: 14px; flex-shrink: 0; }
+        .saved-load em { color: var(--muted); font-style: normal; font-size: 10px; }
+        .saved-del {
+            flex-shrink: 0; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+            border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--red); cursor: pointer;
+        }
+        .saved-del:hover { background: #fee2e2; border-color: #fca5a5; }
+        .saved-del .ico { width: 14px; height: 14px; }
+
+        /* ===== Main tabs ===== */
+        .mtabs {
+            display: flex; gap: 4px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .mtab {
+            padding: 7px 12px; cursor: pointer; border: none; background: none;
+            color: var(--muted); font-weight: 600; font-size: 12px; border-radius: 8px 8px 0 0;
+        }
+        .mtab:hover { color: var(--text); }
+        .mtab.active { background: var(--panel-2); color: var(--accent); }
+        .mtab-content { display: none; flex: 1; padding: 10px; overflow-y: auto; min-height: 0; }
+        .mtab-content.active { display: flex; flex-direction: column; gap: 8px; }
+
+        /* ===== Forms ===== */
+        .form-group { margin-bottom: 8px; }
+        label { font-size: 12px; color: var(--muted); margin-bottom: 3px; display: block; }
+        .checkbox-inline {
+            display: inline-flex; align-items: center; gap: 6px; font-weight: 400;
+            color: var(--text); margin: 0 14px 0 0; cursor: pointer;
+        }
+        input[type="text"], input[type="password"], input[type="url"], input[type="tel"],
+        input[type="number"], textarea, select {
+            width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+            background: var(--panel); color: var(--text); font-size: 13px;
+        }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+        input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+        textarea { resize: vertical; font-family: var(--mono); font-size: 11px; }
+        hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+        .form-row { display: flex; gap: 8px; }
+        .form-row .form-group { flex: 1; }
+        .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+        /* ===== Buttons ===== */
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px;
+            background: var(--panel); color: var(--text); cursor: pointer;
+            font-size: 12px; font-weight: 600; transition: background .15s, border-color .15s, transform .05s;
+        }
+        .btn:hover { background: #e2e8f0; }
+        .btn:active { transform: scale(.96); }
+        .btn:disabled { opacity: .4; cursor: not-allowed; }
+        .btn.icon { width: 42px; height: 42px; padding: 0; font-size: 19px; border-radius: 50%; }
+        .btn.mini { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+        .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .btn.accent:hover { background: var(--accent-h); }
+        .btn.danger { background: #fee2e2; border-color: #fca5a5; color: #b91c1c; }
+        .btn.danger:hover { background: #fecaca; }
+        .btn.ok { background: #dcfce7; border-color: #86efac; color: #15803d; }
+        .btn.ok:hover { background: #bbf7d0; }
+        .btn.warn { background: #fef3c7; border-color: #fcd34d; color: #a16207; }
+        .btn.warn:hover { background: #fde68a; }
+        .btn.muted { color: var(--red); border-color: #fca5a5; }
+        .btn.held { color: var(--amber); border-color: #fcd34d; }
+
+        .ico {
+            width: 1em; height: 1em; display: inline-block; flex-shrink: 0;
+            stroke: currentColor; fill: none; stroke-width: 1.5;
+            stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.15em;
+        }
+        .btn.icon .ico { width: 1.05em; height: 1.05em; }
+
+        /* ===== Call row ===== */
+        .call-row { display: flex; gap: 6px; align-items: center; }
+        .call-input-wrap { flex: 1; position: relative; }
+        .call-input-wrap .input-icon {
+            position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+            font-size: 14px; color: var(--muted); pointer-events: none;
+        }
+        .call-input-wrap input { padding-left: 34px; }
+        .vid-toggle {
+            display: inline-flex; align-items: center; gap: 5px; padding: 8px 10px;
+            border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2);
+            cursor: pointer; font-size: 13px; margin: 0; color: var(--text); flex-shrink: 0;
+        }
+        .vid-toggle:hover { border-color: var(--accent); }
+
+        .call-meta { display: flex; align-items: center; gap: 6px; min-height: 22px; }
+        .recent-label { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+        .recent-chips { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+        .recent-chip {
+            display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11px;
+            border-radius: 999px; background: var(--panel); border: 1px solid var(--border);
+            color: var(--text); cursor: pointer;
+        }
+        .recent-chip:hover { border-color: var(--accent); }
+        .recent-x { color: var(--muted); font-size: 10px; padding-left: 2px; }
+        .recent-x:hover { color: var(--red); }
+        .recent-empty { font-size: 11px; color: var(--muted); }
+
+        /* ===== Incoming call ===== */
+        .incoming-call {
+            display: none; align-items: center; gap: 8px; padding: 8px 10px;
+            border: 1px solid #fcd34d; background: #fefce8;
+            border-radius: 8px;
+        }
+        .incoming-call.active { display: flex; }
+        .incoming-label { font-weight: 700; color: var(--amber); font-size: 12px; flex-shrink: 0; }
+        #callerInfo { flex: 1; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* ===== Call controls ===== */
+        .call-controls { display: none; }
+        .call-controls.active { display: block; }
+        .call-info { font-size: 12px; color: var(--cyan); margin-bottom: 6px; min-height: 16px; font-weight: 600; }
+        .ctrl-row {
+            display: flex; gap: 8px; align-items: center; justify-content: center;
+            padding: 8px; background: var(--panel-2); border-radius: 10px;
+        }
+
+        /* ===== DTMF ===== */
+        .dtmf-section { flex: 1; min-width: 0; margin-top: 0; display: flex; flex-direction: column; }
+        .dtmf-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+        .dtmf-head h4 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 0; }
+        .dtmf-display {
+            font-family: var(--mono); background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 4px 8px; min-height: 26px; margin-bottom: 4px;
+            font-size: 15px; letter-spacing: 2px; color: var(--text); text-align: center;
+        }
+        .dtmf-keypad { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+        .dtmf-btn {
+            background: var(--panel); color: var(--text); border: 1px solid var(--border);
+            border-radius: 7px; padding: 7px 2px; font-size: 15px; font-weight: 600; cursor: pointer;
+            margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1;
+        }
+        .dtmf-btn:hover { background: #e2e8f0; border-color: var(--accent); }
+        .dtmf-btn:active { background: var(--accent); transform: scale(.94); }
+        .dtmf-btn small { font-size: 7px; color: var(--muted); font-weight: 400; }
+        .dtmf-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 5px; }
+        .dtmf-actions label {
+            display: flex; align-items: center; gap: 6px;
+            margin: 0; font-size: 11px; color: var(--muted); flex-shrink: 0;
+        }
+        .dtmf-actions select { flex: 1; min-width: 0; width: auto; padding: 4px 5px; font-size: 11px; }
+        .dtmf-actions .btn { width: auto; flex-shrink: 0; }
+
+        /* ===== Video ===== */
+        .video-container { display: none; gap: 8px; }
+        .video-container.active { display: flex; }
+        .video-box { flex: 1; position: relative; }
+        .video-box video { width: 100%; max-width: 250px; aspect-ratio: 16/9; background: #000; border-radius: 8px; border: 1px solid var(--border); }
+        .vid-tag {
+            position: absolute; bottom: 6px; left: 6px; font-size: 10px;
+            background: rgba(0,0,0,.65); color: #fff; padding: 1px 7px; border-radius: 4px;
+        }
+
+        /* ===== Stats ===== */
+        /* ===== Stats (left) + DTMF (right) ===== */
+        .stats-dtmf { display: flex; gap: 8px; align-items: stretch; }
+        .stats-col { flex: 0 0 54%; min-width: 0; display: flex; flex-direction: column; }
+        .stats-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+        .stat-chip {
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+            padding: 4px 6px; text-align: center; min-width: 0;
+        }
+        .stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; display: block; }
+        .stat-value { font-size: 14px; font-weight: 700; color: var(--text); display: block; white-space: nowrap; }
+        .stat-value.good { color: var(--green); }
+        .stat-value.warning { color: var(--amber); }
+        .stat-value.bad { color: var(--red); }
+        .quality-bar { height: 5px; background: #e2e8f0; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+        .quality-bar-fill { height: 100%; border-radius: 3px; transition: width .4s ease, background-color .4s ease; background: var(--green); }
+        .quality-bar-fill.good { background: var(--green); }
+        .quality-bar-fill.warning { background: var(--amber); }
+        .quality-bar-fill.bad { background: var(--red); }
+        .stats-tools { display: flex; gap: 4px; justify-content: flex-end; margin-top: 5px; }
+
+        /* ===== ICE ===== */
+        .ice-block { border-top: 1px solid var(--border); padding-top: 8px; }
+        .ice-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+        .ice-head .btn { margin-left: auto; }
+        .ice-stats { height: 64px; }
+
+        .logs {
+            background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+            font-family: var(--mono); font-size: 11px; overflow-y: auto; word-break: break-all;
+        }
+        #tab-logs .logs { flex: 1; min-height: 0; }
+
+        .debug-panel {
+            background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+            font-family: var(--mono); font-size: 11px; color: #334155; overflow-y: auto;
+            flex: 1; min-height: 50px;
+        }
+        .debug-entry { padding: 2px 0; border-bottom: 1px solid #e8edf5; word-break: break-all; }
+        .debug-time { color: #94a3b8; }
+        .debug-info { color: #0ea5e9; }
+        .debug-warn { color: #d97706; }
+        .debug-error { color: #dc2626; }
+
+        /* ===== CC controls ===== */
+        .cc-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
+        .cc-controls .btn { margin: 0; padding: 8px; font-size: 11px; }
+
+        /* ===== Transfer dialog ===== */
+        .transfer-dialog {
+            display: none; position: fixed; inset: 0; background: rgba(15,23,42,.4);
+            z-index: 1000; justify-content: center; align-items: center;
+        }
+        .transfer-dialog.active { display: flex; }
+        .transfer-dialog-content {
+            background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+            padding: 20px; width: 380px; box-shadow: 0 10px 40px rgba(15,23,42,.2);
+        }
+        .transfer-dialog-content h3 { margin-bottom: 12px; font-size: 14px; }
+
+        @media (max-height: 700px) {
+            .dtmf-btn { padding: 5px 4px; font-size: 14px; }
+            .ctrl-row { padding: 5px; }
+            .video-box video { max-width: 180px; }
+            .btn.icon { width: 36px; height: 36px; font-size: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-arrow-down-tray" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+  </symbol>
+  <symbol id="i-arrow-path" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/>
+  </symbol>
+  <symbol id="i-arrow-uturn-left" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3"/>
+  </symbol>
+  <symbol id="i-arrows-right-left" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5"/>
+  </symbol>
+  <symbol id="i-backspace" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M12 9.75 14.25 12m0 0 2.25 2.25M14.25 12l2.25-2.25M14.25 12 12 14.25m-2.58 4.92-6.374-6.375a1.125 1.125 0 0 1 0-1.59L9.42 4.83c.21-.211.497-.33.795-.33H19.5a2.25 2.25 0 0 1 2.25 2.25v10.5a2.25 2.25 0 0 1-2.25 2.25h-9.284c-.298 0-.585-.119-.795-.33Z"/>
+  </symbol>
+  <symbol id="i-beaker" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/>
+  </symbol>
+  <symbol id="i-cog-6-tooth" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"/>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
+  </symbol>
+  <symbol id="i-link" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/>
+  </symbol>
+  <symbol id="i-link-slash" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M13.181 8.68a4.503 4.503 0 0 1 1.903 6.405m-9.768-2.782L3.56 14.06a4.5 4.5 0 0 0 6.364 6.365l3.129-3.129m5.614-5.615 1.757-1.757a4.5 4.5 0 0 0-6.364-6.365l-4.5 4.5c-.258.26-.479.541-.661.84m1.903 6.405a4.495 4.495 0 0 1-1.242-.88 4.483 4.483 0 0 1-1.062-1.683m6.587 2.345 5.907 5.907m-5.907-5.907L8.898 8.898M2.991 2.99 8.898 8.9"/>
+  </symbol>
+  <symbol id="i-microphone" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+  </symbol>
+  <symbol id="i-microphone-slash" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+  <line x1="4.5" y1="4.5" x2="19.5" y2="19.5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-paper-airplane" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5"/>
+  </symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5"/>
+  </symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z"/>
+  </symbol>
+  <symbol id="i-phone-arrow-down-left" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M14.25 9.75v-4.5m0 4.5h4.5m-4.5 0 6-6m-3 18c-8.284 0-15-6.716-15-15V4.5A2.25 2.25 0 0 1 4.5 2.25h1.372c.516 0 .966.351 1.091.852l1.106 4.423c.11.44-.054.902-.417 1.173l-1.293.97a1.062 1.062 0 0 0-.38 1.21 12.035 12.035 0 0 0 7.143 7.143c.441.162.928-.004 1.21-.38l.97-1.293a1.125 1.125 0 0 1 1.173-.417l4.423 1.106c.5.125.852.575.852 1.091V19.5a2.25 2.25 0 0 1-2.25 2.25h-2.25Z"/>
+  </symbol>
+  <symbol id="i-phone-arrow-up-right" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 3.75v4.5m0-4.5h-4.5m4.5 0-6 6m3 12c-8.284 0-15-6.716-15-15V4.5A2.25 2.25 0 0 1 4.5 2.25h1.372c.516 0 .966.351 1.091.852l1.106 4.423c.11.44-.054.902-.417 1.173l-1.293.97a1.062 1.062 0 0 0-.38 1.21 12.035 12.035 0 0 0 7.143 7.143c.441.162.928-.004 1.21-.38l.97-1.293a1.125 1.125 0 0 1 1.173-.417l4.423 1.106c.5.125.852.575.852 1.091V19.5a2.25 2.25 0 0 1-2.25 2.25h-2.25Z"/>
+  </symbol>
+  <symbol id="i-phone-x-mark" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 3.75 18 6m0 0 2.25 2.25M18 6l2.25-2.25M18 6l-2.25 2.25m1.5 13.5c-8.284 0-15-6.716-15-15V4.5A2.25 2.25 0 0 1 4.5 2.25h1.372c.516 0 .966.351 1.091.852l1.106 4.423c.11.44-.054.902-.417 1.173l-1.293.97a1.062 1.062 0 0 0-.38 1.21 12.035 12.035 0 0 0 7.143 7.143c.441.162.928-.004 1.21-.38l.97-1.293a1.125 1.125 0 0 1 1.173-.417l4.423 1.106c.5.125.852.575.852 1.091V19.5a2.25 2.25 0 0 1-2.25 2.25h-2.25Z"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/>
+  </symbol>
+  <symbol id="i-user-minus" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M22 10.5h-6m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM4 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 10.374 21c-2.331 0-4.512-.645-6.374-1.766Z"/>
+  </symbol>
+  <symbol id="i-user" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"/>
+  </symbol>
+  <symbol id="i-user-plus" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M18 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM3 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 9.374 21c-2.331 0-4.512-.645-6.374-1.766Z"/>
+  </symbol>
+  <symbol id="i-users" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"/>
+  </symbol>
+  <symbol id="i-video-camera" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z"/>
+  </symbol>
+  <symbol id="i-x-mark" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+  </symbol>
+</svg>
+
+    <div class="app">
+        <!-- ===== Top bar ===== -->
+        <header class="topbar">
+            <div class="brand"><svg class="ico" aria-hidden="true"><use href="#i-phone"/></svg> CC SIP Phone <span class="sub">jssip 3.10.0</span></div>
+            <div class="topbar-right">
+                <div id="registrationStatus" class="status info">Disconnected</div>
+            </div>
+        </header>
+
+        <div class="main">
+            <!-- ===== Left: Registration / Call / DTMF / Video / Stats / ICE ===== -->
+            <aside class="pane left-pane">
+                <!-- Registration (collapsible) -->
+                <details class="reg-box" id="regBox" open>
+                    <summary><svg class="ico" aria-hidden="true"><use href="#i-cog-6-tooth"/></svg> Registration</summary>
+                    <div class="reg-form">
+                        <div class="form-group">
+                            <label for="server">SIP Server (WebSocket URL):</label>
+                            <input type="text" id="server" data-default-path="/ws" placeholder="ws://localhost:8080/ws">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="username">Username:</label>
+                                <input type="text" id="username" value="bob" placeholder="bob">
+                            </div>
+                            <div class="form-group">
+                                <label for="password">Password:</label>
+                                <input type="password" id="password" value="123456" placeholder="password">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="displayName">Display Name:</label>
+                            <input type="text" id="displayName" value="Bob" placeholder="Bob">
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE</label>
+                            <label class="checkbox-inline"><input type="checkbox" id="relayOnly"> Relay Only</label>
+                            <textarea id="iceServers" rows="3">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                        </div>
+                        <div class="btn-row">
+                            <button id="registerBtn" class="btn accent" title="Register"><svg class="ico" aria-hidden="true"><use href="#i-user-plus"/></svg> Register</button>
+                            <button id="unregisterBtn" disabled class="btn" title="Unregister"><svg class="ico" aria-hidden="true"><use href="#i-user-minus"/></svg> Unregister</button>
+                            <span style="flex:1;"></span>
+                            <button id="saveProfileBtn" class="btn mini ok" title="Save account to browser"><svg class="ico" aria-hidden="true"><use href="#i-arrow-down-tray"/></svg> Save</button>
+                            <button id="clearProfileBtn" class="btn mini danger" title="Clear saved accounts & call history"><svg class="ico" aria-hidden="true"><use href="#i-trash"/></svg> Clear</button>
+                        </div>
+                        <div class="saved-accounts">
+                            <div class="saved-head">Saved Accounts</div>
+                            <div id="savedAccounts" class="saved-list"></div>
+                        </div>
+                        <p style="font-size:10px;color:var(--muted);margin-top:6px;">
+                            Auto-saves on registration. URL params <code>?caller=&amp;callee=&amp;ws=</code> override saved values.
+                        </p>
+                    </div>
+                </details>
+
+                <!-- Call row -->
+                <div class="call-row">
+                    <div class="call-input-wrap">
+                        <span class="input-icon"><svg class="ico" aria-hidden="true"><use href="#i-phone"/></svg></span>
+                        <input type="text" id="callTarget" value="alice" placeholder="alice / sip:user@domain" autocomplete="off">
+                    </div>
+                    <label class="vid-toggle" title="Enable video call"><input type="checkbox" id="enableVideo"> <svg class="ico" aria-hidden="true"><use href="#i-video-camera"/></svg></label>
+                    <button id="callBtn" disabled class="btn accent icon" title="Call"><svg class="ico" aria-hidden="true"><use href="#i-phone-arrow-up-right"/></svg></button>
+                </div>
+
+                <!-- Recent targets -->
+                <div class="call-meta">
+                    <span class="recent-label">Recent:</span>
+                    <div id="recentTargets" class="recent-chips"></div>
+                    <button id="clearRecentBtn" class="btn mini" title="Clear recent calls"><svg class="ico" aria-hidden="true"><use href="#i-trash"/></svg></button>
+                </div>
+
+                <!-- Video source config (shown when video enabled) -->
+                <div class="form-group" id="videoSourceGroup" style="display:none;">
+                    <label>Video Source:</label>
+                    <div style="margin-bottom:6px;">
+                        <label class="checkbox-inline"><input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked> Camera</label>
+                        <label class="checkbox-inline"><input type="radio" name="videoSource" id="videoSourceClock" value="clock"> Clock (Virtual)</label>
+                    </div>
+                    <div id="cameraSelectorDiv">
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <select id="cameraSelect" style="flex:1;">
+                                <option value="">Default Camera</option>
+                            </select>
+                            <button type="button" id="refreshCamerasBtn" class="btn mini" title="Refresh camera list"><svg class="ico" aria-hidden="true"><use href="#i-arrow-path"/></svg></button>
+                        </div>
+                    </div>
+                    <div id="videoPreviewDiv" style="display:none;margin-top:8px;">
+                        <canvas id="clockCanvas" width="320" height="240" style="width:160px;height:120px;border-radius:8px;display:block;background:#0f172a;"></canvas>
+                    </div>
+                </div>
+
+                <!-- Incoming call -->
+                <div class="incoming-call" id="incomingCall">
+                    <span class="incoming-label"><svg class="ico" aria-hidden="true"><use href="#i-phone-arrow-down-left"/></svg> Incoming:</span>
+                    <span id="callerInfo"></span>
+                    <button id="answerBtn" class="btn ok icon" title="Answer"><svg class="ico" aria-hidden="true"><use href="#i-phone-arrow-down-left"/></svg></button>
+                    <button id="rejectBtn" class="btn danger icon" title="Reject"><svg class="ico" aria-hidden="true"><use href="#i-x-mark"/></svg></button>
+                </div>
+
+                <!-- Call controls -->
+                <div class="call-controls" id="callControls">
+                    <div class="call-info" id="callInfo"></div>
+                    <div class="ctrl-row">
+                        <button id="hangupBtn" class="btn danger icon" title="Hang up"><svg class="ico" aria-hidden="true"><use href="#i-phone-x-mark"/></svg></button>
+                        <button id="muteBtn" class="btn icon" title="Mute"><svg class="ico" aria-hidden="true"><use href="#i-microphone"/></svg></button>
+                        <button id="holdBtn" class="btn icon" title="Hold"><svg class="ico" aria-hidden="true"><use href="#i-pause"/></svg></button>
+                        <button id="transferBtn" class="btn warn icon" title="Transfer"><svg class="ico" aria-hidden="true"><use href="#i-arrows-right-left"/></svg></button>
+                        <button id="consultBtn" class="btn ok icon" title="Consult (Blind Consult)"><svg class="ico" aria-hidden="true"><use href="#i-users"/></svg></button>
+                    </div>
+                </div>
+
+                <!-- Video -->
+                <div class="video-container" id="videoContainer">
+                    <div class="video-box">
+                        <video id="remoteVideo" autoplay playsinline></video>
+                        <span class="vid-tag">Remote</span>
+                    </div>
+                    <div class="video-box">
+                        <video id="localVideo" autoplay playsinline muted></video>
+                        <span class="vid-tag">Local</span>
+                    </div>
+                </div>
+                <audio id="remoteAudio" autoplay style="display:none;"></audio>
+                <audio id="localAudio" muted autoplay style="display:none;"></audio>
+
+                <!-- Stats (left) + DTMF (right) -->
+                <div class="stats-dtmf">
+                    <div class="stats-col">
+                        <div class="stats-grid">
+                            <div class="stat-chip">
+                                <span class="stat-label">MOS</span>
+                                <span class="stat-value" id="mosValue">--</span>
+                                <div class="quality-bar"><div class="quality-bar-fill" id="mosBar" style="width:0%"></div></div>
+                            </div>
+                            <div class="stat-chip"><span class="stat-label">RTT (ms)</span><span class="stat-value" id="rttValue">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">Loss</span><span class="stat-value" id="lossValue">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">Jitter (ms)</span><span class="stat-value" id="jitterValue">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">RX Pkts</span><span class="stat-value" id="rxPackets">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">TX Pkts</span><span class="stat-value" id="txPackets">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">RX Bytes</span><span class="stat-value" id="rxBytes">--</span></div>
+                            <div class="stat-chip"><span class="stat-label">TX Bytes</span><span class="stat-value" id="txBytes">--</span></div>
+                        </div>
+                        <div class="stats-tools">
+                            <button type="button" id="refreshStatsBtn" class="btn mini" title="Refresh stats"><svg class="ico" aria-hidden="true"><use href="#i-arrow-path"/></svg></button>
+                            <button type="button" id="resetStatsBtn" class="btn mini" title="Reset stats"><svg class="ico" aria-hidden="true"><use href="#i-arrow-uturn-left"/></svg></button>
+                        </div>
+                    </div>
+
+                    <!-- DTMF Keypad -->
+                    <div class="dtmf-section" id="dtmfSection">
+                        <div class="dtmf-head">
+                            <h4>DTMF</h4>
+                        </div>
+                        <div class="dtmf-display" id="dtmfDisplay">&nbsp;</div>
+                        <div class="dtmf-keypad">
+                            <button type="button" class="dtmf-btn" data-key="1">1</button>
+                            <button type="button" class="dtmf-btn" data-key="2">2<small>ABC</small></button>
+                            <button type="button" class="dtmf-btn" data-key="3">3<small>DEF</small></button>
+                            <button type="button" class="dtmf-btn" data-key="4">4<small>GHI</small></button>
+                            <button type="button" class="dtmf-btn" data-key="5">5<small>JKL</small></button>
+                            <button type="button" class="dtmf-btn" data-key="6">6<small>MNO</small></button>
+                            <button type="button" class="dtmf-btn" data-key="7">7<small>PQRS</small></button>
+                            <button type="button" class="dtmf-btn" data-key="8">8<small>TUV</small></button>
+                            <button type="button" class="dtmf-btn" data-key="9">9<small>WXYZ</small></button>
+                            <button type="button" class="dtmf-btn" data-key="*">*</button>
+                            <button type="button" class="dtmf-btn" data-key="0">0<small>+</small></button>
+                            <button type="button" class="dtmf-btn" data-key="#">#</button>
+                        </div>
+                        <div class="dtmf-actions">
+                            <label>
+                                Transport:
+                                <select id="dtmfTransport">
+                                    <option value="RFC2833" selected>RFC2833</option>
+                                    <option value="INFO">INFO</option>
+                                </select>
+                            </label>
+                            <button type="button" id="dtmfClearBtn" class="btn mini" title="Clear DTMF display">Clear</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ICE stats -->
+                <div class="ice-block">
+                    <div class="ice-head">
+                        <span>ICE</span>
+                    </div>
+                    <div class="logs ice-stats" id="iceStats">
+                        <em>No ICE data yet.</em>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- ===== Right: Logs / CC Control / Debug / SIP Cmds / HTTP / ICE Diag ===== -->
+            <aside class="pane right-pane">
+                <div class="mtabs">
+                    <button class="mtab active" data-tab="tab-logs">📋 Logs</button>
+                    <button class="mtab" data-tab="tab-cc">CC Control</button>
+                    <button class="mtab" data-tab="tab-debug">Debug</button>
+                    <button class="mtab" data-tab="tab-sip-cmds">SIP Cmds</button>
+                    <button class="mtab" data-tab="tab-http">HTTP</button>
+                    <button class="mtab" data-tab="tab-ice">ICE Diag</button>
+                </div>
+
+                <!-- Logs -->
+                <div class="mtab-content active" id="tab-logs">
+                    <div class="logs" id="logs"></div>
+                    <div class="btn-row">
+                        <button onclick="clearLogs()" class="btn mini" title="Clear logs"><svg class="ico" aria-hidden="true"><use href="#i-trash"/></svg> Clear Logs</button>
+                    </div>
+                </div>
+
+                <!-- CC Control -->
+                <div class="mtab-content" id="tab-cc">
+                    <div id="ccStatus" class="status info">No active CC call</div>
+                    <div class="cc-controls">
+                        <button id="ccHoldBtn" disabled>Hold</button>
+                        <button id="ccUnholdBtn" disabled>Unhold</button>
+                        <button id="ccTransferBtn" disabled>Blind Transfer</button>
+                        <button id="ccConsultBtn" disabled>Consult</button>
+                        <button id="ccMergeBtn" disabled>Merge (3-way)</button>
+                        <button id="ccSwapBtn" disabled>Swap</button>
+                    </div>
+                    <div class="form-group">
+                        <label for="transferTarget">Transfer/Consult Target:</label>
+                        <input type="text" id="transferTarget" placeholder="sip:user@domain or extension">
+                    </div>
+                    <hr>
+                    <div class="form-group">
+                        <label>CC WebSocket URL:</label>
+                        <input type="text" id="ccWsUrl" placeholder="ws://localhost:8080/ws/ccphone">
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" id="connectCcWsBtn" class="btn accent" title="Connect CC WebSocket"><svg class="ico" aria-hidden="true"><use href="#i-link"/></svg> Connect</button>
+                        <button type="button" id="disconnectCcWsBtn" class="btn" title="Disconnect CC WebSocket"><svg class="ico" aria-hidden="true"><use href="#i-link-slash"/></svg> Disconnect</button>
+                        <button type="button" id="sendCcCmdBtn" class="btn warn" title="Send raw CC command"><svg class="ico" aria-hidden="true"><use href="#i-paper-airplane"/></svg> Send</button>
+                    </div>
+                    <div class="form-group">
+                        <label>Raw Command (JSON):</label>
+                        <textarea id="ccRawCommand" rows="2">{"action":"status.update","status":"idle"}</textarea>
+                    </div>
+                    <div id="ccWsStatus" class="status info">CC WS: disconnected</div>
+                    <div class="debug-panel" id="ccWsLog"></div>
+                </div>
+
+                <!-- Call state + SIP messages -->
+                <div class="mtab-content" id="tab-debug">
+                    <div class="debug-panel" id="callStateDebug">
+                        <div class="debug-entry">No active call</div>
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" id="refreshStateBtn" class="btn mini"><svg class="ico" aria-hidden="true"><use href="#i-arrow-path"/></svg> Refresh State</button>
+                        <button type="button" id="clearSipLogBtn" class="btn mini"><svg class="ico" aria-hidden="true"><use href="#i-trash"/></svg> Clear SIP Log</button>
+                    </div>
+                    <div class="debug-panel" id="sipMessagesLog"></div>
+                </div>
+
+                <!-- SIP commands (INFO) -->
+                <div class="mtab-content" id="tab-sip-cmds">
+                    <div class="form-group">
+                        <label>Preset:</label>
+                        <select id="sipCmdPreset" onchange="onSipCmdPresetChange()">
+                            <option value="">-- Custom --</option>
+                            <option value='{"action":"media.play","params":{"source":{"source_type":"silence"}}}'>media.play (silence)</option>
+                            <option value='{"action":"media.stop","params":{}}'>media.stop</option>
+                            <option value='{"action":"media.inject_start","params":{"source":{"source_type":"silence"}}}'>media.inject_start</option>
+                            <option value='{"action":"media.inject_stop","params":{}}'>media.inject_stop</option>
+                            <option value='{"action":"record.start","params":{"path":"/tmp/recording.wav","beep":true}}'>record.start</option>
+                            <option value='{"action":"record.stop","params":{}}'>record.stop</option>
+                            <option value='{"action":"hold","params":{"leg_id":"caller"}}'>hold</option>
+                            <option value='{"action":"unhold","params":{"leg_id":"caller"}}'>unhold</option>
+                            <option value='{"action":"media.play","params":{"source":{"source_type":"files","uris":["/tmp/announce.wav","/tmp/music.wav"]}}}'>media.play (multi-url)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>JSON Body (SIP INFO):</label>
+                        <textarea id="sipCmdBody" rows="3">{"action":"media.play","params":{"source":{"source_type":"silence"}}}</textarea>
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" id="sendSipInfoCmdBtn" class="btn accent" onclick="sendSipInfoCommand()"><svg class="ico" aria-hidden="true"><use href="#i-paper-airplane"/></svg> Send INFO Command</button>
+                    </div>
+                    <div class="debug-panel" id="sipCmdLog"></div>
+                </div>
+
+                <!-- HTTP commands -->
+                <div class="mtab-content" id="tab-http">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>API Server URL:</label>
+                            <input type="text" id="httpApiUrl" placeholder="http://localhost:8082">
+                        </div>
+                        <div class="form-group">
+                            <label>Bearer Token:</label>
+                            <input type="text" id="httpApiToken" value="dev" placeholder="Bearer token">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>JSON Body:</label>
+                        <textarea id="httpCmdBody" rows="4">{"action":"play","leg_id":"both","source":{"type":"url","url":"http://192.168.3.181:8000/H000026548852213211.wav"},"loop_playback":false}</textarea>
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" id="sendHttpCmdBtn" class="btn accent" onclick="sendHttpCommand()"><svg class="ico" aria-hidden="true"><use href="#i-paper-airplane"/></svg> Send HTTP Command</button>
+                    </div>
+                    <div class="debug-panel" id="httpCmdLog"></div>
+                </div>
+
+                <!-- ICE diagnostics -->
+                <div class="mtab-content" id="tab-ice">
+                    <div class="btn-row">
+                        <button type="button" id="runIceDiagBtn" class="btn accent"><svg class="ico" aria-hidden="true"><use href="#i-beaker"/></svg> Run ICE Diagnostics</button>
+                        <button type="button" id="clearIceDiagBtn" class="btn"><svg class="ico" aria-hidden="true"><use href="#i-trash"/></svg> Clear Diagnostics</button>
+                    </div>
+                    <div class="debug-panel" id="iceDiagResults">
+                        <em>No diagnostics yet.</em>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Transfer Dialog -->
+    <div class="transfer-dialog" id="transferDialog">
+        <div class="transfer-dialog-content">
+            <h3>Transfer Call</h3>
+            <div class="form-group">
+                <label>Transfer To:</label>
+                <input type="text" id="dialogTransferTarget" placeholder="Extension or SIP URI">
+            </div>
+            <div class="btn-row">
+                <button id="confirmTransferBtn" class="btn ok" style="flex:1;">Transfer</button>
+                <button id="cancelTransferBtn" class="btn" style="flex:1;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="//jssip.net/download/releases/jssip-3.10.0.min.js"></script>
+    <script>
+        'use strict';
+
+        // ========== Global State ==========
+        let ua = null;
+        let currentSession = null;
+        let dtmfHistory = '';
+        let consultSession = null;  // For consultative transfer (BC)
+        let isMuted = false;
+        let isOnHold = false;
+        let isConsultOnHold = false;
+        let isRegistered = false;
+        let statsInterval = null;
+        let ccWs = null;
+        let sipMessageLog = [];
+        const pageInstanceId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+            ? window.crypto.randomUUID()
+            : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3) | 0x8;
+                return v.toString(16);
+            });
+
+        // ========== DOM Elements ==========
+        const serverInput = document.getElementById('server');
+        const usernameInput = document.getElementById('username');
+        const passwordInput = document.getElementById('password');
+        const displayNameInput = document.getElementById('displayName');
+        const registerBtn = document.getElementById('registerBtn');
+        const unregisterBtn = document.getElementById('unregisterBtn');
+        const registrationStatus = document.getElementById('registrationStatus');
+        const callTargetInput = document.getElementById('callTarget');
+        const callBtn = document.getElementById('callBtn');
+        const callControls = document.getElementById('callControls');
+        const callInfo = document.getElementById('callInfo');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const muteBtn = document.getElementById('muteBtn');
+        const holdBtn = document.getElementById('holdBtn');
+        const transferBtn = document.getElementById('transferBtn');
+        const consultBtn = document.getElementById('consultBtn');
+        const dtmfTransportSelect = document.getElementById('dtmfTransport');
+        const incomingCallDiv = document.getElementById('incomingCall');
+        const callerInfo = document.getElementById('callerInfo');
+        const answerBtn = document.getElementById('answerBtn');
+        const rejectBtn = document.getElementById('rejectBtn');
+        const remoteAudio = document.getElementById('remoteAudio');
+        const localAudio = document.getElementById('localAudio');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const localVideo = document.getElementById('localVideo');
+        const videoContainer = document.getElementById('videoContainer');
+        const enableVideoCheckbox = document.getElementById('enableVideo');
+        const videoSourceGroup = document.getElementById('videoSourceGroup');
+        const cameraSelectorDiv = document.getElementById('cameraSelectorDiv');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const refreshCamerasBtn = document.getElementById('refreshCamerasBtn');
+        const clockCanvas = document.getElementById('clockCanvas');
+        const videoPreviewDiv = document.getElementById('videoPreviewDiv');
+
+        let localMediaStream = null;
+        let videoCanvasInterval = null;
+        const logs = document.getElementById('logs');
+        const iceStatsPanel = document.getElementById('iceStats');
+        const runIceDiagBtn = document.getElementById('runIceDiagBtn');
+        const clearIceDiagBtn = document.getElementById('clearIceDiagBtn');
+        const iceDiagResults = document.getElementById('iceDiagResults');
+        const iceEnable = document.getElementById('iceEnable');
+        const iceServersInput = document.getElementById('iceServers');
+        let lastOutgoingCallTime = null;
+        let lastOutgoingCallLabel = null;
+        let iceServersManuallyEdited = false;
+        let iceDiagInProgress = false;
+
+        // CC Elements
+        const ccStatus = document.getElementById('ccStatus');
+        const ccHoldBtn = document.getElementById('ccHoldBtn');
+        const ccUnholdBtn = document.getElementById('ccUnholdBtn');
+        const ccTransferBtn = document.getElementById('ccTransferBtn');
+        const ccConsultBtn = document.getElementById('ccConsultBtn');
+        const ccMergeBtn = document.getElementById('ccMergeBtn');
+        const ccSwapBtn = document.getElementById('ccSwapBtn');
+        const transferTargetInput = document.getElementById('transferTarget');
+        const transferDialog = document.getElementById('transferDialog');
+        const dialogTransferTarget = document.getElementById('dialogTransferTarget');
+        const confirmTransferBtn = document.getElementById('confirmTransferBtn');
+        const cancelTransferBtn = document.getElementById('cancelTransferBtn');
+
+        // Debug Elements
+        const ccWsUrlInput = document.getElementById('ccWsUrl');
+        const connectCcWsBtn = document.getElementById('connectCcWsBtn');
+        const disconnectCcWsBtn = document.getElementById('disconnectCcWsBtn');
+        const ccWsStatus = document.getElementById('ccWsStatus');
+        const ccWsLog = document.getElementById('ccWsLog');
+        const ccRawCommandInput = document.getElementById('ccRawCommand');
+        const sendCcCmdBtn = document.getElementById('sendCcCmdBtn');
+        const callStateDebug = document.getElementById('callStateDebug');
+        const refreshStateBtn = document.getElementById('refreshStateBtn');
+        const sipMessagesLog = document.getElementById('sipMessagesLog');
+        const clearSipLogBtn = document.getElementById('clearSipLogBtn');
+
+        // Stats Elements
+        const mosValue = document.getElementById('mosValue');
+        const mosBar = document.getElementById('mosBar');
+        const rttValue = document.getElementById('rttValue');
+        const lossValue = document.getElementById('lossValue');
+        const jitterValue = document.getElementById('jitterValue');
+        const rxPackets = document.getElementById('rxPackets');
+        const txPackets = document.getElementById('txPackets');
+        const rxBytes = document.getElementById('rxBytes');
+        const txBytes = document.getElementById('txBytes');
+
+        // Profile / recent elements
+        const saveProfileBtn = document.getElementById('saveProfileBtn');
+        const clearProfileBtn = document.getElementById('clearProfileBtn');
+        const clearRecentBtn = document.getElementById('clearRecentBtn');
+        const recentTargetsContainer = document.getElementById('recentTargets');
+        const savedAccountsContainer = document.getElementById('savedAccounts');
+
+        // ========== Event Listeners ==========
+        registerBtn.addEventListener('click', register);
+        unregisterBtn.addEventListener('click', unregister);
+        callBtn.addEventListener('click', makeCall);
+        hangupBtn.addEventListener('click', hangup);
+        muteBtn.addEventListener('click', toggleMute);
+        holdBtn.addEventListener('click', toggleHold);
+        transferBtn.addEventListener('click', showTransferDialog);
+        consultBtn.addEventListener('click', startConsultation);
+        answerBtn.addEventListener('click', answerCall);
+        rejectBtn.addEventListener('click', rejectCall);
+
+        // DTMF
+        document.querySelectorAll('.dtmf-btn').forEach(btn => {
+            btn.addEventListener('click', () => sendDtmf(btn.dataset.key));
+        });
+        document.getElementById('dtmfClearBtn').addEventListener('click', () => {
+            dtmfHistory = '';
+            const dtmfDisplay = document.getElementById('dtmfDisplay');
+            if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
+        });
+
+        // CC Controls
+        ccHoldBtn.addEventListener('click', () => ccHold(true));
+        ccUnholdBtn.addEventListener('click', () => ccHold(false));
+        ccTransferBtn.addEventListener('click', () => ccBlindTransfer());
+        ccConsultBtn.addEventListener('click', () => startConsultation());
+        ccMergeBtn.addEventListener('click', () => mergeCalls());
+        ccSwapBtn.addEventListener('click', () => swapCalls());
+
+        // Transfer Dialog
+        confirmTransferBtn.addEventListener('click', doTransfer);
+        cancelTransferBtn.addEventListener('click', hideTransferDialog);
+
+        // Profile / recent
+        if (saveProfileBtn) saveProfileBtn.addEventListener('click', saveProfile);
+        if (clearProfileBtn) clearProfileBtn.addEventListener('click', clearProfile);
+        if (clearRecentBtn) clearRecentBtn.addEventListener('click', clearRecentTargets);
+
+        // Debug
+        connectCcWsBtn.addEventListener('click', connectCcWebSocket);
+        disconnectCcWsBtn.addEventListener('click', disconnectCcWebSocket);
+        if (sendCcCmdBtn) sendCcCmdBtn.addEventListener('click', sendRawCcCommand);
+        refreshStateBtn.addEventListener('click', updateCallStateDebug);
+        clearSipLogBtn.addEventListener('click', () => {
+            sipMessageLog = [];
+            sipMessagesLog.innerHTML = '';
+        });
+
+        if (iceServersInput) {
+            iceServersInput.addEventListener('input', () => {
+                iceServersManuallyEdited = true;
+            });
+        }
+
+        // Stats
+        document.getElementById('refreshStatsBtn').addEventListener('click', refreshStats);
+        document.getElementById('resetStatsBtn').addEventListener('click', resetStats);
+
+        if (runIceDiagBtn) runIceDiagBtn.addEventListener('click', runIceDiagnostics);
+        if (clearIceDiagBtn) clearIceDiagBtn.addEventListener('click', () => resetIceDiagnostics());
+
+        if (enableVideoCheckbox) {
+            enableVideoCheckbox.addEventListener('change', () => {
+                if (videoSourceGroup) videoSourceGroup.style.display = enableVideoCheckbox.checked ? '' : 'none';
+                if (enableVideoCheckbox.checked) {
+                    enumerateCameras();
+                    const isClock = document.getElementById('videoSourceClock') && document.getElementById('videoSourceClock').checked;
+                    if (isClock) startClockPreview();
+                } else {
+                    stopClockPreview();
+                }
+            });
+        }
+
+        document.querySelectorAll('input[name="videoSource"]').forEach((radio) => {
+            radio.addEventListener('change', () => {
+                const isCam = document.getElementById('videoSourceCamera').checked;
+                if (cameraSelectorDiv) cameraSelectorDiv.style.display = isCam ? '' : 'none';
+                if (isCam) stopClockPreview(); else startClockPreview();
+            });
+        });
+
+        if (refreshCamerasBtn) refreshCamerasBtn.addEventListener('click', enumerateCameras);
+
+        // Main tabs
+        document.querySelectorAll('.mtab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.mtab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.mtab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // ========== Profile & Recent (localStorage) ==========
+        const phoneAccountsKey = 'phone_accounts';
+        const phoneTargetsKey = 'phone_targets';
+
+        function collectProfile() {
+            return {
+                server: serverInput ? serverInput.value.trim() : '',
+                username: usernameInput ? usernameInput.value.trim() : '',
+                password: passwordInput ? passwordInput.value : '',
+                displayName: displayNameInput ? displayNameInput.value.trim() : ''
+            };
+        }
+
+        function getAccounts() {
+            try {
+                const list = JSON.parse(localStorage.getItem(phoneAccountsKey));
+                return Array.isArray(list) ? list : [];
+            } catch (e) { return []; }
+        }
+
+        function saveAccounts(list) {
+            try { localStorage.setItem(phoneAccountsKey, JSON.stringify(list.slice(0, 5))); } catch (e) {}
+        }
+
+        function persistProfile() {
+            const cur = collectProfile();
+            if (!cur.server || !cur.username) return;
+            const list = getAccounts().filter(a => !(a.username === cur.username && a.server === cur.server));
+            list.unshift({ ...cur, ts: Date.now() });
+            saveAccounts(list);
+            renderSavedAccounts();
+        }
+
+        function saveProfile() {
+            persistProfile();
+            showStatus('Account saved to browser', 'success');
+            log('Account saved to localStorage');
+        }
+
+        function clearProfile() {
+            try {
+                localStorage.removeItem(phoneAccountsKey);
+                localStorage.removeItem(phoneTargetsKey);
+            } catch (e) {}
+            renderSavedAccounts();
+            renderRecentTargets();
+            showStatus('Saved accounts & call history cleared', 'info');
+            log('Saved accounts & call history cleared');
+        }
+
+        function loadAccount(acc) {
+            if (!acc) return;
+            if (serverInput) serverInput.value = acc.server || '';
+            if (usernameInput) usernameInput.value = acc.username || '';
+            if (passwordInput) passwordInput.value = acc.password || '';
+            if (displayNameInput) displayNameInput.value = acc.displayName || '';
+        }
+
+        function deleteAccount(acc) {
+            if (!acc) return;
+            saveAccounts(getAccounts().filter(a => !(a.username === acc.username && a.server === acc.server)));
+            renderSavedAccounts();
+        }
+
+        function renderSavedAccounts() {
+            if (!savedAccountsContainer) return;
+            const list = getAccounts();
+            savedAccountsContainer.innerHTML = '';
+            if (!list.length) {
+                const empty = document.createElement('span');
+                empty.className = 'recent-empty';
+                empty.textContent = 'No saved accounts';
+                savedAccountsContainer.appendChild(empty);
+                return;
+            }
+            list.forEach(acc => {
+                const row = document.createElement('div');
+                row.className = 'saved-item';
+
+                const loadBtn = document.createElement('button');
+                loadBtn.type = 'button';
+                loadBtn.className = 'saved-load';
+                loadBtn.title = 'Load account';
+                loadBtn.innerHTML = iconSvg('user') + '<span>' + escapeHtml(acc.username || '?') +
+                    (acc.displayName ? ' <em>(' + escapeHtml(acc.displayName) + ')</em>' : '') + '</span>';
+                loadBtn.addEventListener('click', () => {
+                    loadAccount(acc);
+                    showStatus('Account loaded: ' + acc.username, 'info');
+                });
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'saved-del';
+                delBtn.title = 'Delete account';
+                delBtn.innerHTML = iconSvg('trash');
+                delBtn.addEventListener('click', () => deleteAccount(acc));
+
+                row.appendChild(loadBtn);
+                row.appendChild(delBtn);
+                savedAccountsContainer.appendChild(row);
+            });
+        }
+
+        function getRecentTargets() {
+            try {
+                const list = JSON.parse(localStorage.getItem(phoneTargetsKey));
+                return Array.isArray(list) ? list : [];
+            } catch (e) { return []; }
+        }
+
+        function saveRecentTargets(list) {
+            try { localStorage.setItem(phoneTargetsKey, JSON.stringify(list.slice(0, 10))); } catch (e) {}
+        }
+
+        function addRecentTarget(target) {
+            if (!target) return;
+            const list = getRecentTargets().filter(t => t !== target);
+            list.unshift(target);
+            saveRecentTargets(list);
+            renderRecentTargets();
+        }
+
+        function removeRecentTarget(target) {
+            saveRecentTargets(getRecentTargets().filter(t => t !== target));
+            renderRecentTargets();
+        }
+
+        function clearRecentTargets() {
+            try { localStorage.removeItem(phoneTargetsKey); } catch (e) {}
+            renderRecentTargets();
+        }
+
+        function renderRecentTargets() {
+            if (!recentTargetsContainer) return;
+            const list = getRecentTargets();
+            recentTargetsContainer.innerHTML = '';
+            if (!list.length) {
+                const empty = document.createElement('span');
+                empty.className = 'recent-empty';
+                empty.textContent = 'No recent calls';
+                recentTargetsContainer.appendChild(empty);
+                return;
+            }
+            list.forEach(target => {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = 'recent-chip';
+                chip.title = 'Call ' + target;
+                chip.innerHTML = '<span>' + escapeHtml(target) + '</span><span class="recent-x">' + iconSvg('x-mark') + '</span>';
+                chip.addEventListener('click', (e) => {
+                    if (e.target && e.target.classList && e.target.classList.contains('recent-x')) {
+                        e.stopPropagation();
+                        removeRecentTarget(target);
+                    } else if (callTargetInput) {
+                        callTargetInput.value = target;
+                        callTargetInput.focus();
+                    }
+                });
+                recentTargetsContainer.appendChild(chip);
+            });
+        }
+
+        // ========== Helper Functions ==========
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.textContent = `[${timestamp}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLogs() {
+            logs.innerHTML = '';
+            resetIceStats();
+        }
+
+        function showStatus(message, type = 'info') {
+            registrationStatus.className = `status ${type}`;
+            registrationStatus.textContent = message;
+        }
+
+        function setMuteBtnUI(muted) {
+            muteBtn.innerHTML = iconSvg(muted ? 'microphone-slash' : 'microphone');
+            muteBtn.title = muted ? 'Unmute' : 'Mute';
+            muteBtn.classList.toggle('muted', muted);
+        }
+
+        function setHoldBtnUI(held) {
+            holdBtn.innerHTML = iconSvg(held ? 'play' : 'pause');
+            holdBtn.title = held ? 'Unhold' : 'Hold';
+            holdBtn.classList.toggle('held', held);
+        }
+
+        function iconSvg(name) {
+            return '<svg class="ico" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+        }
+
+        function getDomain(serverUrl) {
+            try {
+                const url = new URL(serverUrl);
+                return url.hostname;
+            } catch (error) {
+                log(`Invalid server URL: ${error.message}`);
+                throw error;
+            }
+        }
+
+        function getApiBasePath() {
+            const path = window.location.pathname || '/';
+            const staticIndex = path.indexOf('/static/');
+            if (staticIndex === -1) return '';
+            const base = path.slice(0, staticIndex).replace(/\/+$/, '');
+            return base === '/' ? '' : base;
+        }
+
+        function withApiBase(pathname) {
+            const base = getApiBasePath();
+            const normalizedPath = (pathname || '/').startsWith('/') ? pathname : `/${pathname}`;
+            if (!base) return normalizedPath;
+            if (normalizedPath === base || normalizedPath.startsWith(`${base}/`)) return normalizedPath;
+            return `${base}${normalizedPath}`;
+        }
+
+        let _phoneConfig = { wsPath: '/ws', iceServersPath: '/iceservers', amiPath: '/ami/v1', staticPath: '/static' };
+        async function detectServerConfig() {
+            try {
+                const response = await fetch(withApiBase('/api/config/phone'));
+                if (response.ok) {
+                    const cfg = await response.json();
+                    _phoneConfig = cfg;
+                    return cfg;
+                }
+            } catch (e) {}
+            return _phoneConfig;
+        }
+
+        const defaultServerUrl = (() => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host || 'localhost:8080';
+            const urlParams = new URLSearchParams(window.location.search);
+            const customWsPath = urlParams.get('ws') || localStorage.getItem('phone_ws_path');
+            if (customWsPath && /^wss?:\/\//i.test(customWsPath)) return customWsPath;
+            const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || _phoneConfig.wsPath;
+            const path = withApiBase(pathRaw);
+            return `${protocol}//${host}${path}`;
+        })();
+
+        if (serverInput) {
+            serverInput.placeholder = defaultServerUrl;
+            if (!serverInput.value || serverInput.value === 'ws://localhost:8080/ws' || serverInput.value === 'wss://localhost:8080/ws') {
+                serverInput.value = defaultServerUrl;
+            }
+        }
+
+        // Auto-fill form fields from URL parameters: ?caller=xxx&callee=xxx (query overrides localStorage)
+        (function applyUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            const caller = params.get('caller');
+            const callee = params.get('callee');
+            if (caller) {
+                if (usernameInput) usernameInput.value = caller;
+                if (displayNameInput) displayNameInput.value = caller;
+            }
+            if (callee) {
+                if (callTargetInput) callTargetInput.value = callee;
+            }
+        })();
+
+        // Load saved profile (query params take precedence)
+        (function applySavedProfile() {
+            const params = new URLSearchParams(window.location.search);
+            const callerOverride = params.get('caller');
+            const wsOverride = params.get('ws');
+
+            // Migrate legacy single profile into the accounts list
+            if (!getAccounts().length) {
+                try {
+                    const legacy = JSON.parse(localStorage.getItem('phone_profile'));
+                    if (legacy && typeof legacy === 'object' && legacy.server && legacy.username) {
+                        saveAccounts([{ ...legacy, ts: Date.now() }]);
+                    }
+                } catch (e) {}
+                try { localStorage.removeItem('phone_profile'); } catch (e) {}
+            }
+
+            const profile = getAccounts()[0] || null;
+            if (profile) {
+                if (!callerOverride) {
+                    if (profile.username && usernameInput) usernameInput.value = profile.username;
+                    if (profile.displayName && displayNameInput) displayNameInput.value = profile.displayName;
+                }
+                if (profile.password && passwordInput) passwordInput.value = profile.password;
+                if (!wsOverride && profile.server && serverInput) serverInput.value = profile.server;
+            }
+            renderSavedAccounts();
+            renderRecentTargets();
+        })();
+
+        // Set default CC WS URL
+        if (ccWsUrlInput) {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host || 'localhost:8080';
+            ccWsUrlInput.value = `${protocol}//${host}${withApiBase(_phoneConfig.wsPath + '/ccphone')}`;
+        }
+
+        function formatMs(ms) {
+            if (ms == null) return '--';
+            if (ms < 1000) return ms + ' ms';
+            return (ms / 1000).toFixed(2) + ' s';
+        }
+
+        function formatBytes(bytes) {
+            if (bytes == null) return '--';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // ========== ICE Functions ==========
+        function resetIceStats(message = '<em>No ICE data yet.</em>') {
+            if (iceStatsPanel) iceStatsPanel.innerHTML = message;
+        }
+
+        function resetIceDiagnostics(message = '<em>No diagnostics yet.</em>') {
+            if (iceDiagResults) iceDiagResults.innerHTML = message;
+        }
+
+        function appendIceDiagnostic(message) {
+            if (!iceDiagResults) return;
+            if (iceDiagResults.querySelector('em')) iceDiagResults.innerHTML = '';
+            const line = document.createElement('div');
+            const timestamp = new Date().toLocaleTimeString();
+            line.textContent = `[${timestamp}] ${message}`;
+            iceDiagResults.appendChild(line);
+            iceDiagResults.scrollTop = iceDiagResults.scrollHeight;
+        }
+
+        function parseIceServersConfig(rawValue) {
+            const parsed = JSON.parse(rawValue);
+            const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.iceServers)) ? parsed.iceServers : parsed ? [parsed] : [];
+            const normalized = list.filter((item) => item && item.urls);
+            if (!normalized.length) throw new Error('iceServers is empty or invalid');
+            return normalized;
+        }
+
+        const relayOnlyCheckbox = document.getElementById('relayOnly');
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function getIceServerUrls(server) {
+            if (!server || !server.urls) return [];
+            return Array.isArray(server.urls) ? server.urls : [server.urls];
+        }
+
+        function hasTurnIceServers(iceServers) {
+            return Array.isArray(iceServers) && iceServers.some((server) => {
+                return getIceServerUrls(server).some((url) => typeof url === 'string' && /^turns?:/i.test(url));
+            });
+        }
+
+        function getEnabledPcConfigFromUi() {
+            if (!iceEnable || !iceEnable.checked) return null;
+            if (!iceServersInput) throw new Error('ICE servers input not found');
+            const iceServers = parseIceServersConfig(iceServersInput.value);
+            const config = { iceServers };
+            if (relayOnlyCheckbox && relayOnlyCheckbox.checked) config.iceTransportPolicy = 'relay';
+            return config;
+        }
+
+        function getSessionPcConfig(session) {
+            if (session && session._icePcConfig) return session._icePcConfig;
+            try {
+                return getEnabledPcConfigFromUi();
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function buildIceWaitPolicy(pcConfig) {
+            const iceServers = Array.isArray(pcConfig && pcConfig.iceServers) ? pcConfig.iceServers : [];
+            const relayOnly = Boolean(pcConfig && pcConfig.iceTransportPolicy === 'relay');
+            const hasTurn = hasTurnIceServers(iceServers);
+
+            if (relayOnly) {
+                return {
+                    kind: 'relay',
+                    description: 'waiting for relay candidate (relay-only mode)',
+                    allowPublicFallback: false
+                };
+            }
+
+            if (hasTurn) {
+                return {
+                    kind: 'relay',
+                    description: 'waiting for relay candidate (TURN configured)',
+                    allowPublicFallback: true
+                };
+            }
+
+            if (iceServers.length) {
+                return {
+                    kind: 'public',
+                    description: 'waiting for public candidate (srflx/relay)',
+                    allowPublicFallback: false
+                };
+            }
+
+            return {
+                kind: 'complete',
+                description: 'waiting for browser ICE completion',
+                allowPublicFallback: false
+            };
+        }
+
+        async function runIceDiagnostics() {
+            if (iceDiagInProgress) { appendIceDiagnostic('Diagnostics already running'); return; }
+            if (!window.RTCPeerConnection) { appendIceDiagnostic('RTCPeerConnection is not supported'); return; }
+
+            let pcConfig;
+            try { pcConfig = getEnabledPcConfigFromUi(); } catch (error) {
+                appendIceDiagnostic(`ICE config invalid: ${error.message}`); return;
+            }
+            if (!pcConfig) { appendIceDiagnostic('ICE servers are disabled'); return; }
+
+            const startedAt = Date.now();
+            const candidates = [];
+            let closed = false, timeoutId = null, pc = null;
+
+            const finish = (reason) => {
+                if (closed) return;
+                closed = true; iceDiagInProgress = false;
+                if (runIceDiagBtn) runIceDiagBtn.disabled = false;
+                if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+                if (pc) { try { pc.close(); } catch (e) {} }
+                const elapsed = Date.now() - startedAt;
+                const typeCounts = candidates.reduce((acc, c) => { acc[c.type || 'unknown'] = (acc[c.type || 'unknown'] || 0) + 1; return acc; }, {});
+                const summary = Object.keys(typeCounts).length ? Object.keys(typeCounts).map((k) => `${k}:${typeCounts[k]}`).join(', ') : 'none';
+                appendIceDiagnostic(`Finished (${reason}) in ${formatMs(elapsed)}; candidates=${candidates.length}; types=${summary}`);
+                if (!candidates.some((c) => c.type === 'relay')) appendIceDiagnostic('No relay candidate found');
+            };
+
+            resetIceDiagnostics('<em>Running ICE diagnostics...</em>');
+            appendIceDiagnostic(`Using ${pcConfig.iceServers.length} configured ICE server(s)`);
+            iceDiagInProgress = true;
+            if (runIceDiagBtn) runIceDiagBtn.disabled = true;
+
+            try {
+                pc = new RTCPeerConnection(pcConfig);
+                pc.createDataChannel('ice-diagnostics');
+                pc.addEventListener('icegatheringstatechange', () => {
+                    appendIceDiagnostic(`iceGatheringState=${pc.iceGatheringState}`);
+                    if (pc.iceGatheringState === 'complete') finish('ice gathering complete');
+                });
+                pc.addEventListener('icecandidateerror', (event) => {
+                    appendIceDiagnostic(`icecandidateerror url=${event && event.url || 'unknown'} code=${event && event.errorCode || 'unknown'}`);
+                });
+                pc.addEventListener('icecandidate', (event) => {
+                    if (!event || !event.candidate) { finish('null candidate'); return; }
+                    const parsed = parseIceCandidate(event.candidate.candidate, event.candidate);
+                    candidates.push(parsed);
+                    const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
+                    appendIceDiagnostic(`candidate #${candidates.length}: ${parsed.type || 'unknown'} ${addrText}`);
+                });
+                timeoutId = setTimeout(() => finish('timeout'), 10000);
+                const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+                await pc.setLocalDescription(offer);
+            } catch (error) {
+                appendIceDiagnostic(`Diagnostics failed: ${error.message}`);
+                finish('error');
+            }
+        }
+
+        async function loadDefaultIceServers() {
+            if (!iceServersInput || iceServersManuallyEdited) return;
+            try {
+                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                const response = await fetch(withApiBase(icePath), { cache: 'no-store' });
+                if (!response.ok) throw new Error(`status ${response.status}`);
+                const payload = await response.json();
+                const servers = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.iceServers)) ? payload.iceServers : payload ? [payload] : null;
+                if (!servers || !servers.length) throw new Error('empty ICE server list');
+                if (iceServersManuallyEdited) return;
+                iceServersInput.value = JSON.stringify(servers);
+                if (iceEnable) iceEnable.checked = true;
+                log(`Loaded ICE servers from ${withApiBase(icePath)}`);
+            } catch (error) {
+                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                log(`Failed to load ${withApiBase(icePath)}: ${error.message}`);
+            }
+        }
+
+        const ICE_READY_SETTLE_MS = 250;
+        const ICE_READY_MAX_WAIT_MS = 2000;
+        const WEBRTC_STATS_INTERVAL = 1000;
+
+        function getIceTracker(session, label = 'session') {
+            if (!session) return null;
+            if (!session._iceTracker) {
+                session._iceTracker = {
+                    label,
+                    candidates: [],
+                    startedAt: null,
+                    endedAt: null,
+                    gatherDuration: null,
+                    status: 'waiting for candidates',
+                    readyCallback: null,
+                    readyTimer: null,
+                    maxWaitTimer: null,
+                    initialSdpSent: false,
+                    publicSeen: false,
+                    relaySeen: false,
+                    policy: null
+                };
+            } else if (label && session._iceTracker.label !== label) session._iceTracker.label = label;
+            session._iceCandidates = session._iceTracker.candidates;
+            refreshIceTrackerPolicy(session, session._iceTracker);
+            return session._iceTracker;
+        }
+
+        function refreshIceTrackerPolicy(session, tracker) {
+            if (!tracker) return null;
+            const nextPolicy = buildIceWaitPolicy(getSessionPcConfig(session));
+            const previous = tracker.policy;
+            tracker.policy = nextPolicy;
+            if (!previous || previous.kind !== nextPolicy.kind || previous.description !== nextPolicy.description) {
+                if (!tracker.startedAt && !tracker.initialSdpSent) tracker.status = nextPolicy.description;
+            }
+            return nextPolicy;
+        }
+
+        function clearIceTrackerTimers(tracker) {
+            if (!tracker) return;
+            if (tracker.readyTimer) {
+                clearTimeout(tracker.readyTimer);
+                tracker.readyTimer = null;
+            }
+            if (tracker.maxWaitTimer) {
+                clearTimeout(tracker.maxWaitTimer);
+                tracker.maxWaitTimer = null;
+            }
+        }
+
+        function isPublicCandidateType(type) {
+            return type === 'relay' || type === 'srflx';
+        }
+
+        function describeIceWaitReason(tracker, source) {
+            const policy = tracker && tracker.policy ? tracker.policy : { kind: 'complete', allowPublicFallback: false };
+            if (source === 'settle') {
+                if (policy.kind === 'relay') return 'target relay candidate gathered';
+                if (policy.kind === 'public') return 'target public candidate gathered';
+            }
+
+            if (policy.kind === 'relay') {
+                if (tracker && tracker.relaySeen) return `${source}: relay candidate available`;
+                if (tracker && tracker.publicSeen && policy.allowPublicFallback) return `${source}: no relay candidate, falling back to public candidate`;
+                if (tracker && tracker.candidates.length) return `${source}: no relay/public candidate, sending gathered host candidates`;
+                return `${source}: no relay candidate gathered`;
+            }
+
+            if (policy.kind === 'public') {
+                if (tracker && tracker.publicSeen) return `${source}: public candidate available`;
+                if (tracker && tracker.candidates.length) return `${source}: no public candidate, sending gathered host candidates`;
+                return `${source}: no public candidate gathered`;
+            }
+
+            if (tracker && tracker.candidates.length) return `${source}: browser ICE completion not observed`;
+            return `${source}: no ICE candidate gathered`;
+        }
+
+        function startInitialSdpWait(session, tracker) {
+            if (!tracker) return;
+            const policy = refreshIceTrackerPolicy(session, tracker);
+            if (!tracker.startedAt) {
+                tracker.startedAt = Date.now();
+                tracker.status = policy ? policy.description : 'waiting for candidates';
+            }
+            if (!tracker.maxWaitTimer && !tracker.initialSdpSent && typeof tracker.readyCallback === 'function') {
+                tracker.maxWaitTimer = setTimeout(() => {
+                    tracker.maxWaitTimer = null;
+                    releaseInitialSdpWait(session, describeIceWaitReason(tracker, 'max wait reached'));
+                }, ICE_READY_MAX_WAIT_MS);
+            }
+            updateIceStatsDisplay(session);
+        }
+
+        function concludeIceWaitWithoutReady(session, reason) {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.initialSdpSent || tracker.endedAt) return;
+            tracker.endedAt = Date.now();
+            tracker.gatherDuration = tracker.startedAt ? (tracker.endedAt - tracker.startedAt) : null;
+            tracker.status = reason;
+            clearIceTrackerTimers(tracker);
+            updateIceStatsDisplay(session);
+        }
+
+        function releaseInitialSdpWait(session, reason) {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.initialSdpSent || typeof tracker.readyCallback !== 'function') return false;
+
+            clearIceTrackerTimers(tracker);
+            tracker.initialSdpSent = true;
+            tracker.endedAt = Date.now();
+            tracker.gatherDuration = tracker.startedAt ? (tracker.endedAt - tracker.startedAt) : null;
+            tracker.status = `sending SDP (${reason})`;
+            updateIceStatsDisplay(session);
+
+            try {
+                tracker.readyCallback();
+                return true;
+            } catch (error) {
+                tracker.initialSdpSent = false;
+                tracker.status = `ready() failed: ${error.message}`;
+                updateIceStatsDisplay(session);
+                return false;
+            }
+        }
+
+        function scheduleInitialSdpRelease(session, reason) {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.initialSdpSent || typeof tracker.readyCallback !== 'function') return;
+            if (tracker.readyTimer) return;
+            tracker.status = 'candidate matched, settling before SDP send';
+            updateIceStatsDisplay(session);
+            tracker.readyTimer = setTimeout(() => {
+                tracker.readyTimer = null;
+                releaseInitialSdpWait(session, reason);
+            }, ICE_READY_SETTLE_MS);
+        }
+
+        function updateIceStatsDisplay(session, statusText) {
+            if (!iceStatsPanel) return;
+            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
+            if (!tracker) return;
+            if (statusText) tracker.status = statusText;
+            const parts = [
+                `<div><strong>Call:</strong> ${escapeHtml(tracker.label)}</div>`,
+                `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`
+            ];
+            if (tracker.gatherDuration != null) parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
+            if (tracker.status) parts.push(`<div><strong>Status:</strong> ${tracker.status}</div>`);
+            if (tracker.candidates.length) {
+                const rows = tracker.candidates.map((c, i) => {
+                    const primaryAddress = c.address ? `${c.address}${c.port ? `:${c.port}` : ''}` : 'address unavailable';
+                    const relayInfo = c.relatedAddress ? ` via ${c.relatedAddress}${c.relatedPort ? `:${c.relatedPort}` : ''}` : '';
+                    return escapeHtml(`${i + 1}. ${c.type || 'unknown'} ${primaryAddress}${relayInfo ? ` (${relayInfo.trim()})` : ''} (+${formatMs(c.ts)})`);
+                });
+                parts.push('<hr>');
+                parts.push(rows.join('<br>'));
+            }
+            iceStatsPanel.innerHTML = parts.join('');
+        }
+
+        function parseIceCandidate(candidateString, candidateObject) {
+            const out = { raw: candidateString };
+            try {
+                if (candidateObject) {
+                    out.address = candidateObject.address || candidateObject.ip || null;
+                    out.port = typeof candidateObject.port === 'number' ? candidateObject.port : parseInt(candidateObject.port, 10) || null;
+                    out.type = candidateObject.type || null;
+                    out.protocol = candidateObject.protocol || null;
+                }
+                if (typeof candidateString === 'string' && candidateString.length) {
+                    const parts = candidateString.trim().split(/\s+/);
+                    if (!out.address && parts.length >= 6) {
+                        out.address = parts[4] || null;
+                        const parsedPort = parseInt(parts[5], 10);
+                        out.port = out.port || (Number.isNaN(parsedPort) ? null : parsedPort);
+                    }
+                    if (!out.type) {
+                        const typeIndex = parts.indexOf('typ');
+                        if (typeIndex > -1 && parts[typeIndex + 1]) out.type = parts[typeIndex + 1];
+                    }
+                    if (!out.protocol && parts.length >= 3) out.protocol = parts[2];
+                    const raddrIndex = parts.indexOf('raddr');
+                    const rportIndex = parts.indexOf('rport');
+                    if (!out.relatedAddress && raddrIndex > -1 && parts[raddrIndex + 1]) out.relatedAddress = parts[raddrIndex + 1];
+                    if (!out.relatedPort && rportIndex > -1 && parts[rportIndex + 1]) {
+                        const parsedRport = parseInt(parts[rportIndex + 1], 10);
+                        out.relatedPort = Number.isNaN(parsedRport) ? null : parsedRport;
+                    }
+                }
+            } catch (error) {}
+            return out;
+        }
+
+        function handleSessionIceCandidate(session, candidateObj, readyCallback) {
+            if (!session || !candidateObj) return;
+            const label = session._iceLabel || `${session.direction || 'session'}`;
+            const tracker = getIceTracker(session, label);
+            if (typeof readyCallback === 'function') tracker.readyCallback = readyCallback;
+            const candidateString = candidateObj.candidate || '';
+            if (!candidateString) return;
+            const now = Date.now();
+            if (!tracker.startedAt) startInitialSdpWait(session, tracker);
+            const parsed = parseIceCandidate(candidateString, candidateObj);
+            const entry = { ts: tracker.startedAt ? now - tracker.startedAt : 0, candidate: parsed.raw, type: parsed.type, address: parsed.address, port: parsed.port, relatedAddress: parsed.relatedAddress, relatedPort: parsed.relatedPort };
+            if (entry.candidate && tracker.candidates.some((c) => c.candidate === entry.candidate)) { updateIceStatsDisplay(session); return; }
+            tracker.candidates.push(entry);
+            if (parsed.type === 'relay') tracker.relaySeen = true;
+            if (isPublicCandidateType(parsed.type)) tracker.publicSeen = true;
+            if (tracker.policy && tracker.policy.kind === 'relay' && tracker.relaySeen) {
+                scheduleInitialSdpRelease(session, describeIceWaitReason(tracker, 'preferred candidate gathered'));
+            } else if (tracker.policy && tracker.policy.kind === 'public' && tracker.publicSeen) {
+                scheduleInitialSdpRelease(session, describeIceWaitReason(tracker, 'preferred candidate gathered'));
+            } else {
+                startInitialSdpWait(session, tracker);
+            }
+            updateIceStatsDisplay(session);
+        }
+
+        // ========== Registration ==========
+        function register() {
+            if (ua) { log('Reusing existing UA, stopping first.'); ua.stop(); resetRegistrationState(); }
+            const server = serverInput.value.trim();
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+            const displayName = displayNameInput.value.trim();
+            if (!server || !username) { showStatus('Please enter server and username', 'error'); return; }
+            let domain;
+            try { domain = getDomain(server); } catch (error) { showStatus('Server URL is invalid', 'error'); return; }
+            registerBtn.disabled = true;
+            unregisterBtn.disabled = true;
+            showStatus('Connecting...', 'info');
+            log('Attempting to register via JsSIP...');
+
+            const socket = new JsSIP.WebSocketInterface(server);
+            const configuration = { sockets: [socket], uri: `sip:${username}@${domain}`, password: password, display_name: displayName || username, register: true, instance_id: pageInstanceId };
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) { configuration.pcConfig = pcConfig; log(`Using custom ICE servers for UA: ${JSON.stringify(configuration.pcConfig)}`); }
+                else log('ICE servers disabled (using default)');
+            } catch (e) {
+                showStatus(`ICE servers config invalid: ${e.message}`, 'error');
+                log(`Error applying ICE servers for UA: ${e.message}`);
+                registerBtn.disabled = false; unregisterBtn.disabled = true; return;
+            }
+
+            ua = new JsSIP.UA(configuration);
+            ua.on('connected', () => { log('WebSocket connected'); showStatus('Connected', 'success'); });
+            ua.on('disconnected', () => {
+                log('WebSocket disconnected');
+                if (isRegistered) showStatus('Disconnected', 'error');
+                resetRegistrationState();
+            });
+            ua.on('registered', () => {
+                isRegistered = true;
+                log('Registered successfully');
+                showStatus('Registered', 'success');
+                registerBtn.disabled = true;
+                unregisterBtn.disabled = false;
+                callBtn.disabled = false;
+                persistProfile();
+            });
+            ua.on('unregistered', () => { log('Unregistered from server'); showStatus('Unregistered', 'info'); resetRegistrationState(); });
+            ua.on('registrationFailed', (data) => {
+                log(`Registration failed: ${data.cause}`);
+                showStatus(`Registration failed: ${data.cause}`, 'error');
+                ua.stop(); resetRegistrationState();
+            });
+            ua.on('newRTCSession', (data) => {
+                const session = data.session;
+                if (currentSession && consultSession) {
+                    log('Already handling two sessions, rejecting the new one');
+                    session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+                    return;
+                }
+                const isIncoming = data.originator === 'remote';
+                incomingCallDiv.classList.remove('active');
+                const remoteIdentity = session.remote_identity || {};
+                const remoteUser = remoteIdentity.display_name || (remoteIdentity.uri && remoteIdentity.uri.user) || '';
+                const outgoingName = lastOutgoingCallLabel || callTargetInput.value.trim() || remoteUser || 'unknown';
+                const incomingName = remoteUser || 'unknown';
+                session._iceLabel = isIncoming ? `incoming:${incomingName}` : `outgoing:${outgoingName}`;
+                resetIceStats(`<div><strong>Call:</strong> ${session._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
+                session._timing = {};
+                if (data.originator === 'local') session._timing.callSent = lastOutgoingCallTime || Date.now();
+                else session._timing.incomingReceived = Date.now();
+
+                if (currentSession && !consultSession) {
+                    // This is a consult call
+                    consultSession = session;
+                    bindConsultSessionEvents(session);
+                    log(`Consult call started to ${outgoingName}`);
+                    updateCcStatus('Consult call in progress');
+                } else {
+                    currentSession = session;
+                    bindSessionEvents(session, isIncoming);
+                    if (isIncoming) {
+                        callerInfo.textContent = `Incoming call from: ${incomingName}`;
+                        incomingCallDiv.classList.add('active');
+                        log(`Incoming call from ${incomingName}`);
+                    } else {
+                        callInfo.textContent = `Calling ${outgoingName}...`;
+                        callControls.classList.add('active');
+                    }
+                }
+            });
+            ua.start();
+        }
+
+        function unregister() {
+            if (!ua) return;
+            log('Unregistering from server...');
+            if (currentSession) hangup();
+            ua.unregister(); ua.stop(); resetRegistrationState(); showStatus('Unregistered', 'info');
+        }
+
+        function resetRegistrationState() {
+            isRegistered = false;
+            registerBtn.disabled = false;
+            unregisterBtn.disabled = true;
+            callBtn.disabled = true;
+            endCall();
+            ua = null;
+        }
+
+        // ========== Call Functions ==========
+        async function makeCall() {
+            if (!ua || !isRegistered) { log('UA is not registered'); return; }
+            const target = callTargetInput.value.trim();
+            if (!target) { showStatus('Please enter a call target', 'error'); return; }
+            let domain;
+            try { domain = getDomain(serverInput.value); } catch (error) { showStatus('Server URL is invalid', 'error'); return; }
+            const destination = target.startsWith('sip:') ? target : `sip:${target}@${domain}`;
+            log(`Calling ${destination}`);
+            const videoEnabled = enableVideoCheckbox && enableVideoCheckbox.checked;
+            let callOptions;
+            if (videoEnabled) {
+                try {
+                    localMediaStream = await getVideoSourceStream();
+                    if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
+                    callOptions = { mediaStream: localMediaStream, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true } };
+                    log('Video source stream acquired');
+                } catch (e) {
+                    log(`Failed to get video stream: ${e.message} - falling back to audio-only`);
+                    callOptions = { mediaConstraints: { audio: true, video: false }, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
+                }
+            } else {
+                callOptions = { mediaConstraints: { audio: true, video: false }, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
+            }
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) {
+                    callOptions.pcConfig = pcConfig;
+                    const relayNote = pcConfig.iceTransportPolicy === 'relay' ? ' [relay only]' : '';
+                    log(`Applied ICE servers for outgoing call: ${pcConfig.iceServers.length} configured${relayNote}`);
+                }
+            } catch (error) {
+                showStatus(`ICE servers config invalid: ${error.message}`, 'error');
+                log(`Cannot place call with invalid ICE config: ${error.message}`);
+                return;
+            }
+            lastOutgoingCallTime = Date.now();
+            lastOutgoingCallLabel = target;
+            addRecentTarget(target);
+            ua.call(destination, callOptions);
+            log(`Invite sent successfully (video: ${videoEnabled})`);
+            callBtn.disabled = true;
+        }
+
+        async function answerCall() {
+            if (!currentSession) return;
+            log('Answering incoming call');
+            const offerHasVideo = currentSession && currentSession.request && currentSession.request.body && currentSession.request.body.includes('m=video');
+            const videoEnabled = offerHasVideo || (enableVideoCheckbox && enableVideoCheckbox.checked);
+            let options;
+            if (videoEnabled) {
+                try {
+                    localMediaStream = await getVideoSourceStream();
+                    if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
+                    options = { mediaStream: localMediaStream, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true } };
+                    log('Video source stream acquired');
+                } catch (e) {
+                    log(`Failed to get video stream: ${e.message} - answering audio-only`);
+                    options = { mediaConstraints: { audio: true, video: false }, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
+                }
+            } else {
+                options = { mediaConstraints: { audio: true, video: false }, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
+            }
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) {
+                    options.pcConfig = pcConfig;
+                    const relayNote = pcConfig.iceTransportPolicy === 'relay' ? ' [relay only]' : '';
+                    log(`Applied ICE servers for incoming answer: ${pcConfig.iceServers.length} configured${relayNote}`);
+                }
+            } catch (error) {
+                showStatus(`ICE servers config invalid: ${error.message}`, 'error');
+                log(`Cannot answer call with invalid ICE config: ${error.message}`);
+                return;
+            }
+            try {
+                currentSession._timing = currentSession._timing || {};
+                currentSession._timing.answerTime = Date.now();
+                currentSession.answer(options);
+                incomingCallDiv.classList.remove('active');
+                callControls.classList.add('active');
+                notifyCcCallAction('call.answer', currentSession);
+            } catch (error) {
+                log(`Failed to answer call: ${error.message}`);
+                endCall();
+            }
+        }
+
+        function rejectCall() {
+            if (!currentSession) return;
+            log('Rejecting incoming call');
+            notifyCcCallAction('call.reject', currentSession);
+            currentSession.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+            endCall();
+        }
+
+        function hangup() {
+            if (!currentSession) return;
+            log('Hanging up call');
+            notifyCcCallAction('call.hangup', currentSession);
+            try { currentSession.terminate(); } catch (error) { log(`Error terminating session: ${error.message}`); }
+            endCall();
+        }
+
+        function toggleMute() {
+            if (!currentSession) { log('No active session to mute'); return; }
+            try {
+                if (isMuted) { currentSession.unmute({ audio: true }); setMuteBtnUI(false); log('Audio unmuted'); }
+                else { currentSession.mute({ audio: true }); setMuteBtnUI(true); log('Audio muted'); }
+                isMuted = !isMuted;
+            } catch (error) { log(`Error toggling mute: ${error.message}`); }
+        }
+
+        function toggleHold() {
+            if (!currentSession) { log('No active session to hold'); return; }
+            try {
+                if (typeof currentSession.isEstablished === 'function' && !currentSession.isEstablished()) { log('Call is not yet established, cannot toggle hold'); return; }
+                if (isOnHold) { currentSession.unhold(); setHoldBtnUI(false); log('Call resumed'); }
+                else { currentSession.hold(); setHoldBtnUI(true); log('Call placed on hold'); }
+                isOnHold = !isOnHold;
+            } catch (error) { log(`Error toggling hold: ${error.message}`); }
+        }
+
+        // ========== CC Functions ==========
+        function updateCcStatus(message, type = 'info') {
+            ccStatus.className = `status ${type}`;
+            ccStatus.textContent = message;
+        }
+
+        function updateCcControls() {
+            const hasPrimary = !!currentSession;
+            const hasConsult = !!consultSession;
+            const primaryEstablished = hasPrimary && currentSession.isEstablished && currentSession.isEstablished();
+            const consultEstablished = hasConsult && consultSession.isEstablished && consultSession.isEstablished();
+
+            ccHoldBtn.disabled = !primaryEstablished || isOnHold;
+            ccUnholdBtn.disabled = !primaryEstablished || !isOnHold;
+            ccTransferBtn.disabled = !primaryEstablished;
+            ccConsultBtn.disabled = !primaryEstablished || hasConsult;
+            ccMergeBtn.disabled = !(primaryEstablished && consultEstablished);
+            ccSwapBtn.disabled = !(primaryEstablished && consultEstablished);
+        }
+
+        function ccHold(hold) {
+            if (!currentSession) return;
+            try {
+                if (hold) { currentSession.hold(); isOnHold = true; setHoldBtnUI(true); log('CC: Primary call held'); }
+                else { currentSession.unhold(); isOnHold = false; setHoldBtnUI(false); log('CC: Primary call resumed'); }
+                updateCcControls();
+            } catch (error) { log(`CC Hold error: ${error.message}`); }
+        }
+
+        function showTransferDialog() {
+            if (!currentSession) { log('No active call to transfer'); return; }
+            transferDialog.classList.add('active');
+            dialogTransferTarget.value = transferTargetInput.value || '';
+            dialogTransferTarget.focus();
+        }
+
+        function hideTransferDialog() {
+            transferDialog.classList.remove('active');
+        }
+
+        function doTransfer() {
+            const target = dialogTransferTarget.value.trim();
+            if (!target) { log('Please enter transfer target'); return; }
+            hideTransferDialog();
+            ccBlindTransfer(target);
+        }
+
+        function ccBlindTransfer(target) {
+            if (!currentSession) { log('No active call to transfer'); return; }
+            const transferTo = target || transferTargetInput.value.trim();
+            if (!transferTo) { log('Please enter transfer target'); return; }
+
+            try {
+                let domain;
+                try { domain = getDomain(serverInput.value); } catch (e) { domain = 'localhost'; }
+                const referTo = transferTo.startsWith('sip:') ? transferTo : `sip:${transferTo}@${domain}`;
+
+                log(`Initiating blind transfer to ${referTo}`);
+
+                // Build Refer-To URI
+                const referToUri = new JsSIP.URI('sip', transferTo.startsWith('sip:') ? transferTo.replace('sip:', '').split('@')[0] : transferTo, domain);
+
+                // Send REFER
+                currentSession.refer(referTo, {
+                    eventHandlers: {
+                        requestSucceeded: () => { log('Transfer REFER accepted'); },
+                        requestFailed: (data) => { log(`Transfer REFER failed: ${data.cause}`); },
+                        trying: () => { log('Transfer: trying...'); },
+                        progress: () => { log('Transfer: in progress...'); },
+                        accepted: () => { log('Transfer: accepted by target'); endCall(); },
+                        failed: (data) => { log(`Transfer failed: ${data.cause}`); }
+                    }
+                });
+                updateCcStatus('Transfer in progress...', 'warning');
+            } catch (error) {
+                log(`Transfer error: ${error.message}`);
+                updateCcStatus(`Transfer failed: ${error.message}`, 'error');
+            }
+        }
+
+        function startConsultation() {
+            if (!currentSession) { log('No active primary call'); return; }
+            if (consultSession) { log('Consult call already in progress'); return; }
+
+            const target = transferTargetInput.value.trim();
+            if (!target) { log('Please enter consult target in Transfer/Consult Target field'); return; }
+
+            // Hold primary call
+            try {
+                if (!isOnHold) { currentSession.hold(); isOnHold = true; setHoldBtnUI(true); log('Primary call held for consultation'); }
+            } catch (e) { log(`Error holding primary: ${e.message}`); }
+
+            // Make consult call
+            let domain;
+            try { domain = getDomain(serverInput.value); } catch (e) { domain = 'localhost'; }
+            const destination = target.startsWith('sip:') ? target : `sip:${target}@${domain}`;
+            log(`Starting consultation call to ${destination}`);
+
+            const callOptions = {
+                mediaConstraints: { audio: true, video: false },
+                rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+            };
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) callOptions.pcConfig = pcConfig;
+            } catch (e) {}
+
+            lastOutgoingCallTime = Date.now();
+            lastOutgoingCallLabel = target;
+            addRecentTarget(target);
+            ua.call(destination, callOptions);
+            updateCcStatus('Consultation call in progress...', 'warning');
+        }
+
+        function mergeCalls() {
+            if (!currentSession || !consultSession) { log('Need both primary and consult calls to merge'); return; }
+            log('Merging calls for 3-way conference (sending REFER with Replaces)');
+
+            try {
+                // Send REFER on consult session to join primary
+                const primaryRemote = currentSession.remote_identity && currentSession.remote_identity.uri;
+                if (!primaryRemote) { log('Cannot get primary call remote URI'); return; }
+
+                // Build Replaces header for the primary call
+                const callId = currentSession.dialog && currentSession.dialog.call_id || '';
+                const localTag = currentSession.dialog && currentSession.dialog.local_tag || '';
+                const remoteTag = currentSession.dialog && currentSession.dialog.remote_tag || '';
+                const replaces = encodeURIComponent(`${callId};to-tag=${remoteTag};from-tag=${localTag}`);
+
+                const referTo = `sip:${primaryRemote.user}@${primaryRemote.host}?Replaces=${replaces}`;
+
+                consultSession.refer(referTo, {
+                    eventHandlers: {
+                        requestSucceeded: () => { log('Merge REFER accepted'); },
+                        requestFailed: (data) => { log(`Merge REFER failed: ${data.cause}`); },
+                        accepted: () => {
+                            log('3-way conference established');
+                            updateCcStatus('3-way conference active', 'success');
+                        },
+                        failed: (data) => { log(`Merge failed: ${data.cause}`); }
+                    }
+                });
+            } catch (error) {
+                log(`Merge error: ${error.message}`);
+            }
+        }
+
+        function swapCalls() {
+            if (!currentSession || !consultSession) { log('Need both calls to swap'); return; }
+            log('Swapping active call...');
+            try {
+                if (isOnHold) { currentSession.unhold(); isOnHold = false; setHoldBtnUI(false); }
+                else { currentSession.hold(); isOnHold = true; setHoldBtnUI(true); }
+                if (isConsultOnHold) { consultSession.unhold(); isConsultOnHold = false; }
+                else { consultSession.hold(); isConsultOnHold = true; }
+                log('Calls swapped');
+            } catch (error) { log(`Swap error: ${error.message}`); }
+        }
+
+        function bindConsultSessionEvents(session) {
+            session.on('progress', () => { log('Consult call: Establishing'); });
+            session.on('accepted', () => { log('Consult call: Accepted'); });
+            session.on('confirmed', () => {
+                log('Consult call: Established');
+                updateCcStatus('Consult call connected', 'success');
+                updateCcControls();
+                startStatsMonitoring();
+            });
+            session.on('ended', (data) => {
+                log(`Consult call ended: ${data.cause}`);
+                clearIceTrackerTimers(session._iceTracker);
+                consultSession = null;
+                isConsultOnHold = false;
+                updateCcControls();
+                updateCcStatus('Consult call ended', 'info');
+            });
+            session.on('failed', (data) => {
+                log(`Consult call failed: ${data.cause}`);
+                clearIceTrackerTimers(session._iceTracker);
+                consultSession = null;
+                isConsultOnHold = false;
+                updateCcControls();
+                updateCcStatus(`Consult failed: ${data.cause}`, 'error');
+            });
+            session.on('hold', () => { isConsultOnHold = true; log('Consult call held'); });
+            session.on('unhold', () => { isConsultOnHold = false; log('Consult call resumed'); });
+            session.on('peerconnection', (data) => {
+                attachMedia(data.peerconnection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `consult:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, data.peerconnection, label);
+                } catch (e) {}
+            });
+            if (session.connection) {
+                attachMedia(session.connection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `consult:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, session.connection, label);
+                } catch (e) {}
+            }
+            session.on('icecandidate', (event) => {
+                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
+            });
+        }
+
+        // ========== Session Events ==========
+        function bindSessionEvents(session, isIncoming) {
+            callBtn.disabled = true;
+            session.on('progress', () => {
+                log('Call state: Establishing');
+                if (!isIncoming) callInfo.textContent = 'Ringing...';
+            });
+            session.on('accepted', () => { log('Call state: Accepted'); });
+            session.on('confirmed', () => {
+                log('Call state: Established');
+                callInfo.textContent = `Connected to ${session.remote_identity.display_name || session.remote_identity.uri.user}`;
+                updateCcStatus('Call connected', 'success');
+                updateCcControls();
+                startStatsMonitoring();
+                // Show DTMF keypad
+                dtmfHistory = '';
+                const dtmfSection = document.getElementById('dtmfSection');
+                const dtmfDisplay = document.getElementById('dtmfDisplay');
+                if (dtmfSection) dtmfSection.style.display = '';
+                if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
+            });
+            session.on('confirmed', () => {
+                try {
+                    const t = session._timing || {};
+                    const remoteUser = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    if (t.callSent) log(`Outgoing handshake time to ${remoteUser}: ${formatMs(Date.now() - t.callSent)}`);
+                    else {
+                        const base = t.answerTime || t.incomingReceived;
+                        if (base) log(`Incoming handshake time from ${remoteUser}: ${formatMs(Date.now() - base)}`);
+                    }
+                } catch (e) { log(`handshake timing error: ${e.message}`); }
+            });
+            session.on('ended', (data) => {
+                const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
+                const cause = data && data.cause ? ` (${data.cause})` : '';
+                log(`${directionLabel} call state: Terminated${cause}`);
+                endCall();
+            });
+            session.on('failed', (data) => {
+                const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
+                const cause = data && data.cause ? ` (${data.cause})` : '';
+                log(`${directionLabel} call state: Failed${cause}`);
+                showStatus(`Call failed: ${data.cause}`, 'error');
+                endCall();
+            });
+            session.on('hold', () => { isOnHold = true; setHoldBtnUI(true); log('Call is on hold'); updateCcControls(); });
+            session.on('unhold', () => { isOnHold = false; setHoldBtnUI(false); log('Call is resumed from hold'); updateCcControls(); });
+            session.on('muted', () => { isMuted = true; setMuteBtnUI(true); log('Call audio muted'); });
+            session.on('unmuted', () => { isMuted = false; setMuteBtnUI(false); log('Call audio unmuted'); });
+            session.on('refer', (data) => {
+                log(`Received REFER to ${data.refer_to}`);
+                updateCcStatus(`Received transfer request to ${data.refer_to}`, 'warning');
+            });
+            session.on('reinvite', (data) => {
+                log('Received re-INVITE');
+                logSipMessage('RECEIVED', 're-INVITE', JSON.stringify(data.request && data.request.body ? data.request.body.substring(0, 200) : 'no body'));
+            });
+            session.on('peerconnection', (data) => {
+                attachMedia(data.peerconnection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, data.peerconnection, label);
+                } catch (e) {}
+            });
+            if (session.connection) {
+                log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
+                attachMedia(session.connection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, session.connection, label);
+                } catch (e) {}
+            }
+            session.on('icecandidate', (event) => {
+                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
+            });
+            session.on('sdp', (data) => {
+                logSipMessage(data.originator === 'local' ? 'SENT' : 'RECEIVED', 'SDP', data.sdp.substring(0, 300));
+            });
+        }
+
+        function attachMedia(peerconnection) {
+            const remoteAudioStream = new MediaStream();
+            const remoteVideoStream = new MediaStream();
+            peerconnection.addEventListener('track', (event) => {
+                const { track } = event;
+                if (track.kind === 'audio') { remoteAudioStream.addTrack(track); remoteAudio.srcObject = remoteAudioStream; log('Remote audio track attached'); }
+                else if (track.kind === 'video') { remoteVideoStream.addTrack(track); remoteVideo.srcObject = remoteVideoStream; videoContainer.classList.add('active'); log('Remote video track attached'); }
+            });
+        }
+
+        function sdpHasTelephoneEvent(sdp) {
+            if (!sdp || typeof sdp !== 'string') return false;
+            return /a=rtpmap:\d+\s+telephone-event\/\d+/i.test(sdp);
+        }
+
+        async function sendDtmfRfc2833Verified(session, tone) {
+            const pc = session && session.connection;
+            if (!pc) throw new Error('No RTCPeerConnection available');
+
+            const localSdp = (pc.localDescription && pc.localDescription.sdp) || '';
+            const remoteSdp = (pc.remoteDescription && pc.remoteDescription.sdp) || '';
+            const localHasTelEvent = sdpHasTelephoneEvent(localSdp);
+            const remoteHasTelEvent = sdpHasTelephoneEvent(remoteSdp);
+            if (!localHasTelEvent || !remoteHasTelEvent) {
+                throw new Error(`SDP telephone-event not fully negotiated (local=${localHasTelEvent}, remote=${remoteHasTelEvent})`);
+            }
+
+            const audioSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+            if (!audioSender) throw new Error('No audio sender found');
+
+            const dtmfSender = audioSender.dtmf;
+            if (!dtmfSender) throw new Error('RTCDTMFSender not available on this sender');
+            if (!dtmfSender.canInsertDTMF) throw new Error('RTCDTMFSender cannot insert DTMF currently');
+
+            await new Promise((resolve, reject) => {
+                let settled = false;
+                const originalOnToneChange = dtmfSender.ontonechange;
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    dtmfSender.ontonechange = originalOnToneChange;
+                    reject(new Error('No tonechange confirmation from RTCDTMFSender'));
+                }, 1200);
+
+                dtmfSender.ontonechange = (event) => {
+                    try {
+                        if (typeof originalOnToneChange === 'function') originalOnToneChange(event);
+                    } catch (e) {}
+
+                    if (!settled && event && event.tone === tone) {
+                        settled = true;
+                        clearTimeout(timer);
+                        dtmfSender.ontonechange = originalOnToneChange;
+                        resolve();
+                    }
+                };
+
+                try {
+                    dtmfSender.insertDTMF(tone, 160, 50);
+                } catch (err) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    dtmfSender.ontonechange = originalOnToneChange;
+                    reject(err);
+                }
+            });
+        }
+
+        function sendDtmfInfo(session, tone) {
+            session.sendDTMF(tone, {
+                duration: 160,
+                interToneGap: 50
+            });
+        }
+
+        function shouldFallbackToInfo(error) {
+            const msg = (error && error.message ? error.message : '').toLowerCase();
+            return (
+                msg.includes('sdp telephone-event not fully negotiated') ||
+                msg.includes('rtcdtmfsender not available') ||
+                msg.includes('rtcdtmfsender cannot insert dtmf')
+            );
+        }
+
+        async function sendDtmf(tone) {
+            if (!currentSession) { log('No active call for DTMF'); return; }
+            try {
+                const preferredTransport = (dtmfTransportSelect && dtmfTransportSelect.value) || 'RFC2833';
+                let usedTransport = preferredTransport;
+                console.warn(`[DTMF] Attempting to send: tone=${tone}, transport=${preferredTransport}, session=${currentSession.id}`);
+
+                if (preferredTransport === 'RFC2833') {
+                    try {
+                        await sendDtmfRfc2833Verified(currentSession, tone);
+                    } catch (rfcError) {
+                        if (shouldFallbackToInfo(rfcError)) {
+                            console.warn(`[DTMF] RFC2833 unsupported, fallback to INFO: ${rfcError.message}`);
+                            log(`! RFC2833 unsupported (${rfcError.message}), fallback to INFO`);
+                            sendDtmfInfo(currentSession, tone);
+                            usedTransport = 'INFO(fallback)';
+                        } else {
+                            throw rfcError;
+                        }
+                    }
+                } else {
+                    sendDtmfInfo(currentSession, tone);
+                }
+
+                dtmfHistory += tone;
+                const dtmfDisplay = document.getElementById('dtmfDisplay');
+                if (dtmfDisplay) dtmfDisplay.textContent = dtmfHistory || '\u00a0';
+                log(`✓ DTMF sent (${usedTransport}): ${tone}`);
+                console.warn(`[DTMF] ✓ Successfully sent DTMF: ${tone}, used=${usedTransport}`);
+            } catch (error) {
+                log(`✗ DTMF error: ${error.message}`);
+                console.error(`[DTMF] ✗ Error: ${error.message}`, error);
+            }
+        }
+
+        function endCall() {
+            clearIceTrackerTimers(currentSession && currentSession._iceTracker);
+            clearIceTrackerTimers(consultSession && consultSession._iceTracker);
+            callControls.classList.remove('active');
+            // Reset DTMF display
+            dtmfHistory = '';
+            const dtmfSection = document.getElementById('dtmfSection');
+            const dtmfDisplay = document.getElementById('dtmfDisplay');
+            if (dtmfSection) dtmfSection.style.display = '';
+            if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
+            incomingCallDiv.classList.remove('active');
+            callInfo.textContent = '';
+            videoContainer.classList.remove('active');
+            stopLocalVideoSource();
+            if (remoteAudio.srcObject) { remoteAudio.srcObject.getTracks().forEach((track) => track.stop()); remoteAudio.srcObject = null; }
+            if (localAudio.srcObject) { localAudio.srcObject.getTracks().forEach((track) => track.stop()); localAudio.srcObject = null; }
+            if (remoteVideo.srcObject) { remoteVideo.srcObject.getTracks().forEach((track) => track.stop()); remoteVideo.srcObject = null; }
+            if (localVideo.srcObject) { localVideo.srcObject.getTracks().forEach((track) => track.stop()); localVideo.srcObject = null; }
+            currentSession = null;
+            consultSession = null;
+            isMuted = false;
+            isOnHold = false;
+            isConsultOnHold = false;
+            setMuteBtnUI(false);
+            setHoldBtnUI(false);
+            callBtn.disabled = !isRegistered;
+            resetIceStats();
+            stopStatsMonitoring();
+            resetStats();
+            updateCcStatus('No active CC call', 'info');
+            updateCcControls();
+        }
+
+        // ========== Stats & Quality ==========
+        function startStatsMonitoring() {
+            if (statsInterval) clearInterval(statsInterval);
+            statsInterval = setInterval(refreshStats, 2000);
+        }
+
+        function stopStatsMonitoring() {
+            if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+        }
+
+        async function refreshStats() {
+            const session = currentSession || consultSession;
+            if (!session || !session.connection) return;
+            try {
+                const stats = await session.connection.getStats();
+                let rxAudio = null, txAudio = null;
+                stats.forEach((report) => {
+                    if (report.type === 'inbound-rtp' && (report.mediaType === 'audio' || report.kind === 'audio')) rxAudio = report;
+                    if (report.type === 'outbound-rtp' && (report.mediaType === 'audio' || report.kind === 'audio')) txAudio = report;
+                });
+                if (rxAudio) {
+                    rxPackets.textContent = rxAudio.packetsReceived || 0;
+                    rxBytes.textContent = formatBytes(rxAudio.bytesReceived);
+                    const jitter = rxAudio.jitter ? (rxAudio.jitter * 1000).toFixed(2) : '--';
+                    jitterValue.textContent = jitter;
+                    const packetsLost = rxAudio.packetsLost || 0;
+                    const totalPackets = (rxAudio.packetsReceived || 0) + packetsLost;
+                    const lossPercent = totalPackets > 0 ? ((packetsLost / totalPackets) * 100).toFixed(2) : '0.00';
+                    lossValue.textContent = `${lossPercent}%`;
+                    if (parseFloat(lossPercent) < 1) lossValue.className = 'stat-value good';
+                    else if (parseFloat(lossPercent) < 5) lossValue.className = 'stat-value warning';
+                    else lossValue.className = 'stat-value bad';
+                }
+                if (txAudio) {
+                    txPackets.textContent = txAudio.packetsSent || 0;
+                    txBytes.textContent = formatBytes(txAudio.bytesSent);
+                }
+                // Calculate MOS
+                const mos = calculateMOS(rxAudio);
+                if (mos) {
+                    mosValue.textContent = mos.toFixed(2);
+                    const mosPercent = (mos / 4.5) * 100;
+                    mosBar.style.width = `${mosPercent}%`;
+                    if (mos >= 4) { mosValue.className = 'stat-value good'; mosBar.className = 'quality-bar-fill good'; }
+                    else if (mos >= 3) { mosValue.className = 'stat-value warning'; mosBar.className = 'quality-bar-fill warning'; }
+                    else { mosValue.className = 'stat-value bad'; mosBar.className = 'quality-bar-fill bad'; }
+                }
+                // Get RTT from candidate-pair
+                stats.forEach((report) => {
+                    if (report.type === 'candidate-pair' && report.currentRoundTripTime) {
+                        const rtt = (report.currentRoundTripTime * 1000).toFixed(0);
+                        rttValue.textContent = rtt;
+                        if (rtt < 150) rttValue.className = 'stat-value good';
+                        else if (rtt < 300) rttValue.className = 'stat-value warning';
+                        else rttValue.className = 'stat-value bad';
+                    }
+                });
+            } catch (error) {
+                log(`Stats error: ${error.message}`);
+            }
+        }
+
+        function calculateMOS(rxAudio) {
+            if (!rxAudio) return null;
+            const jitter = rxAudio.jitter ? rxAudio.jitter * 1000 : 0;
+            const packetsLost = rxAudio.packetsLost || 0;
+            const packetsReceived = rxAudio.packetsReceived || 0;
+            const totalPackets = packetsReceived + packetsLost;
+            const lossRate = totalPackets > 0 ? packetsLost / totalPackets : 0;
+            // E-Model based MOS calculation (simplified)
+            // R = 93.2 - I_d - I_e
+            // I_d = delay impairment (using jitter as proxy)
+            // I_e = equipment impairment (using packet loss)
+            const delay = jitter * 2; // Approximate one-way delay from jitter
+            const Id = delay > 177.3 ? 0.024 * delay + 0.11 * (delay - 177.3) : delay * 0.024;
+            const Ie = 0; // Assume G.711 with no codec impairment
+            const Bpl = 4.3; // Packet loss robustness factor for G.711
+            const Ie_eff = Ie + (95 - Ie) * (lossRate / (lossRate + Bpl));
+            const R = 93.2 - Id - Ie_eff;
+            let mos;
+            if (R < 0) mos = 1;
+            else if (R > 100) mos = 4.5;
+            else mos = 1 + 0.035 * R + R * (R - 60) * (100 - R) * 7 * 0.000001;
+            return Math.max(1, Math.min(4.5, mos));
+        }
+
+        function resetStats() {
+            mosValue.textContent = '--';
+            mosBar.style.width = '0%';
+            rttValue.textContent = '--';
+            lossValue.textContent = '--';
+            jitterValue.textContent = '--';
+            rxPackets.textContent = '--';
+            txPackets.textContent = '--';
+            rxBytes.textContent = '--';
+            txBytes.textContent = '--';
+            [mosValue, rttValue, lossValue, jitterValue, rxPackets, txPackets, rxBytes, txBytes].forEach(el => el.className = 'stat-value');
+        }
+
+        // ========== ICE Monitoring ==========
+        function monitorIceGatheringJs(session, pc, label = 'session') {
+            try {
+                if (!pc || session._iceMonitorAttached) return;
+                session._iceMonitorAttached = true;
+                try {
+                    if (typeof pc.getConfiguration === 'function') session._icePcConfig = pc.getConfiguration();
+                } catch (error) {}
+                const tracker = getIceTracker(session, label);
+                updateIceStatsDisplay(session, tracker.status);
+                pc.addEventListener('icegatheringstatechange', () => {
+                    const state = pc.iceGatheringState;
+                    if (state === 'gathering' && !tracker.startedAt && typeof tracker.readyCallback === 'function') startInitialSdpWait(session, tracker);
+                    if (state === 'complete') concludeIceWaitWithoutReady(session, describeIceWaitReason(tracker, 'browser ICE complete'));
+                    else updateIceStatsDisplay(session);
+                });
+                updateIceStatsDisplay(session, tracker.status);
+            } catch (e) { log(`monitorIceGatheringJs error: ${e.message}`); }
+        }
+
+        // ========== Video Functions ==========
+        function startClockPreview() {
+            if (!clockCanvas) return;
+            if (videoCanvasInterval) { clearInterval(videoCanvasInterval); videoCanvasInterval = null; }
+            const ctx = clockCanvas.getContext('2d');
+            drawTestPattern(ctx, clockCanvas.width, clockCanvas.height);
+            videoCanvasInterval = setInterval(() => drawTestPattern(ctx, clockCanvas.width, clockCanvas.height), 100);
+            if (videoPreviewDiv) videoPreviewDiv.style.display = '';
+        }
+
+        function stopClockPreview() {
+            if (videoCanvasInterval) { clearInterval(videoCanvasInterval); videoCanvasInterval = null; }
+            if (videoPreviewDiv) videoPreviewDiv.style.display = 'none';
+        }
+
+        function stopLocalVideoSource() {
+            if (localMediaStream) { localMediaStream.getTracks().forEach((t) => t.stop()); localMediaStream = null; }
+            if (localVideo) localVideo.srcObject = null;
+        }
+
+        function drawTestPattern(ctx, width, height) {
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#0d1b2a');
+            grad.addColorStop(1, '#1b2838');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-US', { hour12: false });
+            ctx.font = `bold ${Math.floor(height * 0.22)}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#00e5ff';
+            ctx.shadowColor = '#00e5ff';
+            ctx.shadowBlur = 14;
+            ctx.fillText(timeStr, width / 2, height * 0.42);
+            ctx.shadowBlur = 0;
+            ctx.font = `${Math.floor(height * 0.09)}px monospace`;
+            ctx.fillStyle = '#90a4ae';
+            ctx.fillText(now.toLocaleDateString(), width / 2, height * 0.65);
+            ctx.font = `${Math.floor(height * 0.07)}px sans-serif`;
+            ctx.fillStyle = '#546e7a';
+            ctx.fillText('rustpbx virtual camera', width / 2, height * 0.88);
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            ctx.shadowBlur = 0;
+        }
+
+        async function getVideoSourceStream() {
+            const source = document.querySelector('input[name="videoSource"]:checked');
+            const sourceValue = source ? source.value : 'camera';
+            if (sourceValue === 'camera') {
+                const deviceId = cameraSelect && cameraSelect.value;
+                const videoConstraint = deviceId ? { deviceId: { exact: deviceId } } : true;
+                return navigator.mediaDevices.getUserMedia({ audio: true, video: videoConstraint });
+            }
+            if (!clockCanvas) throw new Error('Clock canvas element not found');
+            if (!videoCanvasInterval) startClockPreview();
+            const canvasStream = clockCanvas.captureStream(15);
+            const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            return new MediaStream([...audioStream.getAudioTracks(), ...canvasStream.getVideoTracks()]);
+        }
+
+        async function enumerateCameras() {
+            if (!cameraSelect) return;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const cameras = devices.filter((d) => d.kind === 'videoinput');
+                cameraSelect.innerHTML = '';
+                if (cameras.length === 0) { cameraSelect.innerHTML = '<option value="">No cameras found</option>'; return; }
+                cameras.forEach((cam, i) => { const opt = document.createElement('option'); opt.value = cam.deviceId; opt.textContent = cam.label || `Camera ${i + 1}`; cameraSelect.appendChild(opt); });
+                log(`Found ${cameras.length} camera(s)`);
+            } catch (e) { log(`Failed to enumerate cameras: ${e.message}`); }
+        }
+
+        // ========== CC WebSocket Debug ==========
+        function connectCcWebSocket() {
+            if (ccWs) { log('CC WebSocket already connected'); return; }
+            const rawUrl = ccWsUrlInput.value.trim();
+            if (!rawUrl) { log('Please enter CC WebSocket URL'); return; }
+            const agentId = usernameInput.value.trim();
+            if (!agentId) { log('Please input username(agent_id) first'); return; }
+
+            let finalUrl = rawUrl;
+            try {
+                const u = new URL(rawUrl, window.location.href);
+                if (!u.searchParams.get('agent_id')) {
+                    u.searchParams.set('agent_id', agentId);
+                }
+                finalUrl = u.toString();
+            } catch (e) {
+                const glue = rawUrl.includes('?') ? '&' : '?';
+                if (!rawUrl.includes('agent_id=')) {
+                    finalUrl = `${rawUrl}${glue}agent_id=${encodeURIComponent(agentId)}`;
+                }
+            }
+
+            ccWsUrlInput.value = finalUrl;
+            log(`Connecting to CC WebSocket: ${finalUrl}`);
+            ccWs = new WebSocket(finalUrl);
+            ccWs.onopen = () => {
+                log('CC WebSocket connected');
+                ccWsStatus.className = 'status success';
+                ccWsStatus.textContent = 'CC WS: connected';
+                logCcWs('Connected', 'info');
+
+                const registerMsg = { action: 'agent.register', skills: [], max_concurrency: 1 };
+                ccWs.send(JSON.stringify(registerMsg));
+                logCcWs(`Sent: ${JSON.stringify(registerMsg)}`, 'info');
+
+                const statusMsg = { action: 'status.update', status: 'idle' };
+                ccWs.send(JSON.stringify(statusMsg));
+                logCcWs(`Sent: ${JSON.stringify(statusMsg)}`, 'info');
+            };
+            ccWs.onmessage = (event) => {
+                logCcWs(`Received: ${event.data}`, 'info');
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleCcMessage(msg);
+                } catch (e) {
+                    logCcWs(`Raw message: ${event.data}`, 'warn');
+                }
+            };
+            ccWs.onerror = (error) => {
+                log('CC WebSocket error');
+                ccWsStatus.className = 'status error';
+                ccWsStatus.textContent = 'CC WS: error';
+                logCcWs('Error occurred', 'error');
+            };
+            ccWs.onclose = () => {
+                log('CC WebSocket disconnected');
+                ccWsStatus.className = 'status info';
+                ccWsStatus.textContent = 'CC WS: disconnected';
+                logCcWs('Disconnected', 'warn');
+                ccWs = null;
+            };
+        }
+
+        function disconnectCcWebSocket() {
+            if (!ccWs) return;
+            ccWs.close();
+            ccWs = null;
+        }
+
+        function logCcWs(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="debug-time">[${timestamp}]</span> <span class="debug-${type}">${message}</span>`;
+            ccWsLog.appendChild(entry);
+            ccWsLog.scrollTop = ccWsLog.scrollHeight;
+        }
+
+        function handleCcMessage(msg) {
+            const eventType = msg.event || msg.type;
+            if (eventType === 'call.ringing') {
+                updateCcStatus(`CC: Call ringing - ${msg.call_id || '-'}`, 'warning');
+            } else if (eventType === 'call.connected') {
+                updateCcStatus(`CC: Call connected - ${msg.call_id || '-'}`, 'success');
+            } else if (eventType === 'call.ended') {
+                updateCcStatus(`CC: Call ended - ${msg.call_id || '-'}`, 'info');
+            } else if (eventType === 'agent.status_changed') {
+                log(`CC Agent status: ${msg.status || 'unknown'}`);
+            } else if (eventType === 'error') {
+                updateCcStatus(`CC error: ${msg.message || 'unknown error'}`, 'error');
+            }
+        }
+
+        function sendRawCcCommand() {
+            if (!ccWs || ccWs.readyState !== WebSocket.OPEN) {
+                log('CC WebSocket not connected');
+                return;
+            }
+            const raw = ccRawCommandInput ? ccRawCommandInput.value.trim() : '';
+            if (!raw) {
+                log('Please input CC command JSON');
+                return;
+            }
+            try {
+                const parsed = JSON.parse(raw);
+                ccWs.send(JSON.stringify(parsed));
+                logCcWs(`Sent: ${JSON.stringify(parsed)}`, 'info');
+            } catch (e) {
+                log(`Invalid CC command JSON: ${e.message}`);
+            }
+        }
+
+        function getSessionCallId(session) {
+            if (!session) return null;
+            let callId = session._request && session._request.call_id;
+            if (!callId) callId = session._id || session.id || null;
+
+            if (callId && typeof callId === 'string') {
+                callId = callId.split(';')[0].split('\r')[0].split('\n')[0].trim();
+            }
+
+            return callId;
+        }
+
+        function notifyCcCallAction(action, session) {
+            if (!ccWs || ccWs.readyState !== WebSocket.OPEN) return;
+            const callId = getSessionCallId(session);
+            if (!callId) return;
+            const payload = { action, call_id: callId };
+            ccWs.send(JSON.stringify(payload));
+            logCcWs(`Sent: ${JSON.stringify(payload)}`, 'info');
+        }
+
+        // ========== Call State Debug ==========
+        function updateCallStateDebug() {
+            const html = [];
+            if (currentSession) {
+                html.push(`<div class="debug-entry"><strong>Primary Call:</strong></div>`);
+                html.push(`<div class="debug-entry">  Direction: ${currentSession.direction || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  State: ${currentSession.status || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  Established: ${currentSession.isEstablished ? currentSession.isEstablished() : 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  On Hold: ${isOnHold}</div>`);
+                html.push(`<div class="debug-entry">  Muted: ${isMuted}</div>`);
+                if (currentSession.remote_identity) {
+                    const ri = currentSession.remote_identity;
+                    html.push(`<div class="debug-entry">  Remote: ${ri.display_name || ''} &lt;${ri.uri || 'unknown'}&gt;</div>`);
+                }
+                if (currentSession.connection) {
+                    html.push(`<div class="debug-entry">  ICE State: ${currentSession.connection.iceConnectionState}</div>`);
+                    html.push(`<div class="debug-entry">  Conn State: ${currentSession.connection.connectionState}</div>`);
+                }
+            } else {
+                html.push(`<div class="debug-entry">No primary call</div>`);
+            }
+            if (consultSession) {
+                html.push(`<div class="debug-entry"><strong>Consult Call:</strong></div>`);
+                html.push(`<div class="debug-entry">  Direction: ${consultSession.direction || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  State: ${consultSession.status || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  Established: ${consultSession.isEstablished ? consultSession.isEstablished() : 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  On Hold: ${isConsultOnHold}</div>`);
+            }
+            callStateDebug.innerHTML = html.join('');
+        }
+
+        // ========== SIP Commands (INFO) ==========
+        const sipCmdPresets = [
+            { action: 'media.play', params: { source: { source_type: 'silence' } } },
+            { action: 'media.stop', params: {} },
+            { action: 'media.inject_start', params: { source: { source_type: 'silence' } } },
+            { action: 'media.inject_stop', params: {} },
+            { action: 'record.start', params: { path: '/tmp/recording.wav', beep: true } },
+            { action: 'record.stop', params: {} },
+            { action: 'hold', params: { leg_id: 'caller' } },
+            { action: 'unhold', params: { leg_id: 'caller' } },
+            { action: 'media.play', params: { source: { source_type: 'files', uris: ['/tmp/announce.wav', '/tmp/music.wav'] } } },
+        ];
+
+        function onSipCmdPresetChange() {
+            const select = document.getElementById('sipCmdPreset');
+            const bodyArea = document.getElementById('sipCmdBody');
+            if (select && bodyArea && select.value) {
+                bodyArea.value = select.value;
+            }
+        }
+
+        function logSipCmd(message, type) {
+            const logPanel = document.getElementById('sipCmdLog');
+            if (!logPanel) return;
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const ts = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="debug-time">[${ts}]</span> <span class="${type === 'error' ? 'debug-error' : 'debug-info'}">${message}</span>`;
+            logPanel.appendChild(entry);
+            logPanel.scrollTop = logPanel.scrollHeight;
+        }
+
+        function sendSipInfoCommand() {
+            const bodyArea = document.getElementById('sipCmdBody');
+            if (!bodyArea) return;
+            const raw = bodyArea.value.trim();
+            if (!raw) { logSipCmd('Empty command body', 'error'); return; }
+
+            let parsed;
+            try { parsed = JSON.parse(raw); } catch (e) {
+                logSipCmd('Invalid JSON: ' + e.message, 'error');
+                return;
+            }
+
+            const session = currentSession;
+            if (!session) { logSipCmd('No active call session', 'error'); return; }
+
+            const contentType = 'application/vnd.rustpbx+json';
+            const bodyStr = JSON.stringify(parsed);
+
+            try {
+                // JsSIP 3.x: RTCSession.sendRequest() drops the `contentType`
+                // option — it only forwards `extraHeaders` and `body` to the
+                // dialog.  So the Content-Type header MUST be supplied via
+                // extraHeaders, otherwise the server receives ct=None.
+                const extraHeaders = ['Content-Type: ' + contentType];
+                if (typeof session.sendRequest === 'function') {
+                    session.sendRequest('INFO', {
+                        extraHeaders: extraHeaders,
+                        body: bodyStr,
+                    });
+                } else {
+                    // Older JsSIP API: use session.request.sendRequest directly
+                    session.request.sendRequest('INFO', {
+                        extraHeaders: extraHeaders,
+                        body: bodyStr,
+                    });
+                }
+                logSipCmd(`Sent INFO (${contentType}): ${bodyStr.substring(0, 80)}${bodyStr.length > 80 ? '...' : ''}`, 'info');
+                logSipMessage('SENT', 'INFO', contentType);
+            } catch (e) {
+                logSipCmd('Failed to send INFO: ' + e.message, 'error');
+                logSipMessage('SENT', 'INFO', `(failed) ${e.message}`);
+            }
+        }
+
+        // ========== HTTP Commands ==========
+        function sendHttpCommand() {
+            const apiUrl = document.getElementById('httpApiUrl').value.trim();
+            const token = document.getElementById('httpApiToken').value.trim();
+            const bodyRaw = document.getElementById('httpCmdBody').value.trim();
+            const logPanel = document.getElementById('httpCmdLog');
+
+            function logHttpMsg(message, type) {
+                if (!logPanel) return;
+                const entry = document.createElement('div');
+                entry.className = 'debug-entry';
+                const ts = new Date().toLocaleTimeString();
+                entry.innerHTML = `<span class="debug-time">[${ts}]</span> <span class="${type === 'error' ? 'debug-error' : 'debug-info'}">${message}</span>`;
+                logPanel.appendChild(entry);
+                logPanel.scrollTop = logPanel.scrollHeight;
+            }
+
+            if (!apiUrl) { logHttpMsg('Please enter API Server URL', 'error'); return; }
+            if (!token) { logHttpMsg('Please enter Bearer Token', 'error'); return; }
+            if (!bodyRaw) { logHttpMsg('Empty command body', 'error'); return; }
+
+            let parsedBody;
+            try { parsedBody = JSON.parse(bodyRaw); } catch (e) {
+                logHttpMsg('Invalid JSON: ' + e.message, 'error');
+                return;
+            }
+
+            const session = currentSession;
+            if (!session) { logHttpMsg('No active call session', 'error'); return; }
+
+            const callId = getSessionCallId(session);
+            logHttpMsg('Call ID: ' + (callId || 'null'), 'info');
+            if (!callId) { logHttpMsg('Could not get call ID from session', 'error'); return; }
+
+            const url = apiUrl.replace(/\/+$/, '') + '/api/calls/active/' + encodeURIComponent(callId) + '/commands';
+
+            logHttpMsg('POST ' + url, 'info');
+            logHttpMsg('Request: ' + JSON.stringify(parsedBody, null, 2), 'info');
+
+            fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(parsedBody)
+            })
+            .then(async response => {
+                const text = await response.text();
+                logHttpMsg('Status: ' + response.status + ' ' + response.statusText, 'info');
+                let contentType = response.headers.get('Content-Type') || '';
+                logHttpMsg('Content-Type: ' + contentType, 'info');
+                if (text) {
+                    try {
+                        const pretty = JSON.stringify(JSON.parse(text), null, 2);
+                        logHttpMsg('Response: ' + pretty, 'info');
+                    } catch (e) {
+                        logHttpMsg('Response: ' + text, 'info');
+                    }
+                } else {
+                    logHttpMsg('Response: (empty)', 'info');
+                }
+                if (!response.ok) {
+                    logHttpMsg('Request failed with status ' + response.status, 'error');
+                }
+            })
+            .catch(error => {
+                logHttpMsg('Request error: ' + error.message, 'error');
+            });
+        }
+
+        // ========== SIP Message Logging ==========
+        function logSipMessage(direction, method, body) {
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            const dirClass = direction === 'SENT' ? 'debug-info' : 'debug-warn';
+            entry.innerHTML = `<span class="debug-time">[${timestamp}]</span> <span class="${dirClass}">${direction} ${method}</span> ${body}`;
+            sipMessagesLog.appendChild(entry);
+            sipMessagesLog.scrollTop = sipMessagesLog.scrollHeight;
+            sipMessageLog.push({ time: timestamp, direction, method, body });
+            if (sipMessageLog.length > 100) sipMessageLog.shift();
+        }
+
+        // ========== Init ==========
+        window.addEventListener('beforeunload', () => { if (ua) ua.stop(); if (ccWs) ccWs.close(); });
+        loadDefaultIceServers();
+        enumerateCameras();
+        renderRecentTargets();
+        // Set default HTTP API URL to current origin
+        const httpApiUrlInput = document.getElementById('httpApiUrl');
+        if (httpApiUrlInput && !httpApiUrlInput.value) {
+            httpApiUrlInput.value = window.location.origin;
+        }
+        log('CC SIP Phone initialized');
+    </script>
+</body>
+</html>
