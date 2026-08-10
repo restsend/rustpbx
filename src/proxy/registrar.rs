@@ -584,10 +584,15 @@ impl ProxyModule for RegistrarModule {
                 })
                 .collect::<Vec<Header>>();
             let rendered_contact = entry.contact_value(expires);
-            let home_proxy = self
-                .server
-                .default_contact_uri()
-                .and_then(|uri| SipAddr::try_from(uri).ok());
+            // In cluster mode, stamp the cluster-internal address resolved from
+            // `[cluster].peers` so peer nodes route INVITEs to this node via its
+            // reachable cluster address rather than a NAT/external endpoint
+            // address. Single-node mode falls back to the endpoint contact URI.
+            let home_proxy = self.server.cluster_self_addr.clone().or_else(|| {
+                self.server
+                    .default_contact_uri()
+                    .and_then(|uri| SipAddr::try_from(uri).ok())
+            });
             let mut location = Location {
                 aor: entry.uri().clone(),
                 expires,

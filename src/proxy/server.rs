@@ -12,7 +12,10 @@ use crate::{
         CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder},
     },
-    config::{MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig, SipFlowConfig},
+    config::{
+        ClusterConfig, ClusterPeer, MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig,
+        SipFlowConfig,
+    },
     proxy::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
@@ -34,6 +37,7 @@ use rsipstack::sip::{Auth, Param, Transport};
 use rsipstack::{
     EndpointBuilder,
     dialog::dialog_layer::DialogLayer,
+    sip::HostWithPort,
     transaction::{
         Endpoint, TransactionReceiver,
         endpoint::{EndpointOption, MessageInspector},
@@ -104,6 +108,13 @@ pub struct SipServerInner {
     pub cluster_event_hub: Option<Arc<ClusterEventHub>>,
     /// SIP peer IPs for cluster auth bypass.
     pub cluster_peer_ips: Vec<IpAddr>,
+    /// Cluster self address resolved from `[cluster].peers` at startup by matching
+    /// the local endpoint listener against peer `addr:sip_port` entries. Used as
+    /// the `home_proxy` stamped on registrations so cluster peers route INVITEs to
+    /// this node's cluster-internal (reachable) address rather than a NAT/external
+    /// address. `None` in single-node mode (no `[cluster]` peers), falling back to
+    /// `default_contact_uri()`.
+    pub cluster_self_addr: Option<SipAddr>,
     /// Media policy for deciding when to anchor media.
     pub media_policy: Arc<dyn crate::call::MediaPolicy>,
     /// Trunk health check states (populated by trunk_health background loop).
@@ -165,6 +176,9 @@ pub struct SipServerBuilder {
     skip_migrate: bool,
     /// Cluster peer SocketAddrs for inter-node sync (derived from Config.cluster).
     cluster_peers: Vec<SocketAddr>,
+    /// Original `[cluster]` config (peers etc.) used to resolve the self peer
+    /// address at build time for `home_proxy` stamping.
+    cluster_config: Option<ClusterConfig>,
     /// Media policy for deciding when to anchor media.
     media_policy: Option<Arc<dyn crate::call::MediaPolicy>>,
     /// Trunk health check states (shared map populated by background loop).
@@ -205,6 +219,7 @@ impl SipServerBuilder {
             queue_location_enricher: None,
             skip_migrate: false,
             cluster_peers: Vec::new(),
+            cluster_config: None,
             media_policy: None,
             trunk_health: None,
             session_hooks: Vec::new(),
@@ -223,6 +238,11 @@ impl SipServerBuilder {
 
     pub fn with_cluster_peers(mut self, peers: Vec<SocketAddr>) -> Self {
         self.cluster_peers = peers;
+        self
+    }
+
+    pub fn with_cluster_config(mut self, config: Option<ClusterConfig>) -> Self {
+        self.cluster_config = config;
         self
     }
 
@@ -776,6 +796,36 @@ impl SipServerBuilder {
 
         let endpoint = endpoint_builder.build();
 
+        // Resolve this node's cluster-internal address from `[cluster].peers` by
+        // matching a peer `addr:sip_port` entry against the local endpoint
+        // listeners. The matching peer entry IS this node; its address is what
+        // other peers use to reach us, so it is stamped as `home_proxy` on
+        // registrations instead of a possibly-NATed/external endpoint address.
+        let cluster_self_addr = self.cluster_config.as_ref().and_then(|cc| {
+            if cc.peers.is_empty() {
+                return None;
+            }
+            let local_addr_strs: Vec<String> = endpoint
+                .get_addrs()
+                .iter()
+                .map(|a| a.addr.to_string())
+                .collect();
+            match resolve_cluster_self_addr(&cc.peers, &local_addr_strs) {
+                Some(addr) => {
+                    info!(%addr, "resolved cluster self peer address for home_proxy stamping");
+                    Some(addr)
+                }
+                None => {
+                    warn!(
+                        "cluster peers configured but none matched local endpoint addresses \
+                         (endpoint_addrs={local_addr_strs:?}); home_proxy will fall back \
+                         to default_contact_uri()"
+                    );
+                    None
+                }
+            }
+        });
+
         let mut call_router = self.call_router;
         if call_router.is_none()
             && let Some(http_router_config) = &self.config.http_router
@@ -935,6 +985,7 @@ impl SipServerBuilder {
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
             cluster_peer_ips,
+            cluster_self_addr,
             media_policy: self
                 .media_policy
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
@@ -1583,9 +1634,8 @@ impl SipServerInner {
     ) -> Option<crate::proxy::routing::HeaderPassthrough> {
         use crate::proxy::routing::{HeaderPassthrough, find_trunk_by_dest};
 
-        let internal = callee_is_same_realm
-            || target.registered_aor.is_some()
-            || target.home_proxy.is_some();
+        let internal =
+            callee_is_same_realm || target.registered_aor.is_some() || target.home_proxy.is_some();
         if internal {
             return Some(HeaderPassthrough::all());
         }
@@ -1593,9 +1643,24 @@ impl SipServerInner {
         let host = callee_uri.host().to_string();
         let port = callee_uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
         let trunks = self.data_context.trunks_snapshot();
-        find_trunk_by_dest(&trunks, &host, port)
-            .and_then(|trunk| trunk.header_passthrough.clone())
+        find_trunk_by_dest(&trunks, &host, port).and_then(|trunk| trunk.header_passthrough.clone())
     }
+}
+
+/// Resolve this node's cluster-internal address from the `[cluster].peers` list by
+/// matching a peer `addr:sip_port` entry against the local endpoint listener
+/// addresses (`addr:port` strings). The matching peer entry IS this node, so its
+/// address is what other peers use to reach us. Returns `None` when no peer entry
+/// matches (e.g. NAT where the peer address is not on a local interface).
+fn resolve_cluster_self_addr(peers: &[ClusterPeer], local_addr_strs: &[String]) -> Option<SipAddr> {
+    let matched = peers.iter().find(|p| {
+        let peer_sip_addr = format!("{}:{}", p.addr, p.sip_port);
+        local_addr_strs.iter().any(|la| la == &peer_sip_addr)
+    })?;
+    let peer_sip_addr = format!("{}:{}", matched.addr, matched.sip_port);
+    HostWithPort::try_from(peer_sip_addr.as_str())
+        .ok()
+        .map(|addr| SipAddr { r#type: None, addr })
 }
 
 fn build_contact_uri(
@@ -1673,6 +1738,7 @@ async fn log_rlimit_nofile() {
 #[cfg(test)]
 mod contact_uri_tests {
     use super::*;
+    use crate::config::ClusterPeer;
     use rsipstack::sip::HostWithPort;
 
     fn sip_addr(value: &str, transport: Option<Transport>) -> SipAddr {
@@ -1713,5 +1779,50 @@ mod contact_uri_tests {
         let uri = build_contact_uri("rustpbx", &addr, None);
 
         assert_eq!(uri.to_string(), "sip:rustpbx@192.0.2.20:5060");
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_matches_peer_sip_port_against_local_listener() {
+        let peers = vec![
+            ClusterPeer {
+                addr: "172.25.224.232".to_string(),
+                sip_port: 15060,
+                ami_port: 13080,
+            },
+            ClusterPeer {
+                addr: "172.25.225.2".to_string(),
+                sip_port: 15060,
+                ami_port: 13080,
+            },
+        ];
+        // This node is the first peer (Node B); its listener matches peer[0].
+        let local_addrs = vec![
+            "172.25.224.232:15060".to_string(),
+            "116.62.250.247:15060".to_string(),
+        ];
+
+        let result = resolve_cluster_self_addr(&peers, &local_addrs).unwrap();
+
+        assert_eq!(result.addr.to_string(), "172.25.224.232:15060");
+        assert!(result.r#type.is_none());
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_returns_none_when_no_peer_matches() {
+        let peers = vec![ClusterPeer {
+            addr: "10.0.0.1".to_string(),
+            sip_port: 5060,
+            ami_port: 5038,
+        }];
+        let local_addrs = vec!["172.25.224.232:15060".to_string()];
+
+        assert!(resolve_cluster_self_addr(&peers, &local_addrs).is_none());
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_returns_none_for_empty_peer_list() {
+        let local_addrs = vec!["127.0.0.1:15060".to_string()];
+
+        assert!(resolve_cluster_self_addr(&[], &local_addrs).is_none());
     }
 }
