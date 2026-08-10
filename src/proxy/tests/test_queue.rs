@@ -4,6 +4,7 @@ use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::{
     locator::MemoryLocator,
+    proxy_call::session_hooks::{CallSessionContext, CallSessionHook},
     routing::{
         MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
         RouteQueueTargetConfig, RouteRule,
@@ -12,8 +13,10 @@ use crate::proxy::{
     user::MemoryUserBackend,
 };
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, info, warn};
@@ -72,6 +75,8 @@ fn create_queue_proxy_config(port: u16) -> ProxyConfig {
 struct TestQueueServer {
     cancel_token: CancellationToken,
     port: u16,
+    events: Arc<Mutex<Vec<CallSessionContext>>>,
+    ended_events: Arc<Mutex<Vec<(CallSessionContext, Option<crate::callrecord::CallRecordHangupReason>)>>>,
 }
 
 impl TestQueueServer {
@@ -106,11 +111,19 @@ impl TestQueueServer {
         let locator = MemoryLocator::new();
         let cancel_token = CancellationToken::new();
 
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ended_events = Arc::new(Mutex::new(Vec::new()));
+        let hook: Arc<dyn CallSessionHook> = Arc::new(QueueTestHook {
+            connected: events.clone(),
+            ended: ended_events.clone(),
+        });
+
         let builder = test_helpers::register_standard_modules(
             SipServerBuilder::new(config)
                 .with_user_backend(Box::new(user_backend))
                 .with_locator(Box::new(locator))
-                .with_cancel_token(cancel_token.clone()),
+                .with_cancel_token(cancel_token.clone())
+                .with_session_hook(hook),
         );
 
         let server = builder.build().await?;
@@ -122,7 +135,7 @@ impl TestQueueServer {
         });
         sleep(Duration::from_millis(100)).await;
 
-        Ok(Self { cancel_token, port })
+        Ok(Self { cancel_token, port, events, ended_events })
     }
 
     fn get_addr(&self) -> std::net::SocketAddr {
@@ -133,6 +146,28 @@ impl TestQueueServer {
 impl Drop for TestQueueServer {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+    }
+}
+
+#[derive(Clone)]
+struct QueueTestHook {
+    connected: Arc<Mutex<Vec<CallSessionContext>>>,
+    ended: Arc<Mutex<Vec<(CallSessionContext, Option<crate::callrecord::CallRecordHangupReason>)>>>,
+}
+
+#[async_trait]
+impl CallSessionHook for QueueTestHook {
+    async fn on_call_connected(&self, ctx: &CallSessionContext) {
+        self.connected.lock().await.push(ctx.clone());
+    }
+
+    async fn on_call_ended(
+        &self,
+        ctx: &CallSessionContext,
+        reason: Option<&crate::callrecord::CallRecordHangupReason>,
+        _duration_secs: u64,
+    ) {
+        self.ended.lock().await.push((ctx.clone(), reason.cloned()));
     }
 }
 
@@ -178,7 +213,7 @@ async fn test_call_queue_routing() {
     caller.start().await.unwrap();
 
     // 4. Caller dials "support" (triggers routing to queue)
-    let call_task = crate::utils::spawn(async move {
+    let call_task: tokio::task::JoinHandle<anyhow::Result<()>> = crate::utils::spawn(async move {
         info!("Caller dialing support...");
 
         // Generate a minimal SDP offer from caller
@@ -210,16 +245,15 @@ async fn test_call_queue_routing() {
         Ok::<_, anyhow::Error>(())
     });
 
-    // 5. Agent waits for incoming call and answers
-    let answer_task = crate::utils::spawn(async move {
+    // 5. Agent waits for incoming call, answers, waits for CallEstablished (ACK)
+    let agent_task: tokio::task::JoinHandle<anyhow::Result<()>> = crate::utils::spawn(async move {
+        let mut agent_dialog_id = None;
         for _ in 0..50 {
-            // Try for 5 seconds
             let events = agent.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 if let TestUaEvent::IncomingCall(dialog_id, _) = event {
                     info!("Agent received call: {}", dialog_id);
 
-                    // Generate a minimal SDP answer
                     let sdp_answer = format!(
                         "v=0\r\n\
                          o=agent {} 0 IN IP4 127.0.0.1\r\n\
@@ -234,32 +268,70 @@ async fn test_call_queue_routing() {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs(),
-                        agent_port + 100 // Use a different port for RTP
+                        agent_port + 100
                     );
-
-                    agent
-                        .answer_call(&dialog_id, Some(sdp_answer))
-                        .await
-                        .unwrap();
-
-                    // Keep agent alive to receive BYE
-                    sleep(Duration::from_millis(1000)).await;
-                    return Ok(());
+                    agent.answer_call(&dialog_id, Some(sdp_answer)).await.unwrap();
+                    agent_dialog_id = Some(dialog_id);
+                    break;
                 }
+            }
+            if agent_dialog_id.is_some() {
+                break;
             }
             sleep(Duration::from_millis(100)).await;
         }
-        Err(anyhow::anyhow!("Agent did not receive call"))
+        let _agent_dialog_id = agent_dialog_id
+            .ok_or_else(|| anyhow::anyhow!("Agent did not receive call"))?;
+        info!("Agent answered, keeping dialog alive for teardown");
+
+        // Wait for CallEstablished (ACK from proxy), then keep alive for BYE
+        for _ in 0..50 {
+            let events = agent.process_dialog_events().await.unwrap_or_default();
+            if events.iter().any(|e| matches!(e, TestUaEvent::CallEstablished(_))) {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        // Let cleanup happen (caller hangs up, BYE received)
+        sleep(Duration::from_millis(1500)).await;
+        Ok(())
     });
 
-    let (call_res, answer_res) = tokio::join!(call_task, answer_task);
+    let (call_res, agent_res) = tokio::join!(call_task, agent_task);
 
     if let Err(e) = call_res.unwrap() {
         panic!("Call flow failed: {:?}", e);
     }
-    if let Err(e) = answer_res.unwrap() {
+    if let Err(e) = agent_res.unwrap() {
         panic!("Agent flow failed: {:?}", e);
     }
+
+    // Verify session hooks: on_call_connected and on_call_ended must have fired
+    {
+        let connected_events = server.events.lock().await;
+        assert!(!connected_events.is_empty(), "on_call_connected hook should have fired");
+        let connected_ctx = &connected_events[0];
+        assert!(!connected_ctx.session_id.is_empty(), "session_id should be populated");
+        assert!(connected_ctx.callee.contains("support"), "callee should contain 'support', got: {}", connected_ctx.callee);
+    }
+
+    // Give the session a moment to flush on_call_ended
+    sleep(Duration::from_millis(500)).await;
+    {
+        let ended_events = server.ended_events.lock().await;
+        assert!(!ended_events.is_empty(), "on_call_ended hook should have fired after caller hangup");
+        let (ended_ctx, hangup_reason) = &ended_events[0];
+        assert!(!ended_ctx.session_id.is_empty(), "ended session_id should be populated");
+        assert!(
+            matches!(
+                hangup_reason,
+                Some(crate::callrecord::CallRecordHangupReason::ByCaller)
+                    | Some(crate::callrecord::CallRecordHangupReason::Abandoned)
+            ),
+            "hangup_reason should be ByCaller or Abandoned, got: {:?}", hangup_reason
+        );
+    }
+    info!("Queue e2e verification passed: call connected and ended with caller hangup");
 
     // Cleanup happens automatically via Drop
 }

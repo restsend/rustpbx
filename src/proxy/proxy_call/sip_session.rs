@@ -8599,6 +8599,28 @@ impl SipSession {
                             self.attach_callee_dialog(invite, answer_sdp.clone()).await;
                         }
                     }
+                } else if let Some(ref call_id) = dialog_id {
+                    // Dynamic legs (queue agents): store the INVITE dialog on the leg
+                    // AND register a RAII ClientDialogGuard so the agent leg is
+                    // automatically hung up (BYE) when the session is destroyed —
+                    // these legs are not tracked in callee_dialogs.
+                    if let Some(invite) = self
+                        .server
+                        .dialog_layer
+                        .get_client_dialog_by_call_id(call_id)
+                        .into_iter()
+                        .next()
+                    {
+                        let dlg_id = invite.id();
+                        self.legs.set_dialog(
+                            leg_id.clone(),
+                            rsipstack::dialog::dialog::Dialog::Invite(invite),
+                        );
+                        self.callee_guards.push(ClientDialogGuard::new(
+                            self.server.dialog_layer.clone(),
+                            dlg_id,
+                        ));
+                    }
                 }
 
                 // Forward to running app before processing so the app can react
