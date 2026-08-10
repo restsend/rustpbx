@@ -5553,11 +5553,9 @@ enum ConstructMode<'a> {
                     callee_leg.apply_sdp(callee_sdp_value, sdp_type).await?;
                 }
 
-                // accept() opens the gate and, once both legs are accepted,
-                // activates the route (fast-path or transcoding).
+                mb.accept(crate::media::media_bridge::LegSide::B).await;
+                mb.accept(crate::media::media_bridge::LegSide::A).await;
                 if !is_early_media {
-                    mb.accept(crate::media::media_bridge::LegSide::B).await;
-                    mb.accept(crate::media::media_bridge::LegSide::A).await;
                     Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx, &session_id);
                 }
 
