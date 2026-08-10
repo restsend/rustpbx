@@ -462,6 +462,11 @@ impl SipSession {
                 handle.stop();
             }
             self.conference_bridge.bridge_handle = None;
+
+            // Also stop any per-leg handles (e.g. the supervisor listen/whisper
+            // pair stored in the LegRegistry by start_supervisor_bridge_pair).
+            self.legs.stop_all_conference_bridge_handles();
+
             info!(session_id = %self.id, conf_id = %conf_id, "Left conference");
         }
 

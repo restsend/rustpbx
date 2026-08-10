@@ -74,66 +74,6 @@ impl ConferenceMediaBridge {
         Self { conference_manager }
     }
 
-    /// Start bridging conference mixed audio to a leg's media path (output only).
-    ///
-    /// This spawns a background task that continuously reads mixed audio from the conference
-    /// and injects it into the leg's media track via the provided audio sender.
-    pub async fn start_bridge<S>(
-        &self,
-        conf_id: &str,
-        leg_id: &LegId,
-        audio_sender: S,
-        codec: audio_codec::CodecType,
-    ) -> anyhow::Result<ConferenceBridgeHandle>
-    where
-        S: AudioSender + Send + Sync + 'static,
-    {
-        let _conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
-
-        // Take the output_rx for this leg
-        let output_rx = self
-            .conference_manager
-            .take_participant_output_rx(leg_id)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No output_rx found for leg {} in conference {}",
-                    leg_id,
-                    conf_id
-                )
-            })?;
-
-        info!(
-            conf_id = %conf_id,
-            leg_id = %leg_id,
-            "Starting conference media bridge (output only)"
-        );
-        crate::metrics::conference::created();
-
-        // Spawn background task to forward mixed audio
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        let cancel_token_clone = cancel_token.clone();
-
-        let leg_id_clone = leg_id.clone();
-        let conf_id_string = conf_id.to_string();
-        let handle = crate::utils::spawn(async move {
-            Self::forward_loop(
-                output_rx,
-                audio_sender,
-                leg_id_clone,
-                conf_id_string,
-                cancel_token_clone,
-                codec,
-            )
-            .await;
-        });
-
-        Ok(ConferenceBridgeHandle {
-            _tasks: vec![handle],
-            cancel_token,
-        })
-    }
-
     /// Start full-duplex bridge for a leg.
     ///
     /// This creates both forward and reverse loops:
@@ -504,18 +444,6 @@ mod tests {
     use crate::call::runtime::test_utils::{MockAudioReceiver, MockAudioSender};
     use crate::media::conference_mixer::AudioFrame;
     use rustrtc::media::MediaSample;
-
-    #[tokio::test]
-    async fn test_start_bridge_requires_output_rx() {
-        let conf_mgr = Arc::new(ConferenceManager::new());
-        let bridge = ConferenceMediaBridge::new(conf_mgr);
-        let leg_id = LegId::new("test-leg");
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let result = bridge
-            .start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU)
-            .await;
-        assert!(result.is_err());
-    }
 
     #[tokio::test]
     async fn test_forward_loop_audio_encoding() {
