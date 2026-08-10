@@ -103,6 +103,7 @@ fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
         _ => CallRecordHangupReason::Failed,
     }
 }
+
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -2209,7 +2210,33 @@ enum ConstructMode<'a> {
         if let Err((status_code, text, reason)) = setup_result {
             warn!(session_id = %self.context.session_id, ?status_code, ?text, ?reason, "Dialplan execution failed");
 
-            if matches!(status_code, 408 | 480 | 486 | 487) {}
+            let caller_cancelled = self
+                .caller_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    matches!(
+                        dialog.state(),
+                        DialogState::Terminated(_, TerminatedReason::UacCancel)
+                    )
+                });
+
+            if caller_cancelled {
+                info!(
+                    session_id = %self.context.session_id,
+                    "Caller cancelled during setup; skipping rejection and failure tone"
+                );
+                self.meta.error_code = Some(
+                    &crate::proxy::proxy_call::error_catalog::DIAL_CALLER_CANCELLED,
+                );
+                self.meta.last_error = Some((
+                    StatusCode::RequestTerminated,
+                    Some("Caller cancelled".to_string()),
+                ));
+                self.meta.invite_final_status.get_or_insert(487);
+                self.meta.hangup_reason = Some(CallRecordHangupReason::Canceled);
+                self.cleanup().await;
+                return Ok(());
+            }
 
             if let Err(e) = self
                 .reject_with_tone(status_code, text.clone(), reason.clone())
