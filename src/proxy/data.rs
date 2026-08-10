@@ -1289,6 +1289,9 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         header_rules: sbc
             .and_then(|s| s.get("header_rules"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        header_passthrough: sbc
+            .and_then(|s| s.get("header_passthrough"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         ringback: sbc
             .and_then(|s| s.get("ringback"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -1394,6 +1397,9 @@ pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkCon
             }
             if sbc.header_rules.is_some() {
                 trunk.header_rules = sbc.header_rules;
+            }
+            if sbc.header_passthrough.is_some() {
+                trunk.header_passthrough = sbc.header_passthrough;
             }
             if !sbc.codec.is_empty() {
                 trunk.codec = sbc.codec;

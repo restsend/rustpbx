@@ -874,7 +874,15 @@ pub struct Dialplan {
     pub voicemail_enabled: bool,
 
     pub route_invite: Option<Box<dyn RouteInvite>>,
-    pub with_original_headers: bool,
+    /// Resolved at routing time: controls whether custom headers from the
+    /// original INVITE are forwarded to the callee INVITE.
+    ///
+    /// - `Some(rule)` — forward the original request's custom (non-standard)
+    ///   headers according to the rule (internal destinations default to `All`).
+    /// - `None` — do not forward any original custom headers (external trunk
+    ///   default). `build_target_invite_option` may fall back to a per-target
+    ///   resolution when this is unset (app/queue/fork legs).
+    pub header_passthrough: Option<crate::proxy::routing::HeaderPassthrough>,
     pub extensions: http::Extensions,
     pub allow_codecs: Vec<CodecType>,
     pub passthrough_failure: bool,
@@ -916,6 +924,7 @@ impl std::fmt::Debug for Dialplan {
             .field("max_call_duration", &self.max_call_duration)
             .field("rtp_timeout", &self.rtp_timeout)
             .field("enable_sipflow", &self.enable_sipflow)
+            .field("header_passthrough", &self.header_passthrough)
             .finish()
     }
 }
@@ -954,7 +963,7 @@ impl Dialplan {
             call_forwarding: None,
             voicemail_enabled: false,
             route_invite: None,
-            with_original_headers: true,
+            header_passthrough: None,
             extensions: http::Extensions::new(),
             allow_codecs: vec![],
             passthrough_failure: false,
@@ -1167,22 +1176,32 @@ impl Dialplan {
         }
     }
 
-    pub fn build_invite_headers(&self, target: &Location) -> Option<Vec<rsipstack::sip::Header>> {
-        let mut headers = target.headers.clone().unwrap_or_default();
-        if self.with_original_headers {
-            for header in self.original.headers.iter() {
-                if !Self::should_forward_header(header) {
-                    continue;
-                }
-                headers.push(header.clone());
+    /// Select which headers from the original request should be forwarded to a
+    /// callee leg, applying a passthrough rule on top of the always-on
+    /// `should_forward_header` safety filter.
+    ///
+    /// Headers already present in `existing` (by case-insensitive name) are not
+    /// duplicated.
+    pub fn select_passthrough_headers(
+        original_headers: &[rsipstack::sip::Header],
+        existing: &[rsipstack::sip::Header],
+        rule: &crate::proxy::routing::HeaderPassthrough,
+    ) -> Vec<rsipstack::sip::Header> {
+        let mut selected = Vec::new();
+        for header in original_headers {
+            if !Self::should_forward_header(header) {
+                continue;
             }
+            let name = header.name();
+            if !rule.allows(name) {
+                continue;
+            }
+            if existing.iter().any(|h| h.name().eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            selected.push(header.clone());
         }
-
-        if headers.is_empty() {
-            None
-        } else {
-            Some(headers)
-        }
+        selected
     }
 }
 
@@ -1507,5 +1526,142 @@ mod tests {
             auto_answer: false,
         };
         assert!(!flow.all_webrtc_target());
+    }
+
+    // ── Header passthrough ──────────────────────────────────────────────────
+
+    fn custom_header(name: &str, value: &str) -> rsipstack::sip::Header {
+        rsipstack::sip::Header::Other(name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn new_dialplan_header_passthrough_none_by_default() {
+        let dp = Dialplan::new(
+            "sess-001".into(),
+            minimal_request(),
+            DialDirection::Internal,
+        );
+        assert!(dp.header_passthrough.is_none());
+    }
+
+    #[test]
+    fn should_forward_header_allows_custom_and_excludes_standard() {
+        use rsipstack::sip::Header;
+        assert!(Dialplan::should_forward_header(&custom_header("X-Smart2Agent", "v")));
+        assert!(Dialplan::should_forward_header(&custom_header("x-referred-id", "v")));
+        assert!(!Dialplan::should_forward_header(&Header::Via("SIP/2.0/UDP h:5060".into())));
+        assert!(!Dialplan::should_forward_header(&Header::From("sip:a@b".into())));
+        assert!(!Dialplan::should_forward_header(&Header::CallId("cid".into())));
+        assert!(!Dialplan::should_forward_header(&custom_header("Call-ID", "v")));
+        assert!(!Dialplan::should_forward_header(&custom_header("From", "v")));
+    }
+
+    #[test]
+    fn select_passthrough_headers_all_rule_skips_standard_and_dedupes() {
+        use crate::proxy::routing::HeaderPassthrough;
+        let original = vec![
+            custom_header("X-Smart2Agent", "agent"),
+            custom_header("X-SmartParams", "params"),
+            custom_header("X-Referred-Id", "ref"),
+            custom_header("From", "sip:a@b"), // standard -> never forwarded
+            rsipstack::sip::Header::Via("SIP/2.0/UDP h:5060".into()),
+        ];
+        let existing = vec![custom_header("X-Referred-Id", "already-there")];
+        let rule = HeaderPassthrough::all();
+
+        let selected = Dialplan::select_passthrough_headers(&original, &existing, &rule);
+
+        let names: Vec<String> = selected.iter().map(|h| h.name().to_string()).collect();
+        assert!(names.contains(&"X-Smart2Agent".to_string()));
+        assert!(names.contains(&"X-SmartParams".to_string()));
+        // Duplicate name already present -> skipped
+        assert!(!names.contains(&"X-Referred-Id".to_string()));
+        // Standard SIP headers always excluded
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("from")));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("via")));
+    }
+
+    #[test]
+    fn select_passthrough_headers_whitelist_and_blacklist() {
+        use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+        let original = vec![
+            custom_header("X-Smart2Agent", "a"),
+            custom_header("X-SmartBridgeType", "b"),
+            custom_header("X-Token", "secret"),
+        ];
+
+        let whitelist = HeaderPassthrough {
+            mode: HeaderPassthroughMode::Whitelist,
+            whitelist: vec!["x-smart2agent".into()],
+            blacklist: vec![],
+        };
+        let sel = Dialplan::select_passthrough_headers(&original, &[], &whitelist);
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].name(), "X-Smart2Agent");
+
+        let blacklist = HeaderPassthrough {
+            mode: HeaderPassthroughMode::Blacklist,
+            whitelist: vec![],
+            blacklist: vec!["x-token".into()],
+        };
+        let sel = Dialplan::select_passthrough_headers(&original, &[], &blacklist);
+        let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
+        assert!(names.contains(&"X-Smart2Agent".to_string()));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("x-token")));
+    }
+
+    /// Mirrors the refer -> PBX -> WebRTC agent scenario: the incoming refer
+    /// INVITE carries the X-Smart* / X-Referred-* headers, and a registered
+    /// (internal) agent destination resolves to the "all" passthrough rule.
+    #[test]
+    fn refer_smart_headers_forwarded_to_registered_agent() {
+        use crate::proxy::routing::HeaderPassthrough;
+
+        let original = vec![
+            custom_header("X-Smart2Agent", "strategyCode:|callId:abc|taskId:def"),
+            custom_header("X-SmartParams", "nameListId:1|siteId:1|planId:9"),
+            custom_header("X-SmartBridgeType", "refer"),
+            custom_header("X-Referred-Id", "abc"),
+            custom_header("X-Referred-To", "sip:187@x"),
+            custom_header("X-Referred-From", "sip:101@y"),
+            rsipstack::sip::Header::From("sip:187@172.25.225.2:15060".into()),
+            rsipstack::sip::Header::To("sip:test0807@172.25.225.2:15060".into()),
+            rsipstack::sip::Header::CallId("ref-abc".into()),
+            rsipstack::sip::Header::CSeq("1 INVITE".into()),
+        ];
+        // The INVITE to the agent also carries the agent's own headers
+        // (e.g. X-Agent/X-Token from its registration Location) plus standard
+        // routing headers that must never be duplicated/forwarded.
+        let existing = vec![
+            custom_header("X-Agent", "test0807"),
+            custom_header("Max-Forwards", "69"),
+            rsipstack::sip::Header::Contact("sip:pbx@host".into()),
+        ];
+
+        // Internal destination (registered agent) -> All rule.
+        let rule = HeaderPassthrough::all();
+        let selected = Dialplan::select_passthrough_headers(&original, &existing, &rule);
+
+        let names: Vec<String> = selected.iter().map(|h| h.name().to_string()).collect();
+        for want in [
+            "X-Smart2Agent",
+            "X-SmartParams",
+            "X-SmartBridgeType",
+            "X-Referred-Id",
+            "X-Referred-To",
+            "X-Referred-From",
+        ] {
+            assert!(
+                names.contains(&want.to_string()),
+                "{want} should be forwarded to the registered agent"
+            );
+        }
+        // Standard SIP headers are never forwarded; existing names are not duplicated.
+        for excluded in ["From", "To", "Call-ID", "CSeq", "Contact", "Max-Forwards", "X-Agent"] {
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case(excluded)),
+                "{excluded} must not be forwarded"
+            );
+        }
     }
 }

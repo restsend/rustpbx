@@ -601,11 +601,14 @@ impl MediaNegotiator {
     /// Build codec list for an outgoing offer to the callee.
     ///
     /// Algorithm:
-    /// 1. Use the configured policy order. When policy is empty, use the PBX default order.
-    /// 2. Offer caller-common codecs first in that order, preserving caller PT.
-    /// 3. Append policy codecs the caller did not offer, using local default PTs. These
-    ///    extras allow transcoding when the callee cannot use any caller codec.
-    /// 4. For DTMF: append telephone-event entries after the final audio codec
+    /// 1. The policy (allow list, or the PBX default when empty) is used as a
+    ///    filter, not an ordering. Caller-common codecs are offered first in the
+    ///    CALLER'S offer order, preserving caller PT, so the codec the caller
+    ///    actually transmits (its first-listed codec) is what the callee is most
+    ///    likely to pick — avoiding needless transcoding.
+    /// 2. Append policy codecs the caller did not offer, using local default PTs.
+    ///    These extras allow transcoding when the callee cannot use any caller codec.
+    /// 3. For DTMF: append telephone-event entries after the final audio codec
     ///    list, one per audio RTP clock rate, preserving the final audio clock-rate
     ///    order. Caller-offered telephone-event PTs are reused when their rate
     ///    matches; missing rates are generated locally.
@@ -614,35 +617,29 @@ impl MediaNegotiator {
         allow_codecs: &[CodecType],
     ) -> Vec<CodecInfo> {
         let extracted = Self::extract_codec_params(caller_sdp);
-        let codec_order = if allow_codecs.is_empty() {
+        let policy: Vec<_> = if allow_codecs.is_empty() {
             Self::default_rtp_codecs()
+                .into_iter()
+                .filter(|codec| *codec != CodecType::TelephoneEvent && codec.is_audio())
+                .collect()
         } else {
-            allow_codecs.to_vec()
+            allow_codecs
+                .iter()
+                .copied()
+                .filter(|codec| *codec != CodecType::TelephoneEvent && codec.is_audio())
+                .collect()
         };
-        let offer_order: Vec<_> = codec_order
-            .into_iter()
-            .filter(|codec| *codec != CodecType::TelephoneEvent && codec.is_audio())
-            .collect();
 
         let mut result: Vec<CodecInfo> = Vec::new();
 
-        for codec_type in &offer_order {
-            if let Some(codec) = extracted
-                .audio
-                .iter()
-                .find(|codec| codec.codec == *codec_type)
-                .cloned()
-            {
-                result.push(codec);
+        for codec in extracted.audio.iter() {
+            if policy.contains(&codec.codec) && !result.iter().any(|r| r.codec == codec.codec) {
+                result.push(codec.clone());
             }
         }
 
-        for codec_type in offer_order {
-            if !extracted
-                .audio
-                .iter()
-                .any(|codec| codec.codec == codec_type)
-            {
+        for codec_type in policy {
+            if !result.iter().any(|r| r.codec == codec_type) {
                 result.push(Self::codec_info_for_type(codec_type));
             }
         }
@@ -752,22 +749,29 @@ impl MediaNegotiator {
             .filter(|codec| *codec != CodecType::TelephoneEvent && codec.is_audio())
             .collect();
 
-        let mut audio = Vec::new();
-
-        for codec_type in &policy {
-            if let Some(codec) = extracted
+        let audio = if policy.is_empty() {
+            // No policy: honor the offerer's own preference order.
+            extracted.audio.clone()
+        } else {
+            // Policy present: treat it as a filter, not a reorder. Keep the
+            // offerer's order for codecs shared with the policy so the answer
+            // lists the caller's preferred codec first (RFC 3264 interop) and
+            // the bridge ingress profile PT matches what the caller actually
+            // transmits.
+            let audio: Vec<_> = extracted
                 .audio
                 .iter()
-                .find(|codec| codec.codec == *codec_type)
+                .filter(|codec| policy.contains(&codec.codec))
                 .cloned()
-            {
-                audio.push(codec);
+                .collect();
+            if audio.is_empty() {
+                // No intersection: fall back to the offerer's order instead of
+                // an empty audio list (which would drop the m-line).
+                extracted.audio.clone()
+            } else {
+                audio
             }
-        }
-
-        if audio.is_empty() {
-            audio = extracted.audio.clone();
-        }
+        };
 
         let mut result = audio;
         let has_dtmf = !extracted.dtmf.is_empty();
@@ -1513,16 +1517,16 @@ a=rtpmap:101 telephone-event/8000\r\n";
     }
 
     #[test]
-    fn test_offer_constrained_list_is_subset_in_preferred_order() {
+    fn test_offer_constrained_list_is_subset_in_offer_order() {
         let caller_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 10000 RTP/AVP 9 0 8 101\r\n\
-a=rtpmap:9 G722/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n";
+        o=- 1 1 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        m=audio 10000 RTP/AVP 9 0 8 101\r\n\
+        a=rtpmap:9 G722/8000\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:8 PCMA/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n";
 
         let codecs = MediaNegotiator::build_codec_list_from_offer(
             caller_sdp,
@@ -1531,10 +1535,11 @@ a=rtpmap:101 telephone-event/8000\r\n";
 
         let audio: Vec<_> = codecs.iter().filter(|codec| !codec.is_dtmf()).collect();
         assert_eq!(audio.len(), 2);
-        assert_eq!(audio[0].codec, CodecType::PCMA);
-        assert_eq!(audio[0].payload_type, 8);
-        assert_eq!(audio[1].codec, CodecType::PCMU);
-        assert_eq!(audio[1].payload_type, 0);
+        // Policy is a filter; the answer keeps the caller's offer order.
+        assert_eq!(audio[0].codec, CodecType::PCMU);
+        assert_eq!(audio[0].payload_type, 0);
+        assert_eq!(audio[1].codec, CodecType::PCMA);
+        assert_eq!(audio[1].payload_type, 8);
         assert!(!codecs.iter().any(|codec| codec.codec == CodecType::G729));
     }
 
@@ -1558,16 +1563,21 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert_eq!(audio[0].payload_type, 9);
     }
 
+    /// Regression: caller offers PCMA first (`8 0`), allow list is `[PCMU, PCMA]`.
+    /// The answer must follow the CALLER's preference (PCMA first), not the
+    /// policy order — otherwise the caller keeps sending PCMA while the bridge
+    /// ingress profile (derived from the answer's first codec) expects PCMU and
+    /// the ForwardingTrack PT filter drops every caller packet (one-way audio).
     #[test]
-    fn test_offer_constrained_list_uses_policy_order_without_peer_answer() {
+    fn test_offer_constrained_list_follows_caller_order_without_peer_answer() {
         let caller_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 10000 RTP/AVP 8 0 101\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n";
+        o=- 1 1 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        m=audio 10000 RTP/AVP 8 0 101\r\n\
+        a=rtpmap:8 PCMA/8000\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n";
 
         let codecs = MediaNegotiator::build_codec_list_from_offer(
             caller_sdp,
@@ -1576,25 +1586,55 @@ a=rtpmap:101 telephone-event/8000\r\n";
 
         let audio: Vec<_> = codecs.iter().filter(|codec| !codec.is_dtmf()).collect();
         assert_eq!(audio.len(), 2);
-        assert_eq!(audio[0].codec, CodecType::PCMU);
-        assert_eq!(audio[0].payload_type, 0);
-        assert_eq!(audio[1].codec, CodecType::PCMA);
-        assert_eq!(audio[1].payload_type, 8);
+        assert_eq!(audio[0].codec, CodecType::PCMA);
+        assert_eq!(audio[0].payload_type, 8);
+        assert_eq!(audio[1].codec, CodecType::PCMU);
+        assert_eq!(audio[1].payload_type, 0);
+    }
+
+    /// Callee-side counterpart of the PCMA-first caller regression: the
+    /// generated offer to the callee must also put the caller's preferred codec
+    /// (PCMA) first so the callee is most likely to pick it, keeping the caller
+    /// leg and callee leg aligned (no transcoding).
+    #[test]
+    fn test_callee_offer_follows_caller_order_with_pcma_first() {
+        let caller_sdp = "v=0\r\n\
+        o=- 1 1 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        m=audio 10000 RTP/AVP 8 0 101\r\n\
+        a=rtpmap:8 PCMA/8000\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n";
+
+        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            caller_sdp,
+            &[CodecType::PCMU, CodecType::PCMA, CodecType::TelephoneEvent],
+        );
+
+        let audio: Vec<_> = codecs.iter().filter(|codec| !codec.is_dtmf()).collect();
+        assert_eq!(audio.len(), 2);
+        assert_eq!(audio[0].codec, CodecType::PCMA);
+        assert_eq!(audio[0].payload_type, 8);
+        assert_eq!(audio[1].codec, CodecType::PCMU);
+        assert_eq!(audio[1].payload_type, 0);
+        assert!(codecs.iter().any(|c| c.codec == CodecType::TelephoneEvent));
     }
 
     /// Reverse direction: RTP caller → WebRTC callee.
-    /// The caller-facing capability list follows policy order for caller-offered codecs,
-    /// and the callee offer appends policy codecs the caller did not offer.
+    /// The caller-facing capability list follows the caller's offer order for
+    /// caller-offered codecs, and the callee offer appends policy codecs the
+    /// caller did not offer.
     #[test]
     fn test_bridge_codecs_rtp_caller_webrtc_callee() {
         let caller_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 10000 RTP/AVP 8 0 101\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n";
+        o=- 1 1 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        m=audio 10000 RTP/AVP 8 0 101\r\n\
+        a=rtpmap:8 PCMA/8000\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n";
 
         let policy = &[
             CodecType::Opus,
@@ -1608,16 +1648,16 @@ a=rtpmap:101 telephone-event/8000\r\n";
         let caller_audio: Vec<_> = caller_side.iter().filter(|c| !c.is_dtmf()).collect();
         assert_eq!(
             caller_audio[0].codec,
-            CodecType::PCMU,
-            "Caller side follows policy order for common codecs"
+            CodecType::PCMA,
+            "Caller side follows caller offer order for common codecs"
         );
-        assert_eq!(caller_audio[1].codec, CodecType::PCMA);
+        assert_eq!(caller_audio[1].codec, CodecType::PCMU);
         assert_eq!(caller_audio.len(), 2);
         assert!(!caller_side.iter().any(|c| c.codec == CodecType::Opus));
 
         let callee_audio: Vec<_> = callee_side.iter().filter(|c| !c.is_dtmf()).collect();
-        assert_eq!(callee_audio[0].codec, CodecType::PCMU);
-        assert_eq!(callee_audio[1].codec, CodecType::PCMA);
+        assert_eq!(callee_audio[0].codec, CodecType::PCMA);
+        assert_eq!(callee_audio[1].codec, CodecType::PCMU);
         assert_eq!(callee_audio[2].codec, CodecType::Opus);
         assert_eq!(callee_audio.len(), 3);
     }
@@ -1836,19 +1876,21 @@ a=rtpmap:101 telephone-event/8000\r\n";
         );
     }
 
-    /// Regression test: when allow_codecs has PCMA before PCMU (e.g. config `codecs = ["pcma", "pcmu"]`)
-    /// and the caller offers G722(9), PCMU(0), PCMA(8), the outgoing offer must follow
-    /// the policy order for surviving codecs.
+    /// The allow list is a filter, not an order: when the caller offers
+    /// G722(9), PCMU(0), PCMA(8) and allow_codecs = `[pcma, pcmu]`, the
+    /// outgoing offer must keep the caller's order for surviving codecs
+    /// (PCMU then PCMA), so the caller leg stays consistent with what the
+    /// caller actually transmits.
     #[test]
     fn test_policy_order_with_pcma_first_in_allow() {
         let caller_sdp = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 10000 RTP/AVP 9 0 8\r\n\
-a=rtpmap:9 G722/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n";
+        o=- 1 1 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        m=audio 10000 RTP/AVP 9 0 8\r\n\
+        a=rtpmap:9 G722/8000\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:8 PCMA/8000\r\n";
 
         let callee_offer = MediaNegotiator::build_callee_codec_offer_with_allow(
             caller_sdp,
@@ -1859,16 +1901,16 @@ a=rtpmap:8 PCMA/8000\r\n";
         assert_eq!(callee_audio.len(), 2, "G722 must be filtered out");
         assert_eq!(
             callee_audio[0].codec,
-            CodecType::PCMA,
-            "PCMA must be first by policy order"
+            CodecType::PCMU,
+            "PCMU must be first (caller offer order)"
         );
-        assert_eq!(callee_audio[0].payload_type, 8, "PCMA PT must be 8");
+        assert_eq!(callee_audio[0].payload_type, 0, "PCMU PT must be 0");
         assert_eq!(
             callee_audio[1].codec,
-            CodecType::PCMU,
-            "PCMU must be second by policy order"
+            CodecType::PCMA,
+            "PCMA must be second (caller offer order)"
         );
-        assert_eq!(callee_audio[1].payload_type, 0, "PCMU PT must be 0");
+        assert_eq!(callee_audio[1].payload_type, 8, "PCMA PT must be 8");
     }
 
     /// Regression: wholesale trunk configured as `codecs = ["g729"]` produces
@@ -1981,7 +2023,8 @@ a=rtpmap:8 PCMA/8000\r\n";
             "G722 rtpmap must be removed"
         );
 
-        // PCMA (8) must come before PCMU (0) by policy order.
+        // PCMA (8) and PCMU (0) survive; the m-line keeps the caller's offer
+        // order (PCMU before PCMA) since G722(9) was filtered out.
         let m_line_pos = rewritten.find("m=audio").unwrap();
         let m_line_end = rewritten[m_line_pos..].find("\r\n").unwrap() + m_line_pos;
         let m_line = &rewritten[m_line_pos..m_line_end];
@@ -1992,8 +2035,8 @@ a=rtpmap:8 PCMA/8000\r\n";
             .find(" 8 ")
             .or_else(|| m_line.strip_suffix(" 8").map(|_| m_line.len() - 2));
         assert!(
-            pos_8 < pos_0,
-            "PCMA (PT 8) must appear before PCMU (PT 0) in m= line: {}",
+            pos_0 < pos_8,
+            "PCMU (PT 0) must appear before PCMA (PT 8) in m= line (caller offer order): {}",
             m_line
         );
     }

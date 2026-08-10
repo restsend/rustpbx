@@ -1563,6 +1563,37 @@ impl SipServerInner {
             }
         }
     }
+
+    /// Resolve the original-header passthrough rule for a callee destination.
+    ///
+    /// Internal destinations (same realm / registered AOR / home-proxy) always
+    /// passthrough every custom header. External destinations fall back to the
+    /// destination trunk's `header_passthrough` config (if any); otherwise no
+    /// custom headers are forwarded.
+    ///
+    /// `callee_uri` is used only for destination-trunk matching (host:port), so
+    /// it should be the outbound callee URI (e.g. the original request's To URI).
+    pub async fn header_passthrough_for(
+        &self,
+        target: &crate::call::Location,
+        callee_is_same_realm: bool,
+        callee_uri: &rsipstack::sip::Uri,
+    ) -> Option<crate::proxy::routing::HeaderPassthrough> {
+        use crate::proxy::routing::{HeaderPassthrough, find_trunk_by_dest};
+
+        let internal = callee_is_same_realm
+            || target.registered_aor.is_some()
+            || target.home_proxy.is_some();
+        if internal {
+            return Some(HeaderPassthrough::all());
+        }
+
+        let host = callee_uri.host().to_string();
+        let port = callee_uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
+        let trunks = self.data_context.trunks_snapshot();
+        find_trunk_by_dest(&trunks, &host, port)
+            .and_then(|trunk| trunk.header_passthrough.clone())
+    }
 }
 
 fn build_contact_uri(

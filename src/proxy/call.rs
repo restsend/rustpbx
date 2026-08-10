@@ -821,6 +821,32 @@ impl CallModule {
             .with_route_invite(route_invite)
             .with_passthrough_failure(self.inner.config.passthrough_failure);
 
+        // Resolve the original-header passthrough rule for the (direct) callee
+        // target(s) before moving `targets` into the dialplan. Internal
+        // destinations (same realm / registered / home proxy) always
+        // passthrough custom headers; external destinations use the destination
+        // trunk's `header_passthrough` config, else none. App/queue flows
+        // resolve their targets later inside the session, so those legs rely on
+        // the per-target fallback in `build_target_invite_option`.
+        let header_passthrough = {
+            let locs: Vec<&Location> = match &targets {
+                DialStrategy::Sequential(l) | DialStrategy::Parallel(l) => l.iter().collect(),
+            };
+            let internal = callee_is_same_realm
+                || locs.iter().any(|t| t.registered_aor.is_some() || t.home_proxy.is_some());
+            if internal {
+                Some(crate::proxy::routing::HeaderPassthrough::all())
+            } else if let Some(target) = locs.first().copied() {
+                self.inner
+                    .server
+                    .header_passthrough_for(target, false, &original.uri)
+                    .await
+            } else {
+                None
+            }
+        };
+        dialplan.header_passthrough = header_passthrough;
+
         if let Some((app_name, app_params, auto_answer)) = pending_app {
             dialplan = dialplan.with_application(app_name, app_params, auto_answer);
             dialplan.routed_headers = routed_headers;

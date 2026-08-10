@@ -125,6 +125,19 @@ pub struct TrunkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_rules: Option<Vec<HeaderRule>>,
 
+    /// Per-trunk control of whether custom headers from the original INVITE are
+    /// forwarded to this trunk's outbound INVITE.
+    ///
+    /// - `Some(HeaderPassthrough)` — apply the rule to the original request's
+    ///   custom (non-standard) headers.
+    /// - `None` (default) — strict: no original custom headers are forwarded.
+    ///
+    /// Destinations resolved as internal (same realm / registered AOR /
+    /// home-proxy) always passthrough all custom headers regardless of this
+    /// setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_passthrough: Option<HeaderPassthrough>,
+
     // SBC Media
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_mode: Option<MediaMode>,
@@ -154,6 +167,105 @@ pub struct TrunkConfig {
     /// Per-trunk max ring/setup time in seconds before a no-answer rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ring_time: Option<u32>,
+}
+
+/// Controls which original-request custom headers are forwarded to the
+/// destination leg's INVITE. Standard SIP headers (Via/From/To/Call-ID/CSeq/
+/// Contact/... ) are always excluded regardless of this rule.
+///
+/// Rule precedence:
+/// - `Whitelist` — forward only the listed headers.
+/// - `Blacklist` — forward all custom headers except the listed ones.
+/// - `All` (default) — forward all custom headers; if `whitelist` is non-empty
+///   it behaves like a whitelist, otherwise a non-empty `blacklist` is honored.
+///
+/// Header names are matched case-insensitively.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HeaderPassthrough {
+    #[serde(default)]
+    pub mode: HeaderPassthroughMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whitelist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blacklist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderPassthroughMode {
+    #[default]
+    All,
+    Whitelist,
+    Blacklist,
+}
+
+impl HeaderPassthrough {
+    /// Passthrough every custom header — used for internal destinations.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` if a header with the given (case-insensitive) name should
+    /// be forwarded under this rule.
+    pub fn allows(&self, name: &str) -> bool {
+        match self.mode {
+            HeaderPassthroughMode::Whitelist => {
+                self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
+            }
+            HeaderPassthroughMode::Blacklist => {
+                !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(name))
+            }
+            HeaderPassthroughMode::All => {
+                if !self.whitelist.is_empty() {
+                    self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
+                } else if !self.blacklist.is_empty() {
+                    !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(name))
+                } else {
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// Parse a trunk destination into `(host, port)`. Handles both SIP URIs and
+/// bare `host:port` strings.
+pub fn trunk_dest_host_port(dest: &str) -> Option<(String, u16)> {
+    if dest.trim().is_empty() {
+        return None;
+    }
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest) {
+        let host = uri.host().to_string();
+        let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
+        if host.is_empty() {
+            return None;
+        }
+        return Some((host, port));
+    }
+    // Try as bare host:port
+    let parts: Vec<&str> = dest.split(':').collect();
+    let host = *parts.first()?;
+    if host.is_empty() {
+        return None;
+    }
+    let port = parts
+        .get(1)
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(5060);
+    Some((host.to_string(), port))
+}
+
+/// Find a trunk whose destination matches `host:port` (case-insensitive host).
+pub fn find_trunk_by_dest<'a>(
+    trunks: &'a HashMap<String, TrunkConfig>,
+    host: &str,
+    port: u16,
+) -> Option<&'a TrunkConfig> {
+    trunks.values().find(|trunk| {
+        trunk_dest_host_port(&trunk.dest)
+            .map(|(h, p)| h.eq_ignore_ascii_case(host) && p == port)
+            .unwrap_or(false)
+    })
 }
 
 /// Per-trunk ringback/early-media audio configuration
@@ -352,6 +464,7 @@ impl Default for TrunkConfig {
             cac_policy: None,
             overflow_threshold: None,
             header_rules: None,
+            header_passthrough: None,
             media_mode: None,
             video_policy: None,
             external_ip: None,

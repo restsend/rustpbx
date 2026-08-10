@@ -46,6 +46,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `ringback` | table | none | Per-trunk ringback audio override |
 | `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the global `rtp_config.external_ip`. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
 | `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the global `rtp_config.bind_ip` |
+| `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, or `"blacklist"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
 
 ### Trunk Registration
 
@@ -108,6 +109,12 @@ header_rules = [
     { action = "add", name = "X-Client-ID", value = "rustpbx" },
     { action = "remove", name = "X-Internal-Info" },
 ]
+
+# Forward original custom headers to this trunk's outgoing INVITE.
+# Unset (default) -> forward nothing; internal destinations forward everything.
+header_passthrough = { mode = "all" }            # all custom headers
+# header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
+# header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
 
 # Number normalization
 incoming_from_user_prefix = ""    # Strip prefix from inbound caller

@@ -714,6 +714,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         cac_policy: None,
         overflow_threshold: None,
         header_rules: None,
+        header_passthrough: None,
         media_mode: None,
         video_policy: None,
         external_ip: None,
