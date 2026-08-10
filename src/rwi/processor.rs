@@ -2100,6 +2100,39 @@ impl RwiCommandProcessor {
         Ok(CommandResult::ConferenceCreated { conf_id })
     }
 
+    /// Shared driver for per-member conference ops (add/remove/mute/unmute):
+    /// run the manager op, broadcast a ConferenceError on failure, else
+    /// broadcast the success event and return the success result.
+    async fn run_conference_member_op<E, F, T, R>(
+        &self,
+        conf_id: &str,
+        call_id: &str,
+        op: F,
+        success_event: E,
+        success: R,
+        action: &str,
+    ) -> Result<CommandResult, CommandError>
+    where
+        F: std::future::Future<Output = anyhow::Result<T>>,
+        E: crate::rwi::RwiEventSpec,
+        R: FnOnce(String, String) -> CommandResult,
+    {
+        if let Err(e) = op.await {
+            let gw = self.gateway.read();
+            gw.broadcast(&crate::rwi::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            });
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
+
+        let gw = self.gateway.read();
+        gw.broadcast(&success_event);
+
+        info!(conf_id = %conf_id, call_id = %call_id, "Conference member {}", action);
+        Ok(success(conf_id.to_string(), call_id.to_string()))
+    }
+
     async fn conference_add(
         &self,
         conf_id: &str,
@@ -2108,29 +2141,18 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let manager = self.conference_manager();
-        if let Err(e) = manager
-            .add_participant(&conf_id.into(), LegId::new(call_id))
-            .await
-        {
-            let gw = self.gateway.read();
-            gw.broadcast(&crate::rwi::ConferenceError {
+        self.run_conference_member_op(
+            conf_id,
+            call_id,
+            manager.add_participant(&conf_id.into(), LegId::new(call_id)),
+            crate::rwi::ConferenceMemberJoined {
                 conf_id: conf_id.to_string(),
-                error: e.to_string(),
-            });
-            return Err(CommandError::CommandFailed(e.to_string()));
-        }
-
-        let gw = self.gateway.read();
-        gw.broadcast(&crate::rwi::ConferenceMemberJoined {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        });
-
-        info!(conf_id = %conf_id, call_id = %call_id, "Conference member added");
-        Ok(CommandResult::ConferenceMemberAdded {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        })
+                call_id: call_id.to_string(),
+            },
+            |conf_id, call_id| CommandResult::ConferenceMemberAdded { conf_id, call_id },
+            "added",
+        )
+        .await
     }
 
     async fn conference_remove(
@@ -2139,29 +2161,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        if let Err(e) = manager
-            .remove_participant(&conf_id.into(), &LegId::new(call_id))
-            .await
-        {
-            let gw = self.gateway.read();
-            gw.broadcast(&crate::rwi::ConferenceError {
+        self.run_conference_member_op(
+            conf_id,
+            call_id,
+            manager.remove_participant(&conf_id.into(), &LegId::new(call_id)),
+            crate::rwi::ConferenceMemberLeft {
                 conf_id: conf_id.to_string(),
-                error: e.to_string(),
-            });
-            return Err(CommandError::CommandFailed(e.to_string()));
-        }
-
-        let gw = self.gateway.read();
-        gw.broadcast(&crate::rwi::ConferenceMemberLeft {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        });
-
-        info!(conf_id = %conf_id, call_id = %call_id, "Conference member removed");
-        Ok(CommandResult::ConferenceMemberRemoved {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        })
+                call_id: call_id.to_string(),
+            },
+            |conf_id, call_id| CommandResult::ConferenceMemberRemoved { conf_id, call_id },
+            "removed",
+        )
+        .await
     }
 
     async fn conference_mute(
@@ -2170,29 +2181,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        if let Err(e) = manager
-            .mute_participant(&conf_id.into(), &LegId::new(call_id))
-            .await
-        {
-            let gw = self.gateway.read();
-            gw.broadcast(&crate::rwi::ConferenceError {
+        self.run_conference_member_op(
+            conf_id,
+            call_id,
+            manager.mute_participant(&conf_id.into(), &LegId::new(call_id)),
+            crate::rwi::ConferenceMemberMuted {
                 conf_id: conf_id.to_string(),
-                error: e.to_string(),
-            });
-            return Err(CommandError::CommandFailed(e.to_string()));
-        }
-
-        let gw = self.gateway.read();
-        gw.broadcast(&crate::rwi::ConferenceMemberMuted {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        });
-
-        info!(conf_id = %conf_id, call_id = %call_id, "Conference member muted");
-        Ok(CommandResult::ConferenceMemberMuted {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        })
+                call_id: call_id.to_string(),
+            },
+            |conf_id, call_id| CommandResult::ConferenceMemberMuted { conf_id, call_id },
+            "muted",
+        )
+        .await
     }
 
     async fn conference_unmute(
@@ -2201,29 +2201,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        if let Err(e) = manager
-            .unmute_participant(&conf_id.into(), &LegId::new(call_id))
-            .await
-        {
-            let gw = self.gateway.read();
-            gw.broadcast(&crate::rwi::ConferenceError {
+        self.run_conference_member_op(
+            conf_id,
+            call_id,
+            manager.unmute_participant(&conf_id.into(), &LegId::new(call_id)),
+            crate::rwi::ConferenceMemberUnmuted {
                 conf_id: conf_id.to_string(),
-                error: e.to_string(),
-            });
-            return Err(CommandError::CommandFailed(e.to_string()));
-        }
-
-        let gw = self.gateway.read();
-        gw.broadcast(&crate::rwi::ConferenceMemberUnmuted {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        });
-
-        info!(conf_id = %conf_id, call_id = %call_id, "Conference member unmuted");
-        Ok(CommandResult::ConferenceMemberUnmuted {
-            conf_id: conf_id.to_string(),
-            call_id: call_id.to_string(),
-        })
+                call_id: call_id.to_string(),
+            },
+            |conf_id, call_id| CommandResult::ConferenceMemberUnmuted { conf_id, call_id },
+            "unmuted",
+        )
+        .await
     }
 
     async fn conference_destroy(&self, conf_id: &str) -> Result<CommandResult, CommandError> {
