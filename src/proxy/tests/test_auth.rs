@@ -527,6 +527,7 @@ async fn test_guest_call_allowed_extension() {
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
+        cluster_self_addr: None,
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
