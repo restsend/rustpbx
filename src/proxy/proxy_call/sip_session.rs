@@ -4484,17 +4484,12 @@ enum ConstructMode<'a> {
 
     /// Build (if needed) the caller media bridge, send 183 Session Progress,
     /// and play `audio_path` as early media (ringback tone or short cue).
-    /// Returns the playback handle when audio actually started (`None` when
-    /// 183 was already sent, or no caller media is available).
+    /// Returns the playback handle when audio actually started.
     async fn send_early_media(
         &mut self,
         audio_path: &str,
         loop_playback: bool,
     ) -> Result<Option<crate::media::media_bridge::PlaybackHandle>> {
-        if self.media.early_media_sent {
-            return Ok(None);
-        }
-
         // Ensure caller leg exists in MediaBridge
         if let Err(e) = self.ensure_caller_leg().await {
             warn!(session_id = %self.id,
@@ -4505,34 +4500,36 @@ enum ConstructMode<'a> {
             return Ok(None);
         }
 
-        // Get caller-facing answer SDP from the caller leg's PC
-        let answer_sdp = self
-            .bridge()
-            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::A))
-            .and_then(|leg| leg.pc().local_description())
-            .map(|desc| desc.to_sdp_string())
-            .or_else(|| self.media.answer.clone())
-            .unwrap_or_default();
+        if !self.media.early_media_sent {
+            // Get caller-facing answer SDP from the caller leg's PC
+            let answer_sdp = self
+                .bridge()
+                .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::A))
+                .and_then(|leg| leg.pc().local_description())
+                .map(|desc| desc.to_sdp_string())
+                .or_else(|| self.media.answer.clone())
+                .unwrap_or_default();
 
-        if answer_sdp.is_empty() {
-            warn!(session_id = %self.id, "Cannot send 183: no local SDP available on caller leg");
-            return Ok(None);
-        }
+            if answer_sdp.is_empty() {
+                warn!(session_id = %self.id, "Cannot send 183: no local SDP available on caller leg");
+                return Ok(None);
+            }
 
-        self.media.answer = Some(answer_sdp.clone());
-        self.media.early_media_sent = true;
+            self.media.answer = Some(answer_sdp.clone());
+            self.media.early_media_sent = true;
 
-        // Send 183 Session Progress with SDP
-        let ringing_result: anyhow::Result<()> = match self.caller_dialog.as_ref() {
-            Some(dialog) => dialog
-                .ringing(Some(Self::sdp_headers()), Some(answer_sdp.into_bytes()))
-                .map_err(|e| anyhow!("{}", e)),
-            None => Ok(()),
-        };
-        if let Err(e) = ringing_result {
-            warn!(session_id = %self.context.session_id, error = %e, "Failed to send 183 Session Progress");
-        } else {
-            info!(session_id = %self.context.session_id, "Sent 183 Session Progress with early media");
+            // Send 183 Session Progress with SDP
+            let ringing_result: anyhow::Result<()> = match self.caller_dialog.as_ref() {
+                Some(dialog) => dialog
+                    .ringing(Some(Self::sdp_headers()), Some(answer_sdp.into_bytes()))
+                    .map_err(|e| anyhow!("{}", e)),
+                None => Ok(()),
+            };
+            if let Err(e) = ringing_result {
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to send 183 Session Progress");
+            } else {
+                info!(session_id = %self.context.session_id, "Sent 183 Session Progress with early media");
+            }
         }
 
         // Resolve audio path: map packaged `sounds/*` to `config/sounds/*`
@@ -4542,8 +4539,9 @@ enum ConstructMode<'a> {
 
         // Play progress audio via MediaBridge
         if let Some(mb) = self.bridge_mut() {
+            mb.unbridge().await?;
             let handle = mb
-                .play_file(
+                .play_file_side_only(
                     crate::media::media_bridge::LegSide::A,
                     resolved_path,
                     loop_playback,
