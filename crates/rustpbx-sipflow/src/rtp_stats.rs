@@ -165,17 +165,24 @@ impl MediaStatsAccumulator {
     }
 }
 
+/// Extract the first 12 bytes of an RTP header into field values.
+/// Returns (payload_type, sequence_number, rtp_timestamp, ssrc).
+pub(crate) fn rtp_header_fields(raw: &[u8]) -> (u8, u16, u32, u32) {
+    (
+        raw[1] & 0x7f,
+        u16::from_be_bytes([raw[2], raw[3]]),
+        u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
+    )
+}
+
 pub fn parse_rtp_stats_header(raw: &[u8]) -> Option<RtpStatsHeader> {
     if raw.len() < 12 || raw[0] >> 6 != 2 {
         return None;
     }
 
-    Some(RtpStatsHeader {
-        payload_type: raw[1] & 0x7f,
-        sequence_number: u16::from_be_bytes([raw[2], raw[3]]),
-        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
-        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
-    })
+    let (payload_type, sequence_number, rtp_timestamp, ssrc) = rtp_header_fields(raw);
+    Some(RtpStatsHeader { payload_type, sequence_number, rtp_timestamp, ssrc })
 }
 
 pub fn rtp_clock_rate_for_payload_type(payload_type: u8) -> u32 {

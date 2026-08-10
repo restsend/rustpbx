@@ -190,12 +190,13 @@ fn parse_borrowed_rtp_packet(leg: i32, capture_ts: u64, raw: &[u8]) -> Option<Rt
         raw.len()
     };
 
+    let (payload_type, _, rtp_timestamp, ssrc) = crate::rtp_stats::rtp_header_fields(raw);
     Some(RtpPacketView {
         leg,
-        payload_type: raw[1] & 0x7f,
+        payload_type,
         capture_ts,
-        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
-        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
+        rtp_timestamp,
+        ssrc,
         payload: &raw[payload_offset..payload_end],
     })
 }
