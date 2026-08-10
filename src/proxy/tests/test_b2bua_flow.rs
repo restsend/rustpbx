@@ -375,57 +375,62 @@ async fn test_callee_reject_passthrough_486_busy_here() {
 
     let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
-    // Bob rejects the call with 486 BusyHere
-    let answer_task = crate::utils::spawn(async move {
-        for _ in 0..50 {
-            let events = bob.process_dialog_events().await.unwrap_or_default();
-            for event in events {
-                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
-                    info!("Bob received incoming call: {}", dialog_id);
-                    // Reject with 486 BusyHere
-                    bob.reject_call_with_reason(
-                        &dialog_id,
-                        Some(486),
-                        Some("Busy Here".to_string()),
-                    )
-                    .await
-                    .unwrap();
-                    return Ok::<_, anyhow::Error>(dialog_id);
+    for attempt in 1..=5 {
+        // Bob rejects the call with 486 BusyHere as soon as it arrives. Repeating
+        // this flow makes the caller-dialog teardown race much easier to catch.
+        let bob_clone = bob.clone();
+        let answer_task = crate::utils::spawn(async move {
+            for _ in 0..50 {
+                let events = bob_clone.process_dialog_events().await.unwrap_or_default();
+                for event in events {
+                    if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                        info!(attempt, "Bob received incoming call: {}", dialog_id);
+                        bob_clone
+                            .reject_call_with_reason(
+                                &dialog_id,
+                                Some(486),
+                                Some("Busy Here".to_string()),
+                            )
+                            .await
+                            .unwrap();
+                        return Ok::<_, anyhow::Error>(dialog_id);
+                    }
                 }
+                sleep(Duration::from_millis(100)).await;
             }
-            sleep(Duration::from_millis(100)).await;
-        }
-        Err(anyhow::anyhow!("No incoming call received"))
-    });
+            Err(anyhow::anyhow!(
+                "No incoming call received on attempt {attempt}"
+            ))
+        });
 
-    // Alice makes a call to Bob
-    let alice_sdp = dummy_sdp.clone();
-    let alice_clone = alice.clone();
-    let call_task = crate::utils::spawn(async move {
-        timeout(
-            Duration::from_secs(10),
-            alice_clone.make_call("bob", Some(alice_sdp)),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Call timed out"))?
-    });
+        // Alice makes a call to Bob
+        let alice_sdp = dummy_sdp.clone();
+        let alice_clone = alice.clone();
+        let call_task = crate::utils::spawn(async move {
+            timeout(
+                Duration::from_secs(10),
+                alice_clone.make_call("bob", Some(alice_sdp)),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Call timed out on attempt {attempt}"))?
+        });
 
-    let (call_result, answer_result) = tokio::join!(call_task, answer_task);
+        let (call_result, answer_result) = tokio::join!(call_task, answer_task);
 
-    // Alice's call should fail with 486 BusyHere (not 500 ServerInternalError)
-    let call_result_inner = call_result.unwrap();
-    let err_str = call_result_inner.unwrap_err().to_string();
-    info!("Alice call error: {:?}", err_str);
+        // Alice's call should fail with 486 BusyHere (not 500 ServerInternalError)
+        let call_result_inner = call_result.unwrap();
+        let err_str = call_result_inner.unwrap_err().to_string();
+        info!(attempt, "Alice call error: {:?}", err_str);
 
-    // Verify the error contains 486 (not 500)
-    assert!(
-        err_str.contains("486"),
-        "Expected 486 BusyHere, but got: {}",
-        err_str
-    );
+        // Verify the error contains 486 (not 500)
+        assert!(
+            err_str.contains("486"),
+            "Expected 486 BusyHere on attempt {attempt}, but got: {err_str}"
+        );
 
-    // Bob should have rejected the call
-    let _ = answer_result.unwrap();
+        // Bob should have received and rejected every call.
+        answer_result.unwrap().unwrap();
 
-    info!("Test passed: 486 BusyHere was propagated to caller");
+        info!(attempt, "486 BusyHere was propagated to caller");
+    }
 }

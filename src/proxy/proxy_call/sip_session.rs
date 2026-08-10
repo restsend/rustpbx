@@ -622,6 +622,7 @@ impl SipSession {
 
     pub const QUEUE_HOLD_TRACK_ID: &'static str = "queue-hold";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+    const CALLER_REJECTION_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 
     // ── Shared helpers extracted from sub-modules to eliminate duplication ──
 
@@ -1251,6 +1252,7 @@ impl SipSession {
         let max_setup_duration =
             max_ring_time.clamp(Duration::from_secs(30), Duration::from_secs(120));
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
+        let mut draining_caller_rejection = false;
 
         loop {
             tokio::select! {
@@ -1264,8 +1266,21 @@ impl SipSession {
                     }
                     break;
                 }
-                _ = cancel_token.cancelled() => {
+                _ = cancel_token.cancelled(), if !draining_caller_rejection => {
                     debug!(session_id = %session_id, "Call cancelled via token");
+                    // `ServerInviteDialog::reject` queues the final response and
+                    // transitions to UasDecline before `handle` sends it. Keep the
+                    // transaction alive long enough to flush the response and
+                    // receive the caller's ACK instead of dropping it immediately.
+                    if matches!(
+                        server_dialog_clone.state(),
+                        DialogState::Terminated(_, TerminatedReason::UasDecline)
+                    ) {
+                        draining_caller_rejection = true;
+                        timeout =
+                            tokio::time::sleep(Self::CALLER_REJECTION_ACK_TIMEOUT).boxed();
+                        continue;
+                    }
                     if !server_dialog_clone.state().is_terminated() {
                         if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
                             warn!(session_id = %session_id, error = %e, "Failed to reply 487 on cancel");
