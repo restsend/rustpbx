@@ -760,19 +760,21 @@ fn forward_dtmf_event(
         "leg_id": leg_id,
         "digit": digit_str,
     });
-    if let Err(e) = app_runtime.inject_event(event.clone()) {
-        debug!(session_id = %session_id, digit = %digit_str, error = %e,
-            "DTMF: app not running, still forwarding to bridge");
-    } else {
-        info!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
-        if let Some(gw) = rwi_gateway.as_ref() {
-            let g = gw.read();
-            g.send_to_owner(&crate::rwi::Dtmf {
-                call_id: session_id.to_string(),
-                digit: digit_str.clone(),
-                leg_id: Some(leg_id.to_string()),
-                extra: None,
-            });
+    if app_runtime.is_running() {
+        if let Err(e) = app_runtime.inject_event(event.clone()) {
+            debug!(session_id = %session_id, digit = %digit_str, error = %e,
+                "DTMF app injection failed");
+        } else {
+            info!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
+            if let Some(gw) = rwi_gateway.as_ref() {
+                let g = gw.read();
+                g.send_to_owner(&crate::rwi::Dtmf {
+                    call_id: session_id.to_string(),
+                    digit: digit_str.clone(),
+                    leg_id: Some(leg_id.to_string()),
+                    extra: None,
+                });
+            }
         }
     }
     if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
@@ -10738,6 +10740,71 @@ mod tests {
     use super::*;
     use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DtmfAppRuntime {
+        running: bool,
+        inject_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AppRuntime for DtmfAppRuntime {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn start_app(
+            &self,
+            _app_name: &str,
+            _params: Option<serde_json::Value>,
+            _auto_answer: bool,
+        ) -> crate::call::runtime::AppResult<()> {
+            Ok(())
+        }
+
+        async fn stop_app(
+            &self,
+            _reason: Option<String>,
+        ) -> crate::call::runtime::AppResult<()> {
+            Ok(())
+        }
+
+        fn inject_event(
+            &self,
+            _event: serde_json::Value,
+        ) -> crate::call::runtime::AppResult<()> {
+            self.inject_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            self.running
+        }
+
+        fn current_app(&self) -> Option<String> {
+            self.running.then(|| "test".to_string())
+        }
+    }
+
+    #[test]
+    fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
+        let runtime = Arc::new(DtmfAppRuntime {
+            running: false,
+            inject_calls: AtomicUsize::new(0),
+        });
+        let app_runtime: Arc<dyn AppRuntime> = runtime.clone();
+        let bridge_dtmf_tx = Arc::new(parking_lot::RwLock::new(None));
+
+        forward_dtmf_event(
+            '2',
+            "caller",
+            "test-session",
+            &app_runtime,
+            &None,
+            &bridge_dtmf_tx,
+        );
+
+        assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+    }
 
     // ── parse_dial_target ─────────────────────────────────────────────────
 
