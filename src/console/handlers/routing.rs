@@ -834,7 +834,7 @@ pub async fn page_routing(
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
     let catalog = load_catalogs(state.as_ref()).await;
 
     state.render_with_headers(

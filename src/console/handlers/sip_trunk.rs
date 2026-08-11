@@ -101,7 +101,7 @@ async fn page_sip_trunks(
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
     state.render_with_headers(
         "console/sip_trunk.html",
         json!({
@@ -128,7 +128,7 @@ async fn page_sip_trunk_create(
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
     state.render_with_headers(
         "console/sip_trunk_detail.html",
         json!({
@@ -206,7 +206,7 @@ async fn page_sip_trunk_detail(
                 .proxy
                 .ami_path
                 .clone()
-                .unwrap_or_else(|| "/ami/v1".to_string());
+                .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
             state.render_with_headers(
                 "console/sip_trunk_detail.html",
                 json!({

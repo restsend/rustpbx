@@ -42,7 +42,6 @@ pub(crate) fn ok_json(data: serde_json::Value) -> Response {
 
 /// Look up an entity by primary key.  Returns the model on success,
 /// `not_found(label)` on `Ok(None)`, or `internal_error(...)` on `Err`.
-#[allow(unused_macros)]
 macro_rules! find_or_404 {
     ($entity:ty, $id:expr, $db:expr, $label:literal) => {{
         use sea_orm::EntityTrait;
@@ -62,7 +61,6 @@ macro_rules! find_or_404 {
         }
     }};
 }
-#[allow(unused_imports)]
 pub(crate) use find_or_404;
 
 #[allow(clippy::result_large_err)]

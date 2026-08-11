@@ -243,6 +243,7 @@ impl CallRecordHook for RecordingUploadHook {
         // the sipflow backend.
         let recording_url = first_uploaded_url
             .clone()
+            .or_else(|| record.details.recording_url.clone())
             .or_else(|| record.recorder.first().map(|m| m.path.clone()))
             .or_else(|| {
                 if record.answer_time.is_some() {

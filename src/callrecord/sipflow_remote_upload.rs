@@ -76,7 +76,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
 
         // Compute default keys.  Client-specified keys are not sent by the
         // hook (the bin will compute them via the fallback).
-        let default_media = format_sipflow_media_key(record);
+        let _default_media = format_sipflow_media_key(record);
         let _default_signaling = format_sipflow_signaling_key(record);
         let _default_sig_file = format_sipflow_signaling_file_name(record);
 
@@ -141,48 +141,8 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                     );
                 }
             }
-        }
-
-        // Emit RecordEnd
-        if let Some(ref url) = resp.media_url {
-            if let Some(gw) = &self.rwi_gateway {
-                let gw_ref = gw.read();
-                gw_ref.send_to_owner(&crate::rwi::RecordEnd {
-                    call_id: call_id.to_string(),
-                    url: Some(url.clone()),
-                    duration_secs: duration_secs as u64,
-                    file_size: resp.media_size,
-                });
-                info!(call_id, "SipFlowRemoteUploadHook: RecordEnd event emitted");
-            }
-        }
-
-        // Emit RecordingMetadataAvailable
-        if let Some(ref url) = resp.media_url {
-            if let Some(gw) = &self.rwi_gateway {
-                use crate::rwi::proto::RecordingMetadata;
-                let metadata = RecordingMetadata {
-                    filename: default_media,
-                    file_size: resp.media_size,
-                    download_url: Some(url.clone()),
-                    caller_name: None,
-                    callee_name: None,
-                    call_type: "".to_string(),
-                    call_start_time: Some(start.to_rfc3339()),
-                    call_end_time: Some(end.to_rfc3339()),
-                    upload_time: Some(chrono::Utc::now().to_rfc3339()),
-                    extra: None,
-                };
-                let gw_ref = gw.read();
-                gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
-                    call_id: call_id.to_string(),
-                    metadata,
-                });
-                info!(
-                    call_id,
-                    "SipFlowRemoteUploadHook: RecordingMetadataAvailable event emitted"
-                );
-            }
+            record.details.recording_url = Some(url.clone());
+            record.details.recording_duration_secs = Some(duration_secs.max(0));
         }
 
         Ok(())

@@ -74,8 +74,6 @@ fn test_call_record_row_from_record() {
     assert!(row.ended_at.is_some());
     assert_eq!(row.duration_secs, 30);
     assert!(row.has_transcript == false);
-    assert!(row.display_id.is_none());
-    assert!(row.archived_at.is_none());
 }
 
 // ── today_string / derive_daily_url ─────────────────────────────────────────────
@@ -946,4 +944,135 @@ async fn test_enrich_phase_runs_before_completed_and_can_mutate() {
 
     cancel.cancel();
     serve_handle.await.ok();
+}
+
+/// Regression: when sipflow.upload is configured and SipFlowUploadHook stashes
+/// the uploaded URL on record.details.recording_url *before* RecordingUploadHook
+/// runs, RecordingUploadHook must:
+///  1. Use the stashed real URL (not the sipflow://{} placeholder)
+///  2. Emit recording_metadata_available exactly once
+///  3. Include the full metadata bag (hangup_by, agent_id, etc.)
+#[tokio::test]
+async fn test_recording_upload_uses_sipflow_stashed_url() {
+    use crate::callrecord::recording_upload::RecordingUploadHook;
+    use crate::config::RecordingPolicy;
+    use crate::config::RecordingType;
+    use crate::rwi::RwiGateway;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    // Setup RwiGateway with an event-tap subscriber so we can capture events.
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut event_rx = gateway.read().subscribe_events();
+
+    // Create RecordingUploadHook with Local recording type (avoids S3 config).
+    let policy = RecordingPolicy {
+        recording_type: Some(RecordingType::Local),
+        ..Default::default()
+    };
+    let hook = RecordingUploadHook::new(policy)
+        .expect("failed to create RecordingUploadHook")
+        .with_rwi_gateway(gateway.clone());
+
+    // Simulate a record where sipflow captured media:
+    //   - recorder is empty (no local WAV file)
+    //   - details.recording_url is already set (SipFlowUploadHook ran first)
+    //   - metadata carries hangup_by / agent_id from session snapshot
+    let now = Utc::now();
+    let mut record = CallRecord {
+        call_id: "test-call-123".to_string(),
+        start_time: now - chrono::Duration::seconds(60),
+        answer_time: Some(now - chrono::Duration::seconds(45)),
+        end_time: now,
+        caller: "+1234567890".to_string(),
+        callee: "+0987654321".to_string(),
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
+        details: CallDetails {
+            direction: "inbound".to_string(),
+            status: "completed".to_string(),
+            from_number: Some("+1234567890".to_string()),
+            to_number: Some("+0987654321".to_string()),
+            caller_name: Some("Alice".to_string()),
+            recording_url: Some("https://s3.example.com/recordings/test.wav".to_string()),
+            recording_duration_secs: Some(30),
+            metadata: Some(HashMap::from([
+                (
+                    "hangup_by".to_string(),
+                    serde_json::Value::String("caller".to_string()),
+                ),
+                (
+                    "agent_id".to_string(),
+                    serde_json::Value::String("agent-42".to_string()),
+                ),
+            ])),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // Execute — this should read the stashed URL and emit events.
+    hook.on_record_completed(&mut record)
+        .await
+        .expect("on_record_completed failed");
+
+    // Verify record state: recording_url must stay as the real stashed URL.
+    assert_eq!(
+        record.details.recording_url.as_deref(),
+        Some("https://s3.example.com/recordings/test.wav"),
+        "record.details.recording_url should remain the sipflow-stashed URL, \
+         not fall back to sipflow://{{call_id}} placeholder"
+    );
+
+    // Drain events from the gateway tap and verify only one
+    // recording_metadata_available was emitted.
+    let mut metadata_count = 0u32;
+    let deadline = Duration::from_millis(200);
+    let start = std::time::Instant::now();
+
+    loop {
+        match tokio::time::timeout(deadline.saturating_sub(start.elapsed()), event_rx.recv()).await
+        {
+            Ok(Ok(entry)) => {
+                if entry.call_id != "test-call-123" {
+                    continue;
+                }
+                if entry.event.event_type == "recording_metadata_available" {
+                    metadata_count += 1;
+                    assert!(
+                        metadata_count <= 1,
+                        "recording_metadata_available emitted more than once"
+                    );
+
+                    let meta = &entry.event.payload["metadata"];
+                    assert_eq!(
+                        meta["download_url"].as_str(),
+                        Some("https://s3.example.com/recordings/test.wav"),
+                        "download_url should be the real stashed URL, not sipflow://{{call_id}}"
+                    );
+                    // hangup_by / agent_id are flattened into metadata via #[serde(flatten)].
+                    assert_eq!(
+                        meta["hangup_by"].as_str(),
+                        Some("caller"),
+                        "metadata.hangup_by should be present"
+                    );
+                    assert_eq!(
+                        meta["agent_id"].as_str(),
+                        Some("agent-42"),
+                        "metadata.agent_id should be present"
+                    );
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                panic!("event tap lagged by {n} messages — buffer is too small");
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            Err(_timeout) => break,
+        }
+    }
+
+    assert!(
+        metadata_count == 1,
+        "expected exactly 1 recording_metadata_available event, got {metadata_count}"
+    );
 }

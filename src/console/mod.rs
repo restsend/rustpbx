@@ -242,7 +242,7 @@ impl ConsoleState {
                 }
             });
             map.entry("site_name")
-                .or_insert_with(|| serde_json::Value::String("RustPBX".to_string()));
+                .or_insert_with(|| serde_json::Value::String(crate::config::BRAND_NAME.to_string()));
             map.entry("page_title")
                 .or_insert_with(|| serde_json::Value::String("RustPBX admin".to_string()));
             map.entry("site_description").or_insert_with(|| {
@@ -618,7 +618,7 @@ impl ConsoleState {
         &self.config.api_prefix
     }
 
-    /// SIP WebSocket handler path (e.g. "/ws" or "/rustpbx/ws").
+    /// SIP WebSocket handler path (e.g. crate::config::DEFAULT_WS_PATH or "/rustpbx/ws").
     pub fn ws_handler(&self) -> String {
         if let Some(app) = self.app_state() {
             if let Some(v) = &app.config().proxy.ws_handler {
@@ -630,10 +630,10 @@ impl ConsoleState {
                 return v.clone();
             }
         }
-        "/ws".to_string()
+        crate::config::DEFAULT_WS_PATH.to_string()
     }
 
-    /// ICE servers endpoint path (e.g. "/iceservers" or "/rustpbx/iceservers").
+    /// ICE servers endpoint path (e.g. crate::config::DEFAULT_ICE_SERVERS_PATH or "/rustpbx/iceservers").
     pub fn ice_servers_path(&self) -> String {
         if let Some(app) = self.app_state() {
             if let Some(v) = &app.config().proxy.ice_servers_path {
@@ -645,7 +645,7 @@ impl ConsoleState {
                 return v.clone();
             }
         }
-        "/iceservers".to_string()
+        crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()
     }
 
     /// Build API URL with the configured api_prefix

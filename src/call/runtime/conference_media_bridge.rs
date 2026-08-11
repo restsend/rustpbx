@@ -43,26 +43,8 @@ pub trait AudioReceiver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>>;
 }
 
-/// Decoded PCM audio frame from a participant.
-#[derive(Debug, Clone)]
-pub struct PcmAudioFrame {
-    /// Raw PCM samples (16-bit signed, mono)
-    pub samples: Vec<i16>,
-    /// Sample rate in Hz
-    pub sample_rate: u32,
-    /// Timestamp in samples
-    pub timestamp: u64,
-}
-
-impl PcmAudioFrame {
-    pub fn new(samples: Vec<i16>, sample_rate: u32) -> Self {
-        Self {
-            samples,
-            sample_rate,
-            timestamp: 0,
-        }
-    }
-}
+/// Decoded PCM audio frame from a participant. Alias of [`AudioFrame`].
+pub type PcmAudioFrame = AudioFrame;
 
 /// Bridges conference audio to a media track.
 pub struct ConferenceMediaBridge {

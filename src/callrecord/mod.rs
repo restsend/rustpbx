@@ -846,10 +846,8 @@ impl CallRecordSaver for S3CallRecordSaver {
 
 /// Shared extraction of typed call-record values used by both the
 /// SeaORM-based `persist_call_record` path and raw-SQL savers.
-#[allow(dead_code)]
 pub(crate) struct CallRecordRow {
     pub call_id: String,
-    pub display_id: Option<String>,
     pub direction: String,
     pub status: String,
     pub started_at: DateTimeUtc,
@@ -880,7 +878,6 @@ pub(crate) struct CallRecordRow {
     pub metadata: Option<Value>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
-    pub archived_at: Option<DateTimeUtc>,
 }
 
 impl CallRecordRow {
@@ -928,7 +925,6 @@ impl CallRecordRow {
 
         Self {
             call_id: record.call_id.clone(),
-            display_id: None,
             direction,
             status,
             started_at: record.start_time,
@@ -959,7 +955,6 @@ impl CallRecordRow {
             metadata,
             created_at: record.start_time,
             updated_at: record.end_time,
-            archived_at: None,
         }
     }
 }

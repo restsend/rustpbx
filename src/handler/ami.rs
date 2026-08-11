@@ -26,7 +26,7 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
     let r = Router::new()
         .route("/health", get(health_handler))
         .route("/dialogs", get(list_dialogs))
@@ -1064,7 +1064,7 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
 
     for peer in &peers {
         let url = format!("http://{}:{}{}/health", peer.addr, peer.ami_port, ami_path);
@@ -1208,7 +1208,7 @@ async fn cluster_reload_config_handler(
             .proxy
             .ami_path
             .clone()
-            .unwrap_or_else(|| "/ami/v1".to_string());
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
 
         let mut peer_results_summary: Vec<serde_json::Value> = Vec::new();
         let mut any_error = false;
@@ -1417,7 +1417,7 @@ pub async fn fanout_reload_to_peers(
         .proxy
         .ami_path
         .clone()
-        .unwrap_or_else(|| "/ami/v1".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
 
     let mut results = Vec::with_capacity(peers.len());
     for peer in &peers {

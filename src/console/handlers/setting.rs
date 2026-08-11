@@ -387,7 +387,7 @@ pub async fn page_settings(
 async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     let mut data = serde_json::Map::new();
     let now = Utc::now();
-    let mut ami_endpoint = "/ami/v1".to_string();
+    let mut ami_endpoint = crate::config::DEFAULT_AMI_PATH.to_string();
 
     let mut platform = json!({});
     let mut proxy = json!({});
@@ -410,7 +410,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             .proxy
             .ami_path
             .clone()
-            .unwrap_or_else(|| "/ami/v1".to_string());
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
         let mut loaded_config: Option<Config> = None;
 
         if let Some(path) = app_state.config_path.as_ref() {
@@ -2566,7 +2566,7 @@ async fn cluster_reload_sse_handler(
             .proxy
             .ami_path
             .clone()
-            .unwrap_or_else(|| "/ami/v1".to_string());
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
 
         let mut peer_results_summary: Vec<serde_json::Value> = Vec::new();
         let mut any_error = false;

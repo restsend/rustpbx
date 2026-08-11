@@ -18,8 +18,6 @@ use tracing::{info, warn};
 #[derive(Debug, Clone)]
 pub struct PlaybackToken {
     pub(crate) track_id: String,
-    #[allow(unused)]
-    pub(crate) file_path: String,
 }
 
 impl PlaybackToken {
@@ -39,10 +37,7 @@ pub struct PlaybackOutcome {
 
 /// A recording session controller.
 #[derive(Debug, Clone)]
-pub struct RecordingHandle {
-    #[allow(unused)]
-    pub(crate) path: String,
-}
+pub struct RecordingHandle {}
 
 /// Details about a completed recording.
 #[derive(Debug, Clone)]
@@ -227,10 +222,7 @@ impl CallController {
             }),
         })?;
 
-        Ok(PlaybackToken {
-            track_id,
-            file_path: path,
-        })
+        Ok(PlaybackToken { track_id })
     }
 
     /// Play an audio file to the caller leg only (no mirror onto the opposite
@@ -260,10 +252,7 @@ impl CallController {
             }),
         })?;
 
-        Ok(PlaybackToken {
-            track_id,
-            file_path: path,
-        })
+        Ok(PlaybackToken { track_id })
     }
 
     /// Stop current audio playback.
@@ -363,7 +352,7 @@ impl CallController {
         };
         self.session
             .send_command(CallCommand::StartRecording { config })?;
-        Ok(RecordingHandle { path: p })
+        Ok(RecordingHandle {})
     }
 
     /// Stop the active recording and wait for completion.

@@ -508,8 +508,8 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for MediaBridg
                 }
                 return Some(
                     crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
-                        frame.samples,
-                        frame.sample_rate,
+                        frame.frame.samples,
+                        frame.frame.sample_rate,
                     ),
                 );
             }

@@ -13,14 +13,6 @@ use uuid::Uuid;
 /// Result of a transfer attempt via REFER
 #[derive(Debug, Clone)]
 pub enum ReferTransferResult {
-    /// REFER was accepted (202)
-    Accepted,
-    /// REFER was rejected with specific status
-    Rejected { status: u16 },
-    /// REFER not supported (405/420/501)
-    NotSupported { status: u16 },
-    /// REFER timed out
-    Timeout,
     /// Internal error
     InternalError(String),
 }
@@ -134,7 +126,6 @@ impl TransferTransaction {
 pub struct TransferConfig {
     pub refer_enabled: bool,
     pub attended_enabled: bool,
-    pub refer_timeout_secs: u64,
     pub max_concurrent_transfers: usize,
 }
 
@@ -143,7 +134,6 @@ impl Default for TransferConfig {
         Self {
             refer_enabled: true,
             attended_enabled: true,
-            refer_timeout_secs: 30,
             max_concurrent_transfers: 1000,
         }
     }
@@ -313,14 +303,6 @@ impl TransferController {
             }
             Err(ReferTransferResult::InternalError(e)) => {
                 error!(transfer_id = %tx.transfer_id, error = %e, "Failed to dispatch transfer command");
-                self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
-                    .await;
-                Err(TransferFailureReason::InternalError)
-            }
-            Err(_) => {
-                // Should not happen with the fire-and-forget implementation,
-                // but handle defensively.
-                warn!(transfer_id = %tx.transfer_id, "Unexpected error dispatching transfer");
                 self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
                     .await;
                 Err(TransferFailureReason::InternalError)
@@ -1231,7 +1213,6 @@ mod tests {
         let config = TransferConfig::default();
         assert!(config.refer_enabled);
         assert!(config.attended_enabled);
-        assert_eq!(config.refer_timeout_secs, 30);
         assert_eq!(config.max_concurrent_transfers, 1000);
     }
 

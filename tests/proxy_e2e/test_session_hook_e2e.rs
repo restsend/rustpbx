@@ -38,10 +38,8 @@ use tracing::info;
 #[derive(Debug, Clone)]
 enum HookEvent {
     Connected(CallSessionContext),
-    #[allow(dead_code)]
-    Held(CallSessionContext, String),
-    #[allow(dead_code)]
-    Unheld(CallSessionContext, String),
+    Held,
+    Unheld,
     Ended(CallSessionContext, u64),
 }
 
@@ -72,17 +70,13 @@ impl CallSessionHook for RecordingHook {
     }
 
     async fn on_call_held(&self, ctx: &CallSessionContext, leg_id: &str) {
-        self.events
-            .lock()
-            .await
-            .push(HookEvent::Held(ctx.clone(), leg_id.to_string()));
+        let _ = (ctx, leg_id);
+        self.events.lock().await.push(HookEvent::Held);
     }
 
     async fn on_call_unheld(&self, ctx: &CallSessionContext, leg_id: &str) {
-        self.events
-            .lock()
-            .await
-            .push(HookEvent::Unheld(ctx.clone(), leg_id.to_string()));
+        let _ = (ctx, leg_id);
+        self.events.lock().await.push(HookEvent::Unheld);
     }
 
     async fn on_call_ended(
@@ -424,7 +418,7 @@ async fn test_hook_on_hold_unhold() -> Result<()> {
 
     let held_fired = wait_for_event(
         &env.events,
-        |e| matches!(e, HookEvent::Held(_, _)),
+        |e| matches!(e, HookEvent::Held),
         Duration::from_secs(5),
     )
     .await;
@@ -437,7 +431,7 @@ async fn test_hook_on_hold_unhold() -> Result<()> {
 
     let unheld_fired = wait_for_event(
         &env.events,
-        |e| matches!(e, HookEvent::Unheld(_, _)),
+        |e| matches!(e, HookEvent::Unheld),
         Duration::from_secs(5),
     )
     .await;

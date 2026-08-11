@@ -342,16 +342,10 @@ impl AppStateBuilder {
                 }
             }
 
-            if let Some(policy) = recording_upload_policy.as_ref() {
-                let mut hook = RecordingUploadHook::new(policy.clone())?;
-                if let Some(ref gw) = rwi_gateway {
-                    hook = hook.with_rwi_gateway(gw.clone());
-                }
-                builder = builder.with_hook(Box::new(hook));
-            }
-
             // Attach SipFlow upload hooks (run after the saver has persisted
-            // the record).
+            // the record). They must run *before* RecordingUploadHook so the
+            // uploaded URL is stashed on the record for the recording hook to
+            // emit in a single RecordingMetadataAvailable event.
             if let Some(upload_cfg) = sipflow_upload_config.as_ref() {
                 match config.sipflow.as_ref() {
                     // Remote + delegate_upload: POST upload params to the bin
@@ -383,6 +377,14 @@ impl AppStateBuilder {
                         }
                     }
                 }
+            }
+
+            if let Some(policy) = recording_upload_policy.as_ref() {
+                let mut hook = RecordingUploadHook::new(policy.clone())?;
+                if let Some(ref gw) = rwi_gateway {
+                    hook = hook.with_rwi_gateway(gw.clone());
+                }
+                builder = builder.with_hook(Box::new(hook));
             }
 
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
@@ -606,7 +608,7 @@ impl AppStateBuilder {
                         .proxy
                         .ami_path
                         .clone()
-                        .unwrap_or_else(|| "/ami/v1".to_string()),
+                        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string()),
                     sip_addr: p.addr.clone(),
                 })
                 .collect();
@@ -851,9 +853,9 @@ async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse 
 async fn phone_config_handler(State(state): State<AppState>) -> impl IntoResponse {
     let proxy_cfg = &state.config().proxy;
     let config = serde_json::json!({
-        "wsPath": proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
-        "iceServersPath": proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
-        "amiPath": proxy_cfg.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string()),
+        "wsPath": proxy_cfg.ws_handler.clone().unwrap_or_else(|| crate::config::DEFAULT_WS_PATH.to_string()),
+        "iceServersPath": proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()),
+        "amiPath": proxy_cfg.ami_path.clone().unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string()),
         "staticPath": state.config().static_path(),
     });
     Json(config).into_response()
@@ -900,7 +902,7 @@ pub fn create_router(state: AppState) -> Router {
     let ice_servers_path = proxy_cfg
         .ice_servers_path
         .clone()
-        .unwrap_or_else(|| "/iceservers".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string());
     let static_path = state.config().static_path();
 
     // Merge call and WebSocket handlers with static file serving

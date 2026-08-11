@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, Local, TimeZone};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ impl CallRecordHook for SipFlowUploadHook {
         // signalling if configured.
         let skip_media = !record.recorder.is_empty();
 
-        crate::callrecord::sipflow_upload::do_upload(
+        if let Some((url, _size)) = crate::callrecord::sipflow_upload::do_upload(
             self.backend.as_ref(),
             &self.upload_config,
             self.db.as_ref(),
@@ -85,10 +85,13 @@ impl CallRecordHook for SipFlowUploadHook {
             &media_key,
             &signaling_key,
             &signaling_file_name,
-            self.rwi_gateway.as_ref(),
             skip_media,
         )
-        .await;
+        .await
+        {
+            record.details.recording_url = Some(url);
+            record.details.recording_duration_secs = Some(duration_secs.max(0));
+        }
 
         Ok(())
     }
@@ -108,9 +111,8 @@ async fn do_upload(
     media_key: &str,
     signaling_key: &str,
     signaling_file_name: &str,
-    rwi_gateway: Option<&RwiGatewayRef>,
     skip_media: bool,
-) {
+) -> Option<(String, u64)> {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
@@ -175,49 +177,7 @@ async fn do_upload(
         .await;
     }
 
-    // Emit RecordEnd after successful sipflow upload.
-    if let Some(url) = first_uploaded_url.as_ref() {
-        if let Some(gw) = rwi_gateway {
-            let gw_ref = gw.read();
-            gw_ref.send_to_owner(&crate::rwi::RecordEnd {
-                call_id: call_id.to_string(),
-                url: Some(url.clone()),
-                duration_secs: duration_secs as u64,
-                file_size: uploaded_file_size,
-            });
-            info!(call_id, "SipFlowUploadHook: RecordEnd event emitted");
-        }
-    }
-
-    // Emit RecordingMetadataAvailable after successful sipflow upload.
-    if let Some(url) = first_uploaded_url.as_ref() {
-        if let Some(gw) = rwi_gateway {
-            use crate::rwi::proto::RecordingMetadata;
-            // SipFlow runs asynchronously without CallRecord access, so the
-            // addon-contributed metadata bag is not available here.
-            let metadata = RecordingMetadata {
-                filename: media_key.to_string(),
-                file_size: uploaded_file_size,
-                download_url: Some(url.clone()),
-                caller_name: None,
-                callee_name: None,
-                call_type: "".to_string(),
-                call_start_time: Some(start.to_rfc3339()),
-                call_end_time: Some(end.to_rfc3339()),
-                upload_time: Some(Utc::now().to_rfc3339()),
-                extra: None,
-            };
-            let gw_ref = gw.read();
-            gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
-                call_id: call_id.to_string(),
-                metadata,
-            });
-            info!(
-                call_id,
-                "SipFlowUploadHook: RecordingMetadataAvailable event emitted"
-            );
-        }
-    }
+    first_uploaded_url.map(|url| (url, uploaded_file_size))
 }
 
 #[allow(clippy::too_many_arguments)]

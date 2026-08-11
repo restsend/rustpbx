@@ -2,9 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Audio frame for mixer input (PCM 16bit, 8kHz)
-pub type PcmAudioFrame = Vec<i16>;
-
 /// Re-exported from `media::leg_id` so the entire codebase uses one definition
 /// without circular dependencies.
 pub use crate::media::LegId;

@@ -264,11 +264,11 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             proxy_cfg
                 .ws_handler
                 .clone()
-                .unwrap_or_else(|| "/ws".to_string()),
+                .unwrap_or_else(|| crate::config::DEFAULT_WS_PATH.to_string()),
             proxy_cfg
                 .ice_servers_path
                 .clone()
-                .unwrap_or_else(|| "/iceservers".to_string()),
+                .unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()),
         )
     } else if let Some(server) = state.sip_server() {
         let proxy_cfg = server.proxy_config.load();
@@ -276,14 +276,14 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             proxy_cfg
                 .ws_handler
                 .clone()
-                .unwrap_or_else(|| "/ws".to_string()),
+                .unwrap_or_else(|| crate::config::DEFAULT_WS_PATH.to_string()),
             proxy_cfg
                 .ice_servers_path
                 .clone()
-                .unwrap_or_else(|| "/iceservers".to_string()),
+                .unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()),
         )
     } else {
-        ("/ws".to_string(), "/iceservers".to_string())
+        (crate::config::DEFAULT_WS_PATH.to_string(), crate::config::DEFAULT_ICE_SERVERS_PATH.to_string())
     };
 
     #[allow(unused_mut)]
@@ -422,9 +422,9 @@ fn format_host_for_uri(host: &str) -> String {
 }
 
 fn normalize_ws_path(path: Option<&str>) -> String {
-    let raw = path.unwrap_or("/ws").trim();
+    let raw = path.unwrap_or(crate::config::DEFAULT_WS_PATH).trim();
     if raw.is_empty() {
-        "/ws".to_string()
+        crate::config::DEFAULT_WS_PATH.to_string()
     } else if raw.starts_with('/') {
         raw.to_string()
     } else {

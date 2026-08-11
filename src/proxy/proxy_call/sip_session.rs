@@ -461,7 +461,7 @@ impl BuiltinAppFactory {
                 let mode = params
                     .as_ref()
                     .and_then(|p| p.get("mode").and_then(|v| v.as_str()))
-                    .unwrap_or("tree");
+                    .unwrap_or(crate::config::DEFAULT_IVR_MODE);
 
                 if mode == "step" && params.as_ref()?.get("url").is_some() {
                     // Inline step mode (from debug routes or legacy app_params)

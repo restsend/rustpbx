@@ -34,8 +34,7 @@ pub mod runtime;
 pub mod sip;
 pub mod user;
 pub use cookie::{
-    CalleeDisplayName, CalleeOfflineMarker, OutboundTrunkContext, TenantId, TransactionCookie,
-    TrunkContext,
+    CalleeDisplayName, CalleeOfflineMarker, OutboundTrunkContext, TransactionCookie, TrunkContext,
 };
 pub use user::SipUser;
 
@@ -108,9 +107,6 @@ pub struct VoicePrompts {
     /// "You are number N in the queue" that the operator supplies.
     #[serde(default)]
     pub position_prompt: Option<String>,
-    /// Audio file to play for estimated-wait-time announcement.
-    #[serde(default)]
-    pub wait_time_prompt: Option<String>,
     /// Audio file played before the final destination (voicemail/external number)
     /// when all escalation timeouts are exhausted.
     #[serde(default)]
@@ -132,8 +128,6 @@ pub struct ComfortPrompt {
     /// Interval in seconds between consecutive plays of this prompt.
     #[serde(default = "default_comfort_interval")]
     pub interval_secs: u32,
-    /// Sort order for drag-and-drop reordering.
-    pub order: u32,
 }
 
 fn default_comfort_interval() -> u32 {
@@ -148,7 +142,6 @@ impl VoicePrompts {
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH.to_string()),
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH.to_string()),
             position_prompt: None,
-            wait_time_prompt: None,
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
             service_prompt: None,
@@ -162,7 +155,6 @@ impl VoicePrompts {
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN.to_string()),
             no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN.to_string()),
             position_prompt: None,
-            wait_time_prompt: None,
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
             service_prompt: None,

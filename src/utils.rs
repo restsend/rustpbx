@@ -292,11 +292,6 @@ pub fn active_task_count() -> usize {
     GLOBAL_TASK_COUNT.load(Ordering::Relaxed) as usize
 }
 
-/// Get task count by location prefix (stub — always returns 0, kept for test compat)
-pub fn active_task_count_by_prefix(_prefix: &str) -> usize {
-    0
-}
-
 /// Get detailed task metrics keyed by spawn location ("file:line").
 pub fn task_metrics_snapshot() -> std::collections::HashMap<String, usize> {
     TASK_LOCATIONS

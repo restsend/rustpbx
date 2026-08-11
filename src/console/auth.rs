@@ -445,7 +445,7 @@ impl ConsoleState {
             1,
             30,
             secret_bytes,
-            Some("RustPBX".to_string()),
+            Some(crate::config::BRAND_NAME.to_string()),
             user.email.clone(),
         ) {
             Ok(t) => t,
@@ -498,7 +498,7 @@ impl ConsoleState {
             1,
             30,
             secret_bytes,
-            Some("RustPBX".to_string()),
+            Some(crate::config::BRAND_NAME.to_string()),
             user.email.clone(),
         ) {
             Ok(t) => t,

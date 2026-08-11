@@ -3,9 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::debug;
 
-#[allow(unused_imports)]
-use tracing::info;
-
 const VERSION_INFO: &str = concat!(
     "rustpbx ",
     env!("CARGO_PKG_VERSION"),
@@ -83,7 +80,8 @@ pub async fn check_update(
         .with_timeout(std::time::Duration::from_secs(5))
         .with_header("User-Agent", &get_useragent());
 
-    let params: Vec<(String, String)> = vec![
+    #[allow(unused_mut)]
+    let mut params: Vec<(String, String)> = vec![
         ("version".to_string(), version.to_string()),
         ("edition".to_string(), edition.to_string()),
         ("uptime".to_string(), uptime_secs.to_string()),
@@ -92,6 +90,11 @@ pub async fn check_update(
         ("extensions_count".to_string(), extensions_count.to_string()),
         ("wholesale_calls".to_string(), wholesale_calls.to_string()),
     ];
+
+    #[cfg(feature = "commerce")]
+    if let Some(digest) = compute_license_digest(state) {
+        params.push(("license_digest".to_string(), digest));
+    }
 
     let req = crate::http_util::shared_keepalive_client()
         .get("https://miuda.ai/api/check_update")
@@ -113,6 +116,19 @@ pub async fn check_update(
         anyhow::anyhow!("version check parse error: {e}, status={status}, body={body}")
     })?;
     Ok(info)
+}
+
+/// Compute a short digest of the first configured license key (first 8
+/// characters of the key sorted by key name for determinism). Returns `None`
+/// when no license key is configured.
+#[cfg(feature = "commerce")]
+fn compute_license_digest(state: &crate::app::AppState) -> Option<String> {
+    let licenses = state.config().licenses.as_ref()?;
+    let key = licenses.keys.iter().min_by(|a, b| a.0.cmp(b.0))?.1.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.chars().take(8).collect())
 }
 
 /// Spawn a background task that periodically checks for updates (at startup and

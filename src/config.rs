@@ -14,6 +14,18 @@ use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
+/// Default AMI HTTP endpoint path.
+pub const DEFAULT_AMI_PATH: &str = "/ami/v1";
+/// Default SIP-over-WebSocket handler path.
+pub const DEFAULT_WS_PATH: &str = "/ws";
+/// Default ICE servers endpoint path.
+pub const DEFAULT_ICE_SERVERS_PATH: &str = "/iceservers";
+/// Default IVR editor mode.
+pub const DEFAULT_IVR_MODE: &str = "tree";
+/// Product brand name.
+pub const BRAND_NAME: &str = "RustPBX";
+
+
 #[derive(Parser, Debug)]
 #[command(version)]
 pub(crate) struct Cli {
@@ -383,8 +395,6 @@ pub struct ApiTokenConfig {
     pub token: String,
     #[serde(default)]
     pub scopes: Vec<String>,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 impl Default for ConsoleConfig {

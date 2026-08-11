@@ -1873,17 +1873,86 @@ fn extract_tags(tags: &Option<Value>) -> Vec<String> {
     }
 }
 
-async fn build_summary(_db: &DatabaseConnection, _condition: Condition) -> Result<Value, DbErr> {
+/// Aggregate summary counts for the call record list (applies the same
+/// filter condition as the list itself).
+async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
+    use sea_orm::sea_query::{Alias, Expr, Func, IntoCondition, SimpleExpr};
+    use sea_orm::{ExprTrait, QuerySelect};
+
+    fn count_when<C: IntoCondition>(cond: C) -> SimpleExpr {
+        crate::utils::count_when(cond)
+    }
+
+    #[derive(sea_orm::FromQueryResult)]
+    struct SummaryAgg {
+        total: i64,
+        answered: i64,
+        missed: i64,
+        failed: i64,
+        inbound: i64,
+        outbound: i64,
+        transcribed: i64,
+        total_secs: Option<i64>,
+        avg_secs: Option<f64>,
+        unique_dids: i64,
+    }
+
+    let agg = CallRecordEntity::find()
+        .filter(condition.clone())
+        .select_only()
+        .column_as(CallRecordColumn::Id.count(), "total")
+        .column_as(count_when(CallRecordColumn::Status.eq("completed")), "answered")
+        .column_as(count_when(CallRecordColumn::Status.eq("missed")), "missed")
+        .column_as(count_when(CallRecordColumn::Status.eq("failed")), "failed")
+        .column_as(count_when(CallRecordColumn::Direction.eq("inbound")), "inbound")
+        .column_as(count_when(CallRecordColumn::Direction.eq("outbound")), "outbound")
+        .column_as(count_when(CallRecordColumn::HasTranscript.eq(true)), "transcribed")
+        .column_as(
+            SimpleExpr::from(Func::sum(Expr::col(CallRecordColumn::DurationSecs)))
+                .cast_as(Alias::new("INTEGER")),
+            "total_secs",
+        )
+        .column_as(
+            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs))),
+            "avg_secs",
+        )
+        .column_as(
+            Expr::col(CallRecordColumn::FromNumber).count_distinct(),
+            "unique_dids",
+        )
+        .into_model::<SummaryAgg>()
+        .one(db)
+        .await?;
+
+    let Some(agg) = agg else {
+        return Ok(json!({
+            "total": 0, "answered": 0, "missed": 0, "failed": 0,
+            "transcribed": 0, "avg_duration": 0.0, "total_minutes": 0.0,
+            "inbound": 0, "outbound": 0, "asr": 0.0, "unique_dids": 0,
+        }));
+    };
+
+    let answered = std::cmp::max(agg.answered, 0) as u64;
+    let total = std::cmp::max(agg.total, 0) as u64;
+    let asr = if total > 0 {
+        (answered as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let total_minutes = std::cmp::max(agg.total_secs.unwrap_or(0), 0) as f64 / 60.0;
+
     Ok(json!({
-        "total": 0,
-        "answered": 0,
-        "missed": 0,
-        "failed": 0,
-        "avg_duration": 0.0,
-        "total_minutes": 0.0,
-        "inbound": 0,
-        "outbound": 0,
-        "asr": 0.0,
+        "total": agg.total,
+        "answered": agg.answered,
+        "missed": agg.missed,
+        "failed": agg.failed,
+        "transcribed": agg.transcribed,
+        "avg_duration": agg.avg_secs.unwrap_or(0.0).max(0.0),
+        "total_minutes": total_minutes,
+        "inbound": agg.inbound,
+        "outbound": agg.outbound,
+        "asr": asr,
+        "unique_dids": agg.unique_dids,
     }))
 }
 

@@ -27,14 +27,6 @@ pub enum OwnershipMode {
     Barge,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupervisorMode {
-    Listen,
-    Whisper,
-    Barge,
-}
-
 #[derive(Debug, Clone)]
 pub enum RwiCommandPayload {
     Subscribe {
@@ -474,10 +466,6 @@ pub struct ConferenceMemberRequest {
     pub conf_id: Option<String>,
     pub call_id: Option<String>,
 }
-pub type ConferenceAddRequest = ConferenceMemberRequest;
-pub type ConferenceRemoveRequest = ConferenceMemberRequest;
-pub type ConferenceMuteRequest = ConferenceMemberRequest;
-pub type ConferenceUnmuteRequest = ConferenceMemberRequest;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConferenceDestroyRequest {
@@ -720,13 +708,13 @@ pub enum RwiRequestPayload {
     #[serde(rename = "conference.create")]
     ConferenceCreate(ConferenceCreateRequest),
     #[serde(rename = "conference.add")]
-    ConferenceAdd(ConferenceAddRequest),
+    ConferenceAdd(ConferenceMemberRequest),
     #[serde(rename = "conference.remove")]
-    ConferenceRemove(ConferenceRemoveRequest),
+    ConferenceRemove(ConferenceMemberRequest),
     #[serde(rename = "conference.mute")]
-    ConferenceMute(ConferenceMuteRequest),
+    ConferenceMute(ConferenceMemberRequest),
     #[serde(rename = "conference.unmute")]
-    ConferenceUnmute(ConferenceUnmuteRequest),
+    ConferenceUnmute(ConferenceMemberRequest),
     #[serde(rename = "conference.destroy")]
     ConferenceDestroy(ConferenceDestroyRequest),
     #[serde(rename = "conference.end")]

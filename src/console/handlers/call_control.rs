@@ -365,9 +365,9 @@ fn get_ami_path(state: &ConsoleState) -> String {
                 .proxy
                 .ami_path
                 .clone()
-                .unwrap_or_else(|| "/ami/v1".to_string())
+                .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string())
         })
-        .unwrap_or_else(|| "/ami/v1".to_string())
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string())
 }
 
 #[cfg(feature = "commerce")]
