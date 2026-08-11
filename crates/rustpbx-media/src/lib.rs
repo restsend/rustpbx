@@ -30,6 +30,8 @@ mod media_track_tests;
 mod mixer_tests;
 #[cfg(test)]
 mod recorder_tests;
+#[cfg(test)]
+mod test_utils;
 
 // ── Re-exports ──────────────────────────────────────────────────────
 pub use audio_codec::CodecType;
@@ -47,6 +49,36 @@ pub use track::Track;
 // ── Shared utility types ────────────────────────────────────────────
 
 use anyhow::Result;
+
+/// Audio frame buffer for passing PCM audio between components.
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    /// Raw PCM samples (16-bit signed, mono)
+    pub samples: Vec<i16>,
+    /// Sample rate
+    pub sample_rate: u32,
+    /// Timestamp
+    pub timestamp: u64,
+}
+
+impl AudioFrame {
+    /// Create a new audio frame.
+    pub fn new(samples: Vec<i16>, sample_rate: u32) -> Self {
+        Self {
+            samples,
+            sample_rate,
+            timestamp: 0,
+        }
+    }
+
+    pub fn silence(sample_count: usize) -> Self {
+        Self {
+            samples: vec![0i16; sample_count],
+            sample_rate: 8000,
+            timestamp: 0,
+        }
+    }
+}
 
 pub trait StreamWriter: Send + Sync {
     fn write_header(&mut self) -> Result<()>;

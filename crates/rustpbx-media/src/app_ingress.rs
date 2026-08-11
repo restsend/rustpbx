@@ -30,6 +30,7 @@ use tracing::trace;
 
 use crate::leg_id::LegId;
 use crate::negotiate::NegotiatedLegProfile;
+use crate::AudioFrame;
 
 const DEFAULT_PTIME_MS: u64 = 20;
 
@@ -56,8 +57,7 @@ impl IngestState {
 #[derive(Debug, Clone)]
 pub struct LegPcmFrame {
     pub leg: LegId,
-    pub sample_rate: u32,
-    pub samples: Vec<i16>,
+    pub frame: AudioFrame,
     /// `true` when this frame is silence (muted/held/no-data). Lets the app
     /// mixer skip decode work or mark gaps.
     pub silence: bool,
@@ -66,8 +66,7 @@ pub struct LegPcmFrame {
 /// A decoded PCM frame (without the leg tag), for single-leg streams.
 #[derive(Debug, Clone)]
 pub struct PcmFrame {
-    pub sample_rate: u32,
-    pub samples: Vec<i16>,
+    pub frame: AudioFrame,
     /// `true` when this frame is silence (muted/held/no-data).
     pub silence: bool,
 }
@@ -75,8 +74,7 @@ pub struct PcmFrame {
 impl From<LegPcmFrame> for PcmFrame {
     fn from(f: LegPcmFrame) -> Self {
         Self {
-            sample_rate: f.sample_rate,
-            samples: f.samples,
+            frame: f.frame,
             silence: f.silence,
         }
     }
@@ -323,8 +321,7 @@ async fn decode_task(
                 };
                 let _ = bus.send(LegPcmFrame {
                     leg: leg.clone(),
-                    sample_rate,
-                    samples,
+                    frame: AudioFrame::new(samples, sample_rate),
                     silence,
                 });
             }
@@ -368,7 +365,7 @@ mod tests {
         let f1 = rx.recv().await.unwrap();
         assert_eq!(f1.leg, LegId::from("a"));
         assert!(f1.silence, "starved task must emit silence");
-        assert_eq!(f1.samples.len(), pcm_per_frame);
+        assert_eq!(f1.frame.samples.len(), pcm_per_frame);
 
         // Feed enough PCMU data to fill a frame. PCMU decode of N bytes → N samples.
         // Feed 3 frames worth of payload so at least one non-silence frame lands.

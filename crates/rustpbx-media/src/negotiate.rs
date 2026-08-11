@@ -48,19 +48,22 @@ impl CodecInfo {
         self.codec == CodecType::TelephoneEvent
     }
 
+    /// SDP/RTP codec name (e.g. `PCMU`, `opus`, `telephone-event`).
+    pub fn codec_name(&self) -> &'static str {
+        match self.codec {
+            CodecType::PCMU => "PCMU",
+            CodecType::PCMA => "PCMA",
+            CodecType::G722 => "G722",
+            CodecType::G729 => "G729",
+            CodecType::Opus => "opus",
+            CodecType::TelephoneEvent => "telephone-event",
+        }
+    }
+
     /// Convert to rustrtc AudioCapability for use in RtcConfiguration.media_capabilities
     pub fn to_audio_capability(&self) -> Option<rustrtc::config::AudioCapability> {
         use rustrtc::config::AudioCapability;
-        let codec_name = match self.codec {
-            CodecType::PCMU => "PCMU".to_string(),
-            CodecType::PCMA => "PCMA".to_string(),
-            CodecType::G722 => "G722".to_string(),
-            CodecType::G729 => "G729".to_string(),
-            CodecType::Opus => "opus".to_string(),
-            CodecType::TelephoneEvent => "telephone-event".to_string(),
-            #[allow(unreachable_patterns)]
-            _ => return None,
-        };
+        let codec_name = self.codec_name().to_string();
 
         Some(AudioCapability {
             payload_type: self.payload_type,
@@ -387,14 +390,7 @@ impl MediaNegotiator {
     }
 
     fn codec_info_rtpmap(info: &CodecInfo) -> String {
-        let codec_name = match info.codec {
-            CodecType::PCMU => "PCMU",
-            CodecType::PCMA => "PCMA",
-            CodecType::G722 => "G722",
-            CodecType::G729 => "G729",
-            CodecType::Opus => "opus",
-            CodecType::TelephoneEvent => "telephone-event",
-        };
+        let codec_name = info.codec_name();
 
         match info.channels {
             0 | 1 => format!("{}/{}", codec_name, info.clock_rate),

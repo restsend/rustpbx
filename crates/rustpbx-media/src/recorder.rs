@@ -37,11 +37,10 @@ impl Default for RecorderOption {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Leg {
-    A,
-    B,
-}
+/// Which side of the 2-party bridge a leg occupies. Alias of
+/// [`crate::media_bridge::LegSide`] so the recorder shares the same A/B type
+/// as the rest of the media pipeline.
+pub use crate::media_bridge::LegSide as Leg;
 
 #[derive(Debug, Clone, Copy)]
 struct DtmfEventState {

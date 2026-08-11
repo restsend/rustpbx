@@ -401,6 +401,42 @@ impl TestMediaHarness {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
+
+    /// Mirror of [`Self::send_and_receive`] for the B→A direction: test_b
+    /// (baresip / agent) sends encoded frames → relayed through the bridge
+    /// → test_a (caller) receives.
+    async fn send_b_to_a_receive(
+        &mut self,
+        send_codec: CodecType,
+        recv_timeout_ms: u64,
+    ) -> Option<AudioFrame> {
+        let frames = encode_codec_frames(send_codec, 20);
+        assert!(!frames.is_empty(), "must have encoded frames for {send_codec:?}");
+        let rate = send_codec.samplerate();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(recv_timeout_ms);
+        let mut ts = 0u32;
+        let mut last_rebridge = tokio::time::Instant::now();
+
+        loop {
+            for _ in 0..2 {
+                self.test_b.send_audio(frames[0].clone(), ts);
+                ts = ts.wrapping_add(rate / 50);
+            }
+            if let Some(frame) = self.test_a.recv_audio(25).await {
+                if !frame.data.is_empty() {
+                    return Some(frame);
+                }
+            }
+            if tokio::time::Instant::now() - last_rebridge >= Duration::from_secs(2) {
+                let _ = self.mb.bridge().await;
+                last_rebridge = tokio::time::Instant::now();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 // ── Real audio fixtures (from fixtures/sample.wav) ───────────────────────
@@ -551,6 +587,52 @@ async fn fast_path_cross_transport_rtp_to_webrtc() {
     // Let background tasks (ICE/DTLS/sender loops) drain before the test
     // runtime drops — sync close() cannot await task completion.
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+}
+
+/// Local playback frames sent to a WebRTC leg must carry the SDES-MID
+/// header extension (rustrtc's sender stamps it on every outbound RTP packet).
+/// Without MID, Chrome cannot attribute even local playback to the audio track.
+#[tokio::test]
+async fn local_playback_to_webrtc_carries_mid() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.bridge_and_accept().await;
+
+    h.mb
+        .leg(LegSide::A)
+        .unwrap()
+        .play(Box::new(TestBeep::new(8000)), true, None)
+        .await
+        .expect("play beep on WebRTC leg");
+    let control_track = h
+        .test_a
+        .pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.receiver())
+        .map(|r| r.track())
+        .expect("test_a audio receiver track");
+    let frame = tokio::time::timeout(Duration::from_secs(2), control_track.recv())
+        .await
+        .expect("playback frame timeout")
+        .expect("playback frame");
+    let MediaSample::Audio(frame) = frame else {
+        panic!("expected audio");
+    };
+    let raw = frame.raw_packet.as_ref().expect("raw packet");
+    assert!(
+        raw.header.extension.is_some(),
+        "local playback to WebRTC must carry the MID header extension for browser attribution"
+    );
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
 #[tokio::test]
@@ -965,6 +1047,184 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
     h.close();
 }
 
+// ── Full-duplex relay connectivity (all 4 transport-mode combos) ──────────
+//
+// Each test verifies audio flow in BOTH directions (caller→agent and
+// agent→caller) and asserts the SSRC attribution rule:
+//   - relay to a WebRTC destination must use the leg's sender (playback) SSRC
+//     so the browser can attribute it to the negotiated audio track (MID-based
+//     SSRC learning from prior playback/silence frames).
+//   - relay to a plain RTP destination uses a distinct random relay SSRC
+//     (RTP peers are SSRC-tolerant and don't need MID attribution).
+
+/// RTP ↔ RTP: both legs are plain RTP. Relay SSRC is distinct from the
+/// destination's playback SSRC in both directions.
+#[tokio::test]
+async fn relay_full_duplex_rtp_rtp() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    let a_playback = playback_ssrc(&h, LegSide::A);
+    let b_playback = playback_ssrc(&h, LegSide::B);
+    h.bridge_and_accept().await;
+
+    // A→B: caller voice → agent
+    let a_to_b = h.send_and_receive(CodecType::PCMU, 8000).await.expect("A→B");
+    assert!(!a_to_b.data.is_empty(), "A→B: agent must receive audio");
+    let raw_a_b = a_to_b.raw_packet.as_ref().expect("raw packet");
+    assert_eq!(raw_a_b.header.payload_type, 0, "A→B: PT must be PCMU");
+    assert_ne!(raw_a_b.header.ssrc, b_playback,
+        "RTP destination: relay SSRC must be distinct from playback SSRC");
+    assert_no_mid(raw_a_b);
+
+    // B→A: agent voice → caller
+    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 8000).await.expect("B→A");
+    assert!(!b_to_a.data.is_empty(), "B→A: caller must receive audio");
+    let raw_b_a = b_to_a.raw_packet.as_ref().expect("raw packet");
+    assert_eq!(raw_b_a.header.payload_type, 0, "B→A: PT must be PCMU");
+    assert_ne!(raw_b_a.header.ssrc, a_playback,
+        "RTP destination: relay SSRC must be distinct from playback SSRC");
+    assert_no_mid(raw_b_a);
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// WebRTC ↔ WebRTC: both legs use DTLS-SRTP. The rewrite bridge stamps the
+/// destination's SDES-MID on forwarded packets, so the browser attributes
+/// relayed audio to the track regardless of (distinct) relay SSRC.
+#[tokio::test]
+async fn relay_full_duplex_webrtc_webrtc() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+    )
+    .await;
+    let a_playback = playback_ssrc(&h, LegSide::A);
+    let b_playback = playback_ssrc(&h, LegSide::B);
+    h.bridge_and_accept().await;
+
+    let a_to_b = h
+        .send_and_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("A→B");
+    assert!(!a_to_b.data.is_empty());
+    let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, b_playback, "WebRTC destination: relay SSRC must be distinct");
+    assert_has_mid(raw, "WebRTC destination: relay must stamp MID for browser attribution");
+
+    let b_to_a = h
+        .send_b_to_a_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("B→A");
+    assert!(!b_to_a.data.is_empty());
+    let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, a_playback, "WebRTC destination: relay SSRC must be distinct");
+    assert_has_mid(raw, "WebRTC destination: relay must stamp MID for browser attribution");
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// WebRTC(A) ↔ RTP(B): caller uses WebRTC, agent is plain RTP.
+/// A→B: RTP destination → distinct SSRC, no MID.
+/// B→A: WebRTC destination → MID present (bridge-stamped), distinct SSRC.
+#[tokio::test]
+async fn relay_full_duplex_webrtc_rtp() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    let a_playback = playback_ssrc(&h, LegSide::A);
+    let b_playback = playback_ssrc(&h, LegSide::B);
+    h.bridge_and_accept().await;
+
+    // A→B: WebRTC caller → plain RTP agent
+    let a_to_b = h.send_and_receive(CodecType::PCMU, 10000).await.expect("A→B");
+    assert!(!a_to_b.data.is_empty());
+    let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, b_playback, "RTP destination: relay SSRC must be distinct");
+    assert_no_mid(raw);
+
+    // B→A: plain RTP agent → WebRTC caller (original bug direction)
+    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 10000).await.expect("B→A");
+    assert!(!b_to_a.data.is_empty());
+    let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, a_playback, "WebRTC destination: relay SSRC must be distinct");
+    assert_has_mid(raw, "WebRTC destination: relay must stamp MID (the original 'bitrate but no audio' bug)");
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// RTP(A) ↔ WebRTC(B): caller is plain RTP, agent is WebRTC.
+/// A→B: WebRTC destination → MID present, distinct SSRC.
+/// B→A: RTP destination → distinct SSRC, no MID.
+#[tokio::test]
+async fn relay_full_duplex_rtp_webrtc() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+    )
+    .await;
+    let a_playback = playback_ssrc(&h, LegSide::A);
+    let b_playback = playback_ssrc(&h, LegSide::B);
+    h.bridge_and_accept().await;
+
+    // A→B: plain RTP caller → WebRTC agent
+    let a_to_b = h.send_and_receive(CodecType::PCMU, 10000).await.expect("A→B");
+    assert!(!a_to_b.data.is_empty());
+    let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, b_playback, "WebRTC destination: relay SSRC must be distinct");
+    assert_has_mid(raw, "WebRTC destination: relay must stamp MID");
+
+    // B→A: WebRTC agent → plain RTP caller
+    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 10000).await.expect("B→A");
+    assert!(!b_to_a.data.is_empty());
+    let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
+    assert_ne!(raw.header.ssrc, a_playback, "RTP destination: relay SSRC must be distinct");
+    assert_no_mid(raw);
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// The rewrite bridge stamps MID on relayed packets when the destination is
+/// WebRTC (`!strip_extensions`); RTP destinations never receive extensions.
+fn assert_has_mid(raw: &rustrtc::rtp::RtpPacket, msg: &str) {
+    assert!(
+        raw.header.extension.is_some(),
+        "{}: relay to WebRTC must carry a header extension (MID)",
+        msg,
+    );
+}
+
+/// RTP destinations must never carry MID (or any) extensions.
+fn assert_no_mid(raw: &rustrtc::rtp::RtpPacket) {
+    assert!(
+        raw.header.extension.is_none(),
+        "RTP destination: relayed packet must have no header extensions"
+    );
+}
+
+fn playback_ssrc(h: &TestMediaHarness, side: LegSide) -> u32 {
+    rustpbx_media::leg::sender_ssrc_for_kind(
+        h.mb.leg(side).unwrap().pc(),
+        rustrtc::MediaKind::Audio,
+    )
+}
+
 /// Outbound RFC 2833 telephone-event (DTMF) from a leg must reach the facing
 /// peer on the negotiated telephone-event payload type, with start (E=0) and
 /// end (E=1) packets per digit.
@@ -1323,8 +1583,40 @@ async fn recording_transcoded_call_captures_both_speakers_on_a_leg() {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-/// Parse an SDP string for sending to a TestPeer.
-#[allow(dead_code)]
-fn parse_sdp(sdp: &str) -> SessionDescription {
-    SessionDescription::parse(SdpType::Answer, sdp).unwrap()
+/// A constant-amplitude looping PCM source used to produce real playable
+/// frames (control case: local playback to a WebRTC leg carries MID).
+struct TestBeep {
+    rate: u32,
+    pos: usize,
 }
+
+impl TestBeep {
+    fn new(rate: u32) -> Self {
+        Self { rate, pos: 0 }
+    }
+}
+
+impl rustpbx_media::audio_source::AudioSource for TestBeep {
+    fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+        for (i, s) in buffer.iter_mut().enumerate() {
+            *s = ((self.pos + i) as i32 * 1000) as i16;
+        }
+        self.pos += buffer.len();
+        buffer.len()
+    }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn has_data(&self) -> bool {
+        true
+    }
+    fn reset(&mut self) -> anyhow::Result<()> {
+        self.pos = 0;
+        Ok(())
+    }
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────

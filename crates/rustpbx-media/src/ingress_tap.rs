@@ -278,7 +278,6 @@ mod tests {
     use super::*;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
-    use std::sync::atomic::AtomicUsize;
 
     fn make_packet(pt: u8, seq: u16, ts: u32, ssrc: u32, payload: Vec<u8>) -> RtpPacket {
         RtpPacket::new(RtpHeader::new(pt, seq, ts, ssrc), payload)
@@ -358,31 +357,15 @@ mod tests {
         );
     }
 
-    /// A counting recorder backend used to verify the recording hook fires.
-    struct CountingRecorder {
-        samples: AtomicUsize,
-        dtmfs: AtomicUsize,
-    }
+    use crate::test_utils::CountingRecorder;
 
-    impl MediaRecorder for CountingRecorder {
-        fn write_sample(&self, _d: PacketDirection, _p: &RtpPacket) {
-            self.samples.fetch_add(1, Ordering::Relaxed);
-        }
-        fn write_dtmf(&self, _e: DtmfEvent) {
-            self.dtmfs.fetch_add(1, Ordering::Relaxed);
-        }
-        fn set_paused(&self, _paused: bool) {}
-        fn finalize(&self) {}
-    }
+    /// A counting recorder backend used to verify the recording hook fires.
 
     #[test]
     fn recorder_receives_audio_and_dtmf() {
         let tap = IngressTap::new(8);
         tap.set_dtmf_payload_types(vec![101]);
-        let rec = Arc::new(CountingRecorder {
-            samples: AtomicUsize::new(0),
-            dtmfs: AtomicUsize::new(0),
-        });
+        let rec = Arc::new(CountingRecorder::new());
         tap.set_recorder(Some(rec.clone()));
 
         // 3 audio packets → 3 sample writes.
@@ -397,7 +380,7 @@ mod tests {
         tap.on_ingress(&dtmf, test_addr());
 
         assert_eq!(
-            rec.samples.load(Ordering::Relaxed),
+            rec.samples(),
             4,
             "3 audio + 1 DTMF packet → 4 write_sample calls"
         );
@@ -411,10 +394,7 @@ mod tests {
     #[test]
     fn paused_stops_recording_but_stats_advance() {
         let tap = IngressTap::new(8);
-        let rec = Arc::new(CountingRecorder {
-            samples: AtomicUsize::new(0),
-            dtmfs: AtomicUsize::new(0),
-        });
+        let rec = Arc::new(CountingRecorder::new());
         tap.set_recorder(Some(rec.clone()));
         tap.set_paused(true);
 
@@ -425,12 +405,12 @@ mod tests {
         // Stats still advance (RTP-timeout detection relies on this).
         assert_eq!(tap.stats().egress_packets, 5);
         // Recorder not called while paused.
-        assert_eq!(rec.samples.load(Ordering::Relaxed), 0);
+        assert_eq!(rec.samples(), 0);
 
         tap.set_paused(false);
         let p = make_packet(0, 9, 160, 1, vec![1u8; 160]);
         tap.on_egress(&p, test_addr());
-        assert_eq!(rec.samples.load(Ordering::Relaxed), 1);
+        assert_eq!(rec.samples(), 1);
     }
 
     #[test]

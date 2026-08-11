@@ -379,9 +379,14 @@ impl MediaBridge {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
-            // destination is plain RTP. Relay audio gets an SSRC distinct from
-            // the destination's persistent local-playback SSRC. Video keeps its
-            // destination sender SSRC for the negotiated video track.
+            // destination is plain RTP.
+            //
+            // SSRC selection for relayed audio:
+            // Both directions use a distinct random SSRC to avoid timeline
+            // pollution on the playback SSRC. The rewrite bridge stamps the
+            // destination's SDES-MID extension header on forwarded packets
+            // (when the destination is WebRTC), so the browser attributes
+            // them to the correct audio track regardless of SSRC.
             let a_transport = la.pc().config().transport_mode.clone();
             let b_transport = lb.pc().config().transport_mode.clone();
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
@@ -390,6 +395,15 @@ impl MediaBridge {
             let b_relay_ssrc = distinct_relay_ssrc(b_playback_ssrc);
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
+            // SDES-MID (ext id, value) per destination m-line: audio rules stamp
+            // the audio mid, video rules the video mid — so a WebRTC receiver
+            // demuxes audio vs video to the correct tracks (a direction-level
+            // single mid would stamp audio's mid onto video packets and break
+            // one-way video).
+            let a_audio_mid = sdes_mid_for_kind(&la, MediaKind::Audio);
+            let b_audio_mid = sdes_mid_for_kind(&lb, MediaKind::Audio);
+            let a_video_mid = sdes_mid_for_kind(&la, rustrtc::MediaKind::Video);
+            let b_video_mid = sdes_mid_for_kind(&lb, rustrtc::MediaKind::Video);
 
             // RFC 4733 DTMF payload-type remap (only when the two legs
             // negotiated different telephone-event payload types).
@@ -438,11 +452,18 @@ impl MediaBridge {
             }
 
             // ── A→B rules: audio catch-all + DTMF + video ──
+            let b_audio_mid_fields = b_audio_mid
+                .as_ref()
+                .map(|m| (m.0, Some(m.1.to_string())))
+                .map(|(id, mid)| (Some(id), mid))
+                .unwrap_or((None, None));
             let mut rules_a_to_b = vec![RtpRewriteRule {
                 match_payload_type: None,
                 fixed_out_ssrc: Some(b_relay_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
+                sdes_mid_extension_id: b_audio_mid_fields.0,
+                sdes_mid: b_audio_mid_fields.1.clone(),
             }];
             if let Some((a_pt, b_pt)) = dtmf_a_to_b {
                 rules_a_to_b.push(RtpRewriteRule {
@@ -450,6 +471,8 @@ impl MediaBridge {
                     fixed_out_ssrc: Some(b_relay_ssrc),
                     ssrc_offset: 0,
                     out_payload_type: Some(b_pt),
+                    sdes_mid_extension_id: b_audio_mid_fields.0,
+                    sdes_mid: b_audio_mid_fields.1.clone(),
                 });
             }
             let (video_a_to_b, video_b_to_a) = video_relay_rules(
@@ -461,15 +484,24 @@ impl MediaBridge {
                 pa.dtmf_pts(),
                 pb.audio.as_ref().map(|a| a.payload_type),
                 pb.dtmf_pts(),
+                a_video_mid,
+                b_video_mid,
             );
             rules_a_to_b.extend(video_a_to_b);
 
             // ── B→A rules (mirror) ──
+            let a_audio_mid_fields = a_audio_mid
+                .as_ref()
+                .map(|m| (m.0, Some(m.1.to_string())))
+                .map(|(id, mid)| (Some(id), mid))
+                .unwrap_or((None, None));
             let mut rules_b_to_a = vec![RtpRewriteRule {
                 match_payload_type: None,
                 fixed_out_ssrc: Some(a_relay_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
+                sdes_mid_extension_id: a_audio_mid_fields.0,
+                sdes_mid: a_audio_mid_fields.1.clone(),
             }];
             if let Some((a_pt, b_pt)) = dtmf_b_to_a {
                 rules_b_to_a.push(RtpRewriteRule {
@@ -477,6 +509,8 @@ impl MediaBridge {
                     fixed_out_ssrc: Some(a_relay_ssrc),
                     ssrc_offset: 0,
                     out_payload_type: Some(a_pt),
+                    sdes_mid_extension_id: a_audio_mid_fields.0,
+                    sdes_mid: a_audio_mid_fields.1.clone(),
                 });
             }
             rules_b_to_a.extend(video_b_to_a);
@@ -490,6 +524,16 @@ impl MediaBridge {
                 ..Default::default()
             };
 
+            info!(
+                session = %self.session_id,
+                codec = ?ca.codec,
+                a_playback_ssrc, b_playback_ssrc, a_relay_ssrc, b_relay_ssrc,
+                video = ?video_match.as_ref().map(|(v, _)| v.name.as_str()),
+                strip_a_to_b = options_a_to_b.strip_extensions,
+                strip_b_to_a = options_b_to_a.strip_extensions,
+                "fast-path relay activated"
+            );
+
             la.set_egress_source(EgressSource::RewriteRelay {
                 peer_pc: lb.pc().clone(),
                 options: options_a_to_b,
@@ -502,15 +546,6 @@ impl MediaBridge {
                 rules: rules_b_to_a,
             })
             .await?;
-            info!(
-                session = %self.session_id,
-                codec = ?ca.codec,
-                a_playback_ssrc, b_playback_ssrc, a_relay_ssrc, b_relay_ssrc,
-                video = ?video_match.as_ref().map(|(v, _)| v.name.as_str()),
-                strip_a_to_b = options_a_to_b.strip_extensions,
-                strip_b_to_a = options_b_to_a.strip_extensions,
-                "fast-path relay activated"
-            );
             // WebRTC receivers depend on RTCP PLI/NACK to recover lost video
             // keyframes; the RTP relay forwards only RTP, so relay the feedback
             // across the legs (rewriting media_ssrc to the peer's real sender
@@ -925,6 +960,19 @@ fn distinct_relay_ssrc(playback_ssrc: u32) -> u32 {
     }
 }
 
+/// Read the SDES-MID (extension id, mid value) from a leg's sender for the
+/// given media kind — the tuple the rewrite bridge needs to stamp the MID
+/// header extension on forwarded packets so a WebRTC receiver can attribute
+/// them to the negotiated track regardless of their (relay) SSRC.
+fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sync::Arc<str>)> {
+    leg.pc()
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == kind)
+        .and_then(|t| t.sender())
+        .and_then(|s| s.sdes_mid())
+}
+
 /// Build the video payload-type rewrite rules for the fast-path relay.
 ///
 /// The relay must match **every** video payload type a leg may actually send,
@@ -950,6 +998,8 @@ fn video_relay_rules(
     a_dtmf_pts: std::collections::HashSet<u8>,
     b_audio_pt: Option<u8>,
     b_dtmf_pts: std::collections::HashSet<u8>,
+    a_video_mid: Option<(u8, std::sync::Arc<str>)>,
+    b_video_mid: Option<(u8, std::sync::Arc<str>)>,
 ) -> (Vec<RtpRewriteRule>, Vec<RtpRewriteRule>) {
     fn match_peer<'x>(
         codec: &NegotiatedVideoCodec,
@@ -967,6 +1017,15 @@ fn video_relay_rules(
         audio_pt == Some(pt) || dtmf_pts.contains(&pt)
     }
 
+    let mid_fields = |m: &Option<(u8, std::sync::Arc<str>)>| {
+        m.as_ref()
+            .map(|m| (m.0, m.1.to_string()))
+            .map(|(id, mid)| (Some(id), Some(mid)))
+            .unwrap_or((None, None))
+    };
+    let (b_mid_id, b_mid) = mid_fields(&b_video_mid);
+    let (a_mid_id, a_mid) = mid_fields(&a_video_mid);
+
     let mut a_to_b = Vec::new();
     for va in a {
         if is_audio_pt(va.payload_type, a_audio_pt, &a_dtmf_pts) {
@@ -978,6 +1037,8 @@ fn video_relay_rules(
                 fixed_out_ssrc: Some(b_video_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: Some(vb.payload_type),
+                sdes_mid_extension_id: b_mid_id,
+                sdes_mid: b_mid.clone(),
             });
         }
     }
@@ -993,6 +1054,8 @@ fn video_relay_rules(
                 fixed_out_ssrc: Some(a_video_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: Some(va.payload_type),
+                sdes_mid_extension_id: a_mid_id,
+                sdes_mid: a_mid.clone(),
             });
         }
     }
@@ -1121,6 +1184,7 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
+    use crate::test_utils::CountingRecorder;
 
     #[tokio::test]
     async fn set_legs_and_close() {
@@ -1166,30 +1230,6 @@ mod tests {
 
     /// A recorder that counts samples per direction, used to verify which leg
     /// received the recorder.
-    struct CountingRecorder {
-        ingress: std::sync::atomic::AtomicUsize,
-        egress: std::sync::atomic::AtomicUsize,
-    }
-    impl MediaRecorder for CountingRecorder {
-        fn write_sample(
-            &self,
-            direction: crate::ingress_tap::PacketDirection,
-            _: &rustrtc::rtp::RtpPacket,
-        ) {
-            use crate::ingress_tap::PacketDirection;
-            match direction {
-                PacketDirection::Ingress => self
-                    .ingress
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                PacketDirection::Egress => self
-                    .egress
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            };
-        }
-        fn write_dtmf(&self, _: DtmfEvent) {}
-        fn set_paused(&self, _: bool) {}
-        fn finalize(&self) {}
-    }
 
     fn feed_packet(tap: &crate::ingress_tap::IngressTap, ingress: bool) {
         use rustrtc::peer_connection::RtpObserver;
@@ -1209,10 +1249,7 @@ mod tests {
     /// where both legs were merged into the same channel.
     #[tokio::test]
     async fn set_recorder_for_attaches_only_to_a_leg() {
-        let rec = Arc::new(CountingRecorder {
-            ingress: std::sync::atomic::AtomicUsize::new(0),
-            egress: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let rec = Arc::new(CountingRecorder::new());
         let mut mb = MediaBridge::new("s-side-a", BridgeOpts::default());
         // A leg created AFTER set_recorder_for (mirrors real timing: the
         // recorder is configured at session construction, legs arrive later).
@@ -1254,10 +1291,7 @@ mod tests {
     /// new B leg — recording stays anchored to A.
     #[tokio::test]
     async fn set_recorder_for_survives_b_leg_replacement() {
-        let rec = Arc::new(CountingRecorder {
-            ingress: std::sync::atomic::AtomicUsize::new(0),
-            egress: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let rec = Arc::new(CountingRecorder::new());
         let mut mb = MediaBridge::new("s-xfer", BridgeOpts::default());
         mb.replace_leg(
             LegSide::A,
@@ -1758,8 +1792,8 @@ mod tests {
                     .ok()
                     .flatten()
             {
-                assert_eq!(frame.sample_rate, 8000, "PCMU leg decodes at 8 kHz");
-                if !frame.silence && frame.samples.iter().any(|&s| s != 0) {
+                assert_eq!(frame.frame.sample_rate, 8000, "PCMU leg decodes at 8 kHz");
+                if !frame.silence && frame.frame.samples.iter().any(|&s| s != 0) {
                     saw_audio = true;
                     break;
                 }
@@ -1817,15 +1851,17 @@ mod tests {
             empty_dtmf(),
             Some(111),
             empty_dtmf(),
+            None,
+            None,
         );
 
         let a_to_b_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = a_to_b
             .iter()
-            .map(|r| (r.match_payload_type.unwrap(), *r))
+            .map(|r| (r.match_payload_type.unwrap(), r.clone()))
             .collect();
         let b_to_a_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = b_to_a
             .iter()
-            .map(|r| (r.match_payload_type.unwrap(), *r))
+            .map(|r| (r.match_payload_type.unwrap(), r.clone()))
             .collect();
 
         // Every video PT on leg A must have a relay rule, stamped with leg B's
@@ -1859,7 +1895,7 @@ mod tests {
         b_dtmf.insert(110);
 
         let (a_to_b, b_to_a) = video_relay_rules(
-            &a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf,
+            &a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf, None, None,
         );
 
         let a_matched: Vec<u8> = a_to_b.iter().map(|r| r.match_payload_type.unwrap()).collect();

@@ -14,7 +14,7 @@ parking_lot = "0.12"
 rand = "0.10"
 rustpbx-http-util = { path = "../rustpbx-http-util" }
 rustpbx-sipflow = { path = "../rustpbx-sipflow" }
-rustrtc = "0.3.113"
+rustrtc = "0.3.116"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53", features = ["fs", "io-util", "sync"] }
 tokio-util = "0.7.18"

@@ -544,7 +544,7 @@ impl LegInner {
                 if has_webrtc_peer {
                     let pc = self.pc.clone();
                     let peer = peer_pc.clone();
-                    let options = *options;
+                    let options = options.clone();
                     let rules = rules.clone();
                     tokio::spawn(async move {
                         let result =
@@ -571,7 +571,7 @@ impl LegInner {
                     peer_pc.wait_for_rtp_transport_ready(timeout).await?;
                     self.pc.clear_rtp_rewrite_bridge();
                     self.pc
-                        .bridge_rtp_with_rewrite_rules(peer_pc, *options, rules)?;
+                        .bridge_rtp_with_rewrite_rules(peer_pc, options.clone(), rules)?;
                 }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
@@ -767,15 +767,7 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
 fn audio_capability_from_codec(c: &CodecInfo) -> rustrtc::config::AudioCapability {
     rustrtc::config::AudioCapability {
         payload_type: c.payload_type,
-        codec_name: match c.codec {
-            audio_codec::CodecType::PCMU => "PCMU",
-            audio_codec::CodecType::PCMA => "PCMA",
-            audio_codec::CodecType::G722 => "G722",
-            audio_codec::CodecType::G729 => "G729",
-            audio_codec::CodecType::Opus => "opus",
-            audio_codec::CodecType::TelephoneEvent => "telephone-event",
-        }
-        .to_string(),
+        codec_name: c.codec_name().to_string(),
         clock_rate: c.clock_rate,
         channels: c.channels as u8,
         fmtp: c.fmtp.clone(),
