@@ -800,7 +800,7 @@ impl RwiCommandProcessor {
                 CommandError::CommandFailed(format!("invalid destination: {}", req.destination))
             })?;
 
-        let realm = server.proxy_config.load().first_realm();
+        let realm = server.proxy_config.first_realm();
         let caller_str = Self::normalize_originate_caller_id(req.caller_id.as_deref(), &realm);
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
@@ -953,7 +953,7 @@ impl RwiCommandProcessor {
             .is_some();
         let routing_enabled = req
             .route_originated_calls
-            .unwrap_or(server.proxy_config.load().route_originated_calls);
+            .unwrap_or(server.proxy_config.route_originated_calls);
         let routed_hints: Option<crate::config::DialplanHints> = if explicit_trunk
             || !routing_enabled
         {
@@ -2856,4 +2856,3 @@ impl RwiCommandProcessor {
     }
 
 }
-
