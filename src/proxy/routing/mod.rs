@@ -23,11 +23,7 @@ use tokio::net::lookup_host;
 pub mod error_catalog;
 pub mod http;
 pub mod http_error_catalog;
-#[cfg(test)]
-mod http_tests;
 pub mod matcher;
-#[cfg(test)]
-mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConfigOrigin {
@@ -514,7 +510,7 @@ impl TrunkConfig {
         false
     }
 
-    pub(crate) fn matches_incoming_user_prefixes(
+    pub fn matches_incoming_user_prefixes(
         &self,
         from_user: Option<&str>,
         to_user: Option<&str>,

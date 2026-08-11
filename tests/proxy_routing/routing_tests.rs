@@ -1,11 +1,11 @@
-use crate::call::{
+use rustpbx::call::{
     DialDirection, DialStrategy, RoutingState, concurrent_call_limiter::ConcurrentCallLimiter,
     cps_limiter::CpsLimiter,
 };
-use crate::call::{FailureAction, QueueFallbackAction};
-use crate::config::{MediaProxyMode, RecordingPolicy, RouteResult};
-use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
-use crate::proxy::routing::{
+use rustpbx::call::{FailureAction, QueueFallbackAction};
+use rustpbx::config::{MediaProxyMode, RecordingPolicy, RouteResult};
+use rustpbx::proxy::routing::matcher::{RouteResourceLookup, match_invite};
+use rustpbx::proxy::routing::{
     DestConfig, MatchConditions, MediaMode, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
     RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig, TrunkDirection, VideoPolicy,
@@ -909,7 +909,7 @@ fn test_queue_fallback_redirect_to_queue_via_transfer() {
 
     match plan.fallback.expect("fallback missing") {
         QueueFallbackAction::Failure(FailureAction::Transfer(
-            crate::call::TransferEndpoint::Queue(name),
+            rustpbx::call::TransferEndpoint::Queue(name),
         )) => {
             assert_eq!(name, "tier2");
         }
@@ -933,7 +933,7 @@ fn test_queue_fallback_redirect_to_ivr_via_transfer() {
 
     match plan.fallback.expect("fallback missing") {
         QueueFallbackAction::Failure(FailureAction::Transfer(
-            crate::call::TransferEndpoint::Ivr(name),
+            rustpbx::call::TransferEndpoint::Ivr(name),
         )) => {
             assert_eq!(name, "main-menu");
         }
@@ -2043,7 +2043,7 @@ fn test_route_action_get_action_type_application() {
     };
     assert_eq!(
         action_explicit.get_action_type(),
-        crate::proxy::routing::ActionType::Application
+        rustpbx::proxy::routing::ActionType::Application
     );
 
     let action_implicit = RouteAction {
@@ -2053,7 +2053,7 @@ fn test_route_action_get_action_type_application() {
     };
     assert_eq!(
         action_implicit.get_action_type(),
-        crate::proxy::routing::ActionType::Application
+        rustpbx::proxy::routing::ActionType::Application
     );
 
     let action_forward = RouteAction {
@@ -2063,13 +2063,13 @@ fn test_route_action_get_action_type_application() {
     };
     assert_eq!(
         action_forward.get_action_type(),
-        crate::proxy::routing::ActionType::Forward
+        rustpbx::proxy::routing::ActionType::Forward
     );
 }
 
 #[tokio::test]
 async fn test_apply_trunk_config_rewrites_callee_host() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@rustpbx.com",
@@ -2121,7 +2121,7 @@ async fn test_apply_trunk_config_rewrites_callee_host() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_with_ipv6_dest() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@rustpbx.com",
@@ -2148,7 +2148,7 @@ async fn test_apply_trunk_config_with_ipv6_dest() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_preserves_callee_user() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@rustpbx.com",
@@ -2373,7 +2373,7 @@ async fn test_match_invite_forward_with_trunk_rewrites_callee() {
 
 #[tokio::test]
 async fn test_trunk_transport_preserved_in_destination() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@rustpbx.com",
@@ -2398,7 +2398,7 @@ async fn test_trunk_transport_preserved_in_destination() {
 
 #[test]
 fn test_apply_trunk_config_adds_p_asserted_identity() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@rustpbx.com",
@@ -2445,7 +2445,7 @@ fn test_apply_trunk_config_adds_p_asserted_identity() {
 // tests pin that contract.
 #[tokio::test]
 async fn test_apply_trunk_config_originate_auth_trunk_stamps_dest_and_credential() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     // Mirrors the RWI originate's base InviteOption: destination/credential unset.
     let mut option = create_invite_option(
@@ -2483,7 +2483,7 @@ async fn test_apply_trunk_config_originate_auth_trunk_stamps_dest_and_credential
 
 #[tokio::test]
 async fn test_apply_trunk_config_originate_ip_auth_trunk_sets_no_credential() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     // An IP-auth trunk (no username/password) still gets a destination, but no
     // credential — correct, and not a regression of the no-auth case.
@@ -2507,7 +2507,7 @@ async fn test_apply_trunk_config_originate_ip_auth_trunk_sets_no_credential() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_rewrite_hostport_true() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@original.com",
@@ -2556,7 +2556,7 @@ async fn test_apply_trunk_config_rewrite_hostport_true() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_rewrite_hostport_false() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@original.com",
@@ -2610,7 +2610,7 @@ async fn test_apply_trunk_config_rewrite_hostport_false() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_rewrite_hostport_default() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
         "sip:alice@original.com",
@@ -2638,7 +2638,7 @@ async fn test_apply_trunk_config_rewrite_hostport_default() {
 
 #[tokio::test]
 async fn test_apply_trunk_config_rewrite_hostport_preserves_user() {
-    use crate::proxy::routing::matcher::apply_trunk_config;
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     // Test that callee user is preserved regardless of rewrite_hostport setting
     let test_cases = vec![
@@ -3067,7 +3067,7 @@ async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
             assert_eq!(trunk_concurrent_count(&trunks, "out"), 1);
             let ctx = hints
                 .extensions
-                .get::<crate::call::OutboundTrunkContext>()
+                .get::<rustpbx::call::OutboundTrunkContext>()
                 .expect("forward hints should include outbound trunk context");
             assert_eq!(ctx.name, "out");
         }
@@ -3106,9 +3106,9 @@ async fn test_no_limits_means_no_holds() {
 
 #[test]
 fn header_passthrough_default_all_allows_everything() {
-    use crate::proxy::routing::HeaderPassthrough;
+    use rustpbx::proxy::routing::HeaderPassthrough;
     let rule = HeaderPassthrough::default();
-    assert_eq!(rule.mode, crate::proxy::routing::HeaderPassthroughMode::All);
+    assert_eq!(rule.mode, rustpbx::proxy::routing::HeaderPassthroughMode::All);
     assert!(rule.allows("X-Smart2Agent"));
     assert!(rule.allows("X-Referred-Id"));
     assert!(rule.allows("x-smart2agent"));
@@ -3116,7 +3116,7 @@ fn header_passthrough_default_all_allows_everything() {
 
 #[test]
 fn header_passthrough_whitelist_matches_case_insensitively() {
-    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    use rustpbx::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
     let rule = HeaderPassthrough {
         mode: HeaderPassthroughMode::Whitelist,
         whitelist: vec!["X-Smart2Agent".into(), "X-SmartParams".into()],
@@ -3130,7 +3130,7 @@ fn header_passthrough_whitelist_matches_case_insensitively() {
 
 #[test]
 fn header_passthrough_blacklist_excludes_matched() {
-    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    use rustpbx::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
     let rule = HeaderPassthrough {
         mode: HeaderPassthroughMode::Blacklist,
         whitelist: vec![],
@@ -3144,7 +3144,7 @@ fn header_passthrough_blacklist_excludes_matched() {
 
 #[test]
 fn header_passthrough_all_mode_honors_whitelist_then_blacklist() {
-    use crate::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    use rustpbx::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
     // mode=All + non-empty whitelist behaves like a whitelist
     let wl = HeaderPassthrough {
         mode: HeaderPassthroughMode::All,
@@ -3166,7 +3166,7 @@ fn header_passthrough_all_mode_honors_whitelist_then_blacklist() {
 
 #[test]
 fn trunk_dest_host_port_parses_uris_and_bare_addresses() {
-    use crate::proxy::routing::trunk_dest_host_port;
+    use rustpbx::proxy::routing::trunk_dest_host_port;
     assert_eq!(
         trunk_dest_host_port("sip:172.25.225.2:15060"),
         Some(("172.25.225.2".to_string(), 15060))
@@ -3188,7 +3188,7 @@ fn trunk_dest_host_port_parses_uris_and_bare_addresses() {
 
 #[test]
 fn find_trunk_by_dest_matches_host_port_case_insensitively() {
-    use crate::proxy::routing::{TrunkConfig, find_trunk_by_dest};
+    use rustpbx::proxy::routing::{TrunkConfig, find_trunk_by_dest};
     let mut trunks = std::collections::HashMap::new();
     trunks.insert(
         "gw".to_string(),
@@ -3206,7 +3206,7 @@ fn find_trunk_by_dest_matches_host_port_case_insensitively() {
 
 #[test]
 fn trunk_config_deserializes_header_passthrough() {
-    use crate::proxy::routing::TrunkConfig;
+    use rustpbx::proxy::routing::TrunkConfig;
     let toml_str = r#"
         dest = "sip:gw.example.com:5060"
         [header_passthrough]
@@ -3216,14 +3216,14 @@ fn trunk_config_deserializes_header_passthrough() {
     "#;
     let trunk: TrunkConfig = toml::from_str(toml_str).unwrap();
     let hp = trunk.header_passthrough.unwrap();
-    assert_eq!(hp.mode, crate::proxy::routing::HeaderPassthroughMode::Whitelist);
+    assert_eq!(hp.mode, rustpbx::proxy::routing::HeaderPassthroughMode::Whitelist);
     assert!(hp.allows("x-smart2agent"));
     assert!(!hp.allows("X-SmartBridgeType"));
 }
 
 #[test]
 fn trunk_config_header_passthrough_defaults_to_none() {
-    use crate::proxy::routing::TrunkConfig;
+    use rustpbx::proxy::routing::TrunkConfig;
     let toml_str = r#"dest = "sip:gw.example.com:5060""#;
     let trunk: TrunkConfig = toml::from_str(toml_str).unwrap();
     assert!(trunk.header_passthrough.is_none());

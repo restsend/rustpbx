@@ -1433,7 +1433,7 @@ fn attach_outbound_trunk_metadata(
 }
 
 /// Apply trunk configuration
-pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
+pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
     // Set destination
     let dest_uri: rsipstack::sip::Uri = trunk
         .dest

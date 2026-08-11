@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use crate::call::{DialStrategy, DialplanFlow, SipUser, TransactionCookie};
-    use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
-    use crate::proxy::call::CallRouter;
-    use crate::proxy::routing::http::HttpCallRouter;
+    use rustpbx::call::{DialStrategy, DialplanFlow, SipUser, TransactionCookie};
+    use rustpbx::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
+    use rustpbx::proxy::call::CallRouter;
+    use rustpbx::proxy::routing::http::HttpCallRouter;
     use arc_swap::ArcSwap;
     use axum::{Json, Router, routing::post};
     use serde_json::json;
@@ -34,7 +34,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -78,15 +78,15 @@ mod tests {
         // Use a dummy trait object for RouteInvite if resolve doesn't use it
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -95,10 +95,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -141,7 +141,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -184,15 +184,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -201,10 +201,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -239,7 +239,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -282,15 +282,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -299,10 +299,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -348,7 +348,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -391,15 +391,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -408,10 +408,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -455,7 +455,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -492,15 +492,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -509,10 +509,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -549,7 +549,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -586,15 +586,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -603,10 +603,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -649,7 +649,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -686,15 +686,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -708,7 +708,7 @@ mod tests {
 
         assert_eq!(
             dialplan.media.proxy_mode,
-            crate::config::MediaProxyMode::None
+            rustpbx::config::MediaProxyMode::None
         );
         assert!(
             dialplan.header_passthrough.is_some(),
@@ -752,7 +752,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -796,15 +796,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -813,10 +813,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -831,7 +831,7 @@ mod tests {
         // Verify media_proxy override from HTTP router response
         assert_eq!(
             dialplan.media.proxy_mode,
-            crate::config::MediaProxyMode::All
+            rustpbx::config::MediaProxyMode::All
         );
         // Verify RTP config from server is applied
         assert_eq!(dialplan.media.external_ip.as_deref(), Some("203.0.113.1"));
@@ -859,7 +859,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -902,15 +902,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -919,10 +919,10 @@ mod tests {
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
@@ -972,7 +972,7 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -1002,15 +1002,15 @@ mod tests {
 
         struct DummyRouteInvite;
         #[async_trait::async_trait]
-        impl crate::call::RouteInvite for DummyRouteInvite {
+        impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
-                _: &crate::call::DialDirection,
+                _: &rustpbx::call::DialDirection,
                 _: &TransactionCookie,
-            ) -> anyhow::Result<crate::config::RouteResult> {
-                Ok(crate::config::RouteResult::NotHandled(
+            ) -> anyhow::Result<rustpbx::config::RouteResult> {
+                Ok(rustpbx::config::RouteResult::NotHandled(
                     rsipstack::dialog::invitation::InviteOption::default(),
                     None,
                 ))
