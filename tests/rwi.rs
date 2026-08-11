@@ -11,8 +11,8 @@ mod helpers;
 mod comprehensive_event;
 #[path = "rwi/integration.rs"]
 mod integration;
-#[path = "rwi/leg_timeline_e2e.rs"]
-mod leg_timeline_e2e;
+#[path = "rwi/leg_timeline_tests.rs"]
+mod leg_timeline_tests;
 #[path = "rwi/resume_e2e.rs"]
 mod resume_e2e;
 #[path = "rwi/server.rs"]

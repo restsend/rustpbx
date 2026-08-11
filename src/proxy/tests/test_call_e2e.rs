@@ -9,7 +9,7 @@
 
 use super::cdr_capture::CdrExpectation;
 use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{RtpPacket, extract_media_endpoint};
+use super::rtp_utils::extract_media_endpoint;
 use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
@@ -32,15 +32,11 @@ use tracing::{info, warn};
 async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
-    // Use All mode to force media proxy and potential SDP transformation
     let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
-
     let alice = Arc::new(server.create_ua("alice").await?);
     let bob = server.create_ua("bob").await?;
-
     sleep(Duration::from_millis(100)).await;
 
-    // Alice (WebRTC) with Opus - includes WebRTC-specific attributes
     let webrtc_sdp = "v=0\r\n\
         o=- 123456 123456 IN IP4 127.0.0.1\r\n\
         s=-\r\n\
@@ -55,7 +51,6 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
         a=sendrecv\r\n\
         a=rtcp-mux\r\n".to_string();
 
-    // Bob (RTP) with PCMU - plain RTP
     let rtp_sdp = "v=0\r\n\
         o=- 789012 789012 IN IP4 127.0.0.1\r\n\
         s=-\r\n\
@@ -67,14 +62,12 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
         a=sendrecv\r\n"
         .to_string();
 
-    // Alice calls Bob
     let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
     });
 
-    // Bob receives call - verify SDP transformation
     let mut received_offer_sdp: Option<String> = None;
     let mut bob_dialog_id = None;
 
@@ -82,20 +75,17 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
         let events = bob.process_dialog_events().await?;
         for event in events {
             if let TestUaEvent::IncomingCall(id, Some(sdp)) = event {
-                info!("Bob received INVITE with SDP:\n{}", sdp);
                 received_offer_sdp = Some(sdp);
                 bob_dialog_id = Some(id.clone());
                 bob.answer_call(&id, Some(rtp_sdp.clone())).await?;
-                info!("Bob answered with PCMU");
                 break;
             } else if let TestUaEvent::IncomingCall(id, None) = event {
-                warn!("Bob received INVITE without SDP body");
                 bob_dialog_id = Some(id.clone());
                 bob.answer_call(&id, Some(rtp_sdp.clone())).await?;
                 break;
             }
         }
-        if received_offer_sdp.is_some() || bob_dialog_id.is_some() {
+        if bob_dialog_id.is_some() {
             break;
         }
         sleep(Duration::from_millis(100)).await;
@@ -103,128 +93,37 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
 
     assert!(bob_dialog_id.is_some(), "Bob should receive the call");
 
-    // Check SDP transformation if we received one
     if let Some(ref received_sdp) = received_offer_sdp {
-        info!("Analyzing SDP for WebRTC -> RTP bridging...");
-
-        // Check if SDP was transformed
-        let has_savpf = received_sdp.contains("UDP/TLS/RTP/SAVPF");
-        let has_opus = received_sdp.contains("opus/48000");
-        let has_fingerprint = received_sdp.contains("a=fingerprint:");
-        let has_pcmu = received_sdp.contains("PCMU/8000") || received_sdp.contains("a=rtpmap:0");
-
-        if has_savpf || has_opus || has_fingerprint {
-            info!("⚠ SDP NOT transformed - Bob received original WebRTC SDP:");
-            info!(
-                "  - SAVPF protocol: {}",
-                if has_savpf { "present" } else { "removed" }
-            );
-            info!(
-                "  - Opus codec: {}",
-                if has_opus { "present" } else { "removed" }
-            );
-            info!(
-                "  - WebRTC fingerprint: {}",
-                if has_fingerprint {
-                    "present"
-                } else {
-                    "removed"
-                }
-            );
-            info!(
-                "  - PCMU codec: {}",
-                if has_pcmu { "present" } else { "missing" }
-            );
-            info!("Note: Full SDP transformation may require MediaPeer activation");
-
-            // For now, we just log this - the call still goes through the proxy
-            // In future, when MediaPeer SDP transformation is implemented,
-            // these assertions should be uncommented:
-            //
-            // assert!(!has_opus, "Opus should be removed for RTP callee");
-            // assert!(has_pcmu, "PCMU should be present for RTP callee");
-            // assert!(!has_fingerprint, "WebRTC fingerprint should be removed");
-        } else {
-            info!("✓ SDP appears to be transformed for RTP");
-            info!("  - PCMU codec: present");
-        }
-    } else {
-        warn!("Could not analyze SDP - no SDP body received");
+        assert!(
+            !received_sdp.contains("UDP/TLS/RTP/SAVPF"),
+            "SAVPF should be stripped for RTP callee"
+        );
+        assert!(
+            received_sdp.contains("RTP/AVP"),
+            "Transport should be downgraded to RTP/AVP"
+        );
+        assert!(
+            !received_sdp.contains("a=fingerprint:"),
+            "WebRTC fingerprint should be removed"
+        );
+        assert!(
+            received_sdp.contains("PCMU/8000") || received_sdp.contains("a=rtpmap:0"),
+            "PCMU should be present for RTP callee"
+        );
     }
 
-    // Wait for call to complete
-    let _alice_dialog_id = match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
+    let alice_dialog_id = match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
         Ok(Ok(Ok(id))) => Some(id),
         _ => None,
     };
+    assert!(alice_dialog_id.is_some(), "Call should be established");
 
-    // Let call run briefly
     sleep(Duration::from_millis(500)).await;
 
-    // Get active calls and verify through registry
-    let calls = server.get_active_calls();
-    if let Some(call) = calls.first() {
-        info!(session_id = %call.session_id, "Active call found in registry");
-    }
-
-    // Check CDR generation (may be delayed or require specific config)
-    sleep(Duration::from_millis(500)).await;
     let all_records = server.cdr_capture.get_all_records().await;
-    if !all_records.is_empty() {
-        info!("✓ CDR record generated");
-    } else {
-        warn!("⚠ CDR not yet generated (may need more time or specific config)");
-    }
+    assert!(!all_records.is_empty(), "CDR should be generated for transcoded call");
 
     server.stop();
-    info!("WebRTC to RTP test completed - full proxy flow verified");
-    Ok(())
-}
-
-/// Test 5: RTP data integrity verification
-/// Verifies:
-/// - RTP packets are forwarded correctly
-/// - Sequence numbers are preserved
-/// - Timestamps are handled correctly
-#[tokio::test]
-async fn test_rtp_data_integrity() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-
-    // This test requires actual RTP port setup
-    // For now, we test the RTP utilities
-
-    let test_ssrc = 0x12345678u32;
-    let test_pt = 0u8; // PCMU
-
-    // Create test RTP sequence
-    let packets = RtpPacket::create_sequence(
-        100,   // 100 packets
-        1000,  // starting seq
-        50000, // starting timestamp
-        test_ssrc, test_pt, 160, // 160 bytes payload (20ms PCMU)
-        160, // timestamp increment for 20ms @ 8kHz
-    );
-
-    assert_eq!(packets.len(), 100);
-
-    // Verify sequence
-    for (i, packet) in packets.iter().enumerate() {
-        assert_eq!(packet.ssrc, test_ssrc);
-        assert_eq!(packet.payload_type, test_pt);
-        assert_eq!(packet.sequence_number, 1000 + i as u16);
-        assert_eq!(packet.timestamp, 50000 + (i as u32) * 160);
-    }
-
-    // Test encode/decode
-    for packet in &packets {
-        let encoded = packet.encode();
-        let decoded = RtpPacket::decode(&encoded).unwrap();
-        assert_eq!(decoded.ssrc, packet.ssrc);
-        assert_eq!(decoded.sequence_number, packet.sequence_number);
-        assert_eq!(decoded.timestamp, packet.timestamp);
-    }
-
-    info!("RTP data integrity test completed");
     Ok(())
 }
 

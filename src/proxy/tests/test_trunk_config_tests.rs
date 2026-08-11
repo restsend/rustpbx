@@ -1,8 +1,6 @@
-//! Trunk Routing E2E Tests
+//! Trunk Routing Configuration Tests
 //!
-//! Verifies trunk and route configuration injection into E2eTestServer.
-//!
-//! These tests verify that:
+//! Verifies trunk and route configuration injection and matching logic.
 //! - Custom ProxyConfig with trunks/routes can be injected
 //! - Trunk data is loaded into DataContext correctly
 //! - Route data is loaded into DataContext correctly

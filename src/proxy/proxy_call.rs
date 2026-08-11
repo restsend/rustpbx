@@ -19,7 +19,7 @@ pub(crate) mod leg_registry;
 pub(crate) mod media_peer;
 pub(crate) mod media_state;
 pub(crate) mod reporter;
-pub(crate) mod session_hooks;
+pub mod session_hooks;
 pub(crate) mod session_timer;
 pub(crate) mod sip_session;
 pub(crate) mod state;

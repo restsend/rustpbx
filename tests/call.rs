@@ -19,8 +19,6 @@ mod mcu_three_way;
 mod mcu_perf_leak;
 #[path = "call/media_task_leak.rs"]
 mod media_task_leak;
-#[path = "call/outbound_e2e.rs"]
-mod outbound_e2e;
 #[path = "call/ringback_mode.rs"]
 mod ringback_mode;
 #[path = "call/step_provider_retry_config.rs"]

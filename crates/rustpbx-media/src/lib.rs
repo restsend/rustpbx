@@ -27,7 +27,7 @@ pub mod wav_writer;
 #[cfg(test)]
 mod media_track_tests;
 #[cfg(test)]
-mod mixer_e2e_tests;
+mod mixer_tests;
 #[cfg(test)]
 mod recorder_tests;
 
