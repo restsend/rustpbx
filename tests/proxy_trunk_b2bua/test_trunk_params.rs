@@ -3,12 +3,8 @@ use rustpbx::config::{MediaProxyMode, ProxyConfig};
 use rustpbx::proxy::routing::TrunkConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
 
 use crate::common::e2e_test_server::E2eTestServer;
-use crate::common::test_helpers::make_sdp;
-use crate::common::test_ua::TestUaEvent;
 
 fn trunk_config_with(trunk: TrunkConfig) -> ProxyConfig {
     let mut trunks = HashMap::new();

@@ -17,13 +17,13 @@
 //! 6. Same codec (PCMA↔PCMA) through proxy → verify payload_type correctness
 //! 7. No-answer timeout → verify CDR
 
-use super::cdr_capture::{CdrExpectation, validate_cdr};
-use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
-use super::test_helpers;
-use super::test_ua::{TestUa, TestUaEvent};
-use crate::callrecord::CallRecordHangupReason;
-use crate::config::MediaProxyMode;
+use crate::common::cdr_capture::{CdrExpectation, validate_cdr};
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
+use crate::common::test_helpers;
+use crate::common::test_ua::{TestUa, TestUaEvent};
+use rustpbx::callrecord::CallRecordHangupReason;
+use rustpbx::config::MediaProxyMode;
 use anyhow::{Result, anyhow};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ impl MediaTestCtx {
     ) -> Result<(DialogId, DialogId, Option<String>)> {
         let caller = Arc::new(self.caller_ua.clone());
         let caller_handle =
-            crate::utils::spawn(async move { caller.make_call("bob", Some(caller_sdp)).await });
+            rustpbx::utils::spawn(async move { caller.make_call("bob", Some(caller_sdp)).await });
 
         let mut callee_dialog_id = None;
         let mut received_offer_sdp: Option<String> = None;
@@ -390,7 +390,7 @@ async fn test_p2p_no_answer_cdr() -> Result<()> {
 
     // Alice calls Bob — Bob never answers
     let alice_clone = alice.clone();
-    let caller_handle = crate::utils::spawn(async move {
+    let caller_handle = rustpbx::utils::spawn(async move {
         // Use a short timeout so the test doesn't hang
         tokio::time::timeout(
             Duration::from_secs(3),
@@ -599,7 +599,7 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        crate::utils::spawn(
+        rustpbx::utils::spawn(
             async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await },
         );
 

@@ -383,40 +383,6 @@ impl E2eTestUa {
     }
 }
 
-/// Call scenario builder for complex test scenarios
-pub struct CallScenario {
-    server: Arc<E2eTestServer>,
-    caller: Option<TestUa>,
-    callee: Option<TestUa>,
-}
-
-impl CallScenario {
-    pub fn new(server: Arc<E2eTestServer>) -> Self {
-        Self {
-            server,
-            caller: None,
-            callee: None,
-        }
-    }
-
-    pub async fn with_caller(mut self, username: &str) -> Result<Self> {
-        self.caller = Some(self.server.create_ua(username).await?);
-        Ok(self)
-    }
-
-    pub async fn with_callee(mut self, username: &str) -> Result<Self> {
-        self.callee = Some(self.server.create_ua(username).await?);
-        Ok(self)
-    }
-
-    /// Execute the call scenario
-    pub async fn execute(&mut self) -> Result<&str> {
-        // Implementation depends on specific scenario
-        // This is a placeholder for the pattern
-        Ok("")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

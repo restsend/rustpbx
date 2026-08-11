@@ -4,10 +4,10 @@
 //! - Caller → Callee: SIP INFO with application/dtmf-relay is forwarded to the connected callee
 //! - Callee → Caller: SIP INFO with application/dtmf-relay is forwarded back to the caller
 
-use super::e2e_test_server::E2eTestServer;
-use super::test_helpers;
-use super::test_ua::{TestUa, TestUaEvent};
-use crate::config::MediaProxyMode;
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::test_helpers;
+use crate::common::test_ua::{TestUa, TestUaEvent};
+use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,14 +20,14 @@ use test_helpers::make_sdp;
 /// Returns (alice_dialog_id, bob_dialog_id).
 async fn establish_call(
     server: &E2eTestServer,
-    alice: &Arc<super::test_ua::TestUa>,
-    bob: &super::test_ua::TestUa,
+    alice: &Arc<crate::common::test_ua::TestUa>,
+    bob: &crate::common::test_ua::TestUa,
 ) -> Result<(rsipstack::dialog::DialogId, rsipstack::dialog::DialogId)> {
     let alice_sdp = make_sdp(20000);
     let bob_sdp = make_sdp(20010);
 
     // Alice dials Bob (blocks until 200 OK)
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -94,7 +94,7 @@ async fn send_and_wait_for_dtmf(
 ) -> Result<bool> {
     let digit_for_send = expected_digit.to_string();
     let send_handle =
-        crate::utils::spawn(
+        rustpbx::utils::spawn(
             async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await },
         );
 

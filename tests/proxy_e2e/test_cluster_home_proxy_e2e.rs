@@ -1,10 +1,10 @@
-use super::test_ua::{TestUa, TestUaConfig};
-use crate::config::ProxyConfig;
-use crate::proxy::call::CallModule;
-use crate::proxy::registrar::RegistrarModule;
-use crate::proxy::server::SipServerBuilder;
-use crate::proxy::user::MemoryUserBackend;
-use crate::proxy::{ProxyAction, ProxyModule, locator_db::DbLocator};
+use crate::common::test_ua::{TestUa, TestUaConfig};
+use rustpbx::config::ProxyConfig;
+use rustpbx::proxy::call::CallModule;
+use rustpbx::proxy::registrar::RegistrarModule;
+use rustpbx::proxy::server::SipServerBuilder;
+use rustpbx::proxy::user::MemoryUserBackend;
+use rustpbx::proxy::{ProxyAction, ProxyModule, locator_db::DbLocator};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::sip::prelude::HeadersExt;
@@ -65,7 +65,7 @@ struct RejectInviteModule;
 
 impl RejectInviteModule {
     fn create(
-        _server: Arc<crate::proxy::server::SipServerInner>,
+        _server: Arc<rustpbx::proxy::server::SipServerInner>,
         _config: Arc<ProxyConfig>,
     ) -> Result<Box<dyn ProxyModule>> {
         Ok(Box::new(Self))
@@ -94,7 +94,7 @@ impl ProxyModule for RejectInviteModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
-        _cookie: crate::call::TransactionCookie,
+        _cookie: rustpbx::call::TransactionCookie,
     ) -> Result<ProxyAction> {
         if tx.original.method == rsipstack::sip::Method::Invite {
             tx.reply(rsipstack::sip::StatusCode::NotFound).await.ok();
@@ -109,7 +109,7 @@ async fn start_server_a(
     db_url: &str,
     port: u16,
     peer_port: u16,
-) -> Result<Arc<crate::proxy::server::SipServer>> {
+) -> Result<Arc<rustpbx::proxy::server::SipServer>> {
     let config = Arc::new(ProxyConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: Some(port),
@@ -140,7 +140,7 @@ async fn start_server_a(
     );
 
     let run = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         run.serve().await.ok();
     });
 
@@ -152,7 +152,7 @@ async fn start_server_b(
     port: u16,
     peer_port: u16,
     capture: Arc<Mutex<Vec<CapturedInvite>>>,
-) -> Result<Arc<crate::proxy::server::SipServer>> {
+) -> Result<Arc<rustpbx::proxy::server::SipServer>> {
     let config = Arc::new(ProxyConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: Some(port),
@@ -182,7 +182,7 @@ async fn start_server_b(
     );
 
     let run = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         run.serve().await.ok();
     });
 

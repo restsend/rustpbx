@@ -1,8 +1,8 @@
-use super::test_helpers;
-use super::test_ua::{TestUa, TestUaEvent};
-use crate::call::user::SipUser;
-use crate::config::ProxyConfig;
-use crate::proxy::{
+use crate::common::test_helpers;
+use crate::common::test_ua::{TestUa, TestUaEvent};
+use rustpbx::call::user::SipUser;
+use rustpbx::config::ProxyConfig;
+use rustpbx::proxy::{
     locator::MemoryLocator,
     proxy_call::session_hooks::{CallSessionContext, CallSessionHook},
     routing::{
@@ -76,7 +76,7 @@ struct TestQueueServer {
     cancel_token: CancellationToken,
     port: u16,
     events: Arc<Mutex<Vec<CallSessionContext>>>,
-    ended_events: Arc<Mutex<Vec<(CallSessionContext, Option<crate::callrecord::CallRecordHangupReason>)>>>,
+    ended_events: Arc<Mutex<Vec<(CallSessionContext, Option<rustpbx::callrecord::CallRecordHangupReason>)>>>,
 }
 
 impl TestQueueServer {
@@ -128,7 +128,7 @@ impl TestQueueServer {
 
         let server = builder.build().await?;
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             if let Err(e) = server.serve().await {
                 warn!("Server error: {:?}", e);
             }
@@ -152,7 +152,7 @@ impl Drop for TestQueueServer {
 #[derive(Clone)]
 struct QueueTestHook {
     connected: Arc<Mutex<Vec<CallSessionContext>>>,
-    ended: Arc<Mutex<Vec<(CallSessionContext, Option<crate::callrecord::CallRecordHangupReason>)>>>,
+    ended: Arc<Mutex<Vec<(CallSessionContext, Option<rustpbx::callrecord::CallRecordHangupReason>)>>>,
 }
 
 #[async_trait]
@@ -164,7 +164,7 @@ impl CallSessionHook for QueueTestHook {
     async fn on_call_ended(
         &self,
         ctx: &CallSessionContext,
-        reason: Option<&crate::callrecord::CallRecordHangupReason>,
+        reason: Option<&rustpbx::callrecord::CallRecordHangupReason>,
         _duration_secs: u64,
     ) {
         self.ended.lock().await.push((ctx.clone(), reason.cloned()));
@@ -187,7 +187,7 @@ async fn test_call_queue_routing() {
 
     // 2. Create and register Agent
     let agent_port = portpicker::pick_unused_port().unwrap_or(26000);
-    let config = crate::proxy::tests::test_ua::TestUaConfig {
+    let config = crate::common::test_ua::TestUaConfig {
         webrtc: false,
         username: "agent".to_string(),
         password: "password".to_string(),
@@ -201,7 +201,7 @@ async fn test_call_queue_routing() {
 
     // 3. Create Caller
     let caller_port = portpicker::pick_unused_port().unwrap_or(26001);
-    let config = crate::proxy::tests::test_ua::TestUaConfig {
+    let config = crate::common::test_ua::TestUaConfig {
         webrtc: false,
         username: "caller".to_string(),
         password: "password".to_string(),
@@ -213,7 +213,7 @@ async fn test_call_queue_routing() {
     caller.start().await.unwrap();
 
     // 4. Caller dials "support" (triggers routing to queue)
-    let call_task: tokio::task::JoinHandle<anyhow::Result<()>> = crate::utils::spawn(async move {
+    let call_task: tokio::task::JoinHandle<anyhow::Result<()>> = rustpbx::utils::spawn(async move {
         info!("Caller dialing support...");
 
         // Generate a minimal SDP offer from caller
@@ -246,7 +246,7 @@ async fn test_call_queue_routing() {
     });
 
     // 5. Agent waits for incoming call, answers, waits for CallEstablished (ACK)
-    let agent_task: tokio::task::JoinHandle<anyhow::Result<()>> = crate::utils::spawn(async move {
+    let agent_task: tokio::task::JoinHandle<anyhow::Result<()>> = rustpbx::utils::spawn(async move {
         let mut agent_dialog_id = None;
         for _ in 0..50 {
             let events = agent.process_dialog_events().await.unwrap_or_default();
@@ -325,8 +325,8 @@ async fn test_call_queue_routing() {
         assert!(
             matches!(
                 hangup_reason,
-                Some(crate::callrecord::CallRecordHangupReason::ByCaller)
-                    | Some(crate::callrecord::CallRecordHangupReason::Abandoned)
+                Some(rustpbx::callrecord::CallRecordHangupReason::ByCaller)
+                    | Some(rustpbx::callrecord::CallRecordHangupReason::Abandoned)
             ),
             "hangup_reason should be ByCaller or Abandoned, got: {:?}", hangup_reason
         );

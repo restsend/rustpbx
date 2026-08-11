@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::common::cdr_capture::CdrExpectation;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender};
 use crate::common::test_ua::TestUaEvent;

@@ -18,9 +18,8 @@ async fn test_caller_cancel_before_answer() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
 
     let caller_receiver = RtpReceiver::bind(0).await?;
-    let callee_receiver = RtpReceiver::bind(0).await?;
+    let _callee_receiver = RtpReceiver::bind(0).await?;
     let caller_sdp = make_sdp(caller_receiver.port()?);
-    let callee_sdp = make_sdp(callee_receiver.port()?);
 
     let caller = tokio::spawn({
         let a = alice.clone();

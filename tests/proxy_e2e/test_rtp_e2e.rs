@@ -3,12 +3,12 @@
 //! These tests verify that RTP packets are correctly forwarded through the PBX
 //! with accurate data integrity. This is critical for ensuring media quality.
 
-// use super::cdr_capture::{CdrCapture, CdrExpectation};
-use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats};
-use super::test_ua::{TestUa, TestUaEvent};
+// use crate::common::cdr_capture::{CdrCapture, CdrExpectation};
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats};
+use crate::common::test_ua::{TestUa, TestUaEvent};
 
-use crate::config::MediaProxyMode;
+use rustpbx::config::MediaProxyMode;
 use anyhow::{Result, anyhow};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -310,7 +310,7 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
 
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let c = caller.clone();
         let sdp = caller_sdp.clone();
         async move { c.make_call("bob", Some(sdp)).await }

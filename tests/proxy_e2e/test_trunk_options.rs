@@ -1,6 +1,6 @@
-use crate::config::{MediaProxyMode, ProxyConfig};
-use crate::proxy::routing::TrunkConfig;
-use crate::proxy::tests::e2e_test_server::E2eTestServer;
+use rustpbx::config::{MediaProxyMode, ProxyConfig};
+use rustpbx::proxy::routing::TrunkConfig;
+use crate::common::e2e_test_server::E2eTestServer;
 use anyhow::Result;
 use rsipstack::EndpointBuilder;
 use rsipstack::sip::{
@@ -57,7 +57,7 @@ async fn send_options(server_addr: &str, local_port: u16) -> Result<Option<u16>>
 
     let ep_inner = endpoint.inner.clone();
     let ct = cancel.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             r = ep_inner.serve() => { if let Err(e) = r { tracing::warn!("client serve: {e}"); } }

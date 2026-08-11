@@ -11,7 +11,6 @@ use tokio::time::sleep;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::RtpReceiver;
 use crate::common::test_helpers::make_sdp;
-use crate::common::test_ua::TestUaEvent;
 
 #[tokio::test]
 async fn test_outbound_via_trunk_route_establishes() -> Result<()> {
@@ -60,7 +59,6 @@ async fn test_outbound_via_trunk_route_establishes() -> Result<()> {
     let caller_receiver = RtpReceiver::bind(0).await?;
     let caller_port = caller_receiver.port()?;
     let caller_sdp = make_sdp(caller_port);
-    let callee_sdp = make_sdp(callee_port);
 
     let caller = tokio::spawn({
         let a = alice.clone();

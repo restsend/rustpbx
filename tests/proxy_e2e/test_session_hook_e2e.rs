@@ -6,14 +6,14 @@
 //! - `on_call_held` / `on_call_unheld` fires via `CallCommand::Hold/Unhold`
 //! - Wholesale/trunk scenario: caller is not pre-registered; hook still fires
 
-use super::test_helpers;
-use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::call::domain::{CallCommand, LegId};
-use crate::call::user::SipUser;
-use crate::callrecord::CallRecordHangupReason;
-use crate::config::MediaProxyMode;
-use crate::proxy::routing::TrunkConfig;
-use crate::proxy::{
+use crate::common::test_helpers;
+use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use rustpbx::call::domain::{CallCommand, LegId};
+use rustpbx::call::user::SipUser;
+use rustpbx::callrecord::CallRecordHangupReason;
+use rustpbx::config::MediaProxyMode;
+use rustpbx::proxy::routing::TrunkConfig;
+use rustpbx::proxy::{
     acl::AclModule,
     auth::AuthModule,
     call::CallModule,
@@ -106,7 +106,7 @@ fn make_sdp(port: u16) -> String {
 
 struct TestEnv {
     port: u16,
-    registry: Arc<crate::proxy::active_call_registry::ActiveProxyCallRegistry>,
+    registry: Arc<rustpbx::proxy::active_call_registry::ActiveProxyCallRegistry>,
     events: Arc<Mutex<Vec<HookEvent>>>,
     cancel_token: CancellationToken,
     _server_handle: tokio::task::JoinHandle<()>,
@@ -145,7 +145,7 @@ async fn start_server_with_hook() -> Result<TestEnv> {
     let server = Arc::new(builder.build().await?);
     let registry = server.get_inner().active_call_registry.clone();
     let ct = cancel_token.clone();
-    let _server_handle = crate::utils::spawn(async move {
+    let _server_handle = rustpbx::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             result = server.serve() => {
@@ -239,7 +239,7 @@ async fn establish_call(
 
     let alice_clone = alice.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp)).await });
+        rustpbx::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -402,7 +402,7 @@ async fn test_hook_on_hold_unhold() -> Result<()> {
     let alice_bg = alice.clone();
     let pump_token = CancellationToken::new();
     let pump_cancel = pump_token.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         loop {
             tokio::select! {
                 _ = pump_cancel.cancelled() => break,
@@ -509,7 +509,7 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
     let server = Arc::new(builder.build().await?);
     let _registry = server.get_inner().active_call_registry.clone();
     let ct = cancel_token.clone();
-    let _server_handle = crate::utils::spawn(async move {
+    let _server_handle = rustpbx::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             result = server.serve() => {
@@ -531,7 +531,7 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
 
     let caller_clone = trunk_caller.clone();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(trunk_sdp)).await });
+        rustpbx::utils::spawn(async move { caller_clone.make_call("bob", Some(trunk_sdp)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {

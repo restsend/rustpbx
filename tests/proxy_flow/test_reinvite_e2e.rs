@@ -72,7 +72,6 @@ async fn test_reinvite_codec_change_pcmu_to_pcma() -> Result<()> {
 
     // Mid-call re-INVITE: switch to PCMA (PT=8)
     let new_caller_port = RtpReceiver::bind(0).await?.port()?;
-    let new_callee_port = RtpReceiver::bind(0).await?.port()?;
     let pcma_offer = pcma_sdp("127.0.0.1", new_caller_port);
     let reinvite_result = alice.send_reinvite(&alice_id.clone().unwrap(), Some(pcma_offer)).await;
     assert!(reinvite_result.is_ok(), "re-INVITE should be accepted");

@@ -1,6 +1,6 @@
-use super::e2e_test_server::E2eTestServer;
-use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::config::MediaProxyMode;
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +54,7 @@ async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
         a=rtcp-mux\r\n";
 
     // Run caller in background with timeout protection
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -162,7 +162,7 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
         a=rtcp-mux\r\n";
 
     // Run caller in background with timeout protection
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = multi_codec_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -280,7 +280,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
         a=sendrecv\r\n\
         a=rtcp-mux\r\n";
 
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -373,16 +373,16 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
 /// Verifies that the SDP bridge correctly converts RTP SDP to WebRTC SDP
 #[tokio::test]
 async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
-    use crate::call::SipUser;
-    use crate::config::MediaProxyMode;
-    use crate::proxy::tests::test_ua::{TestUa, TestUaConfig};
+    use rustpbx::call::SipUser;
+    use rustpbx::config::MediaProxyMode;
+    use crate::common::test_ua::{TestUa, TestUaConfig};
 
     let _ = tracing_subscriber::fmt::try_init();
 
     // For this test, we need Bob to support WebRTC
     // Create test proxy with users configured
     let port = portpicker::pick_unused_port().unwrap_or(15090);
-    let config = crate::config::ProxyConfig {
+    let config = rustpbx::config::ProxyConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: Some(port),
         tcp_port: None,
@@ -401,7 +401,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
     let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
     // Create user backend with Alice (RTP) and Bob (WebRTC)
-    let user_backend = crate::proxy::user::MemoryUserBackend::new(None);
+    let user_backend = rustpbx::proxy::user::MemoryUserBackend::new(None);
     user_backend
         .create_user(SipUser {
             id: 1,
@@ -426,10 +426,10 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
         .await?;
 
     // Setup server
-    let locator = crate::proxy::locator::MemoryLocator::new();
+    let locator = rustpbx::proxy::locator::MemoryLocator::new();
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    let builder = super::test_helpers::register_standard_modules(
-        crate::proxy::server::SipServerBuilder::new(std::sync::Arc::new(config))
+    let builder = crate::common::test_helpers::register_standard_modules(
+        rustpbx::proxy::server::SipServerBuilder::new(std::sync::Arc::new(config))
             .with_user_backend(Box::new(user_backend))
             .with_locator(Box::new(locator))
             .with_cancel_token(cancel_token.clone()),
@@ -438,7 +438,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
     let server = std::sync::Arc::new(builder.build().await?);
     let server_clone = server.clone();
 
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             warn!("Proxy server error: {:?}", e);
         }
@@ -481,7 +481,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
         a=rtpmap:101 telephone-event/8000\r\n\
         a=sendrecv\r\n";
 
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = rtp_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }

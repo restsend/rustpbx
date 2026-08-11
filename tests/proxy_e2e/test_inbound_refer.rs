@@ -6,8 +6,8 @@
 //! - Originates new call to transfer target
 //! - Bridges original call with transfer target
 
-use super::e2e_test_server::E2eTestServer;
-use super::test_ua::TestUaEvent;
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::test_ua::TestUaEvent;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -60,7 +60,7 @@ async fn test_inbound_refer_success() {
         .to_string();
 
     // Alice calls Bob
-    let caller_handle = crate::utils::spawn({
+    let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -122,7 +122,7 @@ async fn test_inbound_refer_success() {
 
     // Spawn a task for Charlie to answer incoming calls
     let charlie_clone = charlie.clone();
-    let charlie_answer_handle = crate::utils::spawn(async move {
+    let charlie_answer_handle = rustpbx::utils::spawn(async move {
         let mut charlie_dialog_id = None;
         for _ in 0..50 {
             let events = charlie_clone
@@ -159,7 +159,7 @@ async fn test_inbound_refer_success() {
 
     // Process Alice's dialog events (including NOTIFY from PBX) so the REFER subscription can proceed
     let alice_clone = alice.clone();
-    let alice_event_handle = crate::utils::spawn(async move {
+    let alice_event_handle = rustpbx::utils::spawn(async move {
         for _ in 0..100 {
             let _ = alice_clone.process_dialog_events().await;
             sleep(Duration::from_millis(50)).await;

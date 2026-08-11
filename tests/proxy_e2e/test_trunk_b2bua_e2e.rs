@@ -14,12 +14,12 @@
 //! - Rejection flows (486 reject → correct CDR)
 //! - Multiple concurrent trunk calls
 
-use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
-use super::test_helpers;
-use super::test_ua::TestUaEvent;
-use crate::callrecord::CallRecordHangupReason;
-use crate::config::MediaProxyMode;
+use crate::common::e2e_test_server::E2eTestServer;
+use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
+use crate::common::test_helpers;
+use crate::common::test_ua::TestUaEvent;
+use rustpbx::callrecord::CallRecordHangupReason;
+use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,8 +44,8 @@ async fn establish_call(
     callee_rtp_port: u16,
 ) -> Result<(
     EstablishedCall,
-    super::test_ua::TestUa,
-    super::test_ua::TestUa,
+    crate::common::test_ua::TestUa,
+    crate::common::test_ua::TestUa,
 )> {
     let caller_ua = Arc::new(server.create_ua(caller).await?);
     let callee_ua = server.create_ua(callee).await?;
@@ -58,7 +58,7 @@ async fn establish_call(
     let caller_clone = caller_ua.clone();
     let callee_str = callee.to_string();
     let caller_handle =
-        crate::utils::spawn(
+        rustpbx::utils::spawn(
             async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await },
         );
 
@@ -280,7 +280,7 @@ async fn test_trunk_b2bua_pcma_rtp_cdr() -> Result<()> {
     // Establish call
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        rustpbx::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -398,7 +398,7 @@ async fn test_trunk_b2bua_cdr_duration_accuracy() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        rustpbx::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -481,7 +481,7 @@ async fn test_trunk_b2bua_rtp_payload_integrity() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        rustpbx::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -623,7 +623,7 @@ async fn test_trunk_b2bua_early_media_183() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        rustpbx::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -714,7 +714,7 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        rustpbx::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -792,7 +792,7 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        rustpbx::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -1061,7 +1061,7 @@ async fn test_trunk_b2bua_callee_reject_486_stress() -> Result<()> {
     info!("Starting 486 reject stress — 5 iterations");
     for attempt in 1..=5 {
         let callee_reject = callee_ua.clone();
-        let reject_handle = crate::utils::spawn(async move {
+        let reject_handle = rustpbx::utils::spawn(async move {
             for _ in 0..50 {
                 let events = callee_reject.process_dialog_events().await.unwrap_or_default();
                 for event in events {
@@ -1087,7 +1087,7 @@ async fn test_trunk_b2bua_callee_reject_486_stress() -> Result<()> {
 
         let caller_sdp = dummy_sdp.clone();
         let caller_clone = caller_ua.clone();
-        let call_handle = crate::utils::spawn(async move {
+        let call_handle = rustpbx::utils::spawn(async move {
             caller_clone.make_call("bob", Some(caller_sdp)).await
         });
 

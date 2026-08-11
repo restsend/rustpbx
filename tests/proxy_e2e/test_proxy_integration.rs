@@ -1,9 +1,9 @@
-use super::test_helpers;
-use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::call::user::SipUser;
+use crate::common::test_helpers;
+use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use rustpbx::call::user::SipUser;
 
-use crate::config::ProxyConfig;
-use crate::proxy::{
+use rustpbx::config::ProxyConfig;
+use rustpbx::proxy::{
     locator::{Locator, MemoryLocator},
     server::SipServerBuilder,
     user::MemoryUserBackend,
@@ -70,7 +70,7 @@ fn create_test_users() -> Vec<SipUser> {
 pub struct TestProxyServer {
     cancel_token: CancellationToken,
     port: u16,
-    server: Arc<crate::proxy::server::SipServer>,
+    server: Arc<rustpbx::proxy::server::SipServer>,
 }
 
 impl TestProxyServer {
@@ -98,7 +98,7 @@ impl TestProxyServer {
 
         // Start server
         let server_clone = server.clone();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             if let Err(e) = server_clone.serve().await {
                 warn!("Proxy server error: {:?}", e);
             }
@@ -278,10 +278,10 @@ async fn test_call_success() {
 
     let alice_sdp = dummy_sdp.clone();
     let call_task =
-        crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+        rustpbx::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     let bob_sdp = dummy_sdp.clone();
-    let answer_task = crate::utils::spawn(async move {
+    let answer_task = rustpbx::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -391,10 +391,10 @@ async fn test_call_rejection() {
 
     // Alice calls Bob
     let call_task =
-        crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+        rustpbx::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     // Bob waits for incoming call and rejects it
-    let reject_task = crate::utils::spawn(async move {
+    let reject_task = rustpbx::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -451,10 +451,10 @@ async fn test_call_hangup_flow() {
 
     let alice_sdp = dummy_sdp.clone();
     let call_task =
-        crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+        rustpbx::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     let bob_sdp = dummy_sdp.clone();
-    let answer_task = crate::utils::spawn(async move {
+    let answer_task = rustpbx::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
