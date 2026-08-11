@@ -77,7 +77,7 @@ pub async fn execute_dial_core(
 
     let destination = normalize_destination(&req.destination, &ctx);
     let caller_id = req.caller_id.clone().or_else(|| {
-        let realm = ctx.sip_server.proxy_config.first_realm();
+        let realm = ctx.sip_server.proxy_config.load().first_realm();
         Some(format!("sip:outbound@{}", realm))
     });
 
@@ -252,7 +252,7 @@ fn normalize_destination(dest: &str, ctx: &OutboundContext) -> String {
     if dest.starts_with("sip:") {
         return dest.to_string();
     }
-    let realm = ctx.sip_server.proxy_config.first_realm();
+    let realm = ctx.sip_server.proxy_config.load().first_realm();
     normalize_destination_with_realm(dest, &realm)
 }
 

@@ -110,17 +110,30 @@ fn escape_reason_text(text: &str) -> String {
 
 /// Decide what to do when routing returned NotHandled (no explicit forward/queue).
 /// Returns `Ok(targets)` to proceed with the given locations, or `Err` to reject.
+///
+/// `parallel_fork` controls how multiple registered devices for the same
+/// callee are treated: when `true` (default) all bindings ring simultaneously
+/// (first to answer wins); when `false` only the most recently registered
+/// device is dialed.
 fn resolve_unhandled_targets(
     callee_is_same_realm: bool,
     internal_lookup_empty: bool,
     locs: Vec<Location>,
+    parallel_fork: bool,
 ) -> Result<DialStrategy, RouteError> {
     if callee_is_same_realm && internal_lookup_empty {
         // Return empty targets — the offline check is deferred to build_dialplan
         // so dialplan inspectors (e.g. zhongan inbound, HTTP router) can attempt
         // alternative routing before rejecting.
         Ok(DialStrategy::Sequential(vec![]))
+    } else if parallel_fork {
+        // Parallel-fork: ring every registered device at once. The fork logic
+        // (fork_targets_parallel) races the INVITEs and cancels the losers once
+        // the first 200 OK arrives.
+        Ok(DialStrategy::Parallel(locs))
     } else {
+        // Legacy "last alive" behavior: locs are sorted most-recent first, so
+        // dial only the newest registration.
         Ok(DialStrategy::Sequential(locs.into_iter().take(1).collect()))
     }
 }
@@ -166,6 +179,13 @@ pub trait DialplanInspector: Send + Sync {
         cookie: &TransactionCookie,
         original: &rsipstack::sip::Request,
     ) -> DialplanVerdict;
+
+    /// Downcast hook so the server can reach reloadable inspector state during
+    /// a hot-reload (e.g. `EmergencyInspector`). Implementors that keep
+    /// reloadable state should override this.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 /// Context passed to [`QueueLocationEnricher::enrich`].
@@ -375,7 +395,6 @@ pub(crate) fn apply_allowed_codecs(
 
 #[derive(Clone)]
 pub struct CallModuleInner {
-    config: Arc<ProxyConfig>,
     server: SipServerRef,
     pub dialog_layer: Arc<DialogLayer>,
     pub routing_state: Arc<RoutingState>,
@@ -443,7 +462,6 @@ impl CallModule {
         *server.routing_state.write() = routing_state.clone();
 
         let inner = Arc::new(CallModuleInner {
-            config,
             server,
             dialog_layer,
             routing_state,
@@ -484,8 +502,10 @@ impl CallModule {
                 .with_webrtc_start_port(rtp.webrtc_start_port)
                 .with_webrtc_end_port(rtp.webrtc_end_port)
                 .with_ice_servers(rtp.ice_servers.clone())
-                .with_enable_latching(self.inner.config.enable_latching)
-                .with_probation_max_packets(self.inner.config.latching_probation_max_packets)
+                .with_enable_latching(self.inner.server.proxy_config.load().enable_latching)
+                .with_probation_max_packets(
+                    self.inner.server.proxy_config.load().latching_probation_max_packets,
+                )
                 .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
         };
 
@@ -577,7 +597,7 @@ impl CallModule {
         {
             match &config.endpoint {
                 crate::call::TransferEndpoint::Uri(uri) => {
-                    let realm = self.inner.config.select_realm("");
+                    let realm = self.inner.server.proxy_config.load().select_realm("");
                     let normalized = crate::call::build_sip_uri(uri, &realm);
                     let forwarded_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
                         .map_err(|e| {
@@ -799,11 +819,18 @@ impl CallModule {
             };
             DialStrategy::Sequential(vec![target])
         } else {
-            resolve_unhandled_targets(callee_is_same_realm, internal_lookup_empty, locs)?
+            resolve_unhandled_targets(
+                callee_is_same_realm,
+                internal_lookup_empty,
+                locs,
+                self.inner.server.proxy_config.load().parallel_fork,
+            )?
         };
         let recording = self
             .inner
-            .config
+            .server
+            .proxy_config
+            .load()
             .recording
             .as_ref()
             .map(|r| r.new_recording_config())
@@ -819,7 +846,7 @@ impl CallModule {
             .with_media(media_config)
             .with_recording(recording)
             .with_route_invite(route_invite)
-            .with_passthrough_failure(self.inner.config.passthrough_failure);
+            .with_passthrough_failure(self.inner.server.proxy_config.load().passthrough_failure);
 
         // Resolve the original-header passthrough rule for the (direct) callee
         // target(s) before moving `targets` into the dialplan. Internal
@@ -866,9 +893,13 @@ impl CallModule {
                     .map(|trunk| trunk.codec)
             })
             .filter(|codecs| !codecs.is_empty());
-        let fallback_codecs = trunk_codecs
-            .as_deref()
-            .or(self.inner.config.audio_codecs.as_deref());
+        let fallback_codecs = {
+            let cfg = self.inner.server.proxy_config.load();
+            trunk_codecs
+                .as_ref()
+                .cloned()
+                .or_else(|| cfg.audio_codecs.clone())
+        };
 
         // Failure-tone audio profile: the global `[proxy.audio]` default (or
         // built-in tones) as the base, applied to EVERY call regardless of
@@ -878,7 +909,9 @@ impl CallModule {
         // plays the service-unavailable prompt) even with zero configuration.
         let mut audio_profile = self
             .inner
-            .config
+            .server
+            .proxy_config
+            .load()
             .audio_profile
             .clone()
             .unwrap_or_else(crate::proxy::routing::RingbackAudio::builtin_defaults);
@@ -918,8 +951,8 @@ impl CallModule {
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
-            if let Some(max_ring_time) = hints.max_ring_time {
-                dialplan.max_ring_time = max_ring_time;
+            if hints.max_ring_time.is_some() {
+                dialplan.max_ring_time = hints.max_ring_time;
             }
             if let Some(enable_sipflow) = hints.enable_sipflow {
                 dialplan.enable_sipflow = enable_sipflow;
@@ -930,7 +963,7 @@ impl CallModule {
             apply_allowed_codecs(
                 &mut dialplan,
                 hints.allow_codecs.as_deref(),
-                fallback_codecs,
+                fallback_codecs.as_deref(),
             );
             if let Some(ringback) = hints.ringback.take() {
                 audio_profile.merge_from(ringback);
@@ -939,7 +972,7 @@ impl CallModule {
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             dialplan.concurrent_call_lease = hints.concurrent_call_lease;
         } else {
-            apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
+            apply_allowed_codecs(&mut dialplan, None, fallback_codecs.as_deref());
         }
 
         dialplan.audio_profile = Some(audio_profile);
@@ -956,7 +989,9 @@ impl CallModule {
             Some(overrides) => {
                 let mut merged = self
                     .inner
-                    .config
+                    .server
+                    .proxy_config
+                    .load()
                     .recording
                     .as_ref()
                     .cloned()
@@ -1372,7 +1407,7 @@ impl CallModule {
                 // custom wraps default via its own logic
                 f(
                     self.inner.server.clone(),
-                    self.inner.config.clone(),
+                    self.inner.server.proxy_config.load_full(),
                     self.inner.routing_state.clone(),
                 )
                 .map_err(|e| {
@@ -2027,12 +2062,12 @@ impl CallModule {
             .map_err(|e| (400, format!("Invalid transfer target URI: {:?}", e)))?;
 
         // Build caller URI (use server realm)
-        let realm = server
-            .proxy_config
+        let proxy_config = server.proxy_config.load();
+        let realm = proxy_config
             .realms
             .as_ref()
             .and_then(|v| v.first().cloned())
-            .unwrap_or_else(|| server.proxy_config.addr.clone());
+            .unwrap_or_else(|| proxy_config.addr.clone());
         let caller_uri_str = format!("sip:transfer@{}", realm);
         let caller_uri: rsipstack::sip::Uri =
             rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
@@ -2528,7 +2563,7 @@ mod tests {
 
     #[test]
     fn loop_guard_same_realm_online_user_passes() {
-        let result = resolve_unhandled_targets(true, false, make_loc());
+        let result = resolve_unhandled_targets(true, false, make_loc(), true);
         assert!(
             result.is_ok(),
             "same-realm online user should not be rejected"
@@ -2537,7 +2572,7 @@ mod tests {
 
     #[test]
     fn loop_guard_same_realm_offline_returns_empty_targets() {
-        let result = resolve_unhandled_targets(true, true, make_loc());
+        let result = resolve_unhandled_targets(true, true, make_loc(), true);
         assert!(result.is_ok(), "offline same-realm should not error");
         match result.unwrap() {
             DialStrategy::Sequential(locs) => {
@@ -2554,17 +2589,17 @@ mod tests {
     fn loop_guard_external_callee_falls_through_to_locs() {
         // external callee with NotHandled should fall through to locs so that
         // dialplan inspectors (e.g. zhongan inviter) can rewrite the target.
-        let result = resolve_unhandled_targets(false, false, make_loc());
+        let result = resolve_unhandled_targets(false, false, make_loc(), true);
         assert!(
             result.is_ok(),
-            "external callee should fall through to Sequential(locs)"
+            "external callee should fall through to Parallel(locs)"
         );
         let strategy = result.unwrap();
         match strategy {
-            DialStrategy::Sequential(locs) => {
+            DialStrategy::Parallel(locs) => {
                 assert!(!locs.is_empty(), "locs should contain the callee URI");
             }
-            _ => panic!("expected Sequential strategy"),
+            _ => panic!("expected Parallel strategy"),
         }
     }
 
@@ -2572,7 +2607,7 @@ mod tests {
     fn loop_guard_external_callee_falls_through_offline_flag_ignored() {
         // external callee — internal_lookup_empty is set but irrelevant;
         // should still fall through because the offline check only applies to same-realm.
-        let result = resolve_unhandled_targets(false, true, make_loc());
+        let result = resolve_unhandled_targets(false, true, make_loc(), true);
         assert!(
             result.is_ok(),
             "external callee should fall through, offline flag is ignored"
@@ -2627,7 +2662,7 @@ mod tests {
     fn resolve_unhandled_targets_same_realm_offline_returns_empty() {
         // same-realm + offline (internal_lookup_empty=true) should return Ok with empty targets,
         // not 480 — the rejection is deferred to build_dialplan.
-        let result = resolve_unhandled_targets(true, true, make_loc());
+        let result = resolve_unhandled_targets(true, true, make_loc(), true);
         assert!(result.is_ok());
         match result.unwrap() {
             DialStrategy::Sequential(locs) => assert!(locs.is_empty()),
@@ -2639,11 +2674,71 @@ mod tests {
     fn resolve_unhandled_targets_external_callee_retains_locs() {
         // external callee (same_realm=false) keeps the original locs unchanged
         let locs = make_loc();
-        let result = resolve_unhandled_targets(false, false, locs.clone());
+        let result = resolve_unhandled_targets(false, false, locs.clone(), true);
         let strategy = result.unwrap();
         match strategy {
-            DialStrategy::Sequential(l) => assert_eq!(l.len(), locs.len()),
-            _ => panic!("expected Sequential"),
+            DialStrategy::Parallel(l) => assert_eq!(l.len(), locs.len()),
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[test]
+    fn resolve_unhandled_targets_parallel_forks_all_locs() {
+        // parallel_fork=true: every registered binding is returned so the
+        // session can ring them all at once (first to answer wins).
+        let mut locs = make_loc();
+        locs.push(Location {
+            aor: rsipstack::sip::Uri {
+                scheme: Some(rsipstack::sip::Scheme::Sip),
+                auth: Some(rsipstack::sip::Auth {
+                    user: "test2".to_string(),
+                    password: None,
+                }),
+                host_with_port: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::Domain("example.com".to_string().into()),
+                    port: None,
+                },
+                params: vec![],
+                headers: vec![],
+            },
+            ..Default::default()
+        });
+        let result = resolve_unhandled_targets(false, false, locs.clone(), true);
+        let strategy = result.unwrap();
+        match strategy {
+            DialStrategy::Parallel(l) => assert_eq!(l.len(), locs.len()),
+            _ => panic!("expected Parallel strategy"),
+        }
+    }
+
+    #[test]
+    fn resolve_unhandled_targets_last_alive_dials_only_newest() {
+        // parallel_fork=false: legacy "last alive" behavior — only the most
+        // recently registered device (first in the recency-sorted list) is dialed.
+        let mut locs = make_loc();
+        locs.push(Location {
+            aor: rsipstack::sip::Uri {
+                scheme: Some(rsipstack::sip::Scheme::Sip),
+                auth: Some(rsipstack::sip::Auth {
+                    user: "test2".to_string(),
+                    password: None,
+                }),
+                host_with_port: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::Domain("example.com".to_string().into()),
+                    port: None,
+                },
+                params: vec![],
+                headers: vec![],
+            },
+            ..Default::default()
+        });
+        let result = resolve_unhandled_targets(false, false, locs, false);
+        let strategy = result.unwrap();
+        match strategy {
+            DialStrategy::Sequential(l) => {
+                assert_eq!(l.len(), 1, "last-alive mode must dial exactly one device");
+            }
+            _ => panic!("expected Sequential strategy"),
         }
     }
 

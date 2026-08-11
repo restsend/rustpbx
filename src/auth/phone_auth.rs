@@ -150,11 +150,30 @@ impl TokenValidator for PhoneAuth {
 
 pub struct TokenInjector {
     auth: Arc<PhoneAuth>,
+    /// Optional gate: when set, X-Agent-Token is only injected for users the
+    /// validator accepts (e.g. known CC agents). Sync to fit MessageInspector.
+    agent_check: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 impl TokenInjector {
     pub fn new(auth: Arc<PhoneAuth>) -> Self {
-        Self { auth }
+        Self {
+            auth,
+            agent_check: None,
+        }
+    }
+
+    /// Only issue X-Agent-Token for registrants the validator accepts (e.g. a
+    /// CC agent registry lookup). Kept optional so non-CC deployments retain
+    /// the previous unconditional behaviour.
+    pub fn with_agent_validator(
+        auth: Arc<PhoneAuth>,
+        check: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            auth,
+            agent_check: Some(check),
+        }
     }
 }
 
@@ -199,6 +218,12 @@ impl MessageInspector for TokenInjector {
             });
 
         if let Some(agent_id) = agent_id {
+            // Gate to CC agents only when a validator is configured.
+            if let Some(check) = &self.agent_check {
+                if !check(&agent_id) {
+                    return msg;
+                }
+            }
             let token = self.auth.generate_token(&agent_id);
             use rsipstack::sip::message::HasHeaders;
             msg.headers_mut()

@@ -1,24 +1,29 @@
 use crate::call::{DialStrategy, Dialplan, DialplanFlow, Location};
 use crate::config::EmergencyConfig;
 use crate::proxy::call::{DialplanInspector, DialplanVerdict};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use rsipstack::sip::Request;
 use rsipstack::sip::prelude::HeadersExt;
+use std::sync::Arc;
 use tracing::info;
 
 pub struct EmergencyInspector {
-    config: Option<EmergencyConfig>,
+    config: ArcSwap<Option<EmergencyConfig>>,
 }
 
 impl EmergencyInspector {
     pub fn new(config: Option<EmergencyConfig>) -> Self {
-        Self { config }
+        Self {
+            config: ArcSwap::from_pointee(config),
+        }
     }
-}
 
-impl Default for EmergencyInspector {
-    fn default() -> Self {
-        Self::new(None)
+    /// Hot-reload the emergency config (numbers/trunk) from the live proxy
+    /// config. Called by the server during `reload_proxy_config`.
+    pub fn reload_from(&self, proxy_config: &crate::config::ProxyConfig) {
+        self.config
+            .store(Arc::new(proxy_config.emergency.clone()));
     }
 }
 
@@ -30,7 +35,8 @@ impl DialplanInspector for EmergencyInspector {
         _cookie: &crate::call::TransactionCookie,
         original: &Request,
     ) -> DialplanVerdict {
-        let cfg = match self.config.as_ref() {
+        let guard = self.config.load();
+        let cfg = match guard.as_ref() {
             Some(c) => c,
             None => return DialplanVerdict::Continue(dialplan),
         };
@@ -65,6 +71,10 @@ impl DialplanInspector for EmergencyInspector {
         }
 
         DialplanVerdict::Continue(dialplan)
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 

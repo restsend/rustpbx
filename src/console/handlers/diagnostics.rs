@@ -271,7 +271,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 .unwrap_or_else(|| "/iceservers".to_string()),
         )
     } else if let Some(server) = state.sip_server() {
-        let proxy_cfg = &server.proxy_config;
+        let proxy_cfg = server.proxy_config.load();
         (
             proxy_cfg
                 .ws_handler
@@ -355,7 +355,7 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
         let config = app.config().clone();
         load_proxy_info(&config.proxy, Some(config.as_ref()));
     } else if let Some(server) = state.sip_server() {
-        load_proxy_info(&server.proxy_config, None);
+        load_proxy_info(&server.proxy_config.load(), None);
         notes.push("Rendered from live proxy configuration.".to_string());
     } else {
         notes.push("SIP server is not currently running; showing defaults.".to_string());
@@ -1083,6 +1083,7 @@ async fn probe_trunk_options(
     let default_host = default_host_for_probe(&server, &target_uri);
     let ua_label = server
         .proxy_config
+        .load()
         .useragent
         .clone()
         .unwrap_or_else(|| format!("RustPBX diagnostics/{}", env!("CARGO_PKG_VERSION")));
@@ -1093,7 +1094,7 @@ async fn probe_trunk_options(
     for destination in destinations {
         let attempt = match transport {
             ProbeTransport::Udp => {
-                let bind_ip = select_bind_ip(&server.proxy_config.addr, &destination);
+                let bind_ip = select_bind_ip(&server.proxy_config.load().addr, &destination);
                 send_options_udp(
                     bind_ip,
                     destination,
@@ -1209,21 +1210,21 @@ async fn route_evaluate(
 
     let default_host = server
         .proxy_config
+        .load_full()
         .realms
-        .as_ref()
-        .and_then(|realms| realms.first())
-        .map(|s| s.as_str())
-        .unwrap_or("localhost");
+        .clone()
+        .and_then(|realms| realms.into_iter().next())
+        .unwrap_or_else(|| "localhost".to_string());
 
-    let default_caller_value = default_caller_for(&direction, default_host);
+    let default_caller_value = default_caller_for(&direction, &default_host);
     let caller_input = normalize_optional_string(&payload.caller).unwrap_or(default_caller_value);
     let request_uri_input = normalize_optional_string(&payload.request_uri);
 
-    let caller_uri_str = build_sip_uri(&caller_input, default_host);
-    let callee_uri_str = build_sip_uri(callee_input, default_host);
+    let caller_uri_str = build_sip_uri(&caller_input, &default_host);
+    let callee_uri_str = build_sip_uri(callee_input, &default_host);
     let request_uri_str = request_uri_input
         .as_deref()
-        .map(|value| build_sip_uri(value, default_host))
+        .map(|value| build_sip_uri(value, &default_host))
         .unwrap_or_else(|| callee_uri_str.clone());
 
     let caller_uri: rsipstack::sip::Uri = match caller_uri_str.try_into() {
@@ -1979,6 +1980,7 @@ fn default_port_for_transport(transport: ProbeTransport) -> u16 {
 fn default_host_for_probe(server: &SipServerRef, uri: &Uri) -> String {
     server
         .proxy_config
+        .load()
         .realms
         .as_ref()
         .and_then(|realms| {

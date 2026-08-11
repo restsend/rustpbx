@@ -442,12 +442,12 @@ impl SipSession {
             } => {
                 self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
 
-                let realm = self.server.proxy_config.select_realm("");
+                let realm = self.server.proxy_config.load().select_realm("");
                 let normalized = crate::call::build_sip_uri(&uri, &realm);
                 let refer_to_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
                     .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
-                if !self.server.proxy_config.blind_transfer_use_refer {
+                if !self.server.proxy_config.load().blind_transfer_use_refer {
                     info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
                     // The transfer target is a NEW peer — invalidate the cached
                     // callee offer so `prepare_callee_media_offer` creates a

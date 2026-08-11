@@ -111,6 +111,15 @@ impl RwiAuth {
 
 pub type RwiAuthRef = Arc<RwLock<RwiAuth>>;
 
+/// Rebuild the RWI auth (tokens/contexts) from a freshly loaded config and
+/// swap it into the existing live `RwiAuthRef`, so existing WebSocket auth
+/// checks observe the new credentials immediately.
+pub async fn reload_rwi_auth(auth: &RwiAuthRef, config: &Config) {
+    if let Some(cfg) = RwiConfig::from_config(config) {
+        *auth.write().await = RwiAuth::new(cfg);
+    }
+}
+
 pub fn create_rwi_auth(config: &Config) -> Option<RwiAuthRef> {
     RwiConfig::from_config(config).map(|cfg| Arc::new(RwLock::new(RwiAuth::new(cfg))))
 }

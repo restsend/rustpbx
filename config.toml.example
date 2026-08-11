@@ -79,6 +79,18 @@ ami_path = "/ami/v1"
 ice_servers_path = "/iceservers"
 media_proxy = "auto"
 
+# Direct extension-to-extension (P2P) calls: when a callee has multiple
+# registered devices, ring ALL of them in parallel (first to answer wins).
+# Set to false to ring only the most recently registered device instead.
+# Default: true
+# parallel_fork = true
+
+# Global default max ring/setup time (seconds) before a no-answer call is
+# rejected with 408. 0 or unset disables the ring timeout (the call rings
+# until answered or the caller cancels). Per-trunk / per-route max_ring_time
+# overrides this. Hot-reloadable (new calls only).
+# max_ring_time = 60
+
 # Worker thread isolation: SIP signalling and RTP media run on separate tokio
 # runtimes, preventing heavy media-plane load from starving SIP timer tasks.
 # Defaults: sip_worker_threads = min(4, num_cpus), media_worker_threads = rest.

@@ -5,6 +5,7 @@ use crate::{
     proxy::routing::{extract_from_user, extract_to_user, extract_trusted_ip, parse_trusted_proxy},
 };
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rsipstack::sip::prelude::HeadersExt;
@@ -118,10 +119,8 @@ struct DosPerIpData {
 }
 
 struct AclModuleInner {
-    config: Arc<ProxyConfig>,
+    config: ArcSwap<ProxyConfig>,
     server: Option<SipServerRef>,
-    ua_white_list: HashSet<String>,
-    ua_black_list: HashSet<String>,
     fallback_rules: Vec<String>,
     dos_data: Arc<DashMap<IpAddr, DosPerIpData>>,
 }
@@ -140,22 +139,10 @@ impl AclModule {
     fn with_server(config: Arc<ProxyConfig>, server: Option<SipServerRef>) -> Self {
         let fallback_rules = resolve_base_rules(&config);
 
-        let ua_white_list = config
-            .ua_white_list
-            .as_ref()
-            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
-
-        let ua_black_list = config
-            .ua_black_list
-            .as_ref()
-            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
-
         Self {
             inner: Arc::new(AclModuleInner {
-                config,
+                config: ArcSwap::from_pointee(config.as_ref().clone()),
                 server,
-                ua_white_list,
-                ua_black_list,
                 fallback_rules,
                 dos_data: Arc::new(DashMap::new()),
             }),
@@ -168,10 +155,31 @@ impl AclModule {
 
     // ── DoS protection helpers ─────────────────────────────────────
 
+    /// Read the current config, preferring the server's live (hot-reloadable)
+    /// config over the frozen startup snapshot (used in standalone/test mode).
+    fn live_config(&self) -> arc_swap::Guard<Arc<ProxyConfig>> {
+        match &self.inner.server {
+            Some(server) => server.proxy_config.load(),
+            None => self.inner.config.load(),
+        }
+    }
+
+    fn live_ua_lists(&self) -> (HashSet<String>, HashSet<String>) {
+        let cfg = self.live_config();
+        let white = cfg
+            .ua_white_list
+            .as_ref()
+            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
+        let black = cfg
+            .ua_black_list
+            .as_ref()
+            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
+        (white, black)
+    }
+
     fn extract_ip(&self, tx: &Transaction) -> Option<IpAddr> {
         let trusted: Vec<ipnet::IpNet> = self
-            .inner
-            .config
+            .live_config()
             .trusted_proxies
             .iter()
             .filter_map(|s| parse_trusted_proxy(s))
@@ -180,7 +188,7 @@ impl AclModule {
     }
 
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
-        let cfg = &self.inner.config;
+        let cfg = self.live_config();
         let now = Instant::now();
         let mut entry = self
             .inner
@@ -232,7 +240,7 @@ impl AclModule {
     // ── URI normalization check ────────────────────────────────────
 
     fn check_uri_normalization(&self, tx: &Transaction) -> Result<()> {
-        let cfg = &self.inner.config;
+        let cfg = self.live_config();
         if !cfg.uri_reject_malformed {
             return Ok(());
         }
@@ -296,13 +304,14 @@ impl AclModule {
     }
 
     pub fn is_ua_allowed(&self, ua: &str) -> bool {
-        if self.inner.ua_black_list.contains(ua) {
+        let (white, black) = self.live_ua_lists();
+        if black.contains(ua) {
             return false;
         }
-        if self.inner.ua_white_list.is_empty() {
+        if white.is_empty() {
             return true; // No whitelist means all UAs are allowed unless blacklisted
         }
-        self.inner.ua_white_list.contains(ua)
+        white.contains(ua)
     }
 }
 
@@ -401,7 +410,8 @@ impl ProxyModule for AclModule {
                 }
             }
             None => {
-                if !self.inner.ua_white_list.is_empty() {
+                let (white, _) = self.live_ua_lists();
+                if !white.is_empty() {
                     info!(
                         method = tx.original.method().to_string(),
                         "Missing User-Agent header, denied by acl module"
@@ -418,7 +428,7 @@ impl ProxyModule for AclModule {
         }
 
         // 3. DoS protection (per-IP rate limiting, applies to all sources)
-        if self.inner.config.dos_enabled {
+        if self.live_config().dos_enabled {
             if let Some(ip) = self.extract_ip(tx) {
                 if let Err(e) = self.dos_check_and_track(ip).await {
                     warn!("DoS blocked {}: {}", ip, e);
@@ -455,7 +465,7 @@ impl ProxyModule for AclModule {
     }
 
     async fn on_transaction_end(&self, tx: &mut Transaction) -> Result<()> {
-        if self.inner.config.dos_enabled {
+        if self.live_config().dos_enabled {
             if let Some(ip) = self.extract_ip(tx) {
                 self.dos_release(ip).await;
             }

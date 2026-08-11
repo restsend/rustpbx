@@ -499,7 +499,7 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
         .register_module("auth", |inner, _config| {
             Ok(Box::new(AuthModule::new(
                 inner.clone(),
-                inner.proxy_config.clone(),
+                inner.proxy_config.load_full(),
             )))
         })
         .register_module("call", |inner, config| {

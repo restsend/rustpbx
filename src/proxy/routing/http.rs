@@ -335,7 +335,8 @@ impl CallRouter for HttpCallRouter {
                 }
 
                 if let Some(max_ring_time) = result.max_ring_time {
-                    dialplan.max_ring_time = Duration::from_secs(max_ring_time as u64);
+                    dialplan.max_ring_time =
+                        (max_ring_time > 0).then(|| Duration::from_secs(max_ring_time as u64));
                 }
 
                 if let Some(rtp_timeout) = result.rtp_timeout {

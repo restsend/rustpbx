@@ -848,8 +848,9 @@ pub struct Dialplan {
     pub caller_display_name: Option<String>,
     pub caller: Option<rsipstack::sip::Uri>,
     pub flow: DialplanFlow,
-    /// Max ring time for call setup/ringback phase
-    pub max_ring_time: Duration,
+    /// Max ring time for call setup/ringback phase. `None` (default) disables
+    /// the ring timeout — the call rings until answered or the caller cancels.
+    pub max_ring_time: Option<Duration>,
     pub original: Arc<rsipstack::sip::Request>,
     // Enhanced call control options
     /// Recording configuration
@@ -952,7 +953,7 @@ impl Dialplan {
             caller: None,
             caller_contact: None,
             flow: DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
-            max_ring_time: Duration::from_secs(60), // 60 seconds for ringback
+            max_ring_time: None,
             recording: CallRecordingConfig::default(),
             recording_policy: None,
             media: MediaConfig::default(),
@@ -1026,9 +1027,9 @@ impl Dialplan {
         self
     }
 
-    /// Set max ring time
+    /// Set max ring time. `None` (or `Duration::ZERO`) disables the timeout.
     pub fn with_max_ring_time(mut self, duration: Duration) -> Self {
-        self.max_ring_time = duration;
+        self.max_ring_time = (!duration.is_zero()).then_some(duration);
         self
     }
     pub fn with_route_invite(mut self, route: Box<dyn RouteInvite>) -> Self {

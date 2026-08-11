@@ -201,7 +201,7 @@ fn collect_call_metrics(state: &ConsoleState) -> CallMetrics {
 
     if let Some(server) = state.sip_server() {
         metrics.active = server.active_call_registry.count() as u32;
-        metrics.capacity = server.proxy_config.max_concurrency.unwrap_or(0) as u32;
+        metrics.capacity = server.proxy_config.load().max_concurrency.unwrap_or(0) as u32;
     }
 
     metrics.utilization = if metrics.capacity > 0 {
@@ -220,7 +220,7 @@ fn collect_transaction_metrics(state: &ConsoleState) -> TransactionMetrics {
         metrics.running = server
             .runnings_tx
             .load(std::sync::atomic::Ordering::Relaxed) as u32;
-        metrics.max_concurrency = server.proxy_config.max_concurrency.unwrap_or(0) as u32;
+        metrics.max_concurrency = server.proxy_config.load().max_concurrency.unwrap_or(0) as u32;
         let stats = server.endpoint.inner.get_stats();
         metrics.endpoint_running = stats.running_transactions;
         metrics.endpoint_finished = stats.finished_transactions;

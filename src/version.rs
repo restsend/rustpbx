@@ -1,3 +1,4 @@
+use sea_orm::{EntityTrait, PaginatorTrait};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::debug;
@@ -47,9 +48,13 @@ pub struct UpdateInfo {
     pub download_url: Option<String>,
 }
 
-/// Query `https://miuda.ai/api/check_update` with current version + edition.
+/// Query `https://miuda.ai/api/check_update` with current version + edition
+/// plus deployment stats (uptime, total calls, extensions, wholesale calls).
 /// Returns `UpdateInfo` on success.
-pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
+pub async fn check_update(
+    state: &crate::app::AppState,
+    start_time: Instant,
+) -> anyhow::Result<UpdateInfo> {
     let version = env!("CARGO_PKG_VERSION");
     let edition = if cfg!(feature = "commerce") {
         "commerce"
@@ -59,18 +64,38 @@ pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
     let uptime_secs = start_time.elapsed().as_secs();
     let build_time = env!("BUILD_TIME_FMT");
 
+    let total_calls = state.total_calls.load(std::sync::atomic::Ordering::Relaxed);
+
+    let extensions_count = crate::models::extension::Entity::find()
+        .count(state.db())
+        .await
+        .unwrap_or(0);
+
+    #[cfg(feature = "addon-wholesale")]
+    let wholesale_calls = crate::addons::wholesale::models::wholesale_cdr::Entity::find()
+        .count(state.db())
+        .await
+        .unwrap_or(0);
+    #[cfg(not(feature = "addon-wholesale"))]
+    let wholesale_calls = 0u64;
+
     let opts = crate::http_util::HttpFetchOptions::new()
         .with_timeout(std::time::Duration::from_secs(5))
         .with_header("User-Agent", &get_useragent());
 
+    let params: Vec<(String, String)> = vec![
+        ("version".to_string(), version.to_string()),
+        ("edition".to_string(), edition.to_string()),
+        ("uptime".to_string(), uptime_secs.to_string()),
+        ("build_time".to_string(), build_time.to_string()),
+        ("total_calls".to_string(), total_calls.to_string()),
+        ("extensions_count".to_string(), extensions_count.to_string()),
+        ("wholesale_calls".to_string(), wholesale_calls.to_string()),
+    ];
+
     let req = crate::http_util::shared_keepalive_client()
         .get("https://miuda.ai/api/check_update")
-        .query(&[
-            ("version", version),
-            ("edition", edition),
-            ("uptime", &uptime_secs.to_string()),
-            ("build_time", build_time),
-        ]);
+        .query(&params);
     let resp = match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(r) => r,
         Err(e) => {
@@ -95,14 +120,14 @@ pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
 /// inserted into the database (deduped by title so the same version only appears
 /// once).
 pub fn spawn_update_checker(
-    db: sea_orm::DatabaseConnection,
+    state: crate::app::AppState,
     token: tokio_util::sync::CancellationToken,
 ) {
     // Skip update check in debug/development mode
     #[cfg(debug_assertions)]
     {
         debug!("Skipping update check in debug mode");
-        let _ = db;
+        let _ = &state;
         let _ = token;
     }
 
@@ -110,17 +135,18 @@ pub fn spawn_update_checker(
     crate::utils::spawn(async move {
         let start_time = Instant::now();
         loop {
-            match check_update(start_time).await {
+            match check_update(&state, start_time).await {
                 Ok(info) if info.has_update => {
                     use crate::models::system_notification::{ActiveModel, Column, Entity};
                     use sea_orm::{
                         ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter,
                     };
 
+                    let db = state.db();
                     let title = format!("New version available: {}", info.latest_version);
                     let exists = Entity::find()
                         .filter(Column::Title.eq(&title))
-                        .one(&db)
+                        .one(db)
                         .await
                         .ok()
                         .flatten()
@@ -136,7 +162,7 @@ pub fn spawn_update_checker(
                             read: Set(false),
                             created_at: Set(chrono::Utc::now()),
                         };
-                        match am.insert(&db).await {
+                        match am.insert(db).await {
                             Ok(_) => {
                                 info!(latest = %info.latest_version, "update notification created")
                             }

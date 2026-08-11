@@ -367,7 +367,7 @@ async fn build_dashboard_payload(
 
     let capacity = state
         .sip_server()
-        .and_then(|server| server.proxy_config.max_concurrency)
+        .and_then(|server| server.proxy_config.load().max_concurrency)
         .unwrap_or(0) as u32;
 
     let transaction_running = state

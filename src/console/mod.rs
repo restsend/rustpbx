@@ -626,7 +626,7 @@ impl ConsoleState {
             }
         }
         if let Some(server) = self.sip_server() {
-            if let Some(v) = &server.proxy_config.ws_handler {
+            if let Some(v) = &server.proxy_config.load().ws_handler {
                 return v.clone();
             }
         }
@@ -641,7 +641,7 @@ impl ConsoleState {
             }
         }
         if let Some(server) = self.sip_server() {
-            if let Some(v) = &server.proxy_config.ice_servers_path {
+            if let Some(v) = &server.proxy_config.load().ice_servers_path {
                 return v.clone();
             }
         }

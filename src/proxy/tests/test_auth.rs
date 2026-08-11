@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 async fn test_auth_module_invite_success() {
     // Create test server with user backend
     let (server_inner, _) = create_test_server().await;
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     let request = create_test_request(
         rsipstack::sip::Method::Invite,
@@ -195,7 +195,7 @@ async fn test_auth_module_invite_success() {
 async fn test_auth_module_register_success() {
     // Create test server with user backend
     let (server_inner, _) = create_test_server().await;
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     let request = create_test_request(
         rsipstack::sip::Method::Register,
@@ -363,7 +363,7 @@ async fn test_auth_module_disabled_user() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request).await;
@@ -396,7 +396,7 @@ async fn test_auth_module_unknown_user() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request).await;
@@ -429,7 +429,7 @@ async fn test_auth_module_bypass_other_methods() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request).await;
@@ -490,7 +490,8 @@ async fn test_guest_call_allowed_extension() {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
         recording_policy: ArcSwap::new(Arc::new(None)),
-        proxy_config: config,
+        proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),
+        emergency_config: ArcSwap::from_pointee(config.emergency.clone()),
         cancel_token: CancellationToken::new(),
         data_context,
         routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
@@ -534,7 +535,7 @@ async fn test_guest_call_allowed_extension() {
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
     });
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     let request = {
         let realm = "rustpbx.com";
@@ -784,7 +785,7 @@ fn create_issue_146_register_request(
 #[tokio::test]
 async fn test_authenticate_request_accepts_authorization_uri_when_request_uri_differs() {
     let server = create_issue_146_server().await;
-    let module = AuthModule::new(server.clone(), server.proxy_config.clone());
+    let module = AuthModule::new(server.clone(), server.proxy_config.load_full());
     let auth_header_value = r#"Digest username="111",realm="pbx.e36",nonce="MoLk0nzBonitjdoo",uri="sip:pbx.e36:5060;transport=udp",response="5a832a648a56b95f905b8db1d28d8f5b",algorithm=MD5"#;
 
     let request = create_issue_146_register_request("sip:pbx.e36:5060", auth_header_value);
@@ -800,7 +801,7 @@ async fn test_authenticate_request_accepts_authorization_uri_when_request_uri_di
 #[tokio::test]
 async fn test_authenticate_request_preserves_authorization_uri_transport_case() {
     let server = create_issue_146_server().await;
-    let module = AuthModule::new(server.clone(), server.proxy_config.clone());
+    let module = AuthModule::new(server.clone(), server.proxy_config.load_full());
     let auth_header_value = r#"Digest username="111",realm="pbx.e36",nonce="K1KmT96onZZVMvBB",uri="sip:pbx.e36:5061;transport=tls",response="0c9ba3a13fbcc4f342fd7eb9c2be6a83",algorithm=MD5"#;
     let request =
         create_issue_146_register_request("sip:pbx.e36:5061;transport=tls", auth_header_value);
@@ -816,7 +817,7 @@ async fn test_authenticate_request_preserves_authorization_uri_transport_case() 
 #[tokio::test]
 async fn test_auth_no_credentials() {
     let (server, _) = create_test_server().await;
-    let auth_module = AuthModule::new(server.clone(), server.proxy_config.clone());
+    let auth_module = AuthModule::new(server.clone(), server.proxy_config.load_full());
 
     // Create an INVITE request with no auth headers
     let request = create_sip_request(rsipstack::sip::Method::Invite, "alice", "rustpbx.com");
@@ -847,7 +848,7 @@ async fn test_auth_no_credentials() {
 #[tokio::test]
 async fn test_auth_bypass_for_non_invite_register() {
     let (server, _) = create_test_server().await;
-    let auth_module = AuthModule::new(server.clone(), server.proxy_config.clone());
+    let auth_module = AuthModule::new(server.clone(), server.proxy_config.load_full());
 
     // Create a BYE request
     let request = create_sip_request(rsipstack::sip::Method::Bye, "alice", "rustpbx.com");
@@ -887,7 +888,7 @@ async fn test_auth_bypass_for_non_invite_register() {
 #[tokio::test]
 async fn test_auth_disabled_user() {
     let (server, _) = create_test_server().await;
-    let auth_module = AuthModule::new(server.clone(), server.proxy_config.clone());
+    let auth_module = AuthModule::new(server.clone(), server.proxy_config.load_full());
 
     // Create an INVITE request for disabled user
     let request = create_sip_request(rsipstack::sip::Method::Invite, "bob", "rustpbx.com");
@@ -941,7 +942,7 @@ async fn test_proxy_auth_invite_success() {
         "rustpbx.com",
         None,
     );
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
     let (mut tx, _) = create_transaction(request).await;
 
     // This should return 407 Proxy Authentication Required
@@ -1025,7 +1026,7 @@ async fn test_proxy_auth_no_credentials() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request).await;
@@ -1075,7 +1076,7 @@ async fn test_proxy_auth_wrong_credentials() {
         "rustpbx.com",
         None,
     );
-    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
+    let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.load_full());
     let (mut tx, _) = create_transaction(request).await;
 
     let result = module
@@ -1144,7 +1145,7 @@ async fn test_proxy_auth_wrong_credentials() {
 async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
     // Create test server with dialog auth cache enabled
     let (server_inner, _) = create_test_server().await;
-    let mut proxy_config = (*server_inner.proxy_config).clone();
+    let mut proxy_config = (*server_inner.proxy_config.load_full()).clone();
     proxy_config.dialog_auth_cache = Some(crate::config::AuthCacheConfig {
         enabled: true,
         cache_size: 100,

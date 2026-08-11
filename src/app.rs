@@ -488,7 +488,6 @@ impl AppStateBuilder {
                         crate::proxy::emergency::EmergencyInspector::new(Some(emg.clone())),
                     ));
                 }
-
                 // Register number pool inspector for least-used DID assignment
                 builder = builder.with_dialplan_inspector(Box::new(
                     crate::proxy::number_pool::NumberPoolInspector::default(),
@@ -656,7 +655,7 @@ impl AppStateBuilder {
             if let Some(ref console_state) = app_state.console {
                 // Spawn background update checker only when the console is enabled
                 // (checks miuda.ai/api/check_update at startup, then every 24 hours).
-                crate::version::spawn_update_checker(db_conn.clone(), token.clone());
+                crate::version::spawn_update_checker(app_state.clone(), token.clone());
                 console_state.set_sip_server(Some(app_state.sip_server().get_inner()));
                 // Register addon locale directories into the i18n manager before
                 // binding the app_state so that all subsequent renders pick up the
@@ -687,7 +686,7 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         }
     };
 
-    if let Some(ref ws_handler) = state.sip_server().inner.proxy_config.ws_handler {
+    if let Some(ref ws_handler) = state.sip_server().inner.proxy_config.load().ws_handler {
         info!(
             "Registering WebSocket handler to sip server: {}",
             ws_handler

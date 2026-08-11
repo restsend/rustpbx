@@ -17,7 +17,7 @@ async fn setup_presence_e2e() -> Result<(E2eTestServer, Box<dyn ProxyModule>)> {
     let server = E2eTestServer::start_with_presence(MediaProxyMode::Auto).await?;
     let module = PresenceModule::create(
         server.server_ref.clone(),
-        server.server_ref.proxy_config.clone(),
+        server.server_ref.proxy_config.load_full(),
     )?;
     Ok((server, module))
 }

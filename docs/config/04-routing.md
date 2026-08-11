@@ -135,7 +135,7 @@ headers = { "X-Api-Key" = "secret" }
 | `reason` | string | Reason phrase (for `reject`, `abort`, `spam`) |
 | `record` | bool | Whether to record this call |
 | `timeout`| int | Maximum call duration in seconds (default: 3600) |
-| `max_ring_time`| int | Max ring time in seconds for call setup/ringback phase (default: 60, clamped: 30-120) |
+| `max_ring_time`| int | Max ring time in seconds for call setup/ringback phase. `0` or unset disables the ring timeout (ring until answered or cancelled). No clamping is applied. Overrides the global `[proxy] max_ring_time` and the route/trunk value |
 | `rtp_timeout` | int | RTP timeout per direction in seconds — if no audio received on either direction for this duration, call is terminated. Overrides proxy-level `rtp_timeout`. Set to `0` to disable. (default: uses proxy config, 30s) |
 | `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |
 | `headers` | object | Custom SIP headers to add to the outgoing INVITE (key-value) |

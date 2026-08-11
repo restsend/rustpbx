@@ -165,3 +165,99 @@ async def test_p2p_bidirectional_audio(pbx, sipbot_pool, tmp_path):
     assert stats.is_bidirectional, f"caller RTP not bidirectional: {stats}"
     # The tone is looped, so the caller should have sent many packets.
     assert stats.tx_packets > 30, f"expected caller TX tone packets, got {stats}"
+
+
+# ---------------------------------------------------------------------------
+# Multiple registrations per callee (parallel_fork)
+# ---------------------------------------------------------------------------
+
+async def _register_two_devices(sipbot_pool, pbx, *, port_echo: int, port_none: int,
+                                username: str = "1002"):
+    """Register the SAME username from two sipbot UAs on different local ports.
+
+    The echo device is registered first; the never-answering device is
+    registered second, making it the *newest* registration — the one that
+    last-alive mode would pick.
+    """
+    sipbot_pool.callee(
+        host=pbx.host, port=port_echo, username=username, password="123456",
+        register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+        answer_mode="echo",
+    )
+    await asyncio.sleep(1.5)
+    sipbot_pool.callee(
+        host=pbx.host, port=port_none, username=username, password="123456",
+        register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+        ring_secs=60, answer_mode="none",
+    )
+    await asyncio.sleep(1.5)
+
+
+@pytest.mark.asyncio
+async def test_p2p_parallel_fork_rings_all_registrations(pbx, sipbot_pool):
+    """parallel_fork=true (default): a callee with multiple registered devices
+    rings ALL of them — the caller connects even though the NEWEST registration
+    never answers (the older echo device picks up first)."""
+    h.boot_pbx(pbx)
+    await _register_two_devices(sipbot_pool, pbx, port_echo=15220, port_none=15221)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
+    )
+    # The echo device answers despite the never-answering newest registration.
+    assert await caller.wait_output_async(r"200 OK|Call established", timeout=20), caller.output
+    await _wait_rtp(caller, "caller")
+    assert caller.get_rtp_stats().is_bidirectional, caller.get_rtp_stats()
+
+
+@pytest.mark.asyncio
+async def test_p2p_parallel_fork_disabled_rings_last_registered(pbx, sipbot_pool, pbx_config):
+    """parallel_fork=false: only the NEWEST registration is dialed. Here the
+    newest device never answers, so the caller must NOT connect and no media
+    flows — proving the older device was not rung."""
+    pbx_config.set_parallel_fork(False)
+    h.boot_pbx(pbx)
+    await _register_two_devices(sipbot_pool, pbx, port_echo=15222, port_none=15223)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=4,
+    )
+    # Only the never-answering newest device is dialed → the call never connects.
+    assert not await caller.wait_output_async(r"200 OK|Call established", timeout=10), caller.output
+    assert not caller.get_rtp_stats().has_rx, (
+        f"no media should flow when only the never-answering device is dialed: {caller.get_rtp_stats()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# max_ring_time (global no-answer rejection)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_p2p_max_ring_time_rejects_no_answer(pbx, sipbot_pool, pbx_config):
+    """[proxy] max_ring_time rejects a no-answer call with 408 after N seconds.
+
+    With max_ring_time=4 and a callee that never answers, the caller must
+    receive a 408 Request Timeout within ~12s and the call must never be
+    established (early-media ringback RTP may still flow while ringing).
+    """
+    pbx_config.set_max_ring_time(4)
+    h.boot_pbx(pbx)
+    sipbot_pool.callee(
+        host=pbx.host, port=15224, username="1002", password="123456",
+        register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+        ring_secs=60, answer_mode="none",
+    )
+    await asyncio.sleep(2)
+
+    caller = sipbot_pool.caller(
+        target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=15,
+    )
+    # The PBX enforces the configured ring timeout and rejects with 408.
+    assert await caller.wait_output_async(r"408|RequestTimeout|Request Timeout", timeout=12), (
+        f"caller should see 408 after the ring timeout:\n{caller.output}"
+    )
+    # A no-answer rejection must never establish the call.
+    assert not await caller.wait_output_async(r"200 OK|Call established", timeout=2), (
+        f"caller must not connect on a ring-timeout rejection:\n{caller.output}"
+    )

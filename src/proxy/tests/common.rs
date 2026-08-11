@@ -84,7 +84,8 @@ pub async fn create_test_server_with_config(
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
         recording_policy: ArcSwap::new(Arc::new(None)),
-        proxy_config: config.clone(),
+        proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),
+        emergency_config: ArcSwap::from_pointee(config.emergency.clone()),
         cancel_token: CancellationToken::new(),
         data_context,
         routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(

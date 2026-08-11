@@ -448,9 +448,10 @@ impl ProxyModule for AuthModule {
 
                 let from_uri = tx.original.from_header()?.uri()?;
                 let request_host = tx.original.uri().host().to_string();
-                let realm = self.server.proxy_config.select_realm(request_host.as_str());
+                let proxy_config = self.server.proxy_config.load();
+                let realm = proxy_config.select_realm(request_host.as_str());
 
-                if self.server.proxy_config.ensure_user.unwrap_or_default() {
+                if proxy_config.ensure_user.unwrap_or_default() {
                     match self
                         .server
                         .user_backend

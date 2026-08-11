@@ -194,7 +194,7 @@ pub(crate) async fn route_outbound_leg(
         let routing_state = server.routing_state.read().clone();
         let mut fns = server.create_route_invites.iter();
         if let Some(f) = fns.next() {
-            match f(server.clone(), server.proxy_config.clone(), routing_state) {
+            match f(server.clone(), server.proxy_config.load_full(), routing_state) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to create RouteInvite for originated leg");
@@ -869,7 +869,7 @@ enum ConstructMode<'a> {
         self.context
             .dialplan
             .route_originated_calls
-            .unwrap_or(self.server.proxy_config.route_originated_calls)
+            .unwrap_or(self.server.proxy_config.load().route_originated_calls)
     }
 
     /// Route a not-registered (external) leg target through the route table
@@ -1305,7 +1305,7 @@ enum ConstructMode<'a> {
             MediaRuntimeProfile::from_media_path(MediaPathMode::Bypass)
         };
 
-        let cmd_capacity = server.proxy_config.session_cmd_channel_capacity;
+        let cmd_capacity = server.proxy_config.load().session_cmd_channel_capacity;
         let (cmd_tx, cmd_rx) = mpsc::channel(cmd_capacity);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge = crate::proxy::proxy_call::state::AppEventBridge::new();
@@ -1351,7 +1351,7 @@ enum ConstructMode<'a> {
             server.database.clone().unwrap_or_default(),
             call_info,
             Arc::new(crate::config::Config {
-                proxy: (*server.proxy_config).clone(),
+                proxy: (*server.proxy_config.load_full()).clone(),
                 ..Default::default()
             }),
         );
@@ -1545,6 +1545,25 @@ enum ConstructMode<'a> {
         )
     }
 
+    /// Resolve the effective ring/setup timeout for a call.
+    ///
+    /// Precedence: per-call/route/trunk `dialplan.max_ring_time`, then the
+    /// live (hot-reloadable) global `ProxyConfig.max_ring_time`. `None` means
+    /// the ring timeout is disabled (ring until answered or caller cancels).
+    fn effective_ring_timeout(
+        dialplan: &crate::call::Dialplan,
+        server: &SipServerRef,
+    ) -> Option<std::time::Duration> {
+        dialplan.max_ring_time.or_else(|| {
+            server
+                .proxy_config
+                .load()
+                .max_ring_time
+                .filter(|&secs| secs > 0)
+                .map(std::time::Duration::from_secs)
+        })
+    }
+
     pub async fn serve(
         server: SipServerRef,
         context: CallContext,
@@ -1558,7 +1577,7 @@ enum ConstructMode<'a> {
         // Save commonly-needed fields before consuming context
         let original_caller = context.original_caller.clone();
         let original_callee = context.original_callee.clone();
-        let max_ring_time = context.dialplan.max_ring_time;
+        let max_ring_time = Self::effective_ring_timeout(&context.dialplan, &server);
 
         let local_contact = context
             .dialplan
@@ -1666,10 +1685,17 @@ enum ConstructMode<'a> {
                 .await
         });
 
-        let max_setup_duration = max_ring_time
-            .clamp(Duration::from_secs(30), Duration::from_secs(120))
-            + Duration::from_secs(15); // backstop after the session's ring-timeout
-        let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
+        // Backstop for the whole setup phase: ring timeout + 15s slack so the
+        // session's own ring-timeout rejection (with no-answer tone) can fire
+        // first. When no ring timeout is configured this backstop is disabled
+        // (the call rings until answered or cancelled). No clamp is applied —
+        // the configured value is honored verbatim.
+        let max_setup_duration: Option<std::time::Duration> =
+            max_ring_time.map(|d| d + Duration::from_secs(15));
+        let mut timeout: futures::future::BoxFuture<'static, ()> = match max_setup_duration {
+            Some(d) => tokio::time::sleep(d).boxed(),
+            None => futures::future::pending().boxed(),
+        };
         let mut session_cancelled = false;
 
         loop {
@@ -1785,6 +1811,7 @@ enum ConstructMode<'a> {
         self.context.dialplan.rtp_timeout.or_else(|| {
             self.server
                 .proxy_config
+                .load()
                 .rtp_timeout
                 .filter(|secs| *secs > 0)
                 .map(Duration::from_secs)
@@ -2183,7 +2210,8 @@ enum ConstructMode<'a> {
         // no-answer call. Configurable per call (default 60s). Firing here —
         // rather than in `serve` — keeps the caller-dialog message pump alive
         // so a configured no-answer tone can play as 183 before the rejection.
-        let ring_timeout = self.context.dialplan.max_ring_time;
+        // `None` (max_ring_time disabled) rings indefinitely.
+        let ring_timeout = Self::effective_ring_timeout(&self.context.dialplan, &self.server);
         let setup_result = {
             let setup = async {
                 if let Some(ref audio) = ring_audio {
@@ -2208,7 +2236,9 @@ enum ConstructMode<'a> {
             tokio::select! {
                 biased;
                 result = &mut setup => result,
-                _ = tokio::time::sleep(ring_timeout) => Err(into_callee_err(
+                _ = tokio::time::sleep(
+                    ring_timeout.unwrap_or(std::time::Duration::from_secs(24 * 60 * 60))
+                ), if ring_timeout.is_some() => Err(into_callee_err(
                     &StatusCode::RequestTimeout,
                     Some("Ring timeout".to_string()),
                 )),
@@ -2718,9 +2748,10 @@ enum ConstructMode<'a> {
         let default_expires = self
             .server
             .proxy_config
+            .load()
             .session_expires
             .unwrap_or(crate::proxy::proxy_call::session_timer::DEFAULT_SESSION_EXPIRES);
-        if self.server.proxy_config.session_timer_mode().is_enabled() {
+        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
             headers.extend(
                 crate::proxy::proxy_call::session_timer::build_default_session_timer_headers(
                     default_expires,
@@ -4248,9 +4279,10 @@ enum ConstructMode<'a> {
         let default_expires = self
             .server
             .proxy_config
+            .load()
             .session_expires
             .unwrap_or(DEFAULT_SESSION_EXPIRES);
-        let _session_timer_enabled = self.server.proxy_config.session_timer_mode().is_enabled();
+        let _session_timer_enabled = self.server.proxy_config.load().session_timer_mode().is_enabled();
 
         // Build INVITE options for every target
         let dialog_layer = self.server.dialog_layer.clone();
@@ -5013,6 +5045,7 @@ enum ConstructMode<'a> {
         let default_expires = self
             .server
             .proxy_config
+            .load()
             .session_expires
             .unwrap_or(crate::proxy::proxy_call::session_timer::DEFAULT_SESSION_EXPIRES);
         let caller_is_webrtc = self.is_caller_webrtc();
@@ -5104,7 +5137,7 @@ enum ConstructMode<'a> {
                     break match res {
                         Ok((dialog, response)) => {
                             if let Some(ref resp) = response {
-                                if self.server.proxy_config.session_timer_mode().is_enabled()
+                                if self.server.proxy_config.load().session_timer_mode().is_enabled()
                                     && resp.status_code == StatusCode::SessionIntervalTooSmall
                                     && retry_count < 1
                                     && let Some(min_se_value) =
@@ -5438,7 +5471,7 @@ enum ConstructMode<'a> {
         if let Some(dlg) = self.server.dialog_layer.get_dialog(&dialog_id) {
             self.legs.set_dialog(LegId::from("callee"), dlg);
         }
-        if self.server.proxy_config.session_timer_mode().is_enabled() {
+        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
             if let Some(ref response) = response {
                 let requested_session_interval = invite_option
                     .headers
@@ -5920,7 +5953,7 @@ enum ConstructMode<'a> {
             return codecs;
         }
 
-        if let Some(ref codecs) = self.server.proxy_config.audio_codecs {
+        if let Some(ref codecs) = self.server.proxy_config.load().audio_codecs {
             let parsed = parse_allowed_codecs(codecs);
             if !parsed.is_empty() {
                 return parsed;
@@ -6195,10 +6228,11 @@ enum ConstructMode<'a> {
         }
 
         let mut timer_headers = vec![];
-        if self.server.proxy_config.session_timer_mode().is_enabled() {
+        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
             let default_expires = self
                 .server
                 .proxy_config
+                .load()
                 .session_expires
                 .unwrap_or(DEFAULT_SESSION_EXPIRES);
             match self.init_server_timer(default_expires) {
@@ -6870,7 +6904,7 @@ enum ConstructMode<'a> {
             }
         }
         // 3. PBX default
-        if let Some(path) = &self.server.proxy_config.hold_music {
+        if let Some(path) = &self.server.proxy_config.load().hold_music {
             return Some(crate::call::domain::MediaSource::File { path: path.clone() });
         }
         None
@@ -7577,7 +7611,7 @@ enum ConstructMode<'a> {
         let request = server_dialog.initial_request();
         let headers = &request.headers;
         let dialog_id = self.caller_dialog_id();
-        let session_timer_mode = self.server.proxy_config.session_timer_mode();
+        let session_timer_mode = self.server.proxy_config.load().session_timer_mode();
 
         let supported = has_timer_support(headers);
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
@@ -7630,7 +7664,7 @@ enum ConstructMode<'a> {
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
 
         let mut timer = SessionTimerState::default();
-        timer.mode = self.server.proxy_config.session_timer_mode();
+        timer.mode = self.server.proxy_config.load().session_timer_mode();
         if let Some((session_interval, refresher)) = session_expires_value
             .as_deref()
             .and_then(parse_session_expires)
@@ -13847,5 +13881,72 @@ max_retries = 3
         let limiter_arc = Arc::new(limiter);
         drop(session);
         assert_eq!(limiter_arc.current(), 0, "routed-leg lease must be released on session drop");
+    }
+
+    // ── effective_ring_timeout ────────────────────────────────────────────
+
+    fn make_dialplan(max_ring_time: Option<Duration>) -> crate::call::Dialplan {
+        use crate::call::DialDirection;
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: rsipstack::sip::Uri::try_from("sip:1002@rustpbx.com").unwrap(),
+            version: Default::default(),
+            headers: Default::default(),
+            body: Vec::new(),
+        };
+        let mut dp = crate::call::Dialplan::new("s".into(), request, DialDirection::Outbound);
+        dp.max_ring_time = max_ring_time;
+        dp
+    }
+
+    #[tokio::test]
+    async fn effective_ring_timeout_precedence_and_disabled() {
+        use crate::proxy::tests::common::create_test_server;
+        use crate::config::ProxyConfig;
+
+        let (server, _) = create_test_server().await;
+
+        // No per-call value and no global → disabled (None).
+        let mut cfg = ProxyConfig::default();
+        cfg.max_ring_time = None;
+        server.proxy_config.store(Arc::new(cfg));
+        assert_eq!(
+            SipSession::effective_ring_timeout(&make_dialplan(None), &server),
+            None,
+            "no config → ring timeout disabled"
+        );
+
+        // Global config applies when the per-call value is absent.
+        let mut cfg = ProxyConfig::default();
+        cfg.max_ring_time = Some(45);
+        server.proxy_config.store(Arc::new(cfg));
+        assert_eq!(
+            SipSession::effective_ring_timeout(&make_dialplan(None), &server),
+            Some(Duration::from_secs(45)),
+            "global max_ring_time should apply"
+        );
+
+        // Global 0 explicitly disables the timeout.
+        let mut cfg = ProxyConfig::default();
+        cfg.max_ring_time = Some(0);
+        server.proxy_config.store(Arc::new(cfg));
+        assert_eq!(
+            SipSession::effective_ring_timeout(&make_dialplan(None), &server),
+            None,
+            "global max_ring_time = 0 disables the timeout"
+        );
+
+        // Per-call / per-trunk value overrides the global.
+        let mut cfg = ProxyConfig::default();
+        cfg.max_ring_time = Some(45);
+        server.proxy_config.store(Arc::new(cfg));
+        assert_eq!(
+            SipSession::effective_ring_timeout(
+                &make_dialplan(Some(Duration::from_secs(10))),
+                &server,
+            ),
+            Some(Duration::from_secs(10)),
+            "per-call value overrides the global default"
+        );
     }
 }

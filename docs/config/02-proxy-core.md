@@ -257,6 +257,18 @@ passthrough_failure = true
 # Use SIP REFER for blind transfers (default: false, uses re-INVITE)
 # blind_transfer_use_refer = false
 
+# Direct extension-to-extension (P2P) calls: when a callee has multiple
+# registered devices, ring ALL of them in parallel and connect the first that
+# answers (the remaining forks are cancelled). Default: true.
+# Set to false to ring only the most recently registered device instead.
+# parallel_fork = true
+
+# Global default max ring/setup time (seconds) before a no-answer call is
+# rejected with 408 Request Timeout. 0 or unset disables the ring timeout —
+# the call rings until answered or the caller cancels. Per-trunk and per-route
+# `max_ring_time` override this global value. Hot-reloadable (new calls only).
+# max_ring_time = 60
+
 # Maximum items for SIP flow storage (per dialog)
 sip_flow_max_items = 1000
 ```

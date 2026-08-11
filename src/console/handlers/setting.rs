@@ -133,6 +133,8 @@ pub(crate) struct ProxySettingsPayload {
     pub user_backends: Option<Vec<UserBackendConfig>>,
     pub http_router: Option<HttpRouterConfig>,
     pub jwt_auth: Option<Option<JwtAuthPayload>>,
+    /// Global default max ring time (seconds); 0 disables the ring timeout.
+    pub max_ring_time: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -680,6 +682,7 @@ async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize
                     .sip_server()
                     .inner
                     .proxy_config
+                    .load()
                     .acl_rules
                     .as_ref()
                     .map(|rules| rules.len())
@@ -691,6 +694,7 @@ async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize
             .sip_server()
             .inner
             .proxy_config
+            .load()
             .acl_rules
             .as_ref()
             .map(|rules| rules.len())
@@ -1751,7 +1755,7 @@ pub(crate) async fn update_platform_settings(
         match app_state
             .sip_server()
             .inner
-            .reload_platform_settings(&config_path)
+            .reload_proxy_config(&config_path)
             .await
         {
             Ok(msg) => {
@@ -1835,6 +1839,11 @@ pub(crate) async fn update_proxy_settings(
 
     if let Some(max_registrar_expires) = payload.max_registrar_expires {
         table["max_registrar_expires"] = value(i64::from(max_registrar_expires));
+        modified = true;
+    }
+
+    if let Some(max_ring_time) = payload.max_ring_time {
+        table["max_ring_time"] = value(i64::try_from(max_ring_time).unwrap_or(0));
         modified = true;
     }
 
@@ -1931,9 +1940,29 @@ pub(crate) async fn update_proxy_settings(
         }
     }
 
+    let mut reload_message = String::new();
+    let mut reload_applied = false;
+    if let Some(app_state) = state.app_state() {
+        match app_state
+            .sip_server()
+            .inner
+            .reload_proxy_config(&config_path)
+            .await
+        {
+            Ok(msg) => {
+                reload_applied = true;
+                reload_message = msg;
+            }
+            Err(e) => {
+                reload_message = format!("Failed: {e}");
+            }
+        }
+    }
+
     Json(json!({
         "status": "ok",
-        "message": "Proxy settings saved. Restart required to apply.",
+        "requires_restart": !reload_applied,
+        "message": reload_message,
     }))
     .into_response()
 }
@@ -2164,19 +2193,29 @@ pub(crate) async fn update_security_settings(
     }
 
     let acl_rules = config.proxy.acl_rules.clone().unwrap_or_default();
+    let mut reload_message = String::new();
+    let mut reload_applied = false;
     if let Some(app_state) = state.app_state() {
-        let _ = app_state
-            .sip_server()
-            .inner
+        let inner = app_state.sip_server().inner.clone();
+        let _ = inner
             .data_context
             .reload_acl_rules(false, Some(Arc::new(config.proxy.clone())))
             .await;
+        match inner.reload_proxy_config(&config_path).await {
+            Ok(msg) => {
+                reload_applied = true;
+                reload_message = msg;
+            }
+            Err(e) => {
+                reload_message = format!("Failed: {e}");
+            }
+        }
     }
 
     Json(json!({
         "status": "ok",
-        "requires_restart": false,
-        "message": "Security settings saved and applied.",
+        "requires_restart": !reload_applied,
+        "message": reload_message,
         "security": {
             "acl_rules": acl_rules,
         }
@@ -2305,11 +2344,23 @@ pub(crate) async fn update_rwi_settings(
         return resp;
     }
 
-    let rwi_config = config.rwi.unwrap_or_default();
+    let rwi_config = config.rwi.clone().unwrap_or_default();
+    let mut reload_message = String::new();
+    let mut reload_applied = false;
+    if let Some(app_state) = state.app_state() {
+        if let Some(auth) = app_state.core.rwi_auth.as_ref() {
+            crate::rwi::auth::reload_rwi_auth(auth, &config).await;
+            reload_applied = true;
+            reload_message = "RWI settings applied (auth tokens/contexts updated).".to_string();
+        } else {
+            reload_message = "Saved to disk. RWI gateway is not running; restart to apply.".to_string();
+        }
+    }
+
     Json(json!({
         "status": "ok",
-        "requires_restart": true,
-        "message": "RWI settings saved. Please restart the service for changes to take effect.",
+        "requires_restart": !reload_applied,
+        "message": reload_message,
         "rwi": rwi_config
     }))
     .into_response()

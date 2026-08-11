@@ -804,6 +804,20 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub route_originated_calls: bool,
 
+    /// When enabled, direct extension-to-extension (P2P) calls to a callee
+    /// with multiple registered devices ring ALL of them in parallel (first to
+    /// answer wins; the remaining forks are cancelled). When disabled, only the
+    /// most recently registered device is rung. Default: enabled.
+    #[serde(default = "default_parallel_fork")]
+    pub parallel_fork: bool,
+
+    /// Global default max ring/setup time (seconds) before a no-answer call is
+    /// rejected with 408. `0` or unset disables the ring timeout entirely — the
+    /// call rings until answered or the caller cancels. Per-trunk and per-route
+    /// `max_ring_time` override this value. Hot-reloadable (new calls only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ring_time: Option<u64>,
+
     #[serde(default)]
     pub dos_enabled: bool,
     #[serde(default = "default_dos_max_cps")]
@@ -869,6 +883,9 @@ fn default_dos_scan_block_secs() -> u64 {
 }
 fn default_uri_max_length() -> usize {
     256
+}
+fn default_parallel_fork() -> bool {
+    true
 }
 fn default_session_cmd_channel_capacity() -> usize {
     256
@@ -1276,6 +1293,8 @@ impl Default for ProxyConfig {
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             route_originated_calls: false,
+            parallel_fork: default_parallel_fork(),
+            max_ring_time: None,
             dos_enabled: false,
             dos_max_cps_per_ip: default_dos_max_cps(),
             dos_max_concurrent_per_ip: default_dos_max_concurrent(),

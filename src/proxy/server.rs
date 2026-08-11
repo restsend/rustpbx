@@ -67,7 +67,7 @@ pub struct SipServerInner {
     pub cancel_token: CancellationToken,
     pub rtp_config: ArcSwap<RtpConfig>,
     pub media_proxy: ArcSwap<MediaProxyMode>,
-    pub proxy_config: Arc<ProxyConfig>,
+    pub proxy_config: ArcSwap<ProxyConfig>,
     pub data_context: Arc<ProxyDataContext>,
     /// Shared routing state (round-robin counters + policy guard) used by the
     /// inbound route path and by app/transfer/RWI-originated legs that opt into
@@ -130,6 +130,9 @@ pub struct SipServerInner {
     pub contact_username: String,
     /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
     pub rtc_cname: String,
+    /// Live emergency routing config, shared with `EmergencyInspector` so a
+    /// hot-reload updates the numbers/trunk without restarting.
+    pub emergency_config: ArcSwap<Option<crate::config::EmergencyConfig>>,
 }
 
 fn random_hex() -> String {
@@ -954,7 +957,7 @@ impl SipServerBuilder {
         let inner = Arc::new(SipServerInner {
             rtp_config: ArcSwap::new(Arc::new(rtp_config)),
             media_proxy: ArcSwap::new(Arc::new(self.config.media_proxy)),
-            proxy_config: self.config.clone(),
+            proxy_config: ArcSwap::from_pointee(self.config.as_ref().clone()),
             cancel_token,
             data_context,
             routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
@@ -1004,6 +1007,7 @@ impl SipServerBuilder {
                 .clone()
                 .unwrap_or_else(random_hex),
             rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
+            emergency_config: ArcSwap::from_pointee(self.config.emergency.clone()),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -1118,7 +1122,7 @@ impl SipServer {
         let incoming = self.inner.endpoint.incoming_transactions()?;
         let cancel_token = self.inner.cancel_token.clone();
 
-        if let Some(webhook_config) = &self.inner.proxy_config.locator_webhook
+        if let Some(webhook_config) = &self.inner.proxy_config.load().locator_webhook
             && let Some(events) = &self.inner.locator_events
         {
             let rx = events.subscribe();
@@ -1229,7 +1233,7 @@ impl SipServer {
 
             let runnings_tx = self.inner.runnings_tx.clone();
 
-            if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency
+            if let Some(max_concurrency) = self.inner.proxy_config.load().max_concurrency
                 && runnings_tx.load(Ordering::Relaxed) >= max_concurrency
             {
                 warn!(
@@ -1418,6 +1422,7 @@ impl SipServerInner {
     pub fn default_media_config(&self) -> MediaConfig {
         let rtp = self.rtp_config.load();
         let media_proxy = **self.media_proxy.load();
+        let proxy_config = self.proxy_config.load();
         MediaConfig::new()
             .with_proxy_mode(media_proxy)
             .with_external_ip(rtp.external_ip.clone())
@@ -1427,56 +1432,154 @@ impl SipServerInner {
             .with_webrtc_start_port(rtp.webrtc_start_port)
             .with_webrtc_end_port(rtp.webrtc_end_port)
             .with_ice_servers(rtp.ice_servers.clone())
-            .with_enable_latching(self.proxy_config.enable_latching)
-            .with_probation_max_packets(self.proxy_config.latching_probation_max_packets)
+            .with_enable_latching(proxy_config.enable_latching)
+            .with_probation_max_packets(proxy_config.latching_probation_max_packets)
             .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
     }
 
-    /// Hot-reload platform settings (external_ip, RTP port range, media proxy
-    /// mode) from the on-disk configuration. New calls will use the updated
-    /// settings immediately; existing calls are unaffected.
-    pub async fn reload_platform_settings(&self, config_path: &str) -> Result<String> {
+    /// Hot-reload the full `[proxy]` section plus related platform settings
+    /// from the on-disk configuration. The live `ProxyConfig` snapshot is
+    /// swapped atomically so all per-request / per-call reads (`rtp_timeout`,
+    /// dos settings, session timers, realms, codecs, latching, etc.) observe
+    /// the new values on the next request/call. Existing in-flight calls keep
+    /// the config they were created with. `data_context` is re-synced so trunk,
+    /// route and ACL reloads also see the updated config.
+    pub async fn reload_proxy_config(&self, config_path: &str) -> Result<String> {
         let config = crate::config::Config::load_async(config_path)
             .await
             .map_err(|e| anyhow!("Failed to load config: {e}"))?;
 
-        let mut new_rtp = config.rtp_config();
-        let old_rtp = self.rtp_config.load();
+        let mut new_proxy = config.proxy.clone();
+        if new_proxy.recording.is_none() {
+            new_proxy.recording = config.recording.clone();
+        }
+        new_proxy.ensure_recording_defaults();
 
-        // Re-run auto_external_ip detection if not manually configured
+        let old_proxy = self.proxy_config.load();
+        let new_arc = Arc::new(new_proxy.clone());
+
+        // Atomically swap the live proxy config.
+        self.proxy_config.store(new_arc.clone());
+
+        // Keep data_context in sync so trunk/route/ACL reloads reuse the
+        // updated config (generated dirs, use_db_config, etc.).
+        self.data_context.update_config(new_arc.clone());
+
+        // Propagate the platform-level ArcSwap fields that are also derived
+        // from the top-level config sections.
+        let mut new_rtp = config.rtp_config();
         if new_rtp.external_ip.is_none() {
             if let Some(ref url) = new_rtp.auto_external_ip {
                 if let Ok(ip) = crate::auto_external_ip::detect_external_ip(url).await {
-                    tracing::info!(ip = %ip, url = %url, "auto_external_ip detected on platform reload");
+                    tracing::info!(ip = %ip, url = %url, "auto_external_ip detected on proxy reload");
                     new_rtp.external_ip = Some(ip.to_string());
                 }
             }
         }
-
-        let external_ip_changed = old_rtp.external_ip != new_rtp.external_ip;
-        let ports_changed =
-            old_rtp.start_port != new_rtp.start_port || old_rtp.end_port != new_rtp.end_port;
-        let proxy_changed = **self.media_proxy.load() != config.proxy.media_proxy;
-
         self.rtp_config.store(Arc::new(new_rtp));
         self.media_proxy.store(Arc::new(config.proxy.media_proxy));
+        self.recording_policy.store(Arc::new(new_proxy.recording.clone()));
+        self.emergency_config.store(Arc::new(new_proxy.emergency.clone()));
 
-        let mut parts = Vec::new();
-        if external_ip_changed {
-            parts.push("external_ip".to_string());
+        // Push the new emergency config into the shared inspector so existing
+        // inspections observe the updated numbers/trunk immediately.
+        for inspector in &self.dialplan_inspectors {
+            if let Some(emg) = inspector.as_any()
+                && let Some(inspector) = emg.downcast_ref::<crate::proxy::emergency::EmergencyInspector>()
+            {
+                inspector.reload_from(&new_proxy);
+            }
         }
-        if ports_changed {
-            parts.push("RTP ports".to_string());
+
+        let mut parts: Vec<String> = Vec::new();
+        let old = &old_proxy;
+        if old.rtp_timeout != new_proxy.rtp_timeout {
+            parts.push("rtp_timeout".to_string());
         }
-        if proxy_changed {
-            parts.push("media_proxy".to_string());
+        if old.realms != new_proxy.realms {
+            parts.push("realms".to_string());
+        }
+        if old.registrar_expires != new_proxy.registrar_expires
+            || old.max_registrar_expires != new_proxy.max_registrar_expires
+        {
+            parts.push("registrar_expires".to_string());
+        }
+        if old.dos_enabled != new_proxy.dos_enabled
+            || old.dos_max_cps_per_ip != new_proxy.dos_max_cps_per_ip
+            || old.dos_max_concurrent_per_ip != new_proxy.dos_max_concurrent_per_ip
+            || old.dos_scan_probe_threshold != new_proxy.dos_scan_probe_threshold
+            || old.dos_scan_block_duration_secs != new_proxy.dos_scan_block_duration_secs
+        {
+            parts.push("dos".to_string());
+        }
+        if old.session_timer != new_proxy.session_timer
+            || old.session_timer_always != new_proxy.session_timer_always
+            || old.session_expires != new_proxy.session_expires
+        {
+            parts.push("session_timer".to_string());
+        }
+        if old.audio_codecs != new_proxy.audio_codecs
+            || old.video_codecs != new_proxy.video_codecs
+            || format!("{:?}", old.audio_profile) != format!("{:?}", new_proxy.audio_profile)
+        {
+            parts.push("audio/video codecs".to_string());
+        }
+        if old.enable_latching != new_proxy.enable_latching
+            || old.latching_probation_max_packets != new_proxy.latching_probation_max_packets
+        {
+            parts.push("latching".to_string());
+        }
+        if old.max_concurrency != new_proxy.max_concurrency {
+            parts.push("max_concurrency".to_string());
+        }
+        if old.hold_music != new_proxy.hold_music {
+            parts.push("hold_music".to_string());
+        }
+        if old.parallel_fork != new_proxy.parallel_fork
+            || old.passthrough_failure != new_proxy.passthrough_failure
+        {
+            parts.push("routing".to_string());
+        }
+        if old.max_ring_time != new_proxy.max_ring_time {
+            parts.push("max_ring_time".to_string());
+        }
+        if format!("{:?}", old.locator_webhook) != format!("{:?}", new_proxy.locator_webhook) {
+            parts.push("locator_webhook".to_string());
+        }
+        if format!("{:?}", old.jwt_auth) != format!("{:?}", new_proxy.jwt_auth) {
+            parts.push("jwt_auth".to_string());
+        }
+        if format!("{:?}", old.user_backends) != format!("{:?}", new_proxy.user_backends) {
+            parts.push("user_backends".to_string());
+        }
+        if format!("{:?}", old.http_router) != format!("{:?}", new_proxy.http_router) {
+            parts.push("http_router".to_string());
+        }
+        if old.ua_white_list != new_proxy.ua_white_list
+            || old.ua_black_list != new_proxy.ua_black_list
+            || old.trusted_proxies != new_proxy.trusted_proxies
+            || old.uri_max_length != new_proxy.uri_max_length
+            || old.uri_reject_malformed != new_proxy.uri_reject_malformed
+        {
+            parts.push("acl/uri".to_string());
+        }
+        if format!("{:?}", old.emergency) != format!("{:?}", new_proxy.emergency) {
+            parts.push("emergency".to_string());
+        }
+        if old.blind_transfer_use_refer != new_proxy.blind_transfer_use_refer {
+            parts.push("transfer".to_string());
+        }
+        if old.session_cmd_channel_capacity != new_proxy.session_cmd_channel_capacity
+            || old.session_state_channel_capacity != new_proxy.session_state_channel_capacity
+        {
+            parts.push("session channel capacity".to_string());
         }
 
         if parts.is_empty() {
-            Ok("Platform settings reloaded (no changes detected)".to_string())
+            Ok("Proxy config reloaded (no changes detected)".to_string())
         } else {
-            tracing::info!(changed = %parts.join(", "), "Platform settings hot-reloaded");
-            Ok(format!("Platform settings applied: {}", parts.join(", ")))
+            tracing::info!(changed = %parts.join(", "), "Proxy config hot-reloaded");
+            Ok(format!("Proxy config applied: {}", parts.join(", ")))
         }
     }
 
@@ -1566,11 +1669,12 @@ impl SipServerInner {
             (callee_realm, None)
         };
 
+        let proxy_config = self.proxy_config.load();
         let is_my_port = |p: u16| {
-            self.proxy_config.udp_port == Some(p)
-                || self.proxy_config.tcp_port == Some(p)
-                || self.proxy_config.tls_port == Some(p)
-                || self.proxy_config.ws_port == Some(p)
+            proxy_config.udp_port == Some(p)
+                || proxy_config.tcp_port == Some(p)
+                || proxy_config.tls_port == Some(p)
+                || proxy_config.ws_port == Some(p)
         };
 
         match host {
@@ -1581,7 +1685,7 @@ impl SipServerInner {
                 {
                     return port.map(is_my_port).unwrap_or(true);
                 }
-                if let Some(realms) = self.proxy_config.realms.as_ref() {
+                if let Some(realms) = proxy_config.realms.as_ref() {
                     for item in realms {
                         if item == callee_realm {
                             return true;
@@ -1591,8 +1695,7 @@ impl SipServerInner {
                         }
                     }
                 }
-                let realms_empty = self
-                    .proxy_config
+                let realms_empty = proxy_config
                     .realms
                     .as_ref()
                     .map_or(true, |v| v.is_empty());
@@ -1823,4 +1926,86 @@ mod contact_uri_tests {
 
         assert!(resolve_cluster_self_addr(&[], &local_addrs).is_none());
     }
+
+    #[tokio::test]
+    async fn reload_proxy_config_swaps_live_snapshot_and_syncs_data_context() {
+        use crate::proxy::tests::common::create_test_server;
+        use std::io::Write;
+
+        let (server, _) = create_test_server().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rustpbx.toml");
+        let mut file = std::fs::File::create(&path).expect("create config file");
+        let toml = r#"
+[proxy]
+addr = "0.0.0.0"
+rtp_timeout = 42
+registrar_expires = 120
+dos_enabled = true
+session_timer = true
+max_ring_time = 45
+"#;
+        file.write_all(toml.as_bytes()).expect("write config");
+        drop(file);
+
+        let msg = server
+            .reload_proxy_config(path.to_str().unwrap())
+            .await
+            .expect("reload should succeed");
+
+        assert!(
+            msg.contains("rtp_timeout"),
+            "message should mention rtp_timeout, got: {msg}"
+        );
+        assert_eq!(server.proxy_config.load().rtp_timeout, Some(42));
+        assert_eq!(server.proxy_config.load().registrar_expires, Some(120));
+        assert!(server.proxy_config.load().dos_enabled);
+        assert!(server.proxy_config.load().session_timer);
+        assert_eq!(server.proxy_config.load().max_ring_time, Some(45));
+        assert!(
+            msg.contains("max_ring_time"),
+            "message should mention max_ring_time, got: {msg}"
+        );
+        // data_context must see the same live config.
+        assert_eq!(server.data_context.config().rtp_timeout, Some(42));
+    }
+
+    #[tokio::test]
+    async fn reload_proxy_config_reports_no_changes_when_identical() {
+        use crate::proxy::tests::common::create_test_server;
+        use std::io::Write;
+
+        let (server, config) = create_test_server().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rustpbx.toml");
+        let mut file = std::fs::File::create(&path).expect("create config file");
+        let toml = format!(
+            "\n[proxy]\naddr = \"0.0.0.0\"\nrtp_timeout = {}\n",
+            config.rtp_timeout.unwrap_or(15)
+        );
+        file.write_all(toml.as_bytes()).expect("write config");
+        drop(file);
+
+        // First reload applies, second is a no-change.
+        server
+            .reload_proxy_config(path.to_str().unwrap())
+            .await
+            .expect("reload should succeed");
+        let msg = server
+            .reload_proxy_config(path.to_str().unwrap())
+            .await
+            .expect("reload should succeed");
+        assert!(
+            msg.contains("no changes detected"),
+            "expected no-op message, got: {msg}"
+        );
+    }
 }
+
+
+
+
+
+
