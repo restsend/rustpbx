@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::egress::EgressSource;
-use crate::ingress_tap::{DtmfEvent, MediaRecorder};
+use crate::ingress_tap::{DtmfEvent, MediaRecorder, PacketDirection};
 use crate::leg::Leg;
 use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
 
@@ -210,7 +210,10 @@ impl MediaBridge {
                     biased;
                     _ = cancel.cancelled() => break,
                     ev = rx.recv() => match ev {
-                        Ok(ev) => { let _ = bus.send((side, ev)); }
+                        Ok(ev) if ev.direction == PacketDirection::Ingress => {
+                            let _ = bus.send((side, ev));
+                        }
+                        Ok(_) => {}
                         Err(_) => break,
                     },
                     _ = interval.tick() => {
@@ -1291,18 +1294,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dtmf_bus_forwarded_from_leg_tap() {
+    async fn dtmf_bus_forwards_ingress_and_ignores_egress() {
+        use rustrtc::peer_connection::RtpObserver;
+        use rustrtc::rtp::{RtpHeader, RtpPacket};
+
         let mut mb = MediaBridge::new("s4", BridgeOpts::default());
-        mb.replace_leg(
-            LegSide::A,
-            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        let rx = mb.dtmf_bus();
-        // The tap has no dtmf payload types set, so we can't easily synthesize
-        // an event here; this just ensures the bus subscription + forwarder
-        // task spawn without panic.
-        drop(rx);
+        let leg = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+        leg.ingress_tap().set_dtmf_payload_types(vec![101]);
+        mb.replace_leg(LegSide::A, leg.clone()).await;
+        let mut rx = mb.dtmf_bus();
+        let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+
+        let egress = RtpPacket::new(
+            RtpHeader::new(101, 1, 100, 1234),
+            vec![1, 0x80, 0, 160],
+        );
+        leg.ingress_tap().on_egress(&egress, addr);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "egress DTMF must not be published to the session bus"
+        );
+
+        let ingress = RtpPacket::new(
+            RtpHeader::new(101, 2, 200, 1234),
+            vec![2, 0x80, 0, 160],
+        );
+        leg.ingress_tap().on_ingress(&ingress, addr);
+        let (side, event) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("ingress DTMF bus timeout")
+            .expect("ingress DTMF bus closed");
+        assert_eq!(side, LegSide::A);
+        assert_eq!(event.digit, '2');
+        assert_eq!(event.direction, PacketDirection::Ingress);
+
         mb.close();
     }
 
