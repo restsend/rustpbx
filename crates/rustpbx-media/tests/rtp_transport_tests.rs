@@ -930,10 +930,9 @@ async fn transcode_rtp_g729_to_webrtc_opus() {
     h.close();
 }
 
-/// Same-codec fast-path with SSRC verification: the packet forwarded to test_b
-/// must carry test_b's expected sender SSRC (the SSRC leg_b advertised in SDP).
+/// Same-codec fast-path uses an SSRC distinct from local playback on leg B.
 #[tokio::test]
-async fn fast_path_rtp_pcmu_rtp_pcmu_ssrc_rewrite() {
+async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
     let mut h = TestMediaHarness::create(
         TransportMode::Rtp,
         CodecType::PCMU,
@@ -941,16 +940,17 @@ async fn fast_path_rtp_pcmu_rtp_pcmu_ssrc_rewrite() {
         CodecType::PCMU,
     )
     .await;
-    let expected_ssrc =
-        h.mb.leg(LegSide::B)
-            .unwrap()
-            .pc()
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-            .and_then(|t| t.sender())
-            .map(|s| s.ssrc())
-            .expect("leg B audio sender");
+    let playback_ssrc = h
+        .mb
+        .leg(LegSide::B)
+        .unwrap()
+        .pc()
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.sender())
+        .map(|s| s.ssrc())
+        .expect("leg B audio sender");
     h.bridge_and_accept().await;
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
@@ -960,10 +960,7 @@ async fn fast_path_rtp_pcmu_rtp_pcmu_ssrc_rewrite() {
         .raw_packet
         .as_ref()
         .expect("received frame must carry the raw RTP packet");
-    assert_eq!(
-        raw.header.ssrc, expected_ssrc,
-        "forwarded packet SSRC must be leg B's sender SSRC (rewritten by fast-path)"
-    );
+    assert_ne!(raw.header.ssrc, playback_ssrc, "playback uses a separate SSRC");
     assert_eq!(raw.header.payload_type, 0);
     h.close();
 }

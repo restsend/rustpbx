@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use audio_codec::{CodecType, Decoder, Encoder, Resampler, create_encoder};
@@ -164,6 +164,7 @@ impl EgressPipeline {
         let ptime = Duration::from_millis(ptime_ms.unwrap_or(DEFAULT_PTIME_MS) as u64);
         let noise_amplitude = 10f32.powf(codec.comfort_noise_level_db / 20.0) * i16::MAX as f32;
 
+        let playback_timestamp_base = rand::random::<u32>();
         let task = EgressTask {
             sender,
             codec,
@@ -172,8 +173,10 @@ impl EgressPipeline {
             resampler: None,
             ptime,
             gate,
-            rtp_timestamp: 0u32.wrapping_sub(1),
-            sequence_number: 0u16.wrapping_sub(1),
+            playback_timestamp_base,
+            playback_started_at: Instant::now(),
+            sequence_number: 0,
+            marker_pending: false,
             pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, ptime)],
             noise_state: 0x9E37_79B9,
             noise_amplitude,
@@ -252,8 +255,10 @@ struct EgressTask {
     /// While held (true) the pipeline parks. Opened by the relay when both
     /// legs accept.
     gate: Option<Arc<AtomicBool>>,
-    rtp_timestamp: u32,
+    playback_timestamp_base: u32,
+    playback_started_at: Instant,
     sequence_number: u16,
+    marker_pending: bool,
     pcm_buf: Vec<i16>,
     /// LCG state for comfort-noise generation (continuous across frames so the
     /// noise does not repeat per-frame).
@@ -291,6 +296,8 @@ impl EgressTask {
                 _ = cancel.cancelled() => break,
                 cmd = cmd_rx.recv() => match cmd {
                     Some(EgressCmd::SetSource(s)) => {
+                        let was_relay = matches!(&self.source, EgressSource::RewriteRelay { .. });
+                        let will_relay = matches!(&s, EgressSource::RewriteRelay { .. });
                         // If we are switching AWAY from an active Media source,
                         // fire its on_end as interrupted so the app knows the
                         // playback was cut short (e.g. stop_play / DTMF barge).
@@ -333,6 +340,9 @@ impl EgressTask {
                         } else {
                             self.resampler = None;
                         }
+                        if was_relay && !will_relay {
+                            self.marker_pending = true;
+                        }
                         self.source = s;
                     }
                     Some(EgressCmd::UpdateCodec(new_codec)) => {
@@ -342,6 +352,7 @@ impl EgressTask {
                         self.pcm_buf = vec![0i16; pcm_samples_per_frame(new_codec.codec, self.ptime)];
                         // Drop any resampler: TranscodePeer re-derives it on next SetSource.
                         self.resampler = None;
+                        self.marker_pending = true;
                     }
                     None => break,
                 },
@@ -351,8 +362,11 @@ impl EgressTask {
                             // DropOldest semantics: if the PC sender is saturated
                             // (slow remote), drop the oldest rather than block the
                             // pacing task. try_send never awaits.
+                            let clear_marker = self.marker_pending;
                             if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
                                 trace!("egress: sender full, dropping frame to keep cadence");
+                            } else if clear_marker {
+                                self.marker_pending = false;
                             }
                         }
                     }
@@ -393,16 +407,18 @@ impl EgressTask {
                 MediaSample::Audio(f) => Some(f),
                 _ => None,
             });
-            if let Some(f) = passed {
+            if let Some(mut f) = passed {
+                f.marker |= self.marker_pending;
                 self.source = source;
-                self.advance_ts_seq();
+                self.advance_sequence();
                 return Some(f);
             }
             // empty → fall through to silence
             let encoded: Bytes = self.encode_silence().into();
             self.source = source;
-            self.advance_ts_seq();
-            return Some(self.build_frame(encoded));
+            let frame = self.build_frame(encoded);
+            self.advance_sequence();
+            return Some(frame);
         }
 
         let encoded: Bytes = match &mut source {
@@ -458,8 +474,9 @@ impl EgressTask {
         };
 
         self.source = source;
-        self.advance_ts_seq();
-        Some(self.build_frame(encoded))
+        let frame = self.build_frame(encoded);
+        self.advance_sequence();
+        Some(frame)
     }
 
     /// Zero-fill the PCM buffer (silence).
@@ -487,28 +504,30 @@ impl EgressTask {
     /// Build the outbound `AudioFrame` from an already-encoded payload.
     fn build_frame(&self, data: Bytes) -> AudioFrame {
         AudioFrame {
-            rtp_timestamp: self.rtp_timestamp,
+            rtp_timestamp: self.playback_timestamp(),
             clock_rate: self.codec.clock_rate,
             data,
             sequence_number: Some(self.sequence_number),
             payload_type: Some(self.codec.payload_type),
-            marker: false,
+            marker: self.marker_pending,
             header_extension: None,
             source_addr: None,
             raw_packet: None,
         }
     }
 
-    fn advance_ts_seq(&mut self) {
-        self.rtp_timestamp = self
-            .rtp_timestamp
-            .wrapping_add(self.codec_rtp_ticks_per_frame());
+    fn advance_sequence(&mut self) {
         self.sequence_number = self.sequence_number.wrapping_add(1);
     }
 
+    fn playback_timestamp(&self) -> u32 {
+        let elapsed_frames = self.playback_started_at.elapsed().as_nanos() / self.ptime.as_nanos();
+        self.playback_timestamp_base
+            .wrapping_add((elapsed_frames as u32).wrapping_mul(self.codec_rtp_ticks_per_frame()))
+    }
+
     fn codec_rtp_ticks_per_frame(&self) -> u32 {
-        // clock_rate * ptime_ms / 1000
-        self.codec.clock_rate * DEFAULT_PTIME_MS / 1000
+        ((self.codec.clock_rate as u128 * self.ptime.as_nanos()) / 1_000_000_000) as u32
     }
 }
 
@@ -590,8 +609,10 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            rtp_timestamp: 0,
+            playback_timestamp_base: 0,
+            playback_started_at: Instant::now(),
             sequence_number: 0,
+            marker_pending: false,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-30.0 / 20.0) * i16::MAX as f32,
@@ -623,6 +644,86 @@ mod tests {
         .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         pipe.stop();
+    }
+
+    #[tokio::test]
+    async fn playback_after_relay_marks_once_and_reuses_local_timeline() {
+        let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
+        let peer_pc = PeerConnection::new(rustrtc::RtcConfiguration::default());
+        let pipe = EgressPipeline::start_with_gate(
+            sender,
+            pcmu_codec(),
+            EgressSource::RewriteRelay {
+                peer_pc: peer_pc.clone(),
+                options: RtpRewriteBridgeOptions::default(),
+                rules: Vec::new(),
+            },
+            Some(20),
+            None,
+        );
+
+        pipe.set_source(EgressSource::Media {
+            audio: Box::new(LoopingBeep { rate: 8000, pos: 0 }),
+            loop_playback: true,
+            on_end: None,
+        })
+        .await
+        .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), track.recv())
+            .await
+            .expect("first playback frame timeout")
+            .expect("first playback frame");
+        let MediaSample::Audio(first) = first else {
+            panic!("expected audio");
+        };
+        assert!(first.marker, "first local packet after relay must be marked");
+
+        let second = tokio::time::timeout(Duration::from_secs(1), track.recv())
+            .await
+            .expect("second playback frame timeout")
+            .expect("second playback frame");
+        let MediaSample::Audio(second) = second else {
+            panic!("expected audio");
+        };
+        assert!(!second.marker, "marker is only for the source transition");
+
+        pipe.set_source(EgressSource::RewriteRelay {
+            peer_pc: peer_pc.clone(),
+            options: RtpRewriteBridgeOptions::default(),
+            rules: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        pipe.set_source(EgressSource::Media {
+            audio: Box::new(LoopingBeep { rate: 8000, pos: 0 }),
+            loop_playback: true,
+            on_end: None,
+        })
+        .await
+        .unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(1), track.recv())
+            .await
+            .expect("next playback frame timeout")
+            .expect("next playback frame");
+        let MediaSample::Audio(third) = third else {
+            panic!("expected audio");
+        };
+
+        assert!(third.marker, "playback after relay must mark the SSRC switch");
+        assert!(
+            third.rtp_timestamp.wrapping_sub(second.rtp_timestamp) >= 480,
+            "playback timestamp must include the relay gap"
+        );
+        assert_eq!(
+            third.sequence_number,
+            second.sequence_number.map(|seq| seq.wrapping_add(1)),
+            "local playback sequence must continue"
+        );
+
+        pipe.stop();
+        peer_pc.close();
     }
 
     /// A Media source whose sample rate differs from the egress codec must be
@@ -722,8 +823,10 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            rtp_timestamp: 0,
+            playback_timestamp_base: 0,
+            playback_started_at: Instant::now(),
             sequence_number: 0,
+            marker_pending: false,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,
@@ -736,8 +839,6 @@ mod tests {
             !f.data.is_empty(),
             "PCMU silence must encode to non-empty bytes"
         );
-        // Timestamp advances by 160 ticks for 20ms @ 8kHz.
-        assert_eq!(task.rtp_timestamp, 160);
         assert_eq!(task.sequence_number, 1);
     }
 
@@ -778,8 +879,10 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            rtp_timestamp: 0,
+            playback_timestamp_base: 0,
+            playback_started_at: Instant::now(),
             sequence_number: 0,
+            marker_pending: false,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,

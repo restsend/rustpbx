@@ -376,13 +376,15 @@ impl MediaBridge {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
-            // destination is plain RTP. Audio, DTMF and video m-lines each get
-            // their own payload-type-scoped rewrite rule so video is relayed
-            // with the correct (video) SSRC and PT.
+            // destination is plain RTP. Relay audio gets an SSRC distinct from
+            // the destination's persistent local-playback SSRC. Video keeps its
+            // destination sender SSRC for the negotiated video track.
             let a_transport = la.pc().config().transport_mode.clone();
             let b_transport = lb.pc().config().transport_mode.clone();
-            let a_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
-            let b_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
+            let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
+            let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
+            let a_relay_ssrc = distinct_relay_ssrc(a_playback_ssrc);
+            let b_relay_ssrc = distinct_relay_ssrc(b_playback_ssrc);
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
 
@@ -435,14 +437,14 @@ impl MediaBridge {
             // ── A→B rules: audio catch-all + DTMF + video ──
             let mut rules_a_to_b = vec![RtpRewriteRule {
                 match_payload_type: None,
-                fixed_out_ssrc: Some(b_ssrc),
+                fixed_out_ssrc: Some(b_relay_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
             }];
             if let Some((a_pt, b_pt)) = dtmf_a_to_b {
                 rules_a_to_b.push(RtpRewriteRule {
                     match_payload_type: Some(a_pt),
-                    fixed_out_ssrc: Some(b_ssrc),
+                    fixed_out_ssrc: Some(b_relay_ssrc),
                     ssrc_offset: 0,
                     out_payload_type: Some(b_pt),
                 });
@@ -462,14 +464,14 @@ impl MediaBridge {
             // ── B→A rules (mirror) ──
             let mut rules_b_to_a = vec![RtpRewriteRule {
                 match_payload_type: None,
-                fixed_out_ssrc: Some(a_ssrc),
+                fixed_out_ssrc: Some(a_relay_ssrc),
                 ssrc_offset: 0,
                 out_payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
             }];
             if let Some((a_pt, b_pt)) = dtmf_b_to_a {
                 rules_b_to_a.push(RtpRewriteRule {
                     match_payload_type: Some(b_pt),
-                    fixed_out_ssrc: Some(a_ssrc),
+                    fixed_out_ssrc: Some(a_relay_ssrc),
                     ssrc_offset: 0,
                     out_payload_type: Some(a_pt),
                 });
@@ -500,7 +502,7 @@ impl MediaBridge {
             info!(
                 session = %self.session_id,
                 codec = ?ca.codec,
-                a_ssrc, b_ssrc,
+                a_playback_ssrc, b_playback_ssrc, a_relay_ssrc, b_relay_ssrc,
                 video = ?video_match.as_ref().map(|(v, _)| v.name.as_str()),
                 strip_a_to_b = options_a_to_b.strip_extensions,
                 strip_b_to_a = options_b_to_a.strip_extensions,
@@ -909,6 +911,15 @@ fn get_audio_recv_track(pc: &rustrtc::PeerConnection) -> Option<Arc<dyn MediaStr
         .find(|t| t.kind() == MediaKind::Audio)
         .and_then(|t| t.receiver())
         .map(|r| -> Arc<dyn MediaStreamTrack> { r.track() })
+}
+
+fn distinct_relay_ssrc(playback_ssrc: u32) -> u32 {
+    loop {
+        let ssrc = rand::random::<u32>();
+        if ssrc != 0 && ssrc != playback_ssrc {
+            return ssrc;
+        }
+    }
 }
 
 /// Build the video payload-type rewrite rules for the fast-path relay.
