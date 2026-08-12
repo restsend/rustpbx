@@ -1137,11 +1137,11 @@ impl BridgePeer {
                             if !rtp_timeout_fired
                                 && let Some(timeout) = rtp_timeout
                             {
-                                if dw_pkts == 0 {
+                                let gate_open = caller_gate.load(Ordering::Relaxed);
+                                if gate_open && dw_pkts == 0 {
                                     let first_silent = caller_silence_start.is_none();
                                     caller_silence_start.get_or_insert(std::time::Instant::now());
                                     if first_silent {
-                                        let gate_open = caller_gate.load(Ordering::Relaxed);
                                         let fwd_wired = w_fwd.lock().is_some();
                                         let total_w = match w_fwd.lock().as_ref() {
                                             Some(fs) => fs.packets.load(Ordering::Relaxed),
