@@ -252,10 +252,18 @@ impl LegInner {
 
         // Egress pipeline: ptime-paced push into the sender. Silence until the
         // caller switches the source (e.g. via play/hold).
+        let dtmf_payload_type = codecs
+            .iter()
+            .find(|codec| {
+                codec.codec == CodecType::TelephoneEvent
+                    && codec.clock_rate == first_codec.clock_rate
+            })
+            .map(|codec| codec.payload_type);
         let egress_codec = EgressCodec {
             codec: first_codec.codec,
             payload_type: first_codec.payload_type,
             clock_rate: first_codec.clock_rate,
+            dtmf_payload_type,
             comfort_noise,
             comfort_noise_level_db,
         };
@@ -433,22 +441,33 @@ impl LegInner {
         };
         let profile = negotiate::MediaNegotiator::extract_leg_profile(profile_sdp);
 
-        // If the negotiated audio codec changed (e.g. re-INVITE switches
-        // codec), rebuild the egress encoder so subsequent playback/hold frames
-        // are encoded with the new codec.
+        // Keep the destination audio and telephone-event payload types in sync
+        // with the negotiated answer. The DTMF clock follows the audio clock.
         if let Some(audio) = &profile.audio {
-            let prev_codec = self
-                .negotiated
-                .lock()
-                .as_ref()
-                .and_then(|p| p.audio.as_ref())
-                .map(|c| c.codec);
-            if prev_codec != Some(audio.codec) {
+            let dtmf_payload_type = profile.dtmf.as_ref().map(|dtmf| dtmf.payload_type);
+            let previous = self.negotiated.lock().as_ref().and_then(|profile| {
+                profile.audio.as_ref().map(|audio| {
+                    (
+                        audio.codec,
+                        audio.payload_type,
+                        audio.clock_rate,
+                        profile.dtmf.as_ref().map(|dtmf| dtmf.payload_type),
+                    )
+                })
+            });
+            let next = (
+                audio.codec,
+                audio.payload_type,
+                audio.clock_rate,
+                dtmf_payload_type,
+            );
+            if previous != Some(next) {
                 self.egress
                     .update_codec(EgressCodec {
                         codec: audio.codec,
                         payload_type: audio.payload_type,
                         clock_rate: audio.clock_rate,
+                        dtmf_payload_type,
                         comfort_noise: self.comfort_noise,
                         comfort_noise_level_db: self.comfort_noise_level_db,
                     })

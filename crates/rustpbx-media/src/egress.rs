@@ -101,6 +101,9 @@ pub enum EgressSource {
     TranscodePeer {
         peer: Arc<dyn MediaStreamTrack>,
         decoder: Box<dyn Decoder>,
+        /// The source leg's negotiated voice payload type. Other RTP packets
+        /// on this audio track are treated as telephone-event packets.
+        source_audio_payload_type: u8,
         /// Source codec sample rate (for auto-resampling to `EgressCodec`).
         src_sample_rate: u32,
     },
@@ -112,6 +115,9 @@ pub struct EgressCodec {
     pub codec: CodecType,
     pub payload_type: u8,
     pub clock_rate: u32,
+    /// Destination telephone-event payload type. Its clock is assumed to be
+    /// the same as the destination audio RTP clock.
+    pub dtmf_payload_type: Option<u8>,
     /// Emit low-level comfort noise instead of digital silence when the source
     /// has no data. Keeps the outbound stream continuous (fixed seq/ts cadence
     /// regardless) while avoiding dead-air between playback/legs.
@@ -177,6 +183,7 @@ impl EgressPipeline {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, ptime)],
             noise_state: 0x9E37_79B9,
             noise_amplitude,
@@ -259,6 +266,9 @@ struct EgressTask {
     playback_started_at: Instant,
     sequence_number: u16,
     marker_pending: bool,
+    /// Source DTMF event timestamp and its timestamp on the output timeline.
+    /// Every packet belonging to one event keeps the same RTP timestamp.
+    dtmf_event_timestamp: Option<(u32, u32)>,
     pcm_buf: Vec<i16>,
     /// LCG state for comfort-noise generation (continuous across frames so the
     /// noise does not repeat per-frame).
@@ -343,6 +353,7 @@ impl EgressTask {
                         if was_relay && !will_relay {
                             self.marker_pending = true;
                         }
+                        self.dtmf_event_timestamp = None;
                         self.source = s;
                     }
                     Some(EgressCmd::UpdateCodec(new_codec)) => {
@@ -353,6 +364,7 @@ impl EgressTask {
                         // Drop any resampler: TranscodePeer re-derives it on next SetSource.
                         self.resampler = None;
                         self.marker_pending = true;
+                        self.dtmf_event_timestamp = None;
                     }
                     None => break,
                 },
@@ -399,35 +411,17 @@ impl EgressTask {
             }
         }
 
-        // Inject pass-through returns a frame directly (pre-encoded); handled
-        // first so we don't disturb the local timestamp/seq counters' alignment
-        // expectations — but we still advance them for consistency.
-        if let EgressSource::Inject { rx } = &mut source {
-            let passed = rx.lock().try_recv().ok().and_then(|s| match s {
-                MediaSample::Audio(f) => Some(f),
-                _ => None,
-            });
-            if let Some(mut f) = passed {
-                f.marker |= self.marker_pending;
-                self.source = source;
-                self.advance_sequence();
-                return Some(f);
-            }
-            // empty → fall through to silence
-            let encoded: Bytes = self.encode_silence().into();
-            self.source = source;
-            let frame = self.build_frame(encoded);
-            self.advance_sequence();
-            return Some(frame);
-        }
-
-        let encoded: Bytes = match &mut source {
+        let frame = match &mut source {
             EgressSource::RewriteRelay { .. } => {
                 // The pacing loop skips ticks while a relay is active, so we
                 // should never get here; keep a silent fallback just in case.
-                self.encode_silence().into()
+                let encoded = self.encode_silence();
+                self.build_frame(encoded)
             }
-            EgressSource::Silence => self.encode_silence().into(),
+            EgressSource::Silence => {
+                let encoded = self.encode_silence();
+                self.build_frame(encoded)
+            }
             EgressSource::Media {
                 audio,
                 loop_playback,
@@ -435,7 +429,7 @@ impl EgressTask {
                 ..
             } => {
                 let n = audio.read_samples(&mut self.pcm_buf);
-                if n == 0 {
+                let encoded: Bytes = if n == 0 {
                     if *loop_playback {
                         let _ = audio.reset();
                         let n2 = audio.read_samples(&mut self.pcm_buf);
@@ -453,30 +447,101 @@ impl EgressTask {
                     }
                 } else {
                     self.encoder.encode(&self.pcm_buf[..n]).into()
+                };
+                self.build_frame(encoded)
+            }
+            EgressSource::Inject { rx } => {
+                let passed = rx.lock().try_recv().ok().and_then(|sample| match sample {
+                    MediaSample::Audio(frame) => Some(frame),
+                    MediaSample::Video(_) => None,
+                });
+                match passed {
+                    Some(mut frame) => {
+                        frame.marker |= self.marker_pending;
+                        frame
+                    }
+                    None => {
+                        let encoded = self.encode_silence();
+                        self.build_frame(encoded)
+                    }
                 }
             }
-            EgressSource::Inject { .. } => unreachable!("handled above"),
-            EgressSource::TranscodePeer { peer, decoder, .. } => {
+            EgressSource::TranscodePeer {
+                peer,
+                decoder,
+                source_audio_payload_type,
+                ..
+            } => {
                 // Wait up to one ptime for the next frame from the peer's
                 // receiver track. On timeout/error emit silence to keep cadence
                 // (the remote decoder's PLC handles the gap).
                 match tokio::time::timeout(self.ptime, peer.recv()).await {
-                    Ok(Ok(MediaSample::Audio(frame))) => {
-                        let mut pcm = decoder.decode(&frame.data);
+                    Ok(Ok(MediaSample::Audio(input)))
+                        if input
+                            .payload_type
+                            .is_none_or(|pt| pt == *source_audio_payload_type) =>
+                    {
+                        let mut pcm = decoder.decode(&input.data);
                         if let Some(rs) = &mut self.resampler {
                             pcm = rs.resample(&pcm);
                         }
-                        self.encoder.encode(&pcm).into()
+                        let encoded: Bytes = self.encoder.encode(&pcm).into();
+                        self.build_frame(encoded)
                     }
-                    _ => self.encode_silence().into(),
+                    Ok(Ok(MediaSample::Audio(input))) => {
+                        match self.build_dtmf_frame(&input) {
+                            Some(frame) => frame,
+                            None => {
+                                let encoded = self.encode_silence();
+                                self.build_frame(encoded)
+                            }
+                        }
+                    }
+                    _ => {
+                        let encoded = self.encode_silence();
+                        self.build_frame(encoded)
+                    }
                 }
             }
         };
 
         self.source = source;
-        let frame = self.build_frame(encoded);
         self.advance_sequence();
         Some(frame)
+    }
+
+    fn build_dtmf_frame(&mut self, source: &AudioFrame) -> Option<AudioFrame> {
+        let payload_type = self.codec.dtmf_payload_type?;
+        let payload = crate::telephone_event::map_telephone_event_duration(
+            &source.data,
+            source.clock_rate,
+            self.codec.clock_rate,
+        )?;
+
+        let rtp_timestamp = match self.dtmf_event_timestamp {
+            Some((source_timestamp, output_timestamp))
+                if source_timestamp == source.rtp_timestamp =>
+            {
+                output_timestamp
+            }
+            _ => {
+                let output_timestamp = self.playback_timestamp();
+                self.dtmf_event_timestamp = Some((source.rtp_timestamp, output_timestamp));
+                output_timestamp
+            }
+        };
+
+        Some(AudioFrame {
+            rtp_timestamp,
+            clock_rate: self.codec.clock_rate,
+            data: Bytes::from(payload),
+            sequence_number: Some(self.sequence_number),
+            payload_type: Some(payload_type),
+            marker: source.marker,
+            header_extension: None,
+            source_addr: None,
+            raw_packet: None,
+        })
     }
 
     /// Zero-fill the PCM buffer (silence).
@@ -572,6 +637,7 @@ mod tests {
             codec: CodecType::PCMU,
             payload_type: 0,
             clock_rate: 8000,
+            dtmf_payload_type: Some(101),
             comfort_noise: false,
             comfort_noise_level_db: -35.0,
         }
@@ -597,6 +663,7 @@ mod tests {
             codec: CodecType::PCMU,
             payload_type: 0,
             clock_rate: 8000,
+            dtmf_payload_type: Some(101),
             comfort_noise: true,
             comfort_noise_level_db: -30.0,
         };
@@ -613,6 +680,7 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-30.0 / 20.0) * i16::MAX as f32,
@@ -764,6 +832,7 @@ mod tests {
             codec: CodecType::Opus,
             payload_type: 111,
             clock_rate: 48000,
+            dtmf_payload_type: Some(101),
             comfort_noise: false,
             comfort_noise_level_db: -35.0,
         };
@@ -827,6 +896,7 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,
@@ -840,6 +910,98 @@ mod tests {
             "PCMU silence must encode to non-empty bytes"
         );
         assert_eq!(task.sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn transcode_peer_returns_audio_or_dtmf_with_one_sequence_owner() {
+        let (peer_sender, peer_track, _peer_fb) = sample_track(MediaKind::Audio, 8);
+        let (sender, output_track, _output_fb) = sample_track(MediaKind::Audio, 8);
+
+        let dtmf = |duration: u16, end: bool| AudioFrame {
+            rtp_timestamp: 77_000,
+            clock_rate: 48_000,
+            data: Bytes::from(vec![
+                5,
+                if end { 0x80 | 7 } else { 7 },
+                duration.to_be_bytes()[0],
+                duration.to_be_bytes()[1],
+            ]),
+            sequence_number: None,
+            payload_type: Some(101),
+            marker: !end,
+            header_extension: None,
+            source_addr: None,
+            raw_packet: None,
+        };
+        peer_sender
+            .try_send(MediaSample::Audio(dtmf(960, false)))
+            .unwrap();
+        peer_sender
+            .try_send(MediaSample::Audio(dtmf(4800, true)))
+            .unwrap();
+
+        let mut opus_encoder = create_encoder(CodecType::Opus);
+        let opus = opus_encoder.encode(&vec![0i16; 960]);
+        peer_sender
+            .try_send(MediaSample::Audio(AudioFrame {
+                rtp_timestamp: 78_000,
+                clock_rate: 48_000,
+                data: Bytes::from(opus),
+                sequence_number: None,
+                payload_type: Some(111),
+                marker: false,
+                header_extension: None,
+                source_addr: None,
+                raw_packet: None,
+            }))
+            .unwrap();
+
+        let codec = pcmu_codec();
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::TranscodePeer {
+                peer: peer_track,
+                decoder: audio_codec::create_decoder(CodecType::Opus),
+                source_audio_payload_type: 111,
+                src_sample_rate: 48_000,
+            },
+            resampler: Some(Resampler::new(48_000, 8000)),
+            ptime: Duration::from_millis(20),
+            gate: None,
+            playback_timestamp_base: 90_000,
+            playback_started_at: Instant::now(),
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
+        };
+
+        let first = task.next_frame().await.expect("first DTMF frame");
+        let second = task.next_frame().await.expect("second DTMF frame");
+        let audio = task.next_frame().await.expect("transcoded audio frame");
+
+        assert_eq!(first.payload_type, Some(101));
+        assert_eq!(first.sequence_number, Some(0));
+        assert_eq!(u16::from_be_bytes([first.data[2], first.data[3]]), 160);
+        assert_eq!(second.payload_type, Some(101));
+        assert_eq!(second.sequence_number, Some(1));
+        assert_eq!(second.rtp_timestamp, first.rtp_timestamp);
+        assert_eq!(u16::from_be_bytes([second.data[2], second.data[3]]), 800);
+        assert_eq!(audio.payload_type, Some(0));
+        assert_eq!(audio.sequence_number, Some(2));
+        assert_eq!(task.sequence_number, 3);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), output_track.recv())
+                .await
+                .is_err(),
+            "next_frame must return packets without sending them directly"
+        );
     }
 
     #[tokio::test]
@@ -883,6 +1045,7 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,

@@ -40,3 +40,64 @@ pub fn telephone_event_payload(code: u8, end: bool, duration: u16) -> Vec<u8> {
         (duration & 0xFF) as u8,
     ]
 }
+
+/// Largest duration in 8 kHz units that still fits after conversion to 48 kHz.
+/// `10_922 * 6 = 65_532`, which is below `u16::MAX`.
+pub const DTMF_CANONICAL_MAX_DURATION: u16 = 10_922;
+
+fn duration_to_8k(duration: u16, source_clock_rate: u32) -> Option<u16> {
+    let duration = match source_clock_rate {
+        8000 => duration,
+        48000 => duration / 6,
+        _ => return None,
+    };
+    Some(duration.min(DTMF_CANONICAL_MAX_DURATION))
+}
+
+fn duration_from_8k(duration: u16, target_clock_rate: u32) -> Option<u16> {
+    let duration = duration.min(DTMF_CANONICAL_MAX_DURATION);
+    match target_clock_rate {
+        8000 => Some(duration),
+        48000 => Some(duration * 6),
+        _ => None,
+    }
+}
+
+/// Preserve the event, end bit and volume, changing only the RFC 4733
+/// cumulative duration between the supported 8 kHz and 48 kHz clocks.
+pub fn map_telephone_event_duration(
+    payload: &[u8],
+    source_clock_rate: u32,
+    target_clock_rate: u32,
+) -> Option<Vec<u8>> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let source_duration = u16::from_be_bytes([payload[2], payload[3]]);
+    let duration_8k = duration_to_8k(source_duration, source_clock_rate)?;
+    let target_duration = duration_from_8k(duration_8k, target_clock_rate)?.to_be_bytes();
+    let mut mapped = payload.to_vec();
+    mapped[2] = target_duration[0];
+    mapped[3] = target_duration[1];
+    Some(mapped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telephone_event_duration_maps_48k_to_8k() {
+        let mapped = map_telephone_event_duration(&[2, 0x8a, 0x12, 0xc0], 48000, 8000)
+            .expect("supported clocks");
+        assert_eq!(&mapped[..2], &[2, 0x8a]);
+        assert_eq!(u16::from_be_bytes([mapped[2], mapped[3]]), 800);
+    }
+
+    #[test]
+    fn telephone_event_duration_caps_before_48k_multiplication() {
+        let mapped = map_telephone_event_duration(&[5, 0x87, 0xff, 0xff], 8000, 48000)
+            .expect("supported clocks");
+        assert_eq!(u16::from_be_bytes([mapped[2], mapped[3]]), 65_532);
+    }
+}

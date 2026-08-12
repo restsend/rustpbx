@@ -569,12 +569,14 @@ impl MediaBridge {
                 peer: b_recv,
                 decoder: b_decoder,
                 src_sample_rate: b_src_rate,
+                source_audio_payload_type: cb.payload_type,
             })
             .await?;
             lb.set_egress_source(EgressSource::TranscodePeer {
                 peer: a_recv,
                 decoder: a_decoder,
                 src_sample_rate: a_src_rate,
+                source_audio_payload_type: ca.payload_type,
             })
             .await?;
             info!(
