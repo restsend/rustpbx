@@ -1,7 +1,10 @@
-use rsipstack::sip::SipMessage;
-use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
+use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::{HostWithPort, SipMessage, ToTypedHeader};
+use rsipstack::transaction::endpoint::MessageInspector;
+use rsipstack::transport::SipAddr;
 use std::net::IpAddr;
 use tracing::debug;
+
 
 pub struct NatInspector;
 
@@ -30,115 +33,186 @@ impl NatInspector {
         header_value: &mut String,
         from_addr: &rsipstack::sip::HostWithPort,
     ) {
-        // Simple regex-less replacement of host:port in Contact header if it contains a private IP
-        // Contact header looks like: "Display Name" <sip:user@host:port;params> or <sip:host:port> or sip:host:port
+        if let Some(new_value) = rewrite_contact_value(header_value, from_addr) {
+            *header_value = new_value;
+        }
+    }
+}
 
-        // Let's try to find the URI part
-        let uri_start = if let Some(idx) = header_value.find('<') {
-            idx + 1
-        } else if let Some(idx) = header_value.find("sip:") {
-            idx
-        } else {
-            return;
-        };
+/// Core rewrite logic operating on an inbound INVITE/REGISTER request.
+///
+/// `source_port` is the actual transport source port, used as a fallback when
+/// the Via has no `rport`.
+fn fix_nated_contact_in_request(req: &mut rsipstack::sip::Request, source_port: Option<u16>) -> bool {
+    if !matches!(
+        req.method,
+        rsipstack::sip::Method::Invite | rsipstack::sip::Method::Register
+    ) {
+        return false;
+    }
 
-        let uri_end = if let Some(idx) = header_value[uri_start..].find('>') {
-            uri_start + idx
-        } else if let Some(idx) = header_value[uri_start..].find(';') {
-            uri_start + idx
-        } else {
-            header_value.len()
-        };
+    let Ok(via) = req.via_header() else {
+        return false;
+    };
+    let Ok(top) = via.first_value() else {
+        return false;
+    };
+    let Ok(typed) = top.typed() else {
+        return false;
+    };
 
-        let uri_str = &header_value[uri_start..uri_end];
+    // NAT signal: the transport layer only sets `received` (alongside `rport`)
+    // when the real source address differs from the Via sent-by.
+    let Some(Ok(received_ip)) = typed.received() else {
+        return false;
+    };
 
-        // Parse URI
-        // Example: sip:user@172.17.0.2:13050
-        if let Some(at_idx) = uri_str.find('@') {
-            let host_part = &uri_str[at_idx + 1..];
-            let host_only = if let Some(col_idx) = host_part.find(':') {
-                &host_part[..col_idx]
-            } else {
-                host_part
-            };
+    let target = HostWithPort {
+        host: rsipstack::sip::Host::IpAddr(received_ip),
+        port: typed.rport().and_then(|r| r).or(source_port).map(Into::into),
+    };
 
-            if let Ok(ip) = host_only.parse::<IpAddr>()
-                && Self::is_private_ip(&ip)
-            {
-                let from_host = from_addr.host.to_string();
-                if let Ok(from_ip) = from_host.parse::<IpAddr>()
-                    && (from_ip == ip || Self::is_private_ip(&from_ip))
-                {
-                    return;
-                }
-
-                let from_port = from_addr.port.as_ref().map(|p| p.to_string());
-
-                let mut new_host_part = from_host;
-                if let Some(port) = from_port {
-                    new_host_part.push(':');
-                    new_host_part.push_str(&port);
-                } else if let Some(col_idx) = host_part.find(':') {
-                    // Keep original port if from_addr doesn't have one (though it should)
-                    new_host_part.push_str(&host_part[col_idx..]);
-                }
-
-                let mut new_header = header_value[..uri_start + at_idx + 1].to_string();
-                new_header.push_str(&new_host_part);
-                new_header.push_str(&header_value[uri_end..]);
-
-                debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
-                *header_value = new_header;
-            }
-        } else if let Some(host_part) = uri_str.strip_prefix("sip:") {
-            let host_only = if let Some(col_idx) = host_part.find(':') {
-                &host_part[..col_idx]
-            } else {
-                host_part
-            };
-
-            if let Ok(ip) = host_only.parse::<IpAddr>()
-                && Self::is_private_ip(&ip)
-            {
-                let from_host = from_addr.host.to_string();
-                // If the ip is the same as the source ip, we don't need to fix it
-                if let Ok(from_ip) = from_host.parse::<IpAddr>()
-                    && from_ip == ip
-                {
-                    return;
-                }
-
-                let from_port = from_addr.port.as_ref().map(|p| p.to_string());
-
-                let mut new_host_part = from_host;
-                if let Some(port) = from_port {
-                    new_host_part.push(':');
-                    new_host_part.push_str(&port);
-                } else if let Some(col_idx) = host_part.find(':') {
-                    new_host_part.push_str(&host_part[col_idx..]);
-                }
-
-                let mut new_header = header_value[..uri_start + 4].to_string();
-                new_header.push_str(&new_host_part);
-                new_header.push_str(&header_value[uri_end..]);
-
-                debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
-                *header_value = new_header;
+    let mut changed = false;
+    for header in req.headers.iter_mut() {
+        if let rsipstack::sip::Header::Contact(contact) = header {
+            let value = contact.value().to_string();
+            if let Some(new_value) = rewrite_contact_value(&value, &target) {
+                *contact = new_value.into();
+                changed = true;
             }
         }
     }
+    if changed {
+        debug!(
+            received = %received_ip,
+            port = ?target.port,
+            method = %req.method,
+            "Fixed NATed Contact on inbound INVITE/REGISTER"
+        );
+    }
+    changed
+}
+
+/// Rewrite every `<...>` URI in a Contact header value whose host is a private
+/// IP, returning the new header value when at least one URI changed.
+fn rewrite_contact_value(value: &str, target: &HostWithPort) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut changed = false;
+    let mut rest = value;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..=lt]);
+        let after = &rest[lt + 1..];
+        let uri_len = after.find('>').unwrap_or(after.len());
+        let uri = &after[..uri_len];
+        match rewrite_nated_uri(uri, target) {
+            Some(new_uri) => {
+                out.push_str(&new_uri);
+                changed = true;
+            }
+            None => out.push_str(uri),
+        }
+        out.push('>');
+        rest = &after[uri_len + 1..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// Rewrite a single URI (the content of a `<...>` Contact value) when its host
+/// is a private IP. Returns `None` when no rewrite applies.
+fn rewrite_nated_uri(uri: &str, target: &HostWithPort) -> Option<String> {
+    let scheme_end = uri.find(':')? + 1;
+    let scheme = &uri[..scheme_end];
+    if scheme != "sip:" && scheme != "sips:" {
+        return None;
+    }
+    let rest = &uri[scheme_end..];
+    let (user_part, authority) = match rest.find('@') {
+        Some(idx) => (&rest[..=idx], &rest[idx + 1..]),
+        None => ("", rest),
+    };
+    let (authority, suffix) = match authority.find([';', '?']) {
+        Some(idx) => (&authority[..idx], &authority[idx..]),
+        None => (authority, ""),
+    };
+
+    let (host, orig_port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+        let close = after_bracket.find(']')?;
+        let host = &after_bracket[..close];
+        let port = after_bracket[close + 1..].strip_prefix(':');
+        (host, port.map(String::from))
+    } else {
+        match authority.find(':') {
+            Some(idx) => (&authority[..idx], Some(authority[idx + 1..].to_string())),
+            None => (authority, None),
+        }
+    };
+
+    let Ok(host_ip) = host.parse::<IpAddr>() else {
+        return None;
+    };
+    if !NatInspector::is_private_ip(&host_ip) {
+        return None;
+    }
+
+    let target_ip = match &target.host {
+        rsipstack::sip::Host::IpAddr(ip) => *ip,
+        rsipstack::sip::Host::Domain(d) => d.0.parse().ok()?,
+    };
+    // When the received address is itself private *and* differs from the Contact
+    // host, both sides are on private networks — rewriting buys nothing.
+    // However when received == contact host (port-only NAT), fixing the port is
+    // still beneficial so we fall through.
+    if NatInspector::is_private_ip(&target_ip) && target_ip != host_ip {
+        return None;
+    }
+
+    let new_port = target
+        .port
+        .map(|p| p.to_string())
+        .or_else(|| orig_port.clone());
+
+    if target_ip == host_ip {
+        // Host already reachable; only the port needs fixing.
+        if new_port == orig_port {
+            return None;
+        }
+        let new_authority = match new_port {
+            Some(ref p) => format!("{}:{}", host, p),
+            None => host.to_string(),
+        };
+        return Some(format!("{}{}{}{}", scheme, user_part, new_authority, suffix));
+    }
+
+    let new_host = match &target.host {
+        rsipstack::sip::Host::IpAddr(ip @ IpAddr::V6(_)) => format!("[{}]", ip),
+        rsipstack::sip::Host::IpAddr(ip) => ip.to_string(),
+        rsipstack::sip::Host::Domain(d) => d.0.clone(),
+    };
+    let new_authority = match new_port {
+        Some(ref p) => format!("{}:{}", new_host, p),
+        None => new_host,
+    };
+    Some(format!("{}{}{}{}", scheme, user_part, new_authority, suffix))
 }
 
 impl MessageInspector for NatInspector {
     fn before_send(&self, msg: SipMessage, _dest: Option<&SipAddr>) -> SipMessage {
         msg
     }
-
     fn after_received(&self, msg: SipMessage, from: Option<&SipAddr>) -> SipMessage {
         let mut msg = msg;
         let Some(from) = from else { return msg };
+
+        // ── Request side: fix Caller Contact for INVITE/REGISTER ────────
+        if let SipMessage::Request(ref mut req) = msg {
+            let source_port = from.addr.port.map(|p| p.0);
+            fix_nated_contact_in_request(req, source_port);
+            return msg;
+        }
+
+        // ── Response side: fix Callee Contact in 1xx/2xx ────────────────
         if let SipMessage::Response(ref mut resp) = msg {
-            // Check if it's a 2xx for INVITE or a 1xx/2xx response that might be used for target learning
             let kind = resp.status_code.kind();
             let is_target_forming = matches!(
                 kind,
@@ -166,6 +240,7 @@ impl MessageInspector for NatInspector {
 #[cfg(test)]
 mod tests {
     use super::NatInspector;
+    use rsipstack::sip::{HeadersExt, ToTypedHeader};
     use rsipstack::sip::SipMessage;
     use rsipstack::transaction::endpoint::MessageInspector;
     use rsipstack::transport::SipAddr;
@@ -216,6 +291,179 @@ mod tests {
         assert_eq!(
             contact_line, "Contact: <sip:41111112222@198.51.100.24:15060>",
             "rewritten Contact header should not duplicate the header name"
+        );
+    }
+
+    fn contact_line(req: &rsipstack::sip::Request) -> String {
+        let text = rsipstack::sip::SipMessage::Request(req.clone()).to_string();
+        text.lines()
+            .find(|line| line.starts_with("Contact:"))
+            .expect("Contact header should exist")
+            .to_string()
+    }
+
+    fn nated_invite() -> rsipstack::sip::Request {
+        let raw = concat!(
+            "INVITE sip:79900123456@203.0.113.52 SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 10.10.10.10:15060;rport=15060;received=198.51.100.24;branch=z9hG4bKdDbDaK1ixkQ7\r\n",
+            "Call-ID: test@voltecall\r\n",
+            "From: <sip:41111112222@10.10.10.10>;tag=aTNjBN8v\r\n",
+            "To: <sip:79900123456@203.0.113.52>\r\n",
+            "CSeq: 7 INVITE\r\n",
+            "Contact: <sip:41111112222@10.10.10.10:15060>\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let rsipstack::sip::SipMessage::Request(req) = rsipstack::sip::SipMessage::try_from(raw).unwrap()
+        else {
+            panic!("expected request")
+        };
+        req
+    }
+
+    #[test]
+    fn test_fix_nated_contact_invite_rewrites_private_contact() {
+        let mut req = nated_invite();
+        assert!(super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@198.51.100.24:15060>"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_register_rewrites_private_contact() {
+        let raw = concat!(
+            "REGISTER sip:rustpbx.com SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 192.168.1.50:5060;rport=60780;received=203.0.113.9;branch=z9hG4bKreg1\r\n",
+            "Call-ID: reg-test@rustpbx.com\r\n",
+            "From: <sip:1001@rustpbx.com>;tag=from-tag\r\n",
+            "To: <sip:1001@rustpbx.com>\r\n",
+            "CSeq: 1 REGISTER\r\n",
+            "Contact: <sip:1001@192.168.1.50:5060;transport=udp>;expires=3600\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let rsipstack::sip::SipMessage::Request(mut req) =
+            rsipstack::sip::SipMessage::try_from(raw).unwrap()
+        else {
+            panic!("expected request")
+        };
+        assert!(super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:1001@203.0.113.9:60780;transport=udp>;expires=3600"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_no_received_param_leaves_unchanged() {
+        let mut req = nated_invite();
+        // remove received/rport so no NAT signal
+        let mut via = req.via_header().unwrap().clone();
+        via.update_first_value(|v| {
+            let mut typed = v.typed()?;
+            typed.params.retain(|p| {
+                !matches!(
+                    p,
+                    rsipstack::sip::Param::Received(_) | rsipstack::sip::Param::Rport(_)
+                )
+            });
+            Ok(typed.into())
+        })
+        .unwrap();
+        *req.via_header_mut().unwrap() = via;
+
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_port_only_nat_rewrites_port() {
+        let mut req = nated_invite();
+        // source host equals contact host but the port changed (port-only NAT)
+        let mut via = req.via_header().unwrap().clone();
+        via.update_first_value(|v| {
+            let mut typed = v.typed()?;
+            typed.params.retain(|p| !matches!(p, rsipstack::sip::Param::Rport(_) | rsipstack::sip::Param::Received(_)));
+            typed.params.push(rsipstack::sip::Param::Received(
+                rsipstack::sip::param::Received::new("10.10.10.10"),
+            ));
+            typed.params.push(rsipstack::sip::Param::Rport(Some(16060)));
+            Ok(typed.into())
+        })
+        .unwrap();
+        *req.via_header_mut().unwrap() = via;
+
+        assert!(super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@10.10.10.10:16060>"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_public_contact_host_leaves_unchanged() {
+        let raw = concat!(
+            "INVITE sip:79900123456@203.0.113.52 SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 198.51.100.24:15060;rport=15060;received=198.51.100.24;branch=z9hG4bKpub\r\n",
+            "Call-ID: pub@voltecall\r\n",
+            "From: <sip:41111112222@198.51.100.24>;tag=aTNjBN8v\r\n",
+            "To: <sip:79900123456@203.0.113.52>\r\n",
+            "CSeq: 7 INVITE\r\n",
+            "Contact: <sip:41111112222@198.51.100.24:15060>\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let rsipstack::sip::SipMessage::Request(mut req) =
+            rsipstack::sip::SipMessage::try_from(raw).unwrap()
+        else {
+            panic!("expected request")
+        };
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@198.51.100.24:15060>"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_private_received_leaves_unchanged() {
+        // received is itself private: same LAN / private hop, nothing to fix
+        let raw = concat!(
+            "INVITE sip:79900123456@203.0.113.52 SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 10.10.10.10:15060;rport=15060;received=10.10.0.1;branch=z9hG4bKpriv\r\n",
+            "Call-ID: priv@voltecall\r\n",
+            "From: <sip:41111112222@10.10.10.10>;tag=aTNjBN8v\r\n",
+            "To: <sip:79900123456@203.0.113.52>\r\n",
+            "CSeq: 7 INVITE\r\n",
+            "Contact: <sip:41111112222@10.10.10.10:15060>\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let rsipstack::sip::SipMessage::Request(mut req) =
+            rsipstack::sip::SipMessage::try_from(raw).unwrap()
+        else {
+            panic!("expected request")
+        };
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+    }
+
+    #[test]
+    fn test_fix_nated_contact_non_invite_register_leaves_unchanged() {
+        let mut req = nated_invite();
+        req.method = rsipstack::sip::Method::Bye;
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
+        assert_eq!(
+            contact_line(&req),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
         );
     }
 }
