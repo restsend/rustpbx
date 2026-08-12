@@ -1167,7 +1167,7 @@ impl BridgePeer {
                                 } else {
                                     caller_silence_start = None;
                                 }
-                                if dr_pkts == 0 {
+                                if gate_open && dr_pkts == 0 {
                                     callee_silence_start.get_or_insert(std::time::Instant::now());
                                 } else {
                                     callee_silence_start = None;
