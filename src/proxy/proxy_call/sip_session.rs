@@ -3063,13 +3063,19 @@ enum ConstructMode<'a> {
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
 
+                // Our own teardown BYE also emits a Terminated event. Keep an
+                // earlier root cause (for example RTP timeout or autohangup).
                 match reason {
                     TerminatedReason::UacBye => {
-                        self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                        if self.meta.hangup_reason.is_none() {
+                            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                        }
                         info!(session_id = %self.id, "Caller initiated hangup (UacBye)");
                     }
                     TerminatedReason::UasBye => {
-                        self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                        if self.meta.hangup_reason.is_none() {
+                            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                        }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye) on caller dialog");
                     }
                     _ => {
@@ -3737,13 +3743,19 @@ enum ConstructMode<'a> {
 
                 self.update_leg_state(&LegId::from("callee"), LegState::Ended);
 
+                // A BYE cascaded from the caller leg is not a new root cause.
+                // Only populate the reason when nothing recorded it earlier.
                 match &reason {
                     TerminatedReason::UasBye => {
-                        self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                        if self.meta.hangup_reason.is_none() {
+                            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                        }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye)");
                     }
                     TerminatedReason::UacBye => {
-                        self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                        if self.meta.hangup_reason.is_none() {
+                            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                        }
                         info!(session_id = %self.id, "Caller initiated hangup (UacBye) on callee dialog");
                     }
                     _ => {

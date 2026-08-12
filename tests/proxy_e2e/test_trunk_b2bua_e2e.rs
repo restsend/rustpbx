@@ -1001,9 +1001,11 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     // hangup reason is `RtpTimeout`.
     let cdr_deadline = Instant::now() + Duration::from_secs(5);
     let mut rtp_timeout_cdr = false;
+    let mut cdr_status_code: Option<u16> = None;
     while Instant::now() < cdr_deadline {
         let records = server.cdr_capture.get_all_records().await;
         if let Some(record) = records.first() {
+            cdr_status_code = Some(record.status_code);
             if matches!(
                 record.hangup_reason,
                 Some(CallRecordHangupReason::RtpTimeout)
@@ -1022,6 +1024,10 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     assert!(
         rtp_timeout_cdr,
         "CDR hangup reason must be RtpTimeout after proxy-initiated teardown"
+    );
+    assert_eq!(
+        cdr_status_code, Some(200),
+        "An established call keeps the INVITE's 200 final status"
     );
 
     caller_receiver.stop();

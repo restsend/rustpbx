@@ -103,7 +103,7 @@ fn default_latching_probation_max_packets() -> Option<u8> {
 }
 
 fn default_rtp_timeout() -> Option<u64> {
-    Some(15)
+    Some(60)
 }
 
 fn default_generated_config_dir() -> String {
