@@ -1877,11 +1877,18 @@ fn extract_tags(tags: &Option<Value>) -> Vec<String> {
 /// filter condition as the list itself).
 async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
     use sea_orm::sea_query::{Alias, Expr, Func, IntoCondition, SimpleExpr};
-    use sea_orm::{ExprTrait, QuerySelect};
+    use sea_orm::{DatabaseBackend, ExprTrait, QuerySelect};
 
     fn count_when<C: IntoCondition>(cond: C) -> SimpleExpr {
         crate::utils::count_when(cond)
     }
+
+    let (sum_cast, avg_cast) = match db.get_database_backend() {
+        DatabaseBackend::Sqlite => ("INTEGER", "REAL"),
+        DatabaseBackend::MySql => ("SIGNED", "DOUBLE"),
+        DatabaseBackend::Postgres => ("BIGINT", "FLOAT8"),
+        _ => ("BIGINT", "FLOAT8"),
+    };
 
     #[derive(sea_orm::FromQueryResult)]
     struct SummaryAgg {
@@ -1909,11 +1916,12 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         .column_as(count_when(CallRecordColumn::HasTranscript.eq(true)), "transcribed")
         .column_as(
             SimpleExpr::from(Func::sum(Expr::col(CallRecordColumn::DurationSecs)))
-                .cast_as(Alias::new("INTEGER")),
+                .cast_as(Alias::new(sum_cast)),
             "total_secs",
         )
         .column_as(
-            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs))),
+            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs)))
+                .cast_as(Alias::new(avg_cast)),
             "avg_secs",
         )
         .column_as(
@@ -2037,6 +2045,37 @@ mod tests {
     #[test]
     fn parse_recording_stream_selector_rejects_unknown_values() {
         assert!(parse_recording_stream_selector(Some("foobar")).is_err());
+    }
+
+    #[tokio::test]
+    async fn build_summary_aggregates_durations() {
+        let db = setup_db().await;
+
+        for (call_id, duration_secs) in [("summary-call-1", 60), ("summary-call-2", 30)] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(Utc::now()),
+                duration_secs: Set(duration_secs),
+                has_transcript: Set(false),
+                transcript_status: Set("pending".into()),
+                created_at: Set(Utc::now()),
+                updated_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert call record");
+        }
+
+        let summary = build_summary(&db, Condition::all())
+            .await
+            .expect("build summary");
+
+        assert_eq!(summary["total"], 2);
+        assert_eq!(summary["avg_duration"], 45.0);
+        assert_eq!(summary["total_minutes"], 1.5);
     }
 
     #[tokio::test]
