@@ -13,7 +13,6 @@ use crate::{
         format_sipflow_media_key, format_sipflow_signaling_file_name, format_sipflow_signaling_key,
     },
     config::SipFlowUploadConfig,
-    rwi::RwiGatewayRef,
     sipflow::SipFlowBackend,
     storage::{Storage, StorageConfig},
 };
@@ -22,7 +21,6 @@ pub struct SipFlowUploadHook {
     backend: Arc<dyn SipFlowBackend>,
     upload_config: SipFlowUploadConfig,
     db: Option<DatabaseConnection>,
-    rwi_gateway: Option<RwiGatewayRef>,
     client: reqwest::Client,
     s3_storage: Option<Storage>,
 }
@@ -32,7 +30,6 @@ impl SipFlowUploadHook {
         backend: Arc<dyn SipFlowBackend>,
         upload_config: SipFlowUploadConfig,
         db: Option<DatabaseConnection>,
-        rwi_gateway: Option<RwiGatewayRef>,
     ) -> Result<Self> {
         let s3_storage = build_s3_storage(&upload_config)?;
 
@@ -40,7 +37,6 @@ impl SipFlowUploadHook {
             backend,
             upload_config,
             db,
-            rwi_gateway,
             client: crate::http_util::build_keepalive_client(
                 Some(CALL_RECORD_HTTP_TIMEOUT),
                 Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
@@ -550,7 +546,6 @@ mod tests {
                 force_pcm: None,
                 pcm_sample_rate: None,
             },
-            None,
             None,
         )
         .unwrap();

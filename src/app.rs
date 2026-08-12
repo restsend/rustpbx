@@ -360,7 +360,6 @@ impl AppStateBuilder {
                                 nodes.clone(),
                                 upload_cfg.clone(),
                                 Some(db_conn.clone()),
-                                rwi_gateway.clone(),
                             )?,
                         ));
                     }
@@ -372,7 +371,6 @@ impl AppStateBuilder {
                                 backend.clone(),
                                 upload_cfg.clone(),
                                 Some(db_conn.clone()),
-                                rwi_gateway.clone(),
                             )?));
                         }
                     }

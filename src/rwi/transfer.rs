@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
 /// Result of a transfer attempt via REFER

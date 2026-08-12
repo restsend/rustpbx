@@ -11,7 +11,6 @@ use crate::{
         format_sipflow_signaling_key,
     },
     config::{SipFlowClusterNode, SipFlowUploadConfig},
-    rwi::RwiGatewayRef,
     sipflow::backend::remote::jump_consistent_hash,
 };
 
@@ -22,7 +21,6 @@ pub struct SipFlowRemoteUploadHook {
     nodes: Vec<SipFlowClusterNode>,
     upload_config: SipFlowUploadConfig,
     db: Option<DatabaseConnection>,
-    rwi_gateway: Option<RwiGatewayRef>,
     client: reqwest::Client,
 }
 
@@ -31,13 +29,11 @@ impl SipFlowRemoteUploadHook {
         nodes: Vec<SipFlowClusterNode>,
         upload_config: SipFlowUploadConfig,
         db: Option<DatabaseConnection>,
-        rwi_gateway: Option<RwiGatewayRef>,
     ) -> Result<Self> {
         Ok(Self {
             nodes,
             upload_config,
             db,
-            rwi_gateway,
             client: crate::http_util::build_keepalive_client(
                 Some(std::time::Duration::from_secs(120)),
                 Some(std::time::Duration::from_secs(10)),
