@@ -1485,3 +1485,170 @@
             other => panic!("expected ServiceUnavailable(fallback), got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn test_concurrent_resolves_assign_distinct_agents() {
+        use rustpbx::addons::cc::SkillGroupTomlCache;
+        use rustpbx::addons::cc::models::cc_agent_endpoint;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        rustpbx::addons::cc::migration::Migrator::up(&db, None)
+            .await
+            .unwrap();
+
+        rustpbx::addons::cc::skill_group::create_skill_group(
+            &db,
+            CreateSkillGroupRequest {
+                skill_group_id: "support".to_string(),
+                display_name: Some("Support".to_string()),
+                skills_required: vec!["support".to_string()],
+                overflow_groups: vec![],
+                sla_target_secs: 30,
+                max_wait_secs: 90,
+                metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cc_registry = Arc::new(AgentRegistry::with_db(db.clone()));
+        for id in ["1001", "1002", "1003"] {
+            cc_registry
+                .register(id.to_string(), vec!["support".to_string()], 1)
+                .await
+                .unwrap();
+            cc_registry
+                .update_status(id, AgentStatus::Idle)
+                .await
+                .unwrap();
+            cc_agent_endpoint::ActiveModel {
+                agent_id: Set(id.to_string()),
+                endpoint_type: Set("sip_uri".to_string()),
+                endpoint_value: Set(format!("sip:{}@example.com", id)),
+                priority: Set(1),
+                is_active: Set(true),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+
+        let cache = Arc::new(tokio::sync::RwLock::new(
+            SkillGroupTomlCache::default(),
+        ));
+        let adapter = CcAgentRegistryAdapter::new(
+            cc_registry.clone(),
+            acd_disabled(),
+            "localhost",
+        )
+        .with_skill_group_cache(cache);
+
+        // Simulate three concurrent calls to the same skill group.
+        let uris1 = adapter
+            .resolve_target_with_policy("skill-group:support", None, "call-1")
+            .await;
+        let uris2 = adapter
+            .resolve_target_with_policy("skill-group:support", None, "call-2")
+            .await;
+        let uris3 = adapter
+            .resolve_target_with_policy("skill-group:support", None, "call-3")
+            .await;
+
+        // Each call must have at least its primary reserved agent.
+        assert!(!uris1.is_empty(), "call-1 should get a reserved agent");
+        assert!(!uris2.is_empty(), "call-2 should get a reserved agent");
+        assert!(!uris3.is_empty(), "call-3 should get a reserved agent");
+
+        // The primary (first) agent must be distinct across concurrent calls.
+        let primary1 = uris1[0].clone();
+        let primary2 = uris2[0].clone();
+        let primary3 = uris3[0].clone();
+        assert_ne!(primary1, primary2, "concurrent calls must reserve distinct agents");
+        assert_ne!(primary1, primary3, "concurrent calls must reserve distinct agents");
+        assert_ne!(primary2, primary3, "concurrent calls must reserve distinct agents");
+
+        // All three agents should now be in Ringing state.
+        for id in ["1001", "1002", "1003"] {
+            let agent = cc_registry.get_agent(id).await.unwrap();
+            assert!(
+                matches!(agent.status, AgentStatus::Ringing { .. }),
+                "agent {id} should be Ringing after reservation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reservation_fallback_when_all_agents_taken() {
+        use rustpbx::addons::cc::SkillGroupTomlCache;
+        use rustpbx::addons::cc::models::cc_agent_endpoint;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        rustpbx::addons::cc::migration::Migrator::up(&db, None)
+            .await
+            .unwrap();
+
+        rustpbx::addons::cc::skill_group::create_skill_group(
+            &db,
+            CreateSkillGroupRequest {
+                skill_group_id: "support".to_string(),
+                display_name: None,
+                skills_required: vec!["support".to_string()],
+                overflow_groups: vec![],
+                sla_target_secs: 30,
+                max_wait_secs: 90,
+                metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cc_registry = Arc::new(AgentRegistry::with_db(db.clone()));
+        cc_registry
+            .register("1001".to_string(), vec!["support".to_string()], 1)
+            .await
+            .unwrap();
+        cc_registry
+            .update_status("1001", AgentStatus::Idle)
+            .await
+            .unwrap();
+        // Simulate a concurrent call already having reserved this agent.
+        cc_registry
+            .update_status("1001", AgentStatus::Ringing {
+                call_id: "other-call".to_string(),
+                since: std::time::Instant::now(),
+            })
+            .await
+            .unwrap();
+        cc_agent_endpoint::ActiveModel {
+            agent_id: Set("1001".to_string()),
+            endpoint_type: Set("sip_uri".to_string()),
+            endpoint_value: Set("sip:1001@example.com".to_string()),
+            priority: Set(1),
+            is_active: Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let cache = Arc::new(tokio::sync::RwLock::new(
+            SkillGroupTomlCache::default(),
+        ));
+        let adapter = CcAgentRegistryAdapter::new(
+            cc_registry.clone(),
+            acd_disabled(),
+            "localhost",
+        )
+        .with_skill_group_cache(cache);
+
+        let uris = adapter
+            .resolve_target_with_policy("skill-group:support", None, "call-1")
+            .await;
+
+        assert!(
+            uris.len() == 1,
+            "fallback returns all skill-matched agents (status-agnostic), got {uris:?}"
+        );
+        assert_eq!(uris[0], "sip:1001@localhost");
+    }

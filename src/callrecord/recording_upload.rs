@@ -267,16 +267,8 @@ impl CallRecordHook for RecordingUploadHook {
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
                 let metadata = RecordingMetadata {
-                    filename: record
-                        .recorder
-                        .first()
-                        .and_then(|m| {
-                            Path::new(&m.path)
-                                .file_name()
-                                .map(|f| f.to_string_lossy().to_string())
-                        })
-                        .unwrap_or_else(|| record.call_id.clone()),
-                    file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
+                    filename: recording_filename(record, url),
+                    file_size: recording_file_size(record),
                     download_url: Some(url.to_string()),
                     caller_name: extract_sip_username(&record.caller),
                     callee_name: extract_sip_username(&record.callee),
@@ -311,4 +303,46 @@ impl CallRecordHook for RecordingUploadHook {
 
         Ok(())
     }
+}
+
+/// Derive the recording file name for `recording_metadata_available`. A local
+/// WAV recorder file wins; when media was captured via SipFlow there is no
+/// local file, so fall back to the last path segment of the stashed URL and
+/// finally to `{call_id}.wav`. Recordings are always WAV, so the returned name
+/// always carries a `.wav` extension.
+fn recording_filename(record: &CallRecord, url: &str) -> String {
+    if let Some(name) = record.recorder.first().and_then(|m| {
+        Path::new(&m.path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+    }) {
+        return name;
+    }
+    match url
+        .split(['/', '\\', '?', '#'])
+        .rfind(|s| !s.is_empty())
+    {
+        Some(segment) => {
+            let stem = segment.rsplit('.').next_back().unwrap_or(segment);
+            format!("{stem}.wav")
+        }
+        None => format!("{}.wav", record.call_id),
+    }
+}
+
+/// Resolve the recording file size for `recording_metadata_available`: the
+/// local WAV recorder file size, else the size stashed by the SipFlow upload
+/// hooks, else 0.
+fn recording_file_size(record: &CallRecord) -> u64 {
+    record
+        .recorder
+        .first()
+        .map(|m| m.size)
+        .or_else(|| {
+            record
+                .extensions
+                .get::<crate::callrecord::RecordingFileSize>()
+                .map(|s| s.0)
+        })
+        .unwrap_or(0)
 }

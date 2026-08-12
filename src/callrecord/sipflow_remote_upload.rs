@@ -139,6 +139,9 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             }
             record.details.recording_url = Some(url.clone());
             record.details.recording_duration_secs = Some(duration_secs.max(0));
+            record
+                .extensions
+                .insert(crate::callrecord::RecordingFileSize(resp.media_size));
         }
 
         Ok(())

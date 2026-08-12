@@ -1050,6 +1050,12 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
                         Some("https://s3.example.com/recordings/test.wav"),
                         "download_url should be the real stashed URL, not sipflow://{{call_id}}"
                     );
+                    // The sipflow-stashed URL carries the recording file name.
+                    assert_eq!(
+                        meta["filename"].as_str(),
+                        Some("test.wav"),
+                        "metadata.filename should keep the .wav extension"
+                    );
                     // hangup_by / agent_id are flattened into metadata via #[serde(flatten)].
                     assert_eq!(
                         meta["hangup_by"].as_str(),
@@ -1075,4 +1081,160 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
         metadata_count == 1,
         "expected exactly 1 recording_metadata_available event, got {metadata_count}"
     );
+}
+
+/// Regression: when SipFlow captured media and the stashed URL carries no file
+/// name (e.g. `sipflow://{call_id}`), `recording_metadata_available.filename`
+/// must fall back to `{call_id}.wav` — never an extension-less call_id.
+#[tokio::test]
+async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
+    use crate::callrecord::recording_upload::RecordingUploadHook;
+    use crate::config::{RecordingPolicy, RecordingType};
+    use crate::rwi::RwiGateway;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut event_rx = gateway.read().subscribe_events();
+
+    let policy = RecordingPolicy {
+        recording_type: Some(RecordingType::Local),
+        ..Default::default()
+    };
+    let hook = RecordingUploadHook::new(policy)
+        .unwrap()
+        .with_rwi_gateway(gateway.clone());
+
+    let now = Utc::now();
+    let mut record = CallRecord {
+        call_id: "call-no-filename".to_string(),
+        start_time: now - chrono::Duration::seconds(60),
+        answer_time: Some(now - chrono::Duration::seconds(45)),
+        end_time: now,
+        caller: "+1234567890".to_string(),
+        callee: "+0987654321".to_string(),
+        details: CallDetails {
+            direction: "inbound".to_string(),
+            status: "completed".to_string(),
+            recording_url: Some("sipflow://call-no-filename".to_string()),
+            recording_duration_secs: Some(15),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    hook.on_record_completed(&mut record)
+        .await
+        .expect("on_record_completed failed");
+
+    let mut saw_metadata = false;
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            event_rx.recv(),
+        )
+        .await
+        {
+            Ok(Ok(entry)) => {
+                if entry.call_id != "call-no-filename" {
+                    continue;
+                }
+                if entry.event.event_type == "recording_metadata_available" {
+                    let meta = &entry.event.payload["metadata"];
+                    assert_eq!(
+                        meta["filename"].as_str(),
+                        Some("call-no-filename.wav"),
+                        "filename must carry the .wav extension"
+                    );
+                    saw_metadata = true;
+                    break;
+                }
+            }
+            Ok(Err(_)) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(saw_metadata, "recording_metadata_available never emitted");
+}
+
+/// Regression: when SipFlow captured media and uploaded it, the file size
+/// stashed by the SipFlow upload hooks must surface in
+/// `recording_metadata_available.file_size` (not 0).
+#[tokio::test]
+async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
+    use crate::callrecord::recording_upload::RecordingUploadHook;
+    use crate::callrecord::RecordingFileSize;
+    use crate::config::{RecordingPolicy, RecordingType};
+    use crate::rwi::RwiGateway;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut event_rx = gateway.read().subscribe_events();
+
+    let policy = RecordingPolicy {
+        recording_type: Some(RecordingType::Local),
+        ..Default::default()
+    };
+    let hook = RecordingUploadHook::new(policy)
+        .unwrap()
+        .with_rwi_gateway(gateway.clone());
+
+    let now = Utc::now();
+    let mut record = CallRecord {
+        call_id: "call-with-size".to_string(),
+        start_time: now - chrono::Duration::seconds(60),
+        answer_time: Some(now - chrono::Duration::seconds(45)),
+        end_time: now,
+        caller: "+1234567890".to_string(),
+        callee: "+0987654321".to_string(),
+        details: CallDetails {
+            direction: "inbound".to_string(),
+            status: "completed".to_string(),
+            recording_url: Some("https://s3.example.com/recordings/call-with-size.wav".to_string()),
+            recording_duration_secs: Some(15),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // Simulate SipFlowUploadHook stashing the uploaded file size.
+    record.extensions.insert(RecordingFileSize(42_000));
+
+    hook.on_record_completed(&mut record)
+        .await
+        .expect("on_record_completed failed");
+
+    let mut saw_metadata = false;
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            event_rx.recv(),
+        )
+        .await
+        {
+            Ok(Ok(entry)) => {
+                if entry.call_id != "call-with-size" {
+                    continue;
+                }
+                if entry.event.event_type == "recording_metadata_available" {
+                    let meta = &entry.event.payload["metadata"];
+                    assert_eq!(
+                        meta["file_size"].as_u64(),
+                        Some(42_000),
+                        "file_size must come from the stashed SipFlow size"
+                    );
+                    assert_eq!(
+                        meta["filename"].as_str(),
+                        Some("call-with-size.wav"),
+                        "filename must carry the .wav extension"
+                    );
+                    saw_metadata = true;
+                    break;
+                }
+            }
+            Ok(Err(_)) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(saw_metadata, "recording_metadata_available never emitted");
 }

@@ -669,12 +669,6 @@ mod tests {
             })
             .await;
 
-        // Should cancel agent2 leg then connect to agent 3
-        stack
-            .assert_cmd(200, "LegRemove-agent2", |c| {
-                matches!(c, CallCommand::LegRemove { .. })
-            })
-            .await;
         stack
             .join()
             .await

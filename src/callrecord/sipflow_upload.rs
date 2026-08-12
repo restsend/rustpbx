@@ -68,7 +68,7 @@ impl CallRecordHook for SipFlowUploadHook {
         // signalling if configured.
         let skip_media = !record.recorder.is_empty();
 
-        if let Some((url, _size)) = crate::callrecord::sipflow_upload::do_upload(
+        if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
             self.backend.as_ref(),
             &self.upload_config,
             self.db.as_ref(),
@@ -87,6 +87,9 @@ impl CallRecordHook for SipFlowUploadHook {
         {
             record.details.recording_url = Some(url);
             record.details.recording_duration_secs = Some(duration_secs.max(0));
+            record
+                .extensions
+                .insert(crate::callrecord::RecordingFileSize(size));
         }
 
         Ok(())

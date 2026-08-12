@@ -50,6 +50,14 @@ pub struct RwiGateway {
     event_tap: broadcast::Sender<EventCacheEntry>,
     /// In-memory call context store for event enrichment.
     pub meta_store: Arc<CallMetaStore>,
+    /// This node's cluster-internal IP, injected into every dispatched event as
+    /// `src_ip`. `None` in single-node mode (cluster disabled or no self peer
+    /// match) — no injection happens then.
+    src_ip: Option<String>,
+    /// Optional source of the agent's client IP. When set, events whose payload
+    /// carries an `agent_id` get a `client_ip` field injected (looked up via the
+    /// CC AgentRegistry at dispatch time — no per-event locator/DB query).
+    client_ip_lookup: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -101,7 +109,24 @@ impl RwiGateway {
             webhook_tx: None,
             event_tap,
             meta_store: CallMetaStore::new(),
+            src_ip: None,
+            client_ip_lookup: None,
         }
+    }
+
+    /// Set this node's cluster-internal IP (`src_ip`). Called once at startup
+    /// when cluster is enabled. `None` disables injection.
+    pub fn set_src_ip(&mut self, ip: Option<String>) {
+        self.src_ip = ip;
+    }
+
+    /// Set an optional agent client-IP lookup used to enrich `agent_id`-carrying
+    /// events with a `client_ip` field. `None` disables client-IP injection.
+    pub fn set_client_ip_lookup(
+        &mut self,
+        lookup: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    ) {
+        self.client_ip_lookup = lookup;
     }
 
     /// Create a new RWI session and return the Arc handle.
@@ -522,19 +547,51 @@ impl RwiGateway {
     }
 
     fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
-        if let Some(call_id) = &flat.call_id
+        let mut payload = if let Some(call_id) = &flat.call_id
             && let Some(meta) = self.meta_store.get_sync(call_id)
         {
             let mut payload = flat.payload.clone();
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
             merge_event_context(&mut payload, Some(&ctx));
-            return RwiEvent {
-                event_type: flat.event_type,
-                call_id: flat.call_id.clone(),
-                payload,
-            };
+            payload
+        } else {
+            flat.payload.clone()
+        };
+
+        self.inject_origin_fields(&mut payload);
+
+        RwiEvent {
+            event_type: flat.event_type,
+            call_id: flat.call_id.clone(),
+            payload,
         }
-        flat.clone()
+    }
+
+    /// Stamp origin fields onto an event payload:
+    /// - `src_ip` — this node's cluster IP (when cluster is enabled).
+    /// - `client_ip` — the agent's registered client IP, when the payload
+    ///   carries an `agent_id` and a lookup is configured.
+    ///
+    /// Existing keys are never overwritten (event's own field wins), matching
+    /// the `merge_event_context` convention.
+    fn inject_origin_fields(&self, payload: &mut serde_json::Value) {
+        if let Some(ip) = &self.src_ip
+            && let Some(obj) = payload.as_object_mut()
+            && !obj.contains_key("src_ip")
+        {
+            obj.insert("src_ip".to_string(), serde_json::Value::String(ip.clone()));
+        }
+        if let Some(lookup) = &self.client_ip_lookup
+            && let Some(obj) = payload.as_object_mut()
+            && let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str())
+            && !obj.contains_key("client_ip")
+            && let Some(ip) = lookup(agent_id)
+        {
+            obj.insert(
+                "client_ip".to_string(),
+                serde_json::Value::String(ip.to_string()),
+            );
+        }
     }
 
     fn send_flat_to_session(&self, session_id: &SessionId, flat: &RwiEvent) {
@@ -841,6 +898,184 @@ mod tests {
             v["callee"].as_str(),
             Some("sip:explicit-callee@localhost"),
             "event's own callee must win over context"
+        );
+    }
+
+    /// When `src_ip` is configured, every dispatched event must carry it —
+    /// including broadcast events with no call context.
+    #[tokio::test]
+    async fn test_src_ip_injected_into_broadcast_event() {
+        let mut gw = RwiGateway::new();
+        gw.set_src_ip(Some("10.0.0.1".to_string()));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "c1".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["src_ip"].as_str(), Some("10.0.0.1"));
+    }
+
+    /// `src_ip` must also be injected for call-scoped owner events (no meta).
+    #[tokio::test]
+    async fn test_src_ip_injected_into_owner_event() {
+        let mut gw = RwiGateway::new();
+        gw.set_src_ip(Some("10.0.0.2".to_string()));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+            .unwrap();
+
+        gw.send_to_owner(&crate::rwi::CallRinging {
+            call_id: "c1".into(),
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["src_ip"].as_str(), Some("10.0.0.2"));
+    }
+
+    /// No `src_ip` configured → no injection (single-node mode).
+    #[tokio::test]
+    async fn test_src_ip_absent_when_not_configured() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "c1".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert!(v.get("src_ip").is_none());
+    }
+
+    /// An event that already carries `src_ip` must not be overwritten.
+    #[tokio::test]
+    async fn test_src_ip_not_overwritten() {
+        let mut gw = RwiGateway::new();
+        gw.set_src_ip(Some("10.0.0.1".to_string()));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        let mut payload = serde_json::json!({
+            "event_type": "cc_ringing",
+            "call_id": "c1",
+            "agent_id": "agent-1",
+            "src_ip": "192.168.1.9",
+        });
+        payload["event_type"] = "cc_ringing".into();
+        gw.broadcast_event(&crate::rwi::event::RwiEvent {
+            event_type: "cc_ringing",
+            call_id: Some("c1".into()),
+            payload,
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(
+            v["src_ip"].as_str(),
+            Some("192.168.1.9"),
+            "event's own src_ip must win"
+        );
+    }
+
+    /// With a `client_ip_lookup` configured, events carrying `agent_id` get a
+    /// `client_ip` stamped from the lookup.
+    #[tokio::test]
+    async fn test_client_ip_injected_for_agent_events() {
+        let mut gw = RwiGateway::new();
+        gw.set_client_ip_lookup(Some(std::sync::Arc::new(|agent_id: &str| {
+            if agent_id == "agent-1" {
+                Some("192.168.1.100".to_string())
+            } else {
+                None
+            }
+        })));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::RwiEvent {
+            event_type: "agent_state_changed",
+            call_id: None,
+            payload: serde_json::json!({
+                "event_type": "agent_state_changed",
+                "agent_id": "agent-1",
+                "from_status": "offline",
+                "to_status": "idle",
+            }),
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["client_ip"].as_str(), Some("192.168.1.100"));
+        assert_eq!(v["agent_id"].as_str(), Some("agent-1"));
+    }
+
+    /// Events without an `agent_id` must not get a `client_ip`, and unknown
+    /// agents (lookup returns None) must leave the payload untouched.
+    #[tokio::test]
+    async fn test_client_ip_absent_for_unknown_agent() {
+        let mut gw = RwiGateway::new();
+        gw.set_client_ip_lookup(Some(std::sync::Arc::new(|_| None)));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::RwiEvent {
+            event_type: "agent_state_changed",
+            call_id: None,
+            payload: serde_json::json!({
+                "event_type": "agent_state_changed",
+                "agent_id": "unknown-agent",
+                "to_status": "idle",
+            }),
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert!(
+            v.get("client_ip").is_none(),
+            "no client_ip injected for unknown agent"
+        );
+    }
+
+    /// An event that already carries `client_ip` must not be overwritten.
+    #[tokio::test]
+    async fn test_client_ip_not_overwritten() {
+        let mut gw = RwiGateway::new();
+        gw.set_client_ip_lookup(Some(std::sync::Arc::new(|_| {
+            Some("10.9.9.9".to_string())
+        })));
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.broadcast_event(&crate::rwi::event::RwiEvent {
+            event_type: "cc_ringing",
+            call_id: Some("c1".into()),
+            payload: serde_json::json!({
+                "event_type": "cc_ringing",
+                "call_id": "c1",
+                "agent_id": "agent-1",
+                "client_ip": "192.168.1.50",
+            }),
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(
+            v["client_ip"].as_str(),
+            Some("192.168.1.50"),
+            "event's own client_ip must win"
         );
     }
 }

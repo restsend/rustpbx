@@ -8688,6 +8688,28 @@ impl SipSession {
                         hook.on_call_ringing(&ctx).await;
                     }
                 }
+                // Notify the running queue app that the agent is ringing so
+                // it can track per-leg state and emit QueueAgentOffered.
+                let agent_uri = self
+                    .legs
+                    .get(&leg_id)
+                    .and_then(|l| l.endpoint.clone());
+                if let Some(ref agent_uri) = agent_uri {
+                    let resolved_agent_id = self
+                        .extensions
+                        .read()
+                        .get::<std::collections::HashMap<String, String>>()
+                        .and_then(|m| m.get("resolved_agent_id").cloned());
+                    self.app_event_bridge
+                        .send_app_event(crate::call::app::ControllerEvent::Custom(
+                            "agent_ringing".to_string(),
+                            serde_json::json!({
+                                "leg_id": leg_id.0,
+                                "agent_uri": agent_uri,
+                                "agent_id": resolved_agent_id,
+                            }),
+                        ));
+                }
                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                     call_id: self.context.session_id.clone(),
                 });
@@ -8746,12 +8768,18 @@ impl SipSession {
                     .get(&leg_id)
                     .and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
+                    let resolved_agent_id = self
+                        .extensions
+                        .read()
+                        .get::<std::collections::HashMap<String, String>>()
+                        .and_then(|m| m.get("resolved_agent_id").cloned());
                     self.app_event_bridge
                         .send_app_event(crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
+                                "agent_id": resolved_agent_id,
                             }),
                         ));
                 }
@@ -8802,6 +8830,24 @@ impl SipSession {
                 } else {
                     "agent_no_answer"
                 };
+                // Resolve the canonical agent_id from session extensions
+                // so the queue app can update the correct agent's presence.
+                let resolved_agent_id = self
+                    .extensions
+                    .read()
+                    .get::<std::collections::HashMap<String, String>>()
+                    .and_then(|m| m.get("resolved_agent_id").cloned())
+                    .unwrap_or_default();
+                let agent_id = if !resolved_agent_id.is_empty() {
+                    resolved_agent_id.clone()
+                } else {
+                    agent_uri
+                        .as_deref()
+                        .and_then(|u| u.strip_prefix("sip:"))
+                        .and_then(|u| u.split('@').next())
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
                 {
                     self.app_event_bridge
                         .send_app_event(crate::call::app::ControllerEvent::Custom(
@@ -8809,6 +8855,7 @@ impl SipSession {
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
+                                "agent_id": agent_id,
                                 "reason": reason,
                             }),
                         ));
@@ -8824,23 +8871,6 @@ impl SipSession {
                     .is_some_and(|app| app == "queue")
                     || self.app_runtime.get_queue_name().is_some();
                 if in_queue {
-                    use std::collections::HashMap;
-                    let resolved_agent_id = self
-                        .extensions
-                        .read()
-                        .get::<HashMap<String, String>>()
-                        .and_then(|m| m.get("resolved_agent_id").cloned())
-                        .unwrap_or_default();
-                    let agent_id = if !resolved_agent_id.is_empty() {
-                        resolved_agent_id
-                    } else {
-                        agent_uri
-                            .as_deref()
-                            .and_then(|u| u.strip_prefix("sip:"))
-                            .and_then(|u| u.split('@').next())
-                            .unwrap_or("unknown")
-                            .to_string()
-                    };
                     let status = reason
                         .strip_prefix("Rejected with ")
                         .map(str::to_string)

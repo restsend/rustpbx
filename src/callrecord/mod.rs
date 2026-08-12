@@ -203,6 +203,14 @@ pub struct CallRecordMedia {
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Transient carrier for the size of a SipFlow-uploaded recording. Stashed on
+/// `CallRecord.extensions` by `SipFlowUploadHook` / `SipFlowRemoteUploadHook`
+/// so `RecordingUploadHook` can emit an accurate
+/// `recording_metadata_available.file_size` when there is no local WAV
+/// recorder file.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordingFileSize(pub u64);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum CallRecordHangupReason {

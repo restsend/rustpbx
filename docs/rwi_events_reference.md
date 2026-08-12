@@ -124,6 +124,17 @@ events = []
 - `dnis` vs `callee`：同上
 - 上下文由 `CallMetaStore` 在 gateway 分发时自动注入，事件生产者无需手动填充
 
+### 来源字段（gateway 自动注入）
+
+集群模式下 gateway 还会给**所有**事件注入以下字段，Webhook 与 WS 消费者都可见：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `src_ip` | Option\<String\> | 本节点 cluster 内 IP（来自 `[cluster].peers` 自匹配）。仅在启用 cluster 且匹配到本机 peer 时注入；单机/NAT 不匹配时不出现 |
+| `client_ip` | Option\<String\> | 坐席客户端注册 IP（`Location.destination`，WS/WebRTC 即 cc-phone 源 IP）。仅当事件载荷带 `agent_id` 且该坐席已注册时注入 |
+
+两者都遵循“事件自身字段优先”约定——事件自身携带同名非空字段时不会被覆盖。`client_ip` 在坐席注册/注销时从 locator 捕获，分发时 O(1) 查 registry，无发射时查询。
+
 ### 字段重复说明
 
 部分事件（如 `RecordStopped`、`IvrNodeEntered`）自身也携带 `ani`/`dnis` 等字段。当事件自身字段值为 `None` 时，`enrich()` 会自动从上下文补充。Webhook 消费者最终收到的是合并后的完整值。

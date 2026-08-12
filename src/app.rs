@@ -500,6 +500,20 @@ impl AppStateBuilder {
         // Note: CC addon state is created and managed by the addon itself during initialize()
         // The proxy_server_hook registers the AgentRegistry adapter with the SIP server
 
+        // Stamp this node's cluster-internal IP onto every RWI event as `src_ip`
+        // when cluster is enabled. `cluster_self_addr` is resolved at startup from
+        // `[cluster].peers` by matching a peer `addr:sip_port` against local endpoint
+        // listeners; it is `None` in single-node mode (or when no peer matches, e.g.
+        // NAT), so no injection happens then.
+        if let Some(ref gw) = core.rwi_gateway {
+            let src_ip = sip_server
+                .inner
+                .cluster_self_addr
+                .as_ref()
+                .map(|addr| addr.addr.host.to_string());
+            gw.write().set_src_ip(src_ip);
+        }
+
         // Update rwi_call_registry with the active call registry from sip_server
         if config.rwi.is_some() {
             let registry = sip_server.inner.active_call_registry.clone();

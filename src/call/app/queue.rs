@@ -328,6 +328,7 @@ pub struct QueueApp {
     no_answer_token: Option<PlaybackToken>,
     comfort_token: Option<PlaybackToken>,
     final_token: Option<PlaybackToken>,
+    abandoned_recorded: bool,
 }
 
 impl QueueApp {
@@ -358,6 +359,7 @@ impl QueueApp {
             no_answer_token: None,
             comfort_token: None,
             final_token: None,
+            abandoned_recorded: false,
         }
     }
 
@@ -682,6 +684,7 @@ impl QueueApp {
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
         });
+        self.abandoned_recorded = true;
 
         info!(
             queue = %queue_id,
@@ -726,6 +729,7 @@ impl QueueApp {
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
         });
+        self.abandoned_recorded = true;
 
         info!(
             queue = %queue_id,
@@ -833,13 +837,24 @@ impl QueueApp {
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
         );
+        // In sequential mode only one agent rings at a time; clear stale
+        // entries so the ring-timeout handler sees the correct agent.
+        if !self.is_parallel() {
+            self.pending_agents.clear();
+        }
         match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
             Ok(call_id) => {
                 self.pending_agents.push((uri, call_id));
             }
             Err(e) => {
                 warn!("Queue: failed to dial agent {}: {}", uri, e);
-                return self.play_busy_and_then_fallback(ctrl).await;
+                // Advance to the next agent instead of falling back immediately.
+                self.current_agent_idx += 1;
+                self.dial_attempts += 1;
+                if self.current_agent_idx >= self.get_agents().len() {
+                    return self.play_busy_and_then_fallback(ctrl).await;
+                }
+                return Box::pin(self.dial_next_agent(ctrl)).await;
             }
         }
         let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
@@ -1162,9 +1177,12 @@ impl CallApp for QueueApp {
                     .await;
 
                 // Originate call to agent
-                let _call_id = ctrl
+                let call_id = ctrl
                     .originate_call(&agent.uri, Some(self.call_id.clone()))
                     .await?;
+
+                self.pending_agents
+                    .push((agent.uri.clone(), call_id));
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -1550,42 +1568,53 @@ impl CallApp for QueueApp {
             "agent_ring_timeout" => {
                 info!("Queue: agent ring timeout, handling no-answer");
 
+                // Only reset agent(s) that THIS call is currently dialing.
+                // Look up the canonical agent_id via the registry so URI
+                // user-parts that differ from the registered agent_id are
+                // handled correctly (e.g. DbRegistry custom URIs).
+                let timed_out_uris: Vec<String> =
+                    std::mem::take(&mut self.pending_agents)
+                        .into_iter()
+                        .map(|(uri, _)| uri)
+                        .collect();
+
                 if let Some(ref registry) = self.agent_registry {
-                    let agents = registry.list_agents().await;
-                    for agent in agents {
-                        if matches!(agent.presence, PresenceState::Ringing { .. }) {
-                            let _ = registry
-                                .update_presence(&agent.agent_id, PresenceState::Idle)
-                                .await;
-
-                            ctrl.notify_event(
-                                "queue.agent_no_answer",
-                                serde_json::json!({
-                                    "call_id": self.call_id,
-                                    "agent_id": agent.agent_id,
-                                    "queue_id": self.config.name,
-                                }),
-                            )
-                            .await?;
-
-                            // Emit RWI queue lifecycle event: the agent did not
-                            // answer before the ring timeout.
-                            self.emit_rwi(&crate::rwi::event::QueueAgentNoAnswer {
-                                call_id: self.call_id.clone(),
-                                queue_id: self.config.name.clone(),
-                                agent_id: agent.agent_id.clone(),
-                                attempt: self.dial_attempts,
-                                trace_id: self.call_id.clone(),
+                    let all_agents = registry.list_agents().await;
+                    for uri in &timed_out_uris {
+                        let agent_id = all_agents
+                            .iter()
+                            .find(|a| a.uri == *uri)
+                            .map(|a| a.agent_id.clone())
+                            .unwrap_or_else(|| {
+                                uri.strip_prefix("sip:")
+                                    .and_then(|s| s.split('@').next())
+                                    .unwrap_or(uri)
+                                    .to_string()
                             });
+                        let _ = registry
+                            .update_presence(&agent_id, PresenceState::Idle)
+                            .await;
 
-                            break;
-                        }
+                        ctrl.notify_event(
+                            "queue.agent_no_answer",
+                            serde_json::json!({
+                                "call_id": self.call_id,
+                                "agent_id": &agent_id,
+                                "queue_id": self.config.name,
+                            }),
+                        )
+                        .await?;
+
+                        self.emit_rwi(&crate::rwi::event::QueueAgentNoAnswer {
+                            call_id: self.call_id.clone(),
+                            queue_id: self.config.name.clone(),
+                            agent_id: agent_id.clone(),
+                            attempt: self.dial_attempts,
+                            trace_id: self.call_id.clone(),
+                        });
                     }
                 }
 
-                if self.is_parallel() {
-                    self.pending_agents.clear();
-                }
                 self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer, None)
                     .await
             }
@@ -1643,7 +1672,7 @@ impl CallApp for QueueApp {
                 connected_agent: Some(_)
             }
         );
-        if !was_connected {
+        if !was_connected && !self.abandoned_recorded {
             let queue_id = self.config.name.clone();
 
             self.update_stats(&queue_id, |stats| {

@@ -143,6 +143,7 @@ async fn test_agent_events_on_transitions() {
     let payload = event.payload.as_object().expect("payload object");
     assert_eq!(payload["from_status"].as_str(), Some("ringing"));
     assert_eq!(payload["to_status"].as_str(), Some("busy"));
+    assert_eq!(payload["call_id"].as_str(), Some("call-1"));
 
     // ── Test 4: Busy → Wrapup (hanging up) ────────────────────────────
     cc_state
@@ -162,6 +163,7 @@ async fn test_agent_events_on_transitions() {
     let payload = event.payload.as_object().expect("payload object");
     assert_eq!(payload["from_status"].as_str(), Some("busy"));
     assert_eq!(payload["to_status"].as_str(), Some("wrapup"));
+    assert_eq!(payload["call_id"].as_str(), Some("call-1"));
 
     // ── Test 5: Wrapup → Idle (after-call work done) ──────────────────
     cc_state
@@ -177,6 +179,7 @@ async fn test_agent_events_on_transitions() {
     let payload = event.payload.as_object().expect("payload object");
     assert_eq!(payload["from_status"].as_str(), Some("wrapup"));
     assert_eq!(payload["to_status"].as_str(), Some("idle"));
+    assert_eq!(payload["call_id"].as_str(), Some("call-1"));
 
     // ── Test 6: Idle → Busy (outbound call, agent is already idle) ────
     let (test_tx3, mut test_rx3) = tokio::sync::mpsc::unbounded_channel();
@@ -200,6 +203,7 @@ async fn test_agent_events_on_transitions() {
     let payload = event.payload.as_object().expect("payload object");
     assert_eq!(payload["from_status"].as_str(), Some("idle"));
     assert_eq!(payload["to_status"].as_str(), Some("busy"));
+    assert_eq!(payload["call_id"].as_str(), Some("outbound-call"));
 
     // Clean up: back to offline via wrapup
     let (test_tx4, mut test_rx4) = tokio::sync::mpsc::unbounded_channel();
