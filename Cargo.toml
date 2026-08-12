@@ -56,7 +56,6 @@ exclude = [
 [features]
 cross = []
 console = ["dep:minijinja"]
-jemalloc = ["dep:tikv-jemallocator"]
 addon-acme = ["instant-acme"]
 addon-wholesale = [
     "dep:async-stream",
@@ -110,7 +109,6 @@ default = [
 
 
 [dependencies]
-tikv-jemallocator = { version = "0.6", optional = true }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "hyper-rustls",
     "ring",
