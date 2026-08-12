@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.description="A SIP PBX implementation in Rust (Co
 ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV TZ=UTC
-
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
