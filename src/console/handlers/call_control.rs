@@ -405,11 +405,8 @@ async fn forward_command_to_peers(
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status == StatusCode::NOT_FOUND {
-                        return None;
-                    }
-                    let body_text = resp.text().await.ok()?;
-                    Some((status, Json(body_text)).into_response())
+                    let body_value = resp.json::<serde_json::Value>().await.ok()?;
+                    Some((status, Json(body_value)).into_response())
                 }
                 Err(_) => None,
             }
@@ -452,11 +449,8 @@ async fn query_session_from_peers(state: &ConsoleState, session_id: &str) -> Opt
             match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status == StatusCode::NOT_FOUND {
-                        return None;
-                    }
-                    let body_text = resp.text().await.ok()?;
-                    Some((status, Json(body_text)).into_response())
+                    let body_value = resp.json::<serde_json::Value>().await.ok()?;
+                    Some((status, Json(body_value)).into_response())
                 }
                 Err(_) => None,
             }
