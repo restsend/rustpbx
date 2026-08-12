@@ -1460,15 +1460,18 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
     wait_for_cdr(&server, 800).await?;
     let records = server.cdr_capture.get_all_records().await;
     let record = &records[0];
-    if !matches!(
-        record.hangup_reason,
-        Some(CallRecordHangupReason::RtpTimeout)
-    ) {
-        warn!(
-            "Expected CDR hangup reason RtpTimeout, got {:?} (test may be flaky due to timing)",
-            record.hangup_reason
-        );
-    }
+    assert_eq!(
+        record.status_code, 200,
+        "An established call keeps the INVITE's 200 final status"
+    );
+    assert!(
+        matches!(
+            record.hangup_reason,
+            Some(CallRecordHangupReason::RtpTimeout)
+        ),
+        "Expected CDR hangup reason RtpTimeout, got {:?}",
+        record.hangup_reason
+    );
 
     caller_receiver.stop();
     callee_receiver.stop();
