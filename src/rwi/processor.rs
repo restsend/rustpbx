@@ -5,7 +5,6 @@ use crate::call::runtime::ConferenceId;
 use crate::call::runtime::ConferenceManager;
 use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
-use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::RwiGatewayRef;
@@ -1087,14 +1086,14 @@ impl RwiCommandProcessor {
                 .with_id(format!("{}-caller", call_id))
                 .with_cancel_token(cancel_token.clone());
             let caller_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
-                Arc::new(VoiceEnginePeer::new(Arc::new(caller_media_builder.build())));
+                Arc::new(caller_media_builder.build());
             caller_peer.update_track(Box::new(media_track), None).await;
 
             let callee_media_builder = crate::media::MediaStreamBuilder::new()
                 .with_id(format!("{}-callee", call_id))
                 .with_cancel_token(cancel_token.clone());
             let callee_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
-                Arc::new(VoiceEnginePeer::new(Arc::new(callee_media_builder.build())));
+                Arc::new(callee_media_builder.build());
 
             // Construct an UAC SipSession (virtual caller A leg + real callee B leg).
             let synthetic_request = rsipstack::sip::Request {

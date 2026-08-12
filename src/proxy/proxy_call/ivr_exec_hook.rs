@@ -123,7 +123,7 @@ impl CallSessionHook for IvrExecHook {
             let payload = result.clone();
             let session_id_clone = session_id.clone();
             tokio::spawn(async move {
-                let http = reqwest::Client::new();
+                let http = crate::http_util::shared_keepalive_client();
                 match http
                     .post(&url)
                     .timeout(std::time::Duration::from_secs(10))

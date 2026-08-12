@@ -123,6 +123,8 @@ pub async fn create_test_server_with_config(
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
         cluster_self_addr: None,
+        session_registry: Arc::new(crate::call::runtime::NoopSessionRegistry),
+        session_registry_heartbeat: None,
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),

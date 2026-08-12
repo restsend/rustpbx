@@ -6,6 +6,7 @@ use std::time::Duration;
 
 pub mod add_leg_timeline_column;
 pub mod add_metadata_column;
+pub mod cluster_session;
 pub mod add_outbound_sip_trunk_id;
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;

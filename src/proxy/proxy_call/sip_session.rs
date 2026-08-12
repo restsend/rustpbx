@@ -35,7 +35,7 @@ use crate::media::negotiate::MediaNegotiator;
 use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::{
-    media_peer::{MediaPeer, VoiceEnginePeer},
+    media_peer::MediaPeer,
     reporter::CallReporter,
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,
@@ -1402,7 +1402,7 @@ enum ConstructMode<'a> {
             })),
         );
 
-        let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::new();
+        let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::default();
         meta.routed_caller = context.dialplan.caller.as_ref().map(|uri| uri.to_string());
         meta.routed_callee = context
             .dialplan
@@ -1599,12 +1599,12 @@ enum ConstructMode<'a> {
         let caller_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-caller", session_id))
             .with_cancel_token(cancel_token.child_token());
-        let caller_peer = Arc::new(VoiceEnginePeer::new(Arc::new(caller_media_builder.build())));
+        let caller_peer = Arc::new(caller_media_builder.build());
 
         let callee_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-callee", session_id))
             .with_cancel_token(cancel_token.child_token());
-        let callee_peer = Arc::new(VoiceEnginePeer::new(Arc::new(callee_media_builder.build())));
+        let callee_peer = Arc::new(callee_media_builder.build());
 
         let (mut session, handle, cmd_rx) = SipSession::new(
             server.clone(),
@@ -7108,7 +7108,7 @@ enum ConstructMode<'a> {
         channels: u16,
         mono_caller_only: bool,
     ) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
+        use crate::proxy::proxy_call::media_state::{RecordingInfo, RecordingPhase};
         if !self.context.dialplan.recording.enabled {
             return Err(anyhow!("Recording is not enabled for this call"));
         }
@@ -7146,11 +7146,11 @@ enum ConstructMode<'a> {
             mb.set_recorder_for(crate::media::media_bridge::LegSide::A, recorder);
         }
 
-        self.media.recording_state = RecordingPhase::Recording {
+        self.media.recording_state = RecordingPhase::Recording(RecordingInfo {
             path: path.to_string(),
             started_at: Instant::now(),
             max_duration,
-        };
+        });
 
         if beep {
             info!(session_id = %self.context.session_id, "Playing recording beep");
@@ -7167,20 +7167,12 @@ enum ConstructMode<'a> {
     pub async fn pause_recording(&mut self) -> Result<()> {
         use crate::proxy::proxy_call::media_state::RecordingPhase;
         let next = match &self.media.recording_state {
-            RecordingPhase::Recording {
-                path,
-                started_at,
-                max_duration,
-            } => {
-                info!(session_id = %self.id, path = %path, "Recording paused");
-                RecordingPhase::Paused {
-                    path: path.clone(),
-                    started_at: *started_at,
-                    max_duration: *max_duration,
-                }
+            RecordingPhase::Recording(info) => {
+                info!(session_id = %self.id, path = %info.path, "Recording paused");
+                RecordingPhase::Paused(info.clone())
             }
-            RecordingPhase::Paused { path, .. } => {
-                return Err(anyhow!("Recording already paused: {}", path));
+            RecordingPhase::Paused(info) => {
+                return Err(anyhow!("Recording already paused: {}", info.path));
             }
             RecordingPhase::Idle => {
                 return Err(anyhow!("Recording not active"));
@@ -7196,20 +7188,12 @@ enum ConstructMode<'a> {
     pub async fn resume_recording(&mut self) -> Result<()> {
         use crate::proxy::proxy_call::media_state::RecordingPhase;
         let next = match &self.media.recording_state {
-            RecordingPhase::Paused {
-                path,
-                started_at,
-                max_duration,
-            } => {
-                info!(session_id = %self.id, path = %path, "Recording resumed");
-                RecordingPhase::Recording {
-                    path: path.clone(),
-                    started_at: *started_at,
-                    max_duration: *max_duration,
-                }
+            RecordingPhase::Paused(info) => {
+                info!(session_id = %self.id, path = %info.path, "Recording resumed");
+                RecordingPhase::Recording(info.clone())
             }
-            RecordingPhase::Recording { path, .. } => {
-                return Err(anyhow!("Recording already active: {}", path));
+            RecordingPhase::Recording(info) => {
+                return Err(anyhow!("Recording already active: {}", info.path));
             }
             RecordingPhase::Idle => {
                 return Err(anyhow!("Recording not active"));
@@ -7256,9 +7240,7 @@ enum ConstructMode<'a> {
         use crate::proxy::proxy_call::media_state::RecordingPhase;
         let prev = std::mem::replace(&mut self.media.recording_state, RecordingPhase::Idle);
         let path = match &prev {
-            RecordingPhase::Recording { path, .. } | RecordingPhase::Paused { path, .. } => {
-                path.clone()
-            }
+            RecordingPhase::Recording(info) | RecordingPhase::Paused(info) => info.path.clone(),
             RecordingPhase::Idle => return Ok(()),
         };
         // Duration is tracked locally (RecordingPhase.started_at).
@@ -9399,8 +9381,8 @@ impl SipSession {
             .with_cancel_token(self.cancel_token.child_token());
         let media_stream = media_stream_builder.build();
 
-        // Create peer (using VoiceEnginePeer for now - can be extended for WebRTC)
-        let peer: Arc<dyn MediaPeer> = Arc::new(VoiceEnginePeer::new(Arc::new(media_stream)));
+        // Create peer (using MediaStream for now - can be extended for WebRTC)
+        let peer: Arc<dyn MediaPeer> = Arc::new(media_stream);
 
         let mut track_builder = self.build_rtp_track_builder(
             track_id.clone(),

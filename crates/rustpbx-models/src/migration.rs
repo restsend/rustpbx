@@ -29,6 +29,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::alter_rewrite_columns_length::Migration),
             Box::new(super::add_outbound_sip_trunk_id::Migration),
             Box::new(super::config_entry::Migration),
+            Box::new(super::cluster_session::Migration),
             // The queue addon migration is registered in the addon's own migrator.
         ]
     }

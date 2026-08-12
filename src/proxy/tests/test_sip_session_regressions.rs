@@ -1694,18 +1694,18 @@ async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
 
 #[tokio::test]
 async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
-    use crate::proxy::proxy_call::media_state::RecordingPhase;
+    use crate::proxy::proxy_call::media_state::{RecordingInfo, RecordingPhase};
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "voicemail".to_string(),
         None,
         true,
     );
     let mut session = build_session(dialplan).await;
-    session.media.recording_state = RecordingPhase::Recording {
+    session.media.recording_state = RecordingPhase::Recording(RecordingInfo {
         path: "/tmp/rustpbx-test-vm-does-not-need-to-exist.wav".to_string(),
         started_at: Instant::now(),
         max_duration: None,
-    };
+    });
     assert!(session.media.recording_state.is_active());
 
     session.finalize_recording_for_app_shutdown().await;

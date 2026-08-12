@@ -291,10 +291,44 @@ pub struct ClusterPeer {
     pub ami_port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClusterConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<ClusterPeer>,
+    /// Session registry backend: "db" (cluster default), "memory", or "noop".
+    #[serde(default = "default_session_registry_backend")]
+    pub session_registry_backend: String,
+    /// TTL for session records.  A crashed node's sessions are reclaimed after
+    /// this duration by the SWEA sweeper.  Default 3600s (1 hour).
+    #[serde(default = "default_session_registry_ttl")]
+    pub session_registry_ttl_secs: u64,
+    /// Interval at which the per-node heartbeat refreshes owned sessions.
+    /// Default 30s.
+    #[serde(default = "default_session_registry_heartbeat")]
+    pub session_registry_heartbeat_secs: u64,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            peers: Vec::new(),
+            session_registry_backend: default_session_registry_backend(),
+            session_registry_ttl_secs: default_session_registry_ttl(),
+            session_registry_heartbeat_secs: default_session_registry_heartbeat(),
+        }
+    }
+}
+
+fn default_session_registry_backend() -> String {
+    "db".to_string()
+}
+
+fn default_session_registry_ttl() -> u64 {
+    3600
+}
+
+fn default_session_registry_heartbeat() -> u64 {
+    30
 }
 
 fn default_max_audio_download_bytes() -> u64 {
@@ -1727,6 +1761,36 @@ mod tests {
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.peers.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_config_session_registry_defaults() {
+        // Defaults: backend "db", TTL 3600, heartbeat 30 — and they survive
+        // a TOML round-trip (fields are always available, not commerce-gated).
+        let cfg = ClusterConfig::default();
+        assert_eq!(cfg.session_registry_backend, "db");
+        assert_eq!(cfg.session_registry_ttl_secs, 3600);
+        assert_eq!(cfg.session_registry_heartbeat_secs, 30);
+
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.session_registry_backend, "db");
+        assert_eq!(parsed.session_registry_ttl_secs, 3600);
+        assert_eq!(parsed.session_registry_heartbeat_secs, 30);
+    }
+
+    #[test]
+    fn test_cluster_config_session_registry_overrides() {
+        let toml_str = r#"
+            peers = []
+            session_registry_backend = "memory"
+            session_registry_ttl_secs = 120
+            session_registry_heartbeat_secs = 10
+        "#;
+        let parsed: ClusterConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.session_registry_backend, "memory");
+        assert_eq!(parsed.session_registry_ttl_secs, 120);
+        assert_eq!(parsed.session_registry_heartbeat_secs, 10);
     }
 
     /// Regression: `Config::clone` used to round-trip through TOML which is

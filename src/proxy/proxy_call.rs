@@ -27,6 +27,34 @@ pub(crate) mod state;
 #[cfg(test)]
 pub(crate) mod test_util;
 
+/// Build a [`CallContext`] shared by both the live session path and the
+/// early-failure (`report_failure`) path so the derived fields (session id,
+/// timestamps) stay consistent.
+fn build_call_context(
+    dialplan: Arc<Dialplan>,
+    cookie: TransactionCookie,
+    max_forwards: u32,
+    original_caller: String,
+    original_callee: String,
+    metadata: Option<std::collections::HashMap<String, String>>,
+) -> CallContext {
+    let session_id = dialplan
+        .session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    CallContext {
+        session_id,
+        dialplan,
+        cookie,
+        start_time: Instant::now(),
+        original_caller,
+        original_callee,
+        max_forwards,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata,
+    }
+}
+
 pub struct CallSessionBuilder {
     cookie: TransactionCookie,
     dialplan: Dialplan,
@@ -64,10 +92,6 @@ impl CallSessionBuilder {
         let dialplan = self.dialplan;
         let dialplan = Arc::new(dialplan);
         let cancel_token = self.cancel_token.unwrap_or_default();
-        let session_id = dialplan
-            .session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
             .original
@@ -108,17 +132,14 @@ impl CallSessionBuilder {
                 if meta.is_empty() { None } else { Some(meta) }
             });
 
-        let context = CallContext {
-            session_id,
+        let context = build_call_context(
             dialplan,
-            cookie: self.cookie,
-            start_time: Instant::now(),
+            self.cookie,
+            self.max_forwards,
             original_caller,
             original_callee,
-            max_forwards: self.max_forwards,
-            created_at: chrono::Utc::now().to_rfc3339(),
             metadata,
-        };
+        );
 
         SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
     }
@@ -149,36 +170,31 @@ impl CallSessionBuilder {
         }
 
         let dialplan = Arc::new(dialplan);
-        let session_id = dialplan
-            .session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
             .original
             .from_header()
             .ok()
-            .map(|t| t.value().to_string())
+            .and_then(|h| h.uri().ok())
+            .map(|u| u.to_string())
             .unwrap_or_default();
 
         let original_callee = dialplan
             .original
             .to_header()
             .ok()
-            .map(|t| t.value().to_string())
+            .and_then(|h| h.uri().ok())
+            .map(|u| u.to_string())
             .unwrap_or_default();
 
-        let context = CallContext {
-            session_id,
-            dialplan: dialplan.clone(),
+        let context = build_call_context(
+            dialplan.clone(),
             cookie,
-            start_time: Instant::now(),
-            original_caller: original_caller.clone(),
-            original_callee: original_callee.clone(),
-            max_forwards: 70,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            metadata: None,
-        };
+            70,
+            original_caller.clone(),
+            original_callee.clone(),
+            None,
+        );
 
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {
             server,

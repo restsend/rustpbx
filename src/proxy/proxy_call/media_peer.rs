@@ -27,28 +27,18 @@ pub trait MediaPeer: Send + Sync {
     async fn unmute_track(&self, track_id: &str) -> bool;
 }
 
-pub struct VoiceEnginePeer {
-    stream: Arc<MediaStream>,
-}
-
-impl VoiceEnginePeer {
-    pub fn new(stream: Arc<MediaStream>) -> Self {
-        Self { stream }
-    }
-}
-
 #[async_trait]
-impl MediaPeer for VoiceEnginePeer {
+impl MediaPeer for MediaStream {
     fn cancel_token(&self) -> CancellationToken {
-        self.stream.cancel_token.clone()
+        self.cancel_token.clone()
     }
 
     async fn update_track(&self, track: Box<dyn Track>, play_id: Option<String>) {
-        self.stream.update_track(track, play_id).await;
+        self.update_track(track, play_id).await;
     }
 
     async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>> {
-        self.stream.get_tracks().await
+        self.get_tracks().await
     }
 
     async fn update_remote_description(
@@ -57,16 +47,15 @@ impl MediaPeer for VoiceEnginePeer {
         remote: &str,
         sdp_type: SdpType,
     ) -> Result<()> {
-        self.stream
-            .update_remote_description(track_id, remote, sdp_type)
+        self.update_remote_description(track_id, remote, sdp_type)
             .await
     }
 
     async fn mute_track(&self, track_id: &str) -> bool {
-        self.stream.mute_track(track_id).await
+        self.mute_track(track_id).await
     }
 
     async fn unmute_track(&self, track_id: &str) -> bool {
-        self.stream.unmute_track(track_id).await
+        self.unmute_track(track_id).await
     }
 }

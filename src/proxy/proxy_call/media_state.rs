@@ -1,33 +1,34 @@
 use crate::media::media_bridge::MediaBridge;
 use std::time::{Duration, Instant};
 
+/// Metadata shared by the `Recording` and `Paused` phases of a recording.
+#[derive(Debug, Clone)]
+pub struct RecordingInfo {
+    pub path: String,
+    pub started_at: Instant,
+    pub max_duration: Option<Duration>,
+}
+
 #[derive(Debug, Clone)]
 pub enum RecordingPhase {
     Idle,
-    Recording {
-        path: String,
-        started_at: Instant,
-        max_duration: Option<Duration>,
-    },
-    Paused {
-        path: String,
-        started_at: Instant,
-        max_duration: Option<Duration>,
-    },
+    Recording(RecordingInfo),
+    Paused(RecordingInfo),
 }
 
 impl RecordingPhase {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            RecordingPhase::Recording { .. } | RecordingPhase::Paused { .. }
+            RecordingPhase::Recording(_) | RecordingPhase::Paused(_)
         )
     }
 
     pub fn started_at(&self) -> Option<Instant> {
         match self {
-            RecordingPhase::Recording { started_at, .. }
-            | RecordingPhase::Paused { started_at, .. } => Some(*started_at),
+            RecordingPhase::Recording(info) | RecordingPhase::Paused(info) => {
+                Some(info.started_at)
+            }
             _ => None,
         }
     }
@@ -77,32 +78,32 @@ mod tests {
 
     #[test]
     fn test_recording_phase_recording() {
-        let state = RecordingPhase::Recording {
+        let state = RecordingPhase::Recording(RecordingInfo {
             path: "/tmp/test.wav".to_string(),
             started_at: Instant::now(),
             max_duration: Some(Duration::from_secs(30)),
-        };
+        });
         assert!(state.is_active());
         assert!(state.started_at().is_some());
     }
 
     #[test]
     fn test_recording_phase_paused() {
-        let state = RecordingPhase::Paused {
+        let state = RecordingPhase::Paused(RecordingInfo {
             path: "/tmp/test.wav".to_string(),
             started_at: Instant::now(),
             max_duration: None,
-        };
+        });
         assert!(state.is_active());
     }
 
     #[test]
     fn test_recording_phase_elapsed() {
-        let state = RecordingPhase::Recording {
+        let state = RecordingPhase::Recording(RecordingInfo {
             path: "/tmp/test.wav".to_string(),
             started_at: Instant::now(),
             max_duration: None,
-        };
+        });
         let elapsed = state.elapsed().unwrap();
         assert!(elapsed < Duration::from_millis(100));
     }

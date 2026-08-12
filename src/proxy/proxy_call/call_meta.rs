@@ -6,6 +6,7 @@ use rsipstack::sip::StatusCode;
 use std::collections::HashSet;
 use std::time::Instant;
 
+#[derive(Default)]
 pub struct CallMeta {
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
@@ -68,41 +69,4 @@ pub struct CallMeta {
     /// Lets the queue-abandon detector distinguish "caller hung up while still
     /// waiting for an agent" from "caller hung up after already being served".
     pub ever_connected_callee: bool,
-}
-
-impl CallMeta {
-    pub fn new() -> Self {
-        Self {
-            connected_callee: None,
-            connected_callee_dialog_id: None,
-            callee_call_ids: HashSet::new(),
-            ring_time: None,
-            answer_time: None,
-            hangup_reason: None,
-            hangup_messages: Vec::new(),
-            last_error: None,
-            invite_final_status: None,
-            routed_caller: None,
-            routed_callee: None,
-            routed_contact: None,
-            routed_destination: None,
-            queue_name: None,
-            error_code: None,
-            app_name: None,
-            queue_label: None,
-            transfer_return_app: None,
-            trace: Vec::new(),
-            rtp_timeout_side: None,
-            rtp_timeout_leg: None,
-            rtp_timeout_fired: false,
-            transfer_in_progress: false,
-            ever_connected_callee: false,
-        }
-    }
-}
-
-impl Default for CallMeta {
-    fn default() -> Self {
-        Self::new()
-    }
 }

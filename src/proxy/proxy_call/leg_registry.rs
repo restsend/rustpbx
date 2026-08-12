@@ -53,12 +53,15 @@ impl LegRegistry {
         );
     }
 
-    pub fn remove_leg(&mut self, id: &LegId) -> Option<(Leg, Vec<JoinHandle<()>>)> {
+    pub fn remove(&mut self, id: &LegId) -> Option<Leg> {
         let data = self.legs.remove(id)?;
         if let Some(handle) = data.conference_bridge {
             handle.stop();
         }
-        Some((data.leg, data.tasks))
+        for handle in data.tasks {
+            handle.abort();
+        }
+        Some(data.leg)
     }
 
     pub fn set_dialog(&mut self, id: LegId, dialog: Dialog) {
@@ -245,14 +248,6 @@ impl LegRegistry {
                 },
             );
         }
-    }
-
-    pub fn remove(&mut self, id: &LegId) -> Option<Leg> {
-        let (state, tasks) = self.remove_leg(id)?;
-        for handle in tasks {
-            handle.abort();
-        }
-        Some(state)
     }
 }
 

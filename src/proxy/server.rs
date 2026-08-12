@@ -120,6 +120,12 @@ pub struct SipServerInner {
     /// address. `None` in single-node mode (no `[cluster]` peers), falling back to
     /// `default_contact_uri()`.
     pub cluster_self_addr: Option<SipAddr>,
+    /// Cluster-wide session location registry (which node owns which call).
+    /// Backend selected by `[cluster].session_registry_backend`; no-op when
+    /// cluster is not configured.
+    pub session_registry: crate::call::runtime::SessionRegistryRef,
+    /// Keeps the owning node's sessions alive (single batch update per tick).
+    pub session_registry_heartbeat: Option<crate::call::runtime::NodeHeartbeat>,
     /// Media policy for deciding when to anchor media.
     pub media_policy: Arc<dyn crate::call::MediaPolicy>,
     /// Trunk health check states (populated by trunk_health background loop).
@@ -948,6 +954,54 @@ impl SipServerBuilder {
             conference_manager.clone(),
         ));
 
+        // Build the cluster-wide session registry.  Backend selection:
+        //   "db"     (cluster default) — shared PostgreSQL/MySQL
+        //   "memory"                  — in-process, single-node/small deploys
+        //   anything else / no peers  — no-op (single-node)
+        let (session_registry, session_registry_heartbeat): (
+            crate::call::runtime::SessionRegistryRef,
+            Option<crate::call::runtime::NodeHeartbeat>,
+        ) = {
+            use crate::call::runtime::{
+                DbSessionRegistry, MemorySessionRegistry, NoopSessionRegistry,
+            };
+            let node_id = cluster_self_addr
+                .as_ref()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "local".to_string());
+            match self.cluster_config.as_ref() {
+                Some(cfg) if !cfg.peers.is_empty() => {
+                    let ttl = Duration::from_secs(cfg.session_registry_ttl_secs);
+                    let heartbeat =
+                        Duration::from_secs(cfg.session_registry_heartbeat_secs);
+                    let registry: crate::call::runtime::SessionRegistryRef =
+                        match cfg.session_registry_backend.as_str() {
+                            "memory" => MemorySessionRegistry::new(node_id.clone(), ttl),
+                            _ => {
+                                // "db" (default) requires the shared database.
+                                if let Some(db) = database.clone() {
+                                    DbSessionRegistry::new(db, ttl)
+                                } else {
+                                    warn!(
+                                        "cluster session registry backend \"db\" requested but no \
+                                         database configured; falling back to noop"
+                                    );
+                                    Arc::new(NoopSessionRegistry)
+                                }
+                            }
+                        };
+                    let heartbeat_task =
+                        crate::call::runtime::NodeHeartbeat::spawn(
+                            registry.clone(),
+                            node_id,
+                            heartbeat,
+                        );
+                    (registry, Some(heartbeat_task))
+                }
+                _ => (Arc::new(NoopSessionRegistry), None),
+            }
+        };
+
         // Create trunk health state map BEFORE inner so inner.trunk_health is populated
         // (the health loop itself is spawned after inner since it needs endpoint/cancel_token).
         let trunk_health_states: crate::proxy::trunk_health::HealthStateMap =
@@ -996,6 +1050,8 @@ impl SipServerBuilder {
             cluster_event_hub,
             cluster_peer_ips,
             cluster_self_addr,
+            session_registry,
+            session_registry_heartbeat,
             media_policy: self
                 .media_policy
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
