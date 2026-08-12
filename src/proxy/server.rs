@@ -957,7 +957,8 @@ impl SipServerBuilder {
         // Build the cluster-wide session registry.  Backend selection:
         //   "db"     (cluster default) — shared PostgreSQL/MySQL
         //   "memory"                  — in-process, single-node/small deploys
-        //   anything else / no peers  — no-op (single-node)
+        //   "noop"/"disabled"         — explicitly disable even with peers set
+        //   no peers                  — no-op (single-node)
         let (session_registry, session_registry_heartbeat): (
             crate::call::runtime::SessionRegistryRef,
             Option<crate::call::runtime::NodeHeartbeat>,
@@ -977,6 +978,13 @@ impl SipServerBuilder {
                     let registry: crate::call::runtime::SessionRegistryRef =
                         match cfg.session_registry_backend.as_str() {
                             "memory" => MemorySessionRegistry::new(node_id.clone(), ttl),
+                            "noop" | "disabled" => {
+                                info!(
+                                    backend = %cfg.session_registry_backend,
+                                    "session registry disabled despite cluster peers"
+                                );
+                                Arc::new(NoopSessionRegistry)
+                            }
                             _ => {
                                 // "db" (default) requires the shared database.
                                 if let Some(db) = database.clone() {
@@ -990,6 +998,8 @@ impl SipServerBuilder {
                                 }
                             }
                         };
+                    // Keep locally-owned sessions alive with a single batch
+                    // update per tick.  Harmless for a noop registry (no-op).
                     let heartbeat_task =
                         crate::call::runtime::NodeHeartbeat::spawn(
                             registry.clone(),

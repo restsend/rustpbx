@@ -295,7 +295,8 @@ pub struct ClusterPeer {
 pub struct ClusterConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<ClusterPeer>,
-    /// Session registry backend: "db" (cluster default), "memory", or "noop".
+    /// Session registry backend: "db" (cluster default), "memory", or
+    /// "noop"/"disabled" to explicitly disable it even with cluster peers set.
     #[serde(default = "default_session_registry_backend")]
     pub session_registry_backend: String,
     /// TTL for session records.  A crashed node's sessions are reclaimed after
@@ -1745,6 +1746,9 @@ mod tests {
                     ami_port: 8081,
                 },
             ],
+            session_registry_backend: "db".to_string(),
+            session_registry_ttl_secs: 3600,
+            session_registry_heartbeat_secs: 30,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
@@ -1791,6 +1795,17 @@ mod tests {
         assert_eq!(parsed.session_registry_backend, "memory");
         assert_eq!(parsed.session_registry_ttl_secs, 120);
         assert_eq!(parsed.session_registry_heartbeat_secs, 10);
+    }
+
+    #[test]
+    fn test_cluster_config_session_registry_disabled() {
+        let toml_str = r#"
+            peers = [{ addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 }]
+            session_registry_backend = "disabled"
+        "#;
+        let parsed: ClusterConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.session_registry_backend, "disabled");
+        assert_eq!(parsed.peers.len(), 1);
     }
 
     /// Regression: `Config::clone` used to round-trip through TOML which is
