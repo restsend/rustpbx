@@ -462,6 +462,35 @@ impl LegInner {
         };
         let profile = negotiate::MediaNegotiator::extract_leg_profile(profile_sdp);
 
+        self.sync_negotiated_profile(&profile).await?;
+
+        let remote_dtmf_pts: Vec<u8> = negotiate::MediaNegotiator::extract_dtmf_codecs(remote)
+            .iter()
+            .map(|c| c.payload_type)
+            .collect();
+        if !remote_dtmf_pts.is_empty() {
+            let mut all_pts: Vec<u8> = profile.dtmf_pts().into_iter().collect();
+            all_pts.extend(remote_dtmf_pts);
+            all_pts.sort();
+            all_pts.dedup();
+            self.tap.set_dtmf_payload_types(all_pts);
+        }
+
+        Ok(local_sdp)
+    }
+
+    /// Convenience: apply a remote offer and produce an answer.
+    pub async fn answer(&self, remote_offer: &str) -> Result<String> {
+        self.apply_sdp(remote_offer, SdpType::Offer).await
+    }
+
+    /// re-INVITE: apply a new remote offer, return the answer. Performs the
+    /// DTLS check + R1 sender sync; the PC and egress pipeline stay alive.
+    pub async fn reinvite(&self, remote_offer: &str) -> Result<String> {
+        self.answer(remote_offer).await
+    }
+
+    async fn sync_negotiated_profile(&self, profile: &NegotiatedLegProfile) -> Result<()> {
         // Keep the destination audio and telephone-event payload types in sync
         // with the negotiated answer. The DTMF clock follows the audio clock.
         if let Some(audio) = &profile.audio {
@@ -501,35 +530,7 @@ impl LegInner {
                 audio.channels,
             );
         }
-        self.apply_profile(&profile);
 
-        let remote_dtmf_pts: Vec<u8> = negotiate::MediaNegotiator::extract_dtmf_codecs(remote)
-            .iter()
-            .map(|c| c.payload_type)
-            .collect();
-        if !remote_dtmf_pts.is_empty() {
-            let mut all_pts: Vec<u8> = profile.dtmf_pts().into_iter().collect();
-            all_pts.extend(remote_dtmf_pts);
-            all_pts.sort();
-            all_pts.dedup();
-            self.tap.set_dtmf_payload_types(all_pts);
-        }
-
-        Ok(local_sdp)
-    }
-
-    /// Convenience: apply a remote offer and produce an answer.
-    pub async fn answer(&self, remote_offer: &str) -> Result<String> {
-        self.apply_sdp(remote_offer, SdpType::Offer).await
-    }
-
-    /// re-INVITE: apply a new remote offer, return the answer. Performs the
-    /// DTLS check + R1 sender sync; the PC and egress pipeline stay alive.
-    pub async fn reinvite(&self, remote_offer: &str) -> Result<String> {
-        self.answer(remote_offer).await
-    }
-
-    fn apply_profile(&self, profile: &NegotiatedLegProfile) {
         *self.negotiated.lock() = Some(profile.clone());
         // DTMF telephone-event payload types → tap. Listen on ALL negotiated
         // telephone-event PTs (a WebRTC peer may send DTMF on any of them, e.g.
@@ -541,15 +542,16 @@ impl LegInner {
         let mut dtmf = self.dtmf_send.lock();
         dtmf.dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
         dtmf.dtmf_clock_rate = profile.dtmf.as_ref().map(|d| d.clock_rate).unwrap_or(8000);
+        Ok(())
     }
 
-    /// Update the leg's negotiated profile from an SDP. Used by the session's
-    /// re-INVITE path, which builds answers outside [`Self::apply_sdp`]; keeps
-    /// `MediaBridge::bridge()` re-evaluation in sync with the renegotiated
-    /// codec instead of the stale call-setup profile.
-    pub fn apply_profile_from_sdp(&self, sdp: &str) {
+    /// Update the leg's negotiated profile and sender from an SDP built outside
+    /// [`Self::apply_sdp`], including peer-selected initial answers and
+    /// re-INVITEs. Keeps `MediaBridge::bridge()` and egress in sync with the
+    /// SDP returned to the remote peer.
+    pub async fn apply_profile_from_sdp(&self, sdp: &str) -> Result<()> {
         let profile = negotiate::MediaNegotiator::extract_leg_profile(sdp);
-        self.apply_profile(&profile);
+        self.sync_negotiated_profile(&profile).await
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -946,7 +948,9 @@ mod tests {
         assert!(profile.dtmf_pts().contains(&126));
 
         let leg = LegInner::new("dtmf-leg", &LegConfig::rtp_pcmu(), None).expect("leg");
-        leg.apply_profile(&profile);
+        leg.sync_negotiated_profile(&profile)
+            .await
+            .expect("apply negotiated profile");
 
         let tap = leg.ingress_tap();
         let mut rx = tap.subscribe_dtmf();

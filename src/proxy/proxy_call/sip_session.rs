@@ -5668,10 +5668,41 @@ enum ConstructMode<'a> {
             if has_bridge && has_callee_leg {
                 let cmd_tx = self.cmd_tx.clone();
                 let session_id = self.context.session_id.clone();
+                // The configured codec policy controls the offer sent to the
+                // callee. Once the callee answers, answer the caller with the
+                // callee-selected codec when it was present in the caller's
+                // offer. With no intersection, the rewrite helper falls back
+                // to the caller's offer order and MediaBridge transcodes.
+                let caller_answer = match (
+                    self.media.answer.as_deref(),
+                    self.media.caller_offer.as_deref(),
+                ) {
+                    (Some(answer), Some(caller_offer)) => {
+                        Some(self.rewrite_answer_to_selected_codecs(
+                            answer,
+                            caller_offer,
+                            Some(callee_sdp_value),
+                            "MediaBridge caller answer",
+                        ))
+                    }
+                    _ => self.media.answer.clone(),
+                };
+                self.media.answer = caller_answer.clone();
+
                 let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
                 if let Some(callee_leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
                     let sdp_type = callee_sdp_type;
                     callee_leg.apply_sdp(callee_sdp_value, sdp_type).await?;
+                }
+
+                // Keep the actual sender, egress codec, bridge profile and
+                // recorder profile aligned with the SDP returned to caller.
+                // This must happen before accept() activates the route.
+                if let (Some(leg), Some(answer)) = (
+                    mb.leg(crate::media::media_bridge::LegSide::A),
+                    caller_answer.as_deref(),
+                ) {
+                    leg.apply_profile_from_sdp(answer).await?;
                 }
 
                 mb.accept(crate::media::media_bridge::LegSide::B).await;
@@ -5685,8 +5716,7 @@ enum ConstructMode<'a> {
                 self.sync_rtp_timeout_pause();
 
                 self.media.callee_answer_sdp = Some(callee_sdp_value.clone());
-                let answer = self.media.answer.clone();
-                return Ok(answer);
+                return Ok(caller_answer);
             }
         }
 
@@ -6771,7 +6801,13 @@ enum ConstructMode<'a> {
                 DialogSide::Callee => mb.leg(crate::media::media_bridge::LegSide::B),
             };
             if let Some(leg) = side_leg {
-                leg.apply_profile_from_sdp(&answer_sdp);
+                if let Err(error) = leg.apply_profile_from_sdp(&answer_sdp).await {
+                    warn!(
+                        session_id = %self.id,
+                        %error,
+                        "Failed to synchronize MediaBridge leg codec after re-INVITE"
+                    );
+                }
             }
         }
 
@@ -12674,6 +12710,126 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             Some(MediaSource::File {
                 path: "/tmp/default.wav".into()
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn media_bridge_caller_answer_follows_callee_answer_codec() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::media::leg::{LegConfig, LegInner};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let mut dialplan = Dialplan::new(
+            "callee-codec-answer".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        );
+        dialplan.allow_codecs = vec![
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::G722,
+        ];
+        let context = CallContext {
+            session_id: "callee-codec-answer".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            true,
+            caller_peer,
+            callee_peer,
+        );
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 18 0 9 8 101\r\n",
+                "a=rtpmap:18 G729/8000\r\n",
+                "a=fmtp:18 annexb=yes\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:9 G722/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        let callee_offer = session
+            .create_callee_track(false)
+            .await
+            .expect("callee offer");
+        let callee_offer_profile = MediaNegotiator::extract_leg_profile(&callee_offer);
+        assert_eq!(
+            callee_offer_profile.audio.as_ref().map(|codec| codec.codec),
+            Some(CodecType::PCMU),
+            "configured codecs must control the callee offer"
+        );
+
+        let callee = LegInner::new("callee-answer", &LegConfig::rtp_pcmu(), None)
+            .expect("callee leg");
+        let callee_answer = callee.answer(&callee_offer).await.expect("callee answer");
+        let caller_answer = session
+            .prepare_caller_answer_from_callee_sdp(
+                Some(callee_answer),
+                false,
+                rustrtc::SdpType::Answer,
+            )
+            .await
+            .expect("prepare caller answer")
+            .expect("caller answer");
+
+        let caller_answer_profile = MediaNegotiator::extract_leg_profile(&caller_answer);
+        assert_eq!(
+            caller_answer_profile.audio.as_ref().map(|codec| codec.codec),
+            Some(CodecType::PCMU),
+            "caller answer must follow the codec selected in the callee answer"
+        );
+        let caller_leg_profile = session
+            .bridge()
+            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+            .and_then(|leg| leg.negotiated())
+            .expect("caller leg profile");
+        assert_eq!(
+            caller_leg_profile.audio.as_ref().map(|codec| codec.codec),
+            Some(CodecType::PCMU),
+            "caller leg sender/profile must match the returned SDP"
         );
     }
 
