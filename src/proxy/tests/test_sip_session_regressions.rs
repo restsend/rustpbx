@@ -1345,10 +1345,11 @@ fn write_silence_wav(
 /// Build a real, single-leg-A negotiated MediaBridge suitable for `play_file`.
 async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaBridge {
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::{BridgeOpts, LegSide, MediaBridge};
-    let mut mb = MediaBridge::new(session_id, BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).expect("leg a");
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).expect("leg b");
+    use crate::media::media_bridge::{LegSide, MediaBridge};
+    let mut mb = MediaBridge::new(session_id);
+    let recorder_sender = mb.start_recorder(None).expect("recording task");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).expect("leg a");
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).expect("leg b");
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -1478,7 +1479,7 @@ async fn queue_agent_connect_activates_media_bridge() {
 
     // Simulate the agent answering: build a scratch RTP/PCMU leg to answer the
     // offer, yielding the agent's answer SDP.
-    let agent_scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu()).unwrap();
+    let agent_scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu(), None).unwrap();
     let agent_answer = agent_scratch
         .answer(&agent_offer)
         .await
@@ -1694,25 +1695,29 @@ async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
 
 #[tokio::test]
 async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
-    use crate::proxy::proxy_call::media_state::{RecordingInfo, RecordingPhase};
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "voicemail".to_string(),
         None,
         true,
     );
     let mut session = build_session(dialplan).await;
-    session.media.recording_state = RecordingPhase::Recording(RecordingInfo {
-        path: "/tmp/rustpbx-test-vm-does-not-need-to-exist.wav".to_string(),
-        started_at: Instant::now(),
-        max_duration: None,
-    });
-    assert!(session.media.recording_state.is_active());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("voicemail.wav").to_string_lossy().into_owned();
+    let mut bridge = playable_bridge("shutdown-recording").await;
+    bridge
+        .start_recording(path, 1, true, None)
+        .await
+        .expect("start recording");
+    session.media.bridge = Some(bridge);
 
     session.finalize_recording_for_app_shutdown().await;
 
     assert!(
-        !session.media.recording_state.is_active(),
-        "active recording must be finalized (stop_recording run) on shutdown"
+        std::fs::metadata(dir.path().join("voicemail.wav"))
+            .expect("finalized recording")
+            .len()
+            >= 44,
+        "active recording must be finalized on shutdown"
     );
 }
 
@@ -1724,11 +1729,11 @@ async fn finalize_recording_for_app_shutdown_noop_when_idle() {
         true,
     );
     let mut session = build_session(dialplan).await;
-    // recording_state starts Idle.
+    session.media.bridge = Some(playable_bridge("shutdown-idle").await);
+    // No file recorder is active; Stop is answered directly by the task.
     let start = Instant::now();
     session.finalize_recording_for_app_shutdown().await;
     let elapsed = start.elapsed();
-    assert!(!session.media.recording_state.is_active());
     // No-op path must skip the finalization grace sleep.
     assert!(
         elapsed < std::time::Duration::from_millis(100),

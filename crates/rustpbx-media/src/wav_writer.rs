@@ -1,87 +1,77 @@
-use crate::StreamWriter;
 use anyhow::Result;
 use audio_codec::CodecType;
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
+use tokio::fs::File;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-pub struct CodecWavWriter<W: Write + Seek> {
-    writer: W,
+pub struct CodecWavWriter {
+    file: File,
     sample_rate: u32,
     channels: u16,
     codec: Option<CodecType>,
     written_bytes: u32,
 }
 
-impl<W: Write + Seek + Send + Sync> StreamWriter for CodecWavWriter<W> {
-    fn write_header(&mut self) -> Result<()> {
-        self.write_header_internal()
-    }
-
-    fn write_packet(&mut self, data: &[u8], _samples: usize) -> Result<()> {
-        self.write_packet_internal(data)
-    }
-
-    fn finalize(&mut self) -> Result<()> {
-        self.finalize_internal()
-    }
-}
-
-impl CodecWavWriter<File> {
+impl CodecWavWriter {
     pub fn new(file: File, sample_rate: u32, channels: u16, codec: Option<CodecType>) -> Self {
         Self {
-            writer: file,
+            file,
             sample_rate,
             channels,
             codec,
             written_bytes: 0,
         }
     }
-}
-
-impl<W: Write + Seek> CodecWavWriter<W> {
-    pub fn new_with_writer(
-        writer: W,
+    pub async fn create(
+        path: &str,
         sample_rate: u32,
         channels: u16,
         codec: Option<CodecType>,
-    ) -> Self {
-        Self {
-            writer,
-            sample_rate,
-            channels,
-            codec,
-            written_bytes: 0,
+    ) -> Result<Self> {
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await?;
         }
+        let file = File::create(path)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to create recorder file {path}: {error}"))?;
+        let mut writer = Self::new(file, sample_rate, channels, codec);
+        writer.write_header().await?;
+        writer.file.flush().await?;
+        Ok(writer)
     }
 
-    pub fn write_header_internal(&mut self) -> Result<()> {
-        Self::write_wav_header(
-            &mut self.writer,
+    async fn write_header(&mut self) -> Result<()> {
+        let header = Self::wav_header(
             self.codec,
             self.sample_rate,
             self.channels,
             self.written_bytes,
-        )
+        );
+        self.file.write_all(&header).await?;
+        Ok(())
     }
 
-    pub fn write_packet_internal(&mut self, data: &[u8]) -> Result<()> {
-        self.writer.write_all(data)?;
+    pub async fn write_packet(&mut self, data: &[u8]) -> Result<()> {
+        self.file.write_all(data).await?;
         self.written_bytes += data.len() as u32;
         Ok(())
     }
 
-    pub fn finalize_internal(&mut self) -> Result<()> {
-        self.writer.seek(SeekFrom::Start(0))?;
-        self.write_header_internal()
+    pub async fn finalize(&mut self) -> Result<()> {
+        self.file.seek(SeekFrom::Start(0)).await?;
+        self.write_header().await?;
+        self.file.flush().await?;
+        Ok(())
     }
 
-    fn write_wav_header(
-        file: &mut W,
+    fn wav_header(
         codec: Option<CodecType>,
         sample_rate: u32,
         channels: u16,
         data_size: u32,
-    ) -> Result<()> {
+    ) -> [u8; 44] {
         let mut header = [0u8; 44];
         header[0..4].copy_from_slice(b"RIFF");
         let file_size = 36 + data_size;
@@ -131,7 +121,6 @@ impl<W: Write + Seek> CodecWavWriter<W> {
         header[36..40].copy_from_slice(b"data");
         header[40..44].copy_from_slice(&data_size.to_le_bytes());
 
-        file.write_all(&header)?;
-        Ok(())
+        header
     }
 }

@@ -32,8 +32,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::egress::EgressSource;
-use crate::ingress_tap::{DtmfEvent, MediaRecorder, PacketDirection};
+use crate::ingress_tap::{DtmfEvent, PacketDirection};
 use crate::leg::Leg;
+use crate::media_recorder::{
+    FileRecorder, MediaRecorder, RecorderHandle, RecorderSender, RecordingCompletion,
+};
 use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
 
 /// Which side of the 2-party bridge a leg occupies.
@@ -85,24 +88,16 @@ impl PlaybackHandle {
     }
 }
 
-/// Optional global configuration passed at construction.
-#[derive(Default)]
-pub struct BridgeOpts {
-    /// Default recording backend attached to every leg as it's added.
-    pub recorder: Option<Arc<dyn MediaRecorder>>,
-}
-
 /// Per-session 2-party media bridge.
 pub struct MediaBridge {
     session_id: String,
     leg_a: Option<Leg>,
     leg_b: Option<Leg>,
     route_active: bool,
-    recorder: Option<Arc<dyn MediaRecorder>>,
-    /// Which leg(s) the recorder is attached to. `None` = both legs (legacy);
-    /// `Some(side)` = only that leg. Recording captures the first leg's
-    /// send+receive, so callers set this to `Some(LegSide::A)`.
-    recorder_side: Option<LegSide>,
+    /// Control half of the call-scoped recording task, installed when the
+    /// caller-facing A leg is constructed.
+    recorder_handle: Option<RecorderHandle>,
+    recorder_join: Option<tokio::task::JoinHandle<RecordingCompletion>>,
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
@@ -132,15 +127,15 @@ pub struct MediaBridge {
 }
 
 impl MediaBridge {
-    pub fn new(session_id: impl Into<String>, _opts: BridgeOpts) -> Self {
+    pub fn new(session_id: impl Into<String>) -> Self {
         let (dtmf_bus, _) = broadcast::channel(8);
         Self {
             session_id: session_id.into(),
             leg_a: None,
             leg_b: None,
             route_active: false,
-            recorder: None,
-            recorder_side: None,
+            recorder_handle: None,
+            recorder_join: None,
             dtmf_bus,
             root_cancel: CancellationToken::new(),
             leg_wire_cancels: HashMap::new(),
@@ -160,6 +155,88 @@ impl MediaBridge {
             LegSide::A => self.leg_a.clone(),
             LegSide::B => self.leg_b.clone(),
         }
+    }
+
+    /// Start the recording task while caller leg A is being constructed. The
+    /// bridge retains the control half and the caller receives the data-plane
+    /// sender directly.
+    pub fn start_recorder(
+        &mut self,
+        recorder: Option<Box<dyn MediaRecorder>>,
+    ) -> Result<RecorderSender> {
+        if self.recorder_handle.is_some() {
+            return Err(anyhow!("recording task is already started"));
+        }
+        let (handle, sender, join) = RecorderHandle::new(recorder);
+        self.recorder_handle = Some(handle);
+        self.recorder_join = Some(join);
+        Ok(sender)
+    }
+
+    /// Start file recording from caller leg A. The task initializes the file
+    /// backend asynchronously before this resolves.
+    pub async fn start_recording(
+        &mut self,
+        path: String,
+        channels: u16,
+        mono_caller_only: bool,
+        max_duration: Option<Duration>,
+    ) -> Result<()> {
+        let caller_profile = self
+            .leg(LegSide::A)
+            .and_then(|leg| leg.negotiated())
+            .ok_or_else(|| anyhow!("no negotiated A-leg profile to record"))?;
+        let recorder = FileRecorder::new(path, caller_profile, channels, mono_caller_only);
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .set_recorder(Box::new(recorder), max_duration)
+            .await
+    }
+
+    pub fn pause_recording(&self) -> Result<()> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .pause()
+    }
+
+    pub fn resume_recording(&self) -> Result<()> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .resume()
+    }
+
+    /// Ask the recorder task to stop, then return its final result.
+    pub async fn stop_recording(&mut self) -> RecordingCompletion {
+        let Some(join) = self.recorder_join.as_ref() else {
+            return Ok(None);
+        };
+        if !join.is_finished() {
+            self.recorder_handle
+                .as_ref()
+                .ok_or_else(|| anyhow!("recording task is unavailable"))?
+                .stop()?;
+        }
+        self.wait_recorder_result()
+            .await
+            .unwrap_or(Ok(None))
+    }
+
+    /// Wait for the task to finish, either through Stop or max-duration expiry.
+    pub async fn wait_recorder_result(&mut self) -> Option<RecordingCompletion> {
+        let join = match self.recorder_join.as_mut() {
+            Some(join) => join,
+            None => return std::future::pending().await,
+        };
+        let result = join.await;
+        self.recorder_join = None;
+        self.recorder_handle = None;
+        Some(match result {
+            Ok(result) => result,
+            Err(error) => Err(anyhow!("recording task failed: {error}")),
+        })
     }
 
     /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
@@ -290,15 +367,6 @@ impl MediaBridge {
                 }
             }
         });
-        if let Some(rec) = &self.recorder {
-            // Attach only when this leg matches the configured recorder side
-            // (or when no side filter is set → both legs, legacy behaviour).
-            // Recording is first-leg-only, so a B leg added later (e.g. after
-            // a transfer) must NOT pick up the recorder.
-            if self.recorder_side.is_none() || self.recorder_side == Some(side) {
-                leg.set_recorder(Some(rec.clone()));
-            }
-        }
     }
 
     /// Place (or replace) a leg. If a route is already active, the codec is
@@ -338,58 +406,6 @@ impl MediaBridge {
 
     pub fn dtmf_bus(&self) -> broadcast::Receiver<(LegSide, DtmfEvent)> {
         self.dtmf_bus.subscribe()
-    }
-
-    // ── Recording ────────────────────────────────────────────────────────
-
-    /// Attach the recorder to BOTH legs (legacy behaviour). Prefer
-    /// [`Self::set_recorder_for`] for first-leg-only recording.
-    pub fn set_recorder(&mut self, recorder: Arc<dyn MediaRecorder>) {
-        self.recorder_side = None;
-        if let Some(la) = self.leg_a.as_ref() {
-            la.set_recorder(Some(recorder.clone()));
-        }
-        if let Some(lb) = self.leg_b.as_ref() {
-            lb.set_recorder(Some(recorder.clone()));
-        }
-        self.recorder = Some(recorder);
-    }
-
-    /// Attach the recorder to a SINGLE leg (`side`). The stored side filter is
-    /// honoured by `wire_leg`, so a leg created later (e.g. the B leg after a
-    /// transfer) only receives the recorder when it matches `side`.
-    ///
-    /// Recording captures the first leg's send+receive, so callers pass
-    /// [`LegSide::A`]: ingress = caller voice, egress = what the caller hears
-    /// (IVR prompt / callee audio / hold music), all in the caller's codec.
-    pub fn set_recorder_for(&mut self, side: LegSide, recorder: Arc<dyn MediaRecorder>) {
-        self.recorder_side = Some(side);
-        self.recorder = Some(recorder.clone());
-        if let Some(leg) = self.leg(side) {
-            leg.set_recorder(Some(recorder));
-        }
-    }
-
-    pub fn set_recording_paused(&self, paused: bool) {
-        if let Some(la) = self.leg_a.as_ref() {
-            la.ingress_tap().set_paused(paused);
-        }
-        if let Some(lb) = self.leg_b.as_ref() {
-            lb.ingress_tap().set_paused(paused);
-        }
-    }
-
-    pub fn stop_recording(&mut self) {
-        self.recorder_side = None;
-        if let Some(rec) = self.recorder.take() {
-            rec.finalize();
-        }
-        if let Some(la) = self.leg_a.as_ref() {
-            la.set_recorder(None);
-        }
-        if let Some(lb) = self.leg_b.as_ref() {
-            lb.set_recorder(None);
-        }
     }
 
     // ── Routing ──────────────────────────────────────────────────────────
@@ -1028,6 +1044,9 @@ impl MediaBridge {
         if let Some(lb) = self.leg_b.take() {
             lb.stop();
         }
+        // Closing the last control handle makes the detached task drain any
+        // queued RTP and finalize its current backend.
+        self.recorder_handle.take();
     }
 }
 
@@ -1326,13 +1345,12 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
-    use crate::test_utils::CountingRecorder;
 
     #[tokio::test]
     async fn set_legs_and_close() {
-        let mut mb = MediaBridge::new("s1", BridgeOpts::default());
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+        let mut mb = MediaBridge::new("s1");
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
         assert!(mb.leg(LegSide::A).is_some());
@@ -1341,141 +1359,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_recorder_attaches_to_legs() {
-        struct Noop;
-        impl MediaRecorder for Noop {
-            fn write_sample(
-                &self,
-                _: crate::ingress_tap::PacketDirection,
-                _: &rustrtc::rtp::RtpPacket,
-            ) {
-            }
-            fn write_dtmf(&self, _: DtmfEvent) {}
-            fn set_paused(&self, _: bool) {}
-            fn finalize(&self) {}
-        }
-        let mut mb = MediaBridge::new("s3", BridgeOpts::default());
-        mb.replace_leg(
-            LegSide::A,
-            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        mb.set_recorder(Arc::new(Noop));
-        mb.replace_leg(
-            LegSide::B,
-            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        let _ = mb.leg(LegSide::B).unwrap().stats();
-        mb.close();
-    }
-
-    /// A recorder that counts samples per direction, used to verify which leg
-    /// received the recorder.
-
-    fn feed_packet(tap: &crate::ingress_tap::IngressTap, ingress: bool) {
-        use rustrtc::peer_connection::RtpObserver;
-        use rustrtc::rtp::{RtpHeader, RtpPacket};
-        let pkt = RtpPacket::new(RtpHeader::new(0, 1, 160, 1234), vec![0xFFu8; 80]);
-        let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
-        if ingress {
-            tap.on_ingress(&pkt, addr);
-        } else {
-            tap.on_egress(&pkt, addr);
-        }
-    }
-
-    /// `set_recorder_for(A)` mounts the recorder on the A leg only. Feeding
-    /// packets to A's tap (both directions) records them; feeding B's tap
-    /// records nothing. This is the core fix for the recording-stutter bug
-    /// where both legs were merged into the same channel.
-    #[tokio::test]
-    async fn set_recorder_for_attaches_only_to_a_leg() {
-        let rec = Arc::new(CountingRecorder::new());
-        let mut mb = MediaBridge::new("s-side-a", BridgeOpts::default());
-        // A leg created AFTER set_recorder_for (mirrors real timing: the
-        // recorder is configured at session construction, legs arrive later).
-        mb.set_recorder_for(LegSide::A, rec.clone());
-        mb.replace_leg(
-            LegSide::A,
-            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        mb.replace_leg(
-            LegSide::B,
-            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-
-        let a_tap = mb.leg(LegSide::A).unwrap().ingress_tap().clone();
-        let b_tap = mb.leg(LegSide::B).unwrap().ingress_tap().clone();
-        // Feed A ingress + egress → both recorded.
-        feed_packet(&a_tap, true);
-        feed_packet(&a_tap, false);
-        // Feed B ingress + egress → must NOT be recorded.
-        feed_packet(&b_tap, true);
-        feed_packet(&b_tap, false);
-
-        assert_eq!(
-            rec.ingress.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "only A-leg ingress must be recorded"
-        );
-        assert_eq!(
-            rec.egress.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "only A-leg egress must be recorded (IVR / callee audio)"
-        );
-        mb.close();
-    }
-
-    /// After transfer replaces the B leg, the recorder must NOT migrate to the
-    /// new B leg — recording stays anchored to A.
-    #[tokio::test]
-    async fn set_recorder_for_survives_b_leg_replacement() {
-        let rec = Arc::new(CountingRecorder::new());
-        let mut mb = MediaBridge::new("s-xfer", BridgeOpts::default());
-        mb.replace_leg(
-            LegSide::A,
-            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        mb.replace_leg(
-            LegSide::B,
-            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-        mb.set_recorder_for(LegSide::A, rec.clone());
-        // Simulate transfer: replace B.
-        mb.replace_leg(
-            LegSide::B,
-            LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap(),
-        )
-        .await;
-
-        let b2_tap = mb.leg(LegSide::B).unwrap().ingress_tap().clone();
-        feed_packet(&b2_tap, true);
-        feed_packet(&b2_tap, false);
-        assert_eq!(
-            rec.ingress.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "replaced B leg must not be recorded"
-        );
-        assert_eq!(
-            rec.egress.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "replaced B leg must not be recorded"
-        );
-        mb.close();
-    }
-
-    #[tokio::test]
     async fn dtmf_bus_forwards_ingress_and_ignores_egress() {
         use rustrtc::peer_connection::RtpObserver;
         use rustrtc::rtp::{RtpHeader, RtpPacket};
 
-        let mut mb = MediaBridge::new("s4", BridgeOpts::default());
-        let leg = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+        let mut mb = MediaBridge::new("s4");
+        let leg = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
         leg.ingress_tap().set_dtmf_payload_types(vec![101]);
         mb.replace_leg(LegSide::A, leg.clone()).await;
         let mut rx = mb.dtmf_bus();
@@ -1511,9 +1400,9 @@ mod tests {
 
     #[tokio::test]
     async fn replace_leg_rebridges_active_route() {
-        let mut mb = MediaBridge::new("s5", BridgeOpts::default());
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+        let mut mb = MediaBridge::new("s5");
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
         mb.close();
@@ -1525,9 +1414,9 @@ mod tests {
 
         // Two RTP legs negotiate UAC/UAS-style SDP with each other (no DTLS),
         // then the bridge activates the same-codec fast-path relay.
-        let mut mb = MediaBridge::new("s6", BridgeOpts::default());
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+        let mut mb = MediaBridge::new("s6");
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
         let a_offer = a.create_offer(vec![]).await.expect("a offer");
         let b_answer = b
@@ -1586,9 +1475,9 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let mut mb = MediaBridge::new("s7", BridgeOpts::default());
-        let a = LegInner::new("a", &cfg).unwrap();
-        let b = LegInner::new("b", &cfg).unwrap();
+        let mut mb = MediaBridge::new("s7");
+        let a = LegInner::new("a", &cfg, None).unwrap();
+        let b = LegInner::new("b", &cfg, None).unwrap();
 
         let a_offer = a.create_offer(vec![]).await.expect("a offer");
         let b_answer = b
@@ -1639,9 +1528,9 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let mut mb = MediaBridge::new("s-video-rtcp", BridgeOpts::default());
-        let a = LegInner::new("a", &cfg).unwrap();
-        let b = LegInner::new("b", &cfg).unwrap();
+        let mut mb = MediaBridge::new("s-video-rtcp");
+        let a = LegInner::new("a", &cfg, None).unwrap();
+        let b = LegInner::new("b", &cfg, None).unwrap();
 
         let a_offer = a.create_offer(vec![]).await.expect("a offer");
         let b_answer = b
@@ -1694,8 +1583,8 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
 
-        let a = LegInner::new("a", &webrtc_cfg).unwrap();
-        let a2 = LegInner::new("a2", &webrtc_cfg).unwrap();
+        let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
+        let a2 = LegInner::new("a2", &webrtc_cfg, None).unwrap();
         let a_offer = a.create_offer(vec![]).await.expect("a offer");
         let a2_answer = a2
             .apply_sdp(&a_offer, SdpType::Offer)
@@ -1705,8 +1594,8 @@ mod tests {
             .await
             .expect("a applies answer");
 
-        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
-        let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
+        let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu(), None).unwrap();
         let b_offer = b.create_offer(vec![]).await.expect("b offer");
         let b2_answer = b2
             .apply_sdp(&b_offer, SdpType::Offer)
@@ -1719,7 +1608,7 @@ mod tests {
         assert!(a.negotiated().is_some());
         assert!(b.negotiated().is_some());
 
-        let mut mb = MediaBridge::new("s8", BridgeOpts::default());
+        let mut mb = MediaBridge::new("s8");
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
         mb.accept(LegSide::A).await;
@@ -1798,7 +1687,7 @@ mod tests {
             a=ice-ufrag:uv50\r\n\
             a=ice-pwd:ib8b\r\n\
             a=candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host\r\n";
-        let a = LegInner::new("a", &webrtc_cfg).unwrap();
+        let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
         a.apply_sdp(webrtc_offer, SdpType::Offer)
             .await
             .expect("a answers webrtc offer");
@@ -1808,9 +1697,9 @@ mod tests {
         );
 
         // Leg B: RTP/opus — negotiated, transport ready.
-        let b2 = LegInner::new("b2", &rtp_opus_cfg).unwrap();
+        let b2 = LegInner::new("b2", &rtp_opus_cfg, None).unwrap();
         let b_offer = b2.create_offer(vec![]).await.expect("b2 offer");
-        let b = LegInner::new("b", &rtp_opus_cfg).unwrap();
+        let b = LegInner::new("b", &rtp_opus_cfg, None).unwrap();
         b.apply_sdp(&b_offer, SdpType::Offer)
             .await
             .expect("b answers rtp offer");
@@ -1819,7 +1708,7 @@ mod tests {
             "leg B profile should be negotiated"
         );
 
-        let mut mb = MediaBridge::new("s-no-deadlock", BridgeOpts::default());
+        let mut mb = MediaBridge::new("s-no-deadlock");
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
 
@@ -1891,9 +1780,9 @@ mod tests {
     async fn leg_pcm_stream_decodes_bridged_audio() {
         use rustrtc::SdpType;
 
-        let mut mb = MediaBridge::new("pcm-stream", BridgeOpts::default());
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-        let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+        let mut mb = MediaBridge::new("pcm-stream");
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+        let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
         let a_offer = a.create_offer(vec![]).await.expect("a offer");
         let b_answer = b

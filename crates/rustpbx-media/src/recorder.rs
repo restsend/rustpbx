@@ -1,4 +1,3 @@
-use crate::StreamWriter;
 use crate::negotiate::NegotiatedLegProfile;
 use crate::wav_writer::CodecWavWriter;
 use anyhow::Result;
@@ -7,8 +6,6 @@ use bytes::Bytes;
 use rustrtc::media::MediaSample;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -69,8 +66,7 @@ pub struct Recorder {
 
     last_flush: Instant,
 
-    profile_a: NegotiatedLegProfile,
-    profile_b: NegotiatedLegProfile,
+    profile: NegotiatedLegProfile,
     dtmf_state_a: Option<DtmfEventState>,
     dtmf_state_b: Option<DtmfEventState>,
     leg_a_started: bool,
@@ -80,7 +76,7 @@ pub struct Recorder {
     ptime: Duration,
 
     written_samples: u64,
-    writer: Box<dyn StreamWriter>,
+    writer: CodecWavWriter,
 
     /// When true, swap stereo channels: callee→left, caller→right.
     /// Default (false): caller→left, callee→right.
@@ -95,8 +91,8 @@ pub struct Recorder {
 
 impl Recorder {
     /// Create a stereo (2-channel) recorder.
-    pub fn new(path: &str, codec: CodecType) -> Result<Self> {
-        Self::new_with_channels(path, codec, 2, false)
+    pub async fn new(path: &str, codec: CodecType) -> Result<Self> {
+        Self::new_with_channels(path, codec, 2, false).await
     }
 
     /// Create a recorder with an explicit channel count.
@@ -105,19 +101,12 @@ impl Recorder {
     /// both legs to mono, unless `mono_caller_only` is set — then only leg A
     /// (caller ingress) is written at full amplitude (used by voicemail where
     /// the egress leg is silence).
-    pub fn new_with_channels(
+    pub async fn new_with_channels(
         path: &str,
         codec: CodecType,
         channels: u16,
         mono_caller_only: bool,
     ) -> Result<Self> {
-        // ensure the directory exists
-        if let Some(parent) = PathBuf::from(path).parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let file = File::create(path)
-            .map_err(|e| anyhow::anyhow!("Failed to create recorder file {}: {}", path, e))?;
-
         let src_codec = codec;
         let codec = match codec {
             CodecType::Opus => CodecType::PCMU,
@@ -131,13 +120,7 @@ impl Recorder {
             "Creating recorder: path={}, src_codec={:?} codec={:?}",
             path, src_codec, codec
         );
-        let mut writer = Box::new(CodecWavWriter::new(
-            file,
-            sample_rate,
-            channels,
-            Some(codec),
-        ));
-        writer.write_header()?;
+        let writer = CodecWavWriter::create(path, sample_rate, channels, Some(codec)).await?;
 
         Ok(Self {
             path: path.to_string(),
@@ -152,8 +135,7 @@ impl Recorder {
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
             last_flush: Instant::now(),
-            profile_a: NegotiatedLegProfile::default(),
-            profile_b: NegotiatedLegProfile::default(),
+            profile: NegotiatedLegProfile::default(),
             dtmf_state_a: None,
             dtmf_state_b: None,
             next_flush_ts: 0,
@@ -167,21 +149,11 @@ impl Recorder {
         })
     }
 
-    pub fn set_leg_profile(&mut self, leg: Leg, profile: NegotiatedLegProfile) {
-        match leg {
-            Leg::A => self.profile_a = profile,
-            Leg::B => self.profile_b = profile,
-        }
+    pub fn set_profile(&mut self, profile: NegotiatedLegProfile) {
+        self.profile = profile;
     }
 
-    fn profile_for_leg(&self, leg: Leg) -> &NegotiatedLegProfile {
-        match leg {
-            Leg::A => &self.profile_a,
-            Leg::B => &self.profile_b,
-        }
-    }
-
-    pub fn write_sample(
+    pub async fn write_sample(
         &mut self,
         leg: Leg,
         sample: &MediaSample,
@@ -195,7 +167,7 @@ impl Recorder {
         };
 
         let (profile_audio_pt, profile_audio_codec, profile_dtmf_pt, profile_dtmf_clock_rate) = {
-            let profile = self.profile_for_leg(leg);
+            let profile = &self.profile;
             (
                 profile.audio.as_ref().map(|codec| codec.payload_type),
                 profile.audio.as_ref().map(|codec| codec.codec),
@@ -208,12 +180,14 @@ impl Recorder {
         if let (Some(pt), Some(dpt)) = (frame.payload_type, dtmf_pt)
             && pt == dpt
         {
-            return self.write_dtmf_payload(
-                leg,
-                &frame.data,
-                frame.rtp_timestamp,
-                dtmf_clock_rate.unwrap_or(self.sample_rate),
-            );
+            return self
+                .write_dtmf_payload(
+                    leg,
+                    &frame.data,
+                    frame.rtp_timestamp,
+                    dtmf_clock_rate.unwrap_or(self.sample_rate),
+                )
+                .await;
         }
 
         // DTMF fallback: when the PT doesn't match the profile's DTMF PT
@@ -223,12 +197,14 @@ impl Recorder {
         if dtmf_pt.is_some() && frame.data.len() == 4 {
             let code = frame.data[0];
             if crate::telephone_event::dtmf_code_to_char(code).is_some() {
-                return self.write_dtmf_payload(
-                    leg,
-                    &frame.data,
-                    frame.rtp_timestamp,
-                    frame.clock_rate.max(8000),
-                );
+                return self
+                    .write_dtmf_payload(
+                        leg,
+                        &frame.data,
+                        frame.rtp_timestamp,
+                        frame.clock_rate.max(8000),
+                    )
+                    .await;
             }
         }
 
@@ -338,7 +314,7 @@ impl Recorder {
         let absolute_ts = self.leg_end_ts(leg);
         self.insert_audio_block(leg, absolute_ts, encoded);
         if self.last_flush.elapsed() >= self.ptime {
-            self.flush()?;
+            self.flush().await?;
         }
         Ok(())
     }
@@ -476,7 +452,7 @@ impl Recorder {
         }
     }
 
-    pub fn write_dtmf_payload(
+    pub async fn write_dtmf_payload(
         &mut self,
         leg: Leg,
         payload: &[u8],
@@ -543,12 +519,12 @@ impl Recorder {
         );
 
         if end_bit {
-            self.flush()?;
+            self.flush().await?;
         }
         Ok(())
     }
 
-    pub fn write_dtmf(&mut self, leg: Leg, digit: char, duration_ms: u32) -> Result<()> {
+    pub async fn write_dtmf(&mut self, leg: Leg, digit: char, duration_ms: u32) -> Result<()> {
         let pcm = self.dtmf_gen.generate(digit, duration_ms);
         debug!(
             "Recording DTMF: leg={:?}, digit={}, duration={}ms, samples={}",
@@ -570,11 +546,11 @@ impl Recorder {
         let end_ts = ts.saturating_add(self.block_span_samples(&encoded));
         self.overlay_dtmf_range(leg, ts, end_ts, encoded);
 
-        self.flush()?;
+        self.flush().await?;
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
 
         let max_ts_a = self
@@ -666,17 +642,17 @@ impl Recorder {
             }
         };
 
-        self.writer.write_packet(&output, flush_len as usize)?;
+        self.writer.write_packet(&output).await?;
         self.written_bytes += output.len() as u32;
         self.written_samples += flush_len as u64;
 
         Ok(())
     }
 
-    pub fn finalize(&mut self) -> Result<()> {
+    pub async fn finalize(&mut self) -> Result<()> {
         // Final flush: use max to flush ALL remaining data from both legs.
-        self.flush_final()?;
-        self.writer.finalize()?;
+        self.flush_final().await?;
+        self.writer.finalize().await?;
         Ok(())
     }
 
@@ -689,7 +665,7 @@ impl Recorder {
     }
 
     /// Flush everything remaining — used by finalize() to write trailing data.
-    fn flush_final(&mut self) -> Result<()> {
+    async fn flush_final(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
         let max_ts_a = self
             .buffer_a
@@ -720,7 +696,7 @@ impl Recorder {
         } else {
             self.interleave(&data_a, &data_b)?
         };
-        self.writer.write_packet(&output, flush_len as usize)?;
+        self.writer.write_packet(&output).await?;
         self.written_bytes += output.len() as u32;
         self.written_samples += flush_len as u64;
         Ok(())
@@ -905,12 +881,6 @@ impl Recorder {
         }
 
         Ok(mixed)
-    }
-}
-
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        let _ = self.finalize();
     }
 }
 
@@ -1168,13 +1138,17 @@ mod tests {
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
             last_flush: Instant::now(),
-            profile_a: NegotiatedLegProfile::default(),
-            profile_b: NegotiatedLegProfile::default(),
+            profile: NegotiatedLegProfile::default(),
             dtmf_state_a: None,
             dtmf_state_b: None,
             next_flush_ts: 0,
             written_samples: 0,
-            writer: Box::new(TestWriter::new()),
+            writer: CodecWavWriter::new(
+                tokio::fs::File::from_std(tempfile::tempfile().unwrap()),
+                sample_rate,
+                channels,
+                Some(codec),
+            ),
             ptime: Duration::from_millis(20),
             stereo_swap: false,
             mono_caller_only: false,
@@ -1183,29 +1157,4 @@ mod tests {
         }
     }
 
-    // Mock writer for testing
-    struct TestWriter {
-        data: Vec<u8>,
-    }
-
-    impl TestWriter {
-        fn new() -> Self {
-            Self { data: Vec::new() }
-        }
-    }
-
-    impl StreamWriter for TestWriter {
-        fn write_header(&mut self) -> Result<()> {
-            Ok(())
-        }
-
-        fn write_packet(&mut self, data: &[u8], _samples: usize) -> Result<()> {
-            self.data.extend_from_slice(data);
-            Ok(())
-        }
-
-        fn finalize(&mut self) -> Result<()> {
-            Ok(())
-        }
-    }
 }

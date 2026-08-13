@@ -7,33 +7,33 @@
 //! a single tap observes BOTH directions of a leg in ALL forwarding modes —
 //! exactly what per-leg bidirectional recording needs.
 //!
-//! The hot path is lock-free: 2 atomics for stats, a packed (ssrc, pt) atomic
-//! cache that skips the SSRC→PT DashMap write for steady-state packets, a
-//! lock-free DTMF PT bitmask test, and a recorder fast flag that skips the
-//! RwLock read when nothing is recording. The DTMF detector lives behind a
-//! `parking_lot::Mutex` acquired only on the (rare) telephone-event payload
-//! type, never on audio packets.
+//! The recorder hot path is lock-free: an immutable sender performs one
+//! non-blocking channel enqueue. Stats and steady-state SSRC/PT tracking use
+//! atomics, and DTMF payload matching uses a lock-free bitmask. Only the
+//! stateful DTMF detector has a `parking_lot::Mutex`, acquired for the rare
+//! telephone-event packets rather than normal audio.
 //!
 //! This replaces the old `RecorderTap` (which implemented the post-bridge
 //! `RtpReceiverInterceptor` and missed relay packets). For NACK / RTCP
 //! feedback the existing `RtpReceiverInterceptor` is unaffected.
 //!
-//! DTMF telephone-event packets are detected (for the DTMF event bus) but
-//! still forwarded to the recorder's `write_sample` as raw RTP — this lets
-//! SipflowRecorder store them for WAV DTMF-tone synthesis and FileRecorder
-//! decode them via `Recorder::write_dtmf_payload`.
+//! Ingress DTMF telephone-event packets are detected for the DTMF event bus.
+//! Raw telephone-event RTP in both directions is still forwarded to the
+//! recording task — this lets the unified task store it in Sipflow and decode
+//! it into the local WAV via `Recorder::write_dtmf_payload`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use rustrtc::peer_connection::RtpObserver;
 use rustrtc::rtp::RtpPacket;
 use tokio::sync::broadcast;
 use tracing::trace;
 
 use crate::dtmf::DtmfDetector;
+use crate::media_recorder::RecorderSender;
 
 /// Which direction of a leg's transport a packet belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,31 +51,6 @@ pub struct DtmfEvent {
     pub direction: PacketDirection,
     pub digit: char,
     pub timestamp: u32,
-}
-
-/// Recording / capture backend — the implementation owns its own threading,
-/// files, sipflow connection, and codec policy. The tap calls these methods
-/// on the hot path, so implementations MUST be non-blocking (queue internally
-/// and drain from a background task).
-///
-/// This is the abstraction the host passes in: `MediaBridge::set_recorder`.
-/// `FileRecorder` (WAV) and `SipflowRecorder` are the typical backends; a
-/// `TeeRecorder` fans out to several at once.
-pub trait MediaRecorder: Send + Sync {
-    /// A plaintext RTP sample traversed the leg. `packet` carries its
-    /// payload type in `packet.header.payload_type`; the backend resolves the
-    /// codec from its negotiated profiles.
-    fn write_sample(&self, direction: PacketDirection, packet: &RtpPacket);
-
-    /// A DTMF telephone-event was detected and deduplicated.
-    fn write_dtmf(&self, event: DtmfEvent);
-
-    /// Pause / resume capture. When paused the tap short-circuits before
-    /// calling `write_sample` / `write_dtmf`, so this is informational.
-    fn set_paused(&self, paused: bool);
-
-    /// Flush and close all outputs. Called on stop and on Drop by the host.
-    fn finalize(&self);
 }
 
 /// Snapshot of the per-direction counters.
@@ -127,19 +102,20 @@ pub struct IngressTap {
     dtmf_tx: broadcast::Sender<DtmfEvent>,
 
     // ── recording ───────────────────────────────────────────────────────
-    /// Non-zero once a recorder is attached. Lets the common (no-recording)
-    /// fast-path skip the `recorder` RwLock read entirely.
-    has_recorder: AtomicBool,
-    /// Optional recorder backend. Read only when `has_recorder` is set; written
-    /// only when the host attaches/detaches.
-    recorder: RwLock<Option<Arc<dyn MediaRecorder>>>,
-    paused: AtomicBool,
+    /// Immutable sender for the call-scoped recording task. The caller leg
+    /// receives it when this tap is constructed; both RTP directions can use
+    /// the sender concurrently without synchronization here.
+    recorder_sender: Option<RecorderSender>,
 }
 
 impl IngressTap {
     /// Create a new tap. `dtmf_bus_capacity` bounds the DTMF broadcast
     /// channel (subscribers that lag are dropped, never blocking the tap).
-    pub fn new(dtmf_bus_capacity: usize) -> Arc<Self> {
+    /// The optional recording sender is fixed for the tap's lifetime.
+    pub fn new(
+        dtmf_bus_capacity: usize,
+        recorder_sender: Option<RecorderSender>,
+    ) -> Arc<Self> {
         let (dtmf_tx, _) = broadcast::channel(dtmf_bus_capacity.max(1));
         Arc::new(Self {
             ingress_packets: AtomicU64::new(0),
@@ -152,9 +128,7 @@ impl IngressTap {
             dtmf_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
-            has_recorder: AtomicBool::new(false),
-            recorder: RwLock::new(None),
-            paused: AtomicBool::new(false),
+            recorder_sender,
         })
     }
 
@@ -190,26 +164,9 @@ impl IngressTap {
         self.dtmf_pt_mask[word].load(Ordering::Relaxed) & bit != 0
     }
 
-    /// Subscribe to deduplicated DTMF events (both directions).
+    /// Subscribe to deduplicated ingress DTMF events.
     pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
         self.dtmf_tx.subscribe()
-    }
-
-    /// Attach a recording / capture backend (replaces any previous one).
-    pub fn set_recorder(&self, recorder: Option<Arc<dyn MediaRecorder>>) {
-        self.has_recorder.store(recorder.is_some(), Ordering::Release);
-        *self.recorder.write() = recorder;
-    }
-
-    /// Pause / resume capture. When paused, `write_sample` / `write_dtmf` are
-    /// not called and stats still advance (so RTP-timeout detection works).
-    pub fn set_paused(&self, paused: bool) {
-        self.paused.store(paused, Ordering::Release);
-        if self.has_recorder.load(Ordering::Acquire)
-            && let Some(rec) = self.recorder.read().as_ref()
-        {
-            rec.set_paused(paused);
-        }
     }
 
     /// Snapshot the per-direction counters.
@@ -238,15 +195,6 @@ impl IngressTap {
             .filter(|e| pts.iter().any(|p| e.value().contains(p)))
             .map(|e| *e.key())
             .max()
-    }
-
-    /// Finalize the recorder backend, if any.
-    pub fn finalize_recorder(&self) {
-        if self.has_recorder.load(Ordering::Acquire)
-            && let Some(rec) = self.recorder.read().as_ref()
-        {
-            rec.finalize();
-        }
     }
 
     /// Shared processing for both directions: stats + DTMF + record.
@@ -280,10 +228,14 @@ impl IngressTap {
             }
         }
 
-        // DTMF: only telephone-event payloads are inspected. Lock-free bitmask
-        // check; audio packets pay a single atomic load + bit test.
+        // DTMF events are decoded only where they enter their originating leg.
+        // Decoding egress too would see the same bridged digit a second time on
+        // the destination leg and could poison this tap's deduplication state.
+        // Raw egress telephone-event RTP still falls through to the recorder.
         let pt = packet.header.payload_type;
-        if self.is_dtmf_payload_type(pt) {
+        if direction == PacketDirection::Ingress
+            && self.is_dtmf_payload_type(pt)
+        {
             trace!(pt, len = payload_len, "tap: telephone-event packet");
             let digit = self
                 .dtmf_detector
@@ -299,21 +251,16 @@ impl IngressTap {
                 let _ = self.dtmf_tx.send(event);
             }
             // Fall through to write_sample: the raw telephone-event RTP packet
-            // must reach the recorder so it can be stored (SipflowRecorder →
-            // wav_utils synthesizes the tone during export) or decoded
-            // (FileRecorder → Recorder::write_sample detects DTMF by PT →
-            // write_dtmf_payload). We do NOT call write_dtmf separately to
-            // avoid double DTMF in the FileRecorder path.
+            // must reach the recording task so it can be stored in Sipflow
+            // (wav_utils synthesizes the tone during export) and decoded into
+            // a local WAV (Recorder::write_sample detects DTMF by PT). We do
+            // NOT call write_dtmf separately, which would duplicate the tone.
         }
 
-        // All packets (audio + telephone-event) → recorder (skip when paused).
-        if self.paused.load(Ordering::Acquire) {
-            return;
-        }
-        if self.has_recorder.load(Ordering::Acquire)
-            && let Some(rec) = self.recorder.read().as_ref()
-        {
-            rec.write_sample(direction, packet);
+        // All packets (audio + telephone-event) enter the one call-scoped
+        // queue. File pause/stop is owned by the task; Sipflow remains live.
+        if let Some(sender) = self.recorder_sender.as_ref() {
+            sender.capture(direction, packet);
         }
     }
 }
@@ -344,7 +291,7 @@ mod tests {
 
     #[test]
     fn stats_advance_on_ingress_and_egress() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         for seq in 1..=3u16 {
             let p = make_packet(0, seq, 160, 1234, vec![1u8; 160]);
             tap.on_ingress(&p, test_addr());
@@ -365,7 +312,7 @@ mod tests {
     /// guards that lookup: audio and video SSRCs are tracked per payload type.
     #[test]
     fn ingress_ssrc_for_pts_resolves_peer_sender_ssrc() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         // Bob's browser sends audio on SSRC 1001 (PT 111) and video on
         // SSRC 2002 (PT 96). Both ingress.
         tap.on_ingress(&make_packet(111, 1, 160, 1001, vec![1u8; 160]), test_addr());
@@ -386,7 +333,7 @@ mod tests {
 
     #[test]
     fn dtmf_detected_only_for_telephone_event_pt() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         tap.set_dtmf_payload_types(vec![101]);
         let mut rx = tap.subscribe_dtmf();
 
@@ -395,10 +342,14 @@ mod tests {
         tap.on_ingress(&audio, test_addr());
         assert!(rx.try_recv().is_err(), "audio PT must not raise DTMF");
 
-        // DTMF event "1" = digit_code 0x01. Minimal 4-byte payload the
-        // detector accepts: [code, flags, volume, duration...].
+        // Egress DTMF is not an input event and must not affect the detector.
+        // Feed the exact same packet on ingress afterward to prove egress did
+        // not poison the deduplication state.
         let dtmf_payload = vec![1u8, 0x80, 10, 0xA0];
         let dtmf = make_packet(101, 1, 0, 1, dtmf_payload);
+        tap.on_egress(&dtmf, test_addr());
+        assert!(rx.try_recv().is_err(), "egress DTMF must not raise an event");
+
         tap.on_ingress(&dtmf, test_addr());
         let ev = rx.try_recv().expect("telephone-event PT must raise DTMF");
         assert_eq!(ev.digit, '1');
@@ -412,68 +363,36 @@ mod tests {
         );
     }
 
-    use crate::test_utils::CountingRecorder;
-
-    /// A counting recorder backend used to verify the recording hook fires.
-
     #[test]
     fn recorder_receives_audio_and_dtmf() {
-        let tap = IngressTap::new(8);
+        let (tx, mut captured) = tokio::sync::mpsc::channel(16);
+        let sender = RecorderSender::new(tx);
+        let tap = IngressTap::new(8, Some(sender));
         tap.set_dtmf_payload_types(vec![101]);
-        let rec = Arc::new(CountingRecorder::new());
-        tap.set_recorder(Some(rec.clone()));
 
         // 3 audio packets → 3 sample writes.
         for seq in 1..=3u16 {
             let p = make_packet(0, seq, 160, 1, vec![1u8; 160]);
             tap.on_ingress(&p, test_addr());
         }
-        // 1 DTMF packet → forwarded via write_sample (raw RTP for later tone
-        // synthesis), NOT via write_dtmf. This ensures SipflowRecorder stores
-        // the telephone-event packet for WAV DTMF synthesis.
+        // Raw DTMF in both directions still reaches the recorder even though
+        // only ingress is decoded into a DTMF event.
         let dtmf = make_packet(101, 1, 0, 1, vec![1u8, 0x80, 10, 0xA0]);
         tap.on_ingress(&dtmf, test_addr());
+        tap.on_egress(&dtmf, test_addr());
 
-        assert_eq!(
-            rec.samples(),
-            4,
-            "3 audio + 1 DTMF packet → 4 write_sample calls"
-        );
-        assert_eq!(
-            rec.dtmfs.load(Ordering::Relaxed),
-            0,
-            "write_dtmf is no longer called; DTMF goes through write_sample"
-        );
-    }
-
-    #[test]
-    fn paused_stops_recording_but_stats_advance() {
-        let tap = IngressTap::new(8);
-        let rec = Arc::new(CountingRecorder::new());
-        tap.set_recorder(Some(rec.clone()));
-        tap.set_paused(true);
-
-        for seq in 1..=5u16 {
-            let p = make_packet(0, seq, 160, 1, vec![1u8; 160]);
-            tap.on_egress(&p, test_addr());
-        }
-        // Stats still advance (RTP-timeout detection relies on this).
-        assert_eq!(tap.stats().egress_packets, 5);
-        // Recorder not called while paused.
-        assert_eq!(rec.samples(), 0);
-
-        tap.set_paused(false);
-        let p = make_packet(0, 9, 160, 1, vec![1u8; 160]);
-        tap.on_egress(&p, test_addr());
-        assert_eq!(rec.samples(), 1);
+        let packets: Vec<_> = std::iter::from_fn(|| captured.try_recv().ok()).collect();
+        assert_eq!(packets.len(), 5, "3 audio + 2 DTMF packets");
+        assert_eq!(packets[3].direction, PacketDirection::Ingress);
+        assert_eq!(packets[4].direction, PacketDirection::Egress);
+        assert_eq!(packets.last().unwrap().packet.header.payload_type, 101);
     }
 
     #[test]
     fn no_recorder_no_panic() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         let p = make_packet(0, 1, 160, 1, vec![1u8; 160]);
         tap.on_ingress(&p, test_addr()); // must not panic
-        tap.finalize_recorder(); // no-op, must not panic
         assert_eq!(tap.ingress_packet_count(), 1);
     }
 
@@ -482,7 +401,7 @@ mod tests {
     /// visible to the RTCP relay lookup.
     #[test]
     fn ingress_ssrc_pt_cache_captures_new_pairs() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         // Steady-state audio: 100 packets on (1001, 0).
         for seq in 1..=100u16 {
             let p = make_packet(0, seq, 160, 1001, vec![1u8; 160]);
@@ -504,7 +423,7 @@ mod tests {
     /// advance.
     #[test]
     fn tracking_disabled_skips_ssrc_pt_map() {
-        let tap = IngressTap::new(8);
+        let tap = IngressTap::new(8, None);
         tap.set_track_ingress_ssrc_pts(false);
         for seq in 1..=3u16 {
             let p = make_packet(0, seq, 160, 1001, vec![1u8; 160]);
@@ -523,7 +442,7 @@ mod tests {
     /// length and contents) on the DTMF PT and on the audio PT.
     #[test]
     fn malformed_rtp_packets_do_not_panic() {
-        let tap = IngressTap::new(64);
+        let tap = IngressTap::new(64, None);
         tap.set_dtmf_payload_types(vec![101]);
         let mut rx = tap.subscribe_dtmf();
         let mut seed = 0x1234_5678u32;

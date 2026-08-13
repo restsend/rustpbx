@@ -34,8 +34,9 @@ use tokio::sync::{broadcast, oneshot};
 use tracing::debug;
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
-use crate::ingress_tap::{DtmfEvent, IngressTap, MediaRecorder, TapStats};
+use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
 use crate::leg_id::LegId;
+use crate::media_recorder::RecorderSender;
 use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
 
 /// RFC 4733 telephone-event duration for a 20 ms event at the given clock
@@ -199,6 +200,7 @@ impl LegInner {
         codecs: Vec<CodecInfo>,
         comfort_noise: bool,
         comfort_noise_level_db: f32,
+        recorder_sender: Option<RecorderSender>,
     ) -> Result<Leg> {
         let first_codec = codecs.first().ok_or_else(|| anyhow!("no codecs"))?;
 
@@ -260,8 +262,7 @@ impl LegInner {
         // Plaintext bidirectional observer (stats / DTMF / recording).
         // 8 DTMF-event slots is plenty: digits are rare and lagged receivers
         // are dropped, never blocking the hot path.
-        let tap = IngressTap::new(8);
-        pc.add_observer(tap.clone());
+        let tap = IngressTap::new(8, recorder_sender);
 
         // Gate: closed until the call is answered (`accept`). The egress
         // pipeline parks on it so the leg never emits audio (even silence) to
@@ -312,10 +313,10 @@ impl LegInner {
         }))
     }
 
-    /// Attach the ingress tap observer to the RTP transport(s). The transport
-    /// is created lazily (async, after ICE connects) following the first
-    /// `set_remote_description`, so the observer registered in
-    /// `from_rtc_config` is a no-op until then. Call this after SDP is applied.
+    /// Attach the ingress tap observer to the RTP transport(s). A new
+    /// PeerConnection has no RTP transport to attach to: direct RTP creates it
+    /// while applying remote SDP, while WebRTC creates it later after ICE
+    /// selects a pair. Call this after SDP is applied.
     /// Spawns a background task so it never blocks SDP negotiation. The task
     /// handle is stored so `stop` can abort it; a transport that never becomes
     /// ready logs a warning instead of silently dropping stats/DTMF/recording.
@@ -344,13 +345,18 @@ impl LegInner {
     /// Create a leg from a simplified [`LegConfig`] (builds the
     /// [`RtcConfiguration`] internally). Prefer [`Self::from_rtc_config`] when
     /// you already have a fully-configured `RtcConfiguration`.
-    pub fn new(id: impl Into<String>, cfg: &LegConfig) -> Result<Leg> {
+    pub fn new(
+        id: impl Into<String>,
+        cfg: &LegConfig,
+        recorder_sender: Option<RecorderSender>,
+    ) -> Result<Leg> {
         Self::from_rtc_config(
             id,
             build_rtc_config(cfg),
             cfg.codecs.clone(),
             cfg.comfort_noise,
             cfg.comfort_noise_level_db,
+            recorder_sender,
         )
     }
 
@@ -378,10 +384,6 @@ impl LegInner {
 
     pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
         self.tap.subscribe_dtmf()
-    }
-
-    pub fn set_recorder(&self, recorder: Option<Arc<dyn MediaRecorder>>) {
-        self.tap.set_recorder(recorder);
     }
 
     /// Mark the leg as answered (remote peer accepted the call). Opens the
@@ -432,9 +434,8 @@ impl LegInner {
             .set_remote_description(desc)
             .await
             .map_err(|e| anyhow!("set_remote_description failed: {}", e))?;
-        // The RTP transport is created inside set_remote_description; the tap
-        // observer registered at construction is a no-op until then, so attach
-        // it now that the transport exists.
+        // Direct RTP has a transport now; WebRTC may still be waiting for ICE.
+        // Attach immediately when the transport object becomes available.
         self.ensure_observer();
 
         let local_sdp = if sdp_type == SdpType::Offer {
@@ -797,7 +798,6 @@ impl LegInner {
         // the two `Arc<RtpTransport>`s keep each other alive forever and both
         // PeerConnections leak (~16KB per call in the mediaproxy=all path).
         self.pc.clear_rtp_rewrite_bridge();
-        self.tap.finalize_recorder();
         self.pc.close();
     }
 }
@@ -945,7 +945,7 @@ mod tests {
         assert!(profile.dtmf_pts().contains(&110));
         assert!(profile.dtmf_pts().contains(&126));
 
-        let leg = LegInner::new("dtmf-leg", &LegConfig::rtp_pcmu()).expect("leg");
+        let leg = LegInner::new("dtmf-leg", &LegConfig::rtp_pcmu(), None).expect("leg");
         leg.apply_profile(&profile);
 
         let tap = leg.ingress_tap();
@@ -968,7 +968,7 @@ mod tests {
         // Two RTP legs bound to ephemeral ports must construct and stop
         // without panicking. Uses the loopback PC (no real network needed for
         // construction; add_track + observer are synchronous).
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu()).expect("leg a");
+        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).expect("leg a");
         assert_eq!(a.id().as_str(), "a");
         assert!(a.negotiated().is_none());
         // Observer is installed: stats start at zero.
@@ -998,7 +998,7 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let a = LegInner::new("a", &cfg).expect("webrtc leg");
+        let a = LegInner::new("a", &cfg, None).expect("webrtc leg");
         let offer = a.create_offer(vec![]).await.expect("create_offer");
         assert!(
             offer.contains("a=fingerprint"),
@@ -1047,7 +1047,7 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let leg = LegInner::new("video", &cfg).expect("video leg");
+        let leg = LegInner::new("video", &cfg, None).expect("video leg");
         let offer = leg.create_offer(vec![]).await.expect("create_offer");
 
         assert!(
@@ -1105,7 +1105,7 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let leg = LegInner::new("answerer", &cfg).expect("answerer leg");
+        let leg = LegInner::new("answerer", &cfg, None).expect("answerer leg");
 
         // Minimal WebRTC offer with audio + video m-lines (what a browser
         // sends: sendrecv, video with an SSRC).
@@ -1193,7 +1193,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
 
-        let leg = LegInner::new("caller-dtmf", &cfg).expect("leg");
+        let leg = LegInner::new("caller-dtmf", &cfg, None).expect("leg");
 
         let offer = "v=0\r\n\
             o=- 1 1 IN IP4 10.0.0.1\r\n\
@@ -1236,7 +1236,7 @@ mod p24_uac_test {
         // A leg generates its own offer (UAC), then applies a remote answer with
         // a codec it offered. This mirrors RWI originate's callee leg.
         let cfg = LegConfig::rtp_pcmu();
-        let leg = LegInner::new("uac", &cfg).unwrap();
+        let leg = LegInner::new("uac", &cfg, None).unwrap();
         let offer = leg.create_offer(vec![]).await.expect("offer");
         assert!(!offer.is_empty());
 

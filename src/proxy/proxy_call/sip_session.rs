@@ -1053,54 +1053,25 @@ enum ConstructMode<'a> {
         (handle, cmd_rx)
     }
 
-    /// Attach a [`SipflowRecorder`] to the media bridge so RTP packets are
-    /// stored in the sipflow backend for later WAV export.
-    ///
-    /// Per design, when sipflow is enabled and `force_file` is NOT set, media
-    /// capture happens through sipflow (not the WAV file recorder). This
-    /// re-wires RTP → sipflow after the media-layer rewrite that dropped the
-    /// old `setup_sipflow_capture` wiring.
-    pub(super) fn attach_sipflow_media_capture(&mut self) {
-        let Some(mb) = self.media.bridge.as_mut() else {
-            return;
-        };
+    /// Build the per-call Sipflow adapter over the server's shared backend when
+    /// caller leg A and its recording task are created.
+    fn sipflow_recorder(
+        &self,
+    ) -> Option<Box<dyn crate::media::media_recorder::MediaRecorder>> {
         let recording = &self.context.dialplan.recording;
         if !recording.enabled || recording.force_file {
-            return;
+            return None;
         }
-        let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend()) else {
-            return;
-        };
         let call_id = self.context.session_id.clone();
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<crate::media::media_recorder::SipflowItem>(1024);
-        let recorder = crate::media::media_recorder::SipflowRecorder::new(tx);
-        let drain_call_id = call_id.clone();
-        crate::utils::spawn(async move {
-            while let Some(item) = rx.recv().await {
-                let leg = match item.direction {
-                    crate::media::ingress_tap::PacketDirection::Ingress => 0i32,
-                    crate::media::ingress_tap::PacketDirection::Egress => 1i32,
-                };
-                let sipflow_item = crate::sipflow::SipFlowItem {
-                    timestamp: item.received_at_micros,
-                    seq: item.sequence_number as u64,
-                    leg: Some(leg),
-                    msg_type: crate::sipflow::SipFlowMsgType::Rtp,
-                    src_addr: "synth".to_string(),
-                    dst_addr: String::new(),
-                    payload: item.raw,
-                };
-                if let Err(e) = backend.record(drain_call_id.as_str().into(), sipflow_item) {
-                    warn!(session_id = %drain_call_id, error = %e, "sipflow media record failed");
-                }
-            }
-        });
-        mb.set_recorder_for(crate::media::media_bridge::LegSide::A, recorder);
-        info!(
-            session_id = %call_id,
-            "sipflow media capture attached to media bridge (A-leg only)"
-        );
+        self.server
+            .sip_flow
+            .as_ref()
+            .and_then(|flow| flow.backend())
+            .map(|backend| {
+                Box::new(crate::media::media_recorder::SipflowRecorder::new(
+                    backend, call_id,
+                )) as Box<dyn crate::media::media_recorder::MediaRecorder>
+            })
     }
     /// Put a leg on hold playing a file as hold music (looping).
     /// Ensure a conference exists — create it if missing.
@@ -1488,11 +1459,9 @@ enum ConstructMode<'a> {
         if use_media_proxy {
             session.media.bridge = Some(crate::media::media_bridge::MediaBridge::new(
                 session_id_str.clone(),
-                crate::media::media_bridge::BridgeOpts::default(),
             ));
             session.spawn_dtmf_forwarder();
         }
-        session.attach_sipflow_media_capture();
 
         (session, sip_handle, cmd_rx)
     }
@@ -2042,6 +2011,19 @@ enum ConstructMode<'a> {
         }
     }
 
+    async fn wait_recorder_result(
+        bridge: &mut Option<crate::media::media_bridge::MediaBridge>,
+    ) -> Option<crate::media::media_recorder::RecordingCompletion> {
+        let result = match bridge.as_mut() {
+            Some(bridge) => bridge.wait_recorder_result().await,
+            None => return std::future::pending().await,
+        };
+        match result {
+            Some(result) => Some(result),
+            None => std::future::pending().await,
+        }
+    }
+
     /// Unified event loop shared by [`process`] (UAS) and [`process_uac`] (UAC).
     ///
     /// Drives hangup drain, cancellation, caller/callee dialog-state events,
@@ -2126,6 +2108,18 @@ enum ConstructMode<'a> {
                         .await;
                     if !result.success {
                         warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
+                    }
+                }
+
+                Some(result) = Self::wait_recorder_result(&mut self.media.bridge) => {
+                    match result {
+                        Ok(Some(result)) => {
+                            self.publish_recording_complete(result);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(session_id = %self.id, %error, "recording task failed");
+                        }
                     }
                 }
 
@@ -2434,13 +2428,27 @@ enum ConstructMode<'a> {
         };
         let leg_label = format!("{}-{}", self.id.0, leg_name);
 
-        let Some(mb) = self.bridge_mut() else {
+        let Some(mb) = self.bridge() else {
             return Ok(());
         };
         if mb.leg(side).is_some() {
             return Ok(());
         }
-        let leg = crate::media::leg::LegInner::new(leg_label, &cfg)?;
+        let sipflow_recorder = if side == crate::media::media_bridge::LegSide::A {
+            self.sipflow_recorder()
+        } else {
+            None
+        };
+        let mb = self
+            .bridge_mut()
+            .ok_or_else(|| anyhow!("No MediaBridge"))?;
+        let recorder_sender = match side {
+            crate::media::media_bridge::LegSide::A => {
+                Some(mb.start_recorder(sipflow_recorder)?)
+            }
+            crate::media::media_bridge::LegSide::B => None,
+        };
+        let leg = crate::media::leg::LegInner::new(leg_label, &cfg, recorder_sender)?;
         mb.replace_leg(side, leg).await;
         Ok(())
     }
@@ -4827,12 +4835,21 @@ enum ConstructMode<'a> {
         let cfg = self.build_leg_config(transport.clone(), codecs, video_codecs);
         let caller_label = format!("{}-caller", self.id.0);
 
-        let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-        if mb.leg(crate::media::media_bridge::LegSide::A).is_some() {
+        if self
+            .bridge()
+            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::A))
+            .is_some()
+        {
             return Ok(());
         }
+        let sipflow_recorder = self.sipflow_recorder();
+        let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
 
-        let leg = crate::media::leg::LegInner::new(caller_label, &cfg)?;
+        let leg = crate::media::leg::LegInner::new(
+            caller_label,
+            &cfg,
+            Some(mb.start_recorder(sipflow_recorder)?),
+        )?;
         let answer = leg
             .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
             .await?;
@@ -5486,6 +5503,7 @@ enum ConstructMode<'a> {
                     match crate::media::leg::LegInner::new(
                         format!("{}-callee", self.id.0),
                         &cfg,
+                        None,
                     ) {
                         Ok(leg) => {
                             if let Ok(offer) = leg.create_offer(vec![]).await {
@@ -6108,7 +6126,7 @@ enum ConstructMode<'a> {
             let callee_label = format!("{}-callee", self.id.0);
 
             let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-            let leg = crate::media::leg::LegInner::new(callee_label, &cfg)?;
+            let leg = crate::media::leg::LegInner::new(callee_label, &cfg, None)?;
             let mut sdp = leg.create_offer(vec![]).await?;
             mb.replace_leg(crate::media::media_bridge::LegSide::B, leg)
                 .await;
@@ -6453,9 +6471,15 @@ enum ConstructMode<'a> {
             && let Some(ref option) = self.context.dialplan.recording.option
         {
             let path = option.recorder_file.clone();
-            if !path.is_empty()
-                && let Err(e) = self.start_recording(&path, None, false).await
-            {
+            let result = if path.is_empty() {
+                Ok(())
+            } else {
+                match self.bridge_mut() {
+                    Some(bridge) => bridge.start_recording(path, 2, false, None).await,
+                    None => Err(anyhow!("Recording requires MediaBridge")),
+                }
+            };
+            if let Err(e) = result {
                 warn!(session_id = %self.id,
                     session_id = %self.context.session_id,
                     error = %e,
@@ -7168,125 +7192,49 @@ enum ConstructMode<'a> {
         }
     }
 
-    pub async fn start_recording(
-        &mut self,
-        path: &str,
-        max_duration: Option<Duration>,
-        beep: bool,
-    ) -> Result<()> {
-        self.start_recording_with_layout(path, max_duration, beep, 2, false)
-            .await
-    }
-
-    /// Start recording with an explicit output layout.
-    ///
-    /// `channels == 1 && mono_caller_only` writes a mono WAV containing only
-    /// the caller's ingress (leg A) at full amplitude — used by voicemail,
-    /// where the egress leg is silence during the message.
-    pub async fn start_recording_with_layout(
-        &mut self,
-        path: &str,
-        max_duration: Option<Duration>,
-        beep: bool,
-        channels: u16,
-        mono_caller_only: bool,
-    ) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::{RecordingInfo, RecordingPhase};
-        if !self.context.dialplan.recording.enabled {
-            return Err(anyhow!("Recording is not enabled for this call"));
-        }
-
-        // Recording captures the A leg's send+receive only. Both directions
-        // are in the caller's (A leg's) negotiated codec — ingress is what the
-        // caller sends, egress is what the caller hears (transcoded/relayed
-        // callee audio or locally-generated IVR), all encoded for the caller.
-        // The FileRecorder maps direction → leg (Ingress→A, Egress→B), so BOTH
-        // recorder leg slots must use the A leg's negotiated profile.
-        {
-            let mb = self
-                .bridge_mut()
-                .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
-            let profile_a = mb
-                .leg(crate::media::media_bridge::LegSide::A)
-                .and_then(|l| l.negotiated())
-                .ok_or_else(|| anyhow!("no negotiated A-leg profile to record"))?;
-
-            let profiles_arr: [(
-                crate::media::recorder::Leg,
-                crate::media::negotiate::NegotiatedLegProfile,
-            ); 2] = [
-                (crate::media::recorder::Leg::A, profile_a.clone()),
-                (crate::media::recorder::Leg::B, profile_a),
-            ];
-            // FileRecorder runs on its own OS thread; hot path is try_send.
-            let recorder = crate::media::media_recorder::FileRecorder::start_with_channels(
-                path.to_string(),
-                profiles_arr,
-                channels,
-                mono_caller_only,
-            )
-            .await?;
-            mb.set_recorder_for(crate::media::media_bridge::LegSide::A, recorder);
-        }
-
-        self.media.recording_state = RecordingPhase::Recording(RecordingInfo {
-            path: path.to_string(),
-            started_at: Instant::now(),
-            max_duration,
-        });
-
-        if beep {
-            info!(session_id = %self.context.session_id, "Playing recording beep");
-            self.handle_play(
-                None,
-                crate::call::domain::MediaSource::file("beep.wav"),
-                None,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn pause_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let next = match &self.media.recording_state {
-            RecordingPhase::Recording(info) => {
-                info!(session_id = %self.id, path = %info.path, "Recording paused");
-                RecordingPhase::Paused(info.clone())
-            }
-            RecordingPhase::Paused(info) => {
-                return Err(anyhow!("Recording already paused: {}", info.path));
-            }
-            RecordingPhase::Idle => {
-                return Err(anyhow!("Recording not active"));
-            }
+    fn publish_recording_complete(
+        &self,
+        result: crate::media::media_recorder::RecordingResult,
+    ) {
+        let path = result.path;
+        let duration = Duration::from_secs_f64(result.duration_secs);
+        let file_size = result.file_size;
+        info!(session_id = %self.id, path = %path, duration = ?duration, file_size, "Recording stopped");
+        let info = crate::call::app::RecordingInfo {
+            path,
+            duration,
+            size_bytes: file_size,
         };
-        self.media.recording_state = next;
-        if let Some(mb) = self.bridge() {
-            mb.set_recording_paused(true);
+        let _ = self.app_event_bridge.send_app_event(
+            crate::call::app::ControllerEvent::RecordingComplete(info.clone()),
+        );
+        if let Some(gateway) = self.server.rwi_gateway.as_ref() {
+            let call_id = self.context.session_id.clone();
+            let meta = gateway.read().meta_store.get_sync(&call_id);
+            let (caller_name, callee_name) = match meta {
+                Some(ref meta) => (meta.caller_name.clone(), meta.callee_name.clone()),
+                None => (None, None),
+            };
+            gateway.read().send_to_owner(&crate::rwi::RecordStopped {
+                call_id: call_id.clone(),
+                duration_secs: Some(info.duration.as_secs()),
+                filename: Some(info.path.clone()),
+                unique_id: Some(call_id),
+                file_size: Some(info.size_bytes),
+                download_url: None,
+                caller_name,
+                callee_name,
+                called_phone: None,
+                call_type: None,
+                agent_id: None,
+                agent_name: None,
+                call_start_time: None,
+                call_end_time: None,
+                upload_time: None,
+                switch_flag: None,
+                root_call_id: None,
+            });
         }
-        Ok(())
-    }
-
-    pub async fn resume_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let next = match &self.media.recording_state {
-            RecordingPhase::Paused(info) => {
-                info!(session_id = %self.id, path = %info.path, "Recording resumed");
-                RecordingPhase::Recording(info.clone())
-            }
-            RecordingPhase::Recording(info) => {
-                return Err(anyhow!("Recording already active: {}", info.path));
-            }
-            RecordingPhase::Idle => {
-                return Err(anyhow!("Recording not active"));
-            }
-        };
-        self.media.recording_state = next;
-        if let Some(mb) = self.bridge() {
-            mb.set_recording_paused(false);
-        }
-        Ok(())
     }
 
     /// Called from the caller-hangup path: if an app is recording when the
@@ -7299,54 +7247,32 @@ enum ConstructMode<'a> {
     /// `on_record_complete` spawns its persistence work, so we only need to
     /// give the app event loop a brief, bounded window to execute it once.
     pub(crate) async fn finalize_recording_for_app_shutdown(&mut self) {
-        if !self.media.recording_state.is_active() {
-            return;
-        }
-        if let Err(error) = self.stop_recording().await {
-            warn!(
-                session_id = %self.id,
-                %error,
-                "Failed to finalize recording on caller hangup"
-            );
-            return;
-        }
+        let outcome = match self.bridge_mut() {
+            Some(bridge) => bridge.stop_recording().await,
+            None => return,
+        };
+        let completed = match outcome {
+            Ok(Some(result)) => {
+                self.publish_recording_complete(result);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                warn!(
+                    session_id = %self.id,
+                    %error,
+                    "Failed to finalize recording on caller hangup"
+                );
+                return;
+            }
+        };
         // Only grant the event loop a grace when an app is actually running to
         // receive the RecordingComplete we just emitted. Call-level auto
         // recording has no app, so we must not delay session teardown (which
         // would also delay CDR generation) in that case.
-        if self.app_runtime.is_running() {
+        if completed && self.app_runtime.is_running() {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-    }
-
-    pub async fn stop_recording(&mut self) -> Result<()> {
-        use crate::proxy::proxy_call::media_state::RecordingPhase;
-        let prev = std::mem::replace(&mut self.media.recording_state, RecordingPhase::Idle);
-        let path = match &prev {
-            RecordingPhase::Recording(info) | RecordingPhase::Paused(info) => info.path.clone(),
-            RecordingPhase::Idle => return Ok(()),
-        };
-        // Duration is tracked locally (RecordingPhase.started_at).
-        let duration = prev.elapsed().unwrap_or_default();
-
-        // Finalize the recorder backend (flush + close the WAV).
-        if let Some(mb) = self.bridge_mut() {
-            mb.stop_recording();
-        }
-
-        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        info!(session_id = %self.id, path = %path, duration = ?duration, file_size, "Recording stopped");
-
-        let _ = self
-            .app_event_bridge
-            .send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
-                crate::call::app::RecordingInfo {
-                    path: path.clone(),
-                    duration,
-                    size_bytes: file_size,
-                },
-            ));
-        Ok(())
     }
 
     async fn cleanup(&mut self) {
@@ -8575,29 +8501,69 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_stop_playback(leg_id).await)
             }
 
-            CallCommand::StartRecording { config } => Self::ok_or_failure(
-                self.start_recording_with_layout(
-                    &config.path,
-                    config
-                        .max_duration_secs
-                        .map(|s| Duration::from_secs(s as u64)),
-                    config.beep,
-                    config.channels.unwrap_or(2),
-                    config.mono_caller_only.unwrap_or(false),
-                )
-                .await,
-            ),
+            CallCommand::StartRecording { config } => {
+                let result = async {
+                    if !self.context.dialplan.recording.enabled {
+                        return Err(anyhow!("Recording is not enabled for this call"));
+                    }
+                    let bridge = self
+                        .bridge_mut()
+                        .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
+                    bridge
+                        .start_recording(
+                            config.path,
+                            config.channels.unwrap_or(2),
+                            config.mono_caller_only.unwrap_or(false),
+                            config
+                                .max_duration_secs
+                                .map(|seconds| Duration::from_secs(seconds as u64)),
+                        )
+                        .await?;
+                    if config.beep {
+                        self.handle_play(
+                            None,
+                            crate::call::domain::MediaSource::file("beep.wav"),
+                            None,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                Self::ok_or_failure(result)
+            }
 
-            CallCommand::StopRecording => Self::ok_or_failure(self.stop_recording().await),
+            CallCommand::StopRecording => {
+                let outcome = match self.bridge_mut() {
+                    Some(bridge) => bridge.stop_recording().await,
+                    None => Err(anyhow!("Recording requires MediaBridge")),
+                };
+                match outcome {
+                    Ok(Some(result)) => {
+                        self.publish_recording_complete(result);
+                        CommandResult::success()
+                    }
+                    Ok(None) => CommandResult::success(),
+                    Err(error) => CommandResult::failure(error.to_string()),
+                }
+            }
 
             CallCommand::Trace { event } => {
                 self.record_trace(event);
                 CommandResult::success()
             }
 
-            CallCommand::PauseRecording => Self::ok_or_failure(self.pause_recording().await),
+            CallCommand::PauseRecording => Self::ok_or_failure(
+                self.bridge()
+                    .ok_or_else(|| anyhow!("Recording requires MediaBridge"))
+                    .and_then(MediaBridge::pause_recording),
+            ),
 
-            CallCommand::ResumeRecording => Self::ok_or_failure(self.resume_recording().await),
+            CallCommand::ResumeRecording => Self::ok_or_failure(
+                self.bridge()
+                    .ok_or_else(|| anyhow!("Recording requires MediaBridge"))
+                    .and_then(MediaBridge::resume_recording),
+            ),
 
             CallCommand::Transfer {
                 leg_id,
@@ -13513,20 +13479,18 @@ max_retries = 3
     #[tokio::test]
     async fn arm_bridged_rtp_timeouts_sends_hangup_on_inactivity() {
         use crate::media::leg::{LegConfig, LegInner};
-        use crate::media::media_bridge::{BridgeOpts, LegSide};
+        use crate::media::media_bridge::LegSide;
 
-        let mut mb = crate::media::media_bridge::MediaBridge::new(
-            "rtp-timeout-session-test",
-            BridgeOpts::default(),
-        );
+        let mut mb =
+            crate::media::media_bridge::MediaBridge::new("rtp-timeout-session-test");
         mb.replace_leg(
             LegSide::A,
-            LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+            LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
         )
         .await;
         mb.replace_leg(
             LegSide::B,
-            LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+            LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
         )
         .await;
 

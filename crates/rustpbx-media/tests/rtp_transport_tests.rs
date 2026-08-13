@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use audio_codec::CodecType;
 use rustpbx_media::leg::LegInner;
-use rustpbx_media::media_bridge::{BridgeOpts, LegSide, MediaBridge};
+use rustpbx_media::media_bridge::{LegSide, MediaBridge};
 use rustpbx_media::negotiate::{CodecInfo, MediaNegotiator};
 use rustrtc::config::{BufferDropStrategy, SdpCompatibilityMode};
 use rustrtc::media::MediaStreamTrack;
@@ -287,8 +287,37 @@ impl TestMediaHarness {
         transport_b: TransportMode,
         codec_b: CodecType,
     ) -> Self {
+        Self::create_inner(transport_a, codec_a, transport_b, codec_b, None).await
+    }
+
+    async fn create_with_recorder(
+        transport_a: TransportMode,
+        codec_a: CodecType,
+        transport_b: TransportMode,
+        codec_b: CodecType,
+        recorder: Box<dyn rustpbx_media::media_recorder::MediaRecorder>,
+    ) -> Self {
+        Self::create_inner(
+            transport_a,
+            codec_a,
+            transport_b,
+            codec_b,
+            Some(recorder),
+        )
+        .await
+    }
+
+    async fn create_inner(
+        transport_a: TransportMode,
+        codec_a: CodecType,
+        transport_b: TransportMode,
+        codec_b: CodecType,
+        recorder: Option<Box<dyn rustpbx_media::media_recorder::MediaRecorder>>,
+    ) -> Self {
         let codec_a = MediaNegotiator::codec_info_for_type(codec_a);
         let codec_b = MediaNegotiator::codec_info_for_type(codec_b);
+        let mut mb = MediaBridge::new("rtp-test");
+        let recorder_sender = mb.start_recorder(recorder).unwrap();
 
         let leg_a = LegInner::from_rtc_config(
             "a",
@@ -296,6 +325,7 @@ impl TestMediaHarness {
             vec![codec_a.clone()],
             true,
             -35.0,
+            Some(recorder_sender),
         )
         .unwrap();
         let leg_b = LegInner::from_rtc_config(
@@ -304,6 +334,7 @@ impl TestMediaHarness {
             vec![codec_b.clone()],
             true,
             -35.0,
+            None,
         )
         .unwrap();
 
@@ -329,7 +360,6 @@ impl TestMediaHarness {
             }
         }
 
-        let mut mb = MediaBridge::new("rtp-test", BridgeOpts::default());
         mb.replace_leg(LegSide::A, leg_a.clone()).await;
         mb.replace_leg(LegSide::B, leg_b.clone()).await;
 
@@ -698,7 +728,7 @@ async fn create_video_harness(
     let mk_leg = |name: &str, t: TransportMode, caps: Vec<rustrtc::config::VideoCapability>| {
         let mut cfg = rtc_config(t, &codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps;
-        LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0).unwrap()
+        LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0, None).unwrap()
     };
     let leg_a = mk_leg("a", transport_a.clone(), caps_a.clone());
     let leg_b = mk_leg("b", transport_b.clone(), caps_b.clone());
@@ -725,7 +755,7 @@ async fn create_video_harness(
         }
     }
 
-    let mut mb = MediaBridge::new("video-harness", BridgeOpts::default());
+    let mut mb = MediaBridge::new("video-harness");
     mb.replace_leg(LegSide::A, leg_a.clone()).await;
     mb.replace_leg(LegSide::B, leg_b.clone()).await;
     mb.accept(LegSide::A).await;
@@ -1267,7 +1297,8 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
     };
     let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
     leg_cfg.media_capabilities = Some(leg_caps);
-    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0).unwrap();
+    let leg =
+        LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None).unwrap();
 
     // Peer: offer PCMU + telephone-event so the leg's DTMF PT gets negotiated.
     let mut caps = rustrtc::config::MediaCapabilities::default();
@@ -1346,19 +1377,89 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
 // ── Recording: A-leg only (regression for the recording-stutter bug) ─────
 
 use rustpbx_media::ingress_tap::PacketDirection;
-use rustpbx_media::media_recorder::SipflowRecorder;
+use rustpbx_media::media_recorder::{MediaRecorder, SipflowRecorder};
+use rustpbx_sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
 
-/// Drain a `SipflowRecorder`'s channel into a list of (direction, pt) tuples
+struct CaptureBackend {
+    tx: tokio::sync::mpsc::UnboundedSender<SipFlowItem>,
+}
+
+#[async_trait::async_trait]
+impl SipFlowBackend for CaptureBackend {
+    fn record(&self, _call_id: std::borrow::Cow<'_, str>, item: SipFlowItem) -> anyhow::Result<()> {
+        let _ = self.tx.send(item);
+        Ok(())
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn query_flow(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<SipFlowItem>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media_stats(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<SipFlowMediaStats>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+fn recorder_capture(
+    call_id: &str,
+) -> (
+    Box<dyn MediaRecorder>,
+    tokio::sync::mpsc::UnboundedReceiver<SipFlowItem>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = std::sync::Arc::new(CaptureBackend { tx });
+    (
+        Box::new(SipflowRecorder::new(backend, call_id.to_string())),
+        rx,
+    )
+}
+
+/// Drain a recorder sender's channel into a list of (direction, PT) tuples
 /// for inspection. Returns the captured items collected over `window_ms`.
 async fn drain_sipflow_items(
-    rx: &mut tokio::sync::mpsc::Receiver<rustpbx_media::media_recorder::SipflowItem>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SipFlowItem>,
     window_ms: u64,
 ) -> Vec<(PacketDirection, u8)> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(window_ms);
     let mut out = Vec::new();
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
-            Ok(Some(item)) => out.push((item.direction, item.payload_type)),
+            Ok(Some(item)) => {
+                let direction = match item.leg {
+                    Some(0) => PacketDirection::Ingress,
+                    Some(1) => PacketDirection::Egress,
+                    leg => panic!("unexpected recording leg: {leg:?}"),
+                };
+                let payload_type = item
+                    .payload
+                    .get(1)
+                    .map(|value| value & 0x7f)
+                    .expect("captured item must contain an RTP header");
+                out.push((direction, payload_type));
+            }
             Ok(None) => break,
             Err(_) => continue,
         }
@@ -1383,18 +1484,16 @@ async fn drain_sipflow_items(
 /// (which holds the recorder) ever produces items.
 #[tokio::test]
 async fn recording_captures_a_leg_only_not_b_leg() {
-    let mut h = TestMediaHarness::create(
+    let (recorder, mut rx) = recorder_capture("a-leg-only");
+    let mut h = TestMediaHarness::create_with_recorder(
         TransportMode::Rtp,
         CodecType::PCMU,
         TransportMode::Rtp,
         CodecType::PCMU,
+        recorder,
     )
     .await;
     h.bridge_and_accept().await;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let rec = SipflowRecorder::new(tx);
-    h.mb.set_recorder_for(LegSide::A, rec);
 
     let frames = encode_codec_frames(CodecType::PCMU, 20);
     let rate = CodecType::PCMU.samplerate();
@@ -1459,19 +1558,17 @@ async fn recording_captures_a_leg_only_not_b_leg() {
 async fn ivr_playback_is_recorded_as_a_leg_egress() {
     use rustpbx_media::audio_source::FileAudioSource;
 
-    let mut h = TestMediaHarness::create(
+    let (recorder, mut rx) = recorder_capture("ivr-egress");
+    let mut h = TestMediaHarness::create_with_recorder(
         TransportMode::Rtp,
         CodecType::PCMU,
         TransportMode::Rtp,
         CodecType::PCMU,
+        recorder,
     )
     .await;
     // Only the A leg + test_a are needed for IVR playback; do not bridge.
     h.mb.accept(LegSide::A).await;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let rec = SipflowRecorder::new(tx);
-    h.mb.set_recorder_for(LegSide::A, rec);
 
     // Play a real WAV (the same fixture used by the codec tests) on the A leg.
     // The egress pipeline encodes it to PCMU and pushes frames through the
@@ -1512,18 +1609,16 @@ async fn ivr_playback_is_recorded_as_a_leg_egress() {
 /// transport only.
 #[tokio::test]
 async fn recording_transcoded_call_captures_both_speakers_on_a_leg() {
-    let mut h = TestMediaHarness::create(
+    let (recorder, mut rx) = recorder_capture("transcoded-call");
+    let mut h = TestMediaHarness::create_with_recorder(
         TransportMode::Rtp,
         CodecType::Opus,
         TransportMode::Rtp,
         CodecType::PCMU,
+        recorder,
     )
     .await;
     h.bridge_and_accept().await;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let rec = SipflowRecorder::new(tx);
-    h.mb.set_recorder_for(LegSide::A, rec);
 
     // Caller audio (Opus, PT 111): test_a → leg A ingress.
     let opus_frames = encode_codec_frames(CodecType::Opus, 20);

@@ -1931,37 +1931,10 @@ impl RwiCommandProcessor {
 
     async fn record_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let has_recording = self.record_states.remove(call_id).is_some();
+        self.record_states.remove(call_id);
         handle
             .send_command(CallCommand::StopRecording)
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        if has_recording {
-            let meta = self.gateway.read().meta_store.get_sync(call_id);
-            let (ani, dnis) = match meta {
-                Some(ref m) => (m.caller_name.clone(), m.callee_name.clone()),
-                None => (None, None),
-            };
-            let gw = self.gateway.read();
-            gw.send_to_owner(&crate::rwi::RecordStopped {
-                call_id: call_id.to_string(),
-                duration_secs: None,
-                filename: None,
-                unique_id: Some(call_id.to_string()),
-                file_size: None,
-                download_url: None,
-                caller_name: ani,
-                callee_name: dnis,
-                called_phone: None,
-                call_type: None,
-                agent_id: None,
-                agent_name: None,
-                call_start_time: None,
-                call_end_time: None,
-                upload_time: None,
-                switch_flag: None,
-                root_call_id: None,
-            });
-        }
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::Success)
     }
 

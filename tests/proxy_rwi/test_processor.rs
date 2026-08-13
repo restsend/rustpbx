@@ -1363,21 +1363,26 @@ use rustpbx::rwi::*;
             .await
             .unwrap();
 
+        let (stop_seen_tx, stop_seen_rx) = tokio::sync::oneshot::channel();
+        rustpbx::utils::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                if matches!(command, CallCommand::StopRecording) {
+                    let _ = stop_seen_tx.send(());
+                    break;
+                }
+            }
+        });
+
         let result = processor
             .process_command(RwiCommandPayload::RecordStop {
                 call_id: "call-rec-s".into(),
             })
             .await;
-        assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+        assert!(result.is_ok());
 
-        let mut found_stop = false;
-        while let Ok(cmd) = rx.try_recv() {
-            if matches!(cmd, CallCommand::StopRecording) {
-                found_stop = true;
-                break;
-            }
-        }
-        assert!(found_stop, "Expected StopRecording action to be sent");
+        stop_seen_rx
+            .await
+            .expect("Expected StopRecording action to be sent");
     }
 
     #[tokio::test]

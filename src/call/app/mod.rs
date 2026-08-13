@@ -110,7 +110,7 @@ pub use app_context::{
 };
 pub use controller::{
     CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackToken,
-    RecordingHandle, RecordingInfo,
+    RecordingInfo,
 };
 pub use event_loop::AppEventLoop;
 

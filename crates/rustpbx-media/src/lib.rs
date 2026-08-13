@@ -30,9 +30,6 @@ mod media_track_tests;
 mod mixer_tests;
 #[cfg(test)]
 mod recorder_tests;
-#[cfg(test)]
-mod test_utils;
-
 // ── Re-exports ──────────────────────────────────────────────────────
 pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
@@ -47,8 +44,6 @@ pub use rtp_track_builder::RtpTrackBuilder;
 pub use track::Track;
 
 // ── Shared utility types ────────────────────────────────────────────
-
-use anyhow::Result;
 
 /// Audio frame buffer for passing PCM audio between components.
 #[derive(Debug, Clone)]
@@ -80,17 +75,9 @@ impl AudioFrame {
     }
 }
 
-pub trait StreamWriter: Send + Sync {
-    fn write_header(&mut self) -> Result<()>;
-    fn write_packet(&mut self, data: &[u8], samples: usize) -> Result<()>;
-    fn finalize(&mut self) -> Result<()>;
-}
-
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
     now.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
-
-

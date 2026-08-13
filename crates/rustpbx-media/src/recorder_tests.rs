@@ -95,13 +95,13 @@ mod recorder_advanced_tests {
 
     // ==================== Recorder Format Tests ====================
 
-    #[test]
-    fn test_recorder_wav_header_pcmu() {
+    #[tokio::test]
+    async fn test_recorder_wav_header_pcmu() {
         let temp_path = std::env::temp_dir().join("test_wav_header_pcmu.wav");
         let path_str = temp_path.to_str().unwrap();
 
         // Create recorder with PCMU
-        let recorder = Recorder::new(path_str, CodecType::PCMU);
+        let recorder = Recorder::new(path_str, CodecType::PCMU).await;
         assert!(recorder.is_ok(), "Should create PCMU recorder");
 
         // File should exist
@@ -123,12 +123,12 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_wav_header_pcma() {
+    #[tokio::test]
+    async fn test_recorder_wav_header_pcma() {
         let temp_path = std::env::temp_dir().join("test_wav_header_pcma.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let recorder = Recorder::new(path_str, CodecType::PCMA);
+        let recorder = Recorder::new(path_str, CodecType::PCMA).await;
         assert!(recorder.is_ok(), "Should create PCMA recorder");
 
         assert!(temp_path.exists(), "WAV file should be created");
@@ -137,12 +137,12 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_wav_header_g722() {
+    #[tokio::test]
+    async fn test_recorder_wav_header_g722() {
         let temp_path = std::env::temp_dir().join("test_wav_header_g722.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let recorder = Recorder::new(path_str, CodecType::G722);
+        let recorder = Recorder::new(path_str, CodecType::G722).await;
         assert!(recorder.is_ok(), "Should create G722 recorder");
 
         assert!(temp_path.exists(), "WAV file should be created");
@@ -153,12 +153,12 @@ mod recorder_advanced_tests {
 
     // ==================== Recorder Dual-Leg Tests ====================
 
-    #[test]
-    fn test_recorder_dual_leg_recording() {
+    #[tokio::test]
+    async fn test_recorder_dual_leg_recording() {
         let temp_path = std::env::temp_dir().join("test_recorder_dual_leg.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Create mock audio frames for both legs
         let frame_a = AudioFrame {
@@ -187,15 +187,15 @@ mod recorder_advanced_tests {
 
         // Write samples from both legs
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None).await
             .expect("Should write Leg A sample");
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None).await
             .expect("Should write Leg B sample");
 
         // Force flush
-        recorder.finalize().expect("Should finalize recorder");
+        recorder.finalize().await.expect("Should finalize recorder");
 
         // File should have data
         let metadata = std::fs::metadata(&temp_path).unwrap();
@@ -208,12 +208,12 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_single_channel_recording() {
+    #[tokio::test]
+    async fn test_recorder_single_channel_recording() {
         let temp_path = std::env::temp_dir().join("test_recorder_single_channel.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         let frame = AudioFrame {
             data: vec![0xFF; 160].into(),
@@ -228,10 +228,10 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
             .expect("Should write sample");
 
-        recorder.finalize().expect("Should finalize recorder");
+        recorder.finalize().await.expect("Should finalize recorder");
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44, "WAV file should have audio data");
@@ -242,12 +242,12 @@ mod recorder_advanced_tests {
 
     // ==================== DTMF Recording Tests ====================
 
-    #[test]
-    fn test_recorder_dtmf_event_payload() {
+    #[tokio::test]
+    async fn test_recorder_dtmf_event_payload() {
         let temp_path = std::env::temp_dir().join("test_recorder_dtmf_event.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // DTMF payload: digit '5' (code 5), end bit set, duration 800 samples
         let dtmf_payload = vec![
@@ -258,10 +258,10 @@ mod recorder_advanced_tests {
         ];
 
         recorder
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 0, 8000)
+            .write_dtmf_payload(Leg::A, &dtmf_payload, 0, 8000).await
             .expect("Should write DTMF payload");
 
-        recorder.finalize().expect("Should finalize");
+        recorder.finalize().await.expect("Should finalize");
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44, "Should have recorded DTMF tone");
@@ -270,31 +270,31 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_dtmf_ignores_duplicate_terminal_packets() {
+    #[tokio::test]
+    async fn test_recorder_dtmf_ignores_duplicate_terminal_packets() {
         let temp_path_single = std::env::temp_dir().join("test_recorder_dtmf_single.wav");
         let temp_path_dup = std::env::temp_dir().join("test_recorder_dtmf_duplicate.wav");
 
         let dtmf_payload = [5, 0x80, 0x06, 0x40];
 
         let mut recorder_single =
-            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).unwrap();
+            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).await.unwrap();
         recorder_single
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+            .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000).await
             .expect("single terminal DTMF should be written");
         recorder_single
-            .finalize()
+            .finalize().await
             .expect("single finalize should succeed");
 
         let mut recorder_dup =
-            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).unwrap();
+            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).await.unwrap();
         for _ in 0..3 {
             recorder_dup
-                .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+                .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000).await
                 .expect("duplicate terminal DTMF packets should be accepted");
         }
         recorder_dup
-            .finalize()
+            .finalize().await
             .expect("duplicate finalize should succeed");
 
         let len_single = std::fs::metadata(&temp_path_single).unwrap().len();
@@ -309,10 +309,10 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path_dup);
     }
 
-    #[test]
-    fn test_recorder_dtmf_progressive_duration_is_not_appended_repeatedly() {
+    #[tokio::test]
+    async fn test_recorder_dtmf_progressive_duration_is_not_appended_repeatedly() {
         let temp_path = std::env::temp_dir().join("test_recorder_dtmf_progressive_duration.wav");
-        let mut recorder = Recorder::new(temp_path.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(temp_path.to_str().unwrap(), CodecType::PCMU).await.unwrap();
         let rtp_timestamp = 12_345;
 
         for duration in [160u16, 320, 480, 640, 800] {
@@ -323,18 +323,18 @@ mod recorder_advanced_tests {
                 duration as u8,
             ];
             recorder
-                .write_dtmf_payload(Leg::A, &payload, rtp_timestamp, 8000)
+                .write_dtmf_payload(Leg::A, &payload, rtp_timestamp, 8000).await
                 .expect("progressive DTMF packet should be accepted");
         }
 
         let terminal_payload = [5, 0x80, 0x03, 0x20];
         for _ in 0..2 {
             recorder
-                .write_dtmf_payload(Leg::A, &terminal_payload, rtp_timestamp, 8000)
+                .write_dtmf_payload(Leg::A, &terminal_payload, rtp_timestamp, 8000).await
                 .expect("repeated terminal DTMF packet should be accepted");
         }
 
-        recorder.finalize().expect("finalize should succeed");
+        recorder.finalize().await.expect("finalize should succeed");
 
         let file_len = std::fs::metadata(&temp_path).unwrap().len();
         assert_eq!(
@@ -346,23 +346,23 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_dtmf_uses_event_clock_rate() {
+    async fn test_recorder_dtmf_uses_event_clock_rate() {
         let temp_path_a = std::env::temp_dir().join("test_recorder_dtmf_clock_a.wav");
         let temp_path_b = std::env::temp_dir().join("test_recorder_dtmf_clock_b.wav");
-        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).unwrap();
-        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).await.unwrap();
+        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).await.unwrap();
 
         recorder_a
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 0, 48000)
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 0, 48000).await
             .expect("48k DTMF should be written");
         recorder_b
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 0, 8000)
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 0, 8000).await
             .expect("8k DTMF should be written");
 
-        recorder_a.finalize().expect("48k finalize should succeed");
-        recorder_b.finalize().expect("8k finalize should succeed");
+        recorder_a.finalize().await.expect("48k finalize should succeed");
+        recorder_b.finalize().await.expect("8k finalize should succeed");
 
         let len_a = std::fs::metadata(&temp_path_a).unwrap().len();
         let len_b = std::fs::metadata(&temp_path_b).unwrap().len();
@@ -378,13 +378,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path_b);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_dtmf_timestamp_uses_event_clock_rate() {
+    async fn test_recorder_dtmf_timestamp_uses_event_clock_rate() {
         let temp_path_a = std::env::temp_dir().join("test_recorder_dtmf_ts_a.wav");
         let temp_path_b = std::env::temp_dir().join("test_recorder_dtmf_ts_b.wav");
-        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).unwrap();
-        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).await.unwrap();
+        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).await.unwrap();
 
         let frame = AudioFrame {
             data: vec![0xFF; 160].into(),
@@ -399,21 +399,21 @@ mod recorder_advanced_tests {
         };
 
         recorder_a
-            .write_sample(Leg::A, &MediaSample::Audio(frame.clone()), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame.clone()), None, None, None).await
             .expect("Should write anchor sample");
         recorder_b
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
             .expect("Should write anchor sample");
 
         recorder_a
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 4800, 48000)
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 4800, 48000).await
             .expect("48k DTMF should be written");
         recorder_b
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 800, 8000)
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 800, 8000).await
             .expect("8k DTMF should be written");
 
-        recorder_a.finalize().expect("48k finalize should succeed");
-        recorder_b.finalize().expect("8k finalize should succeed");
+        recorder_a.finalize().await.expect("48k finalize should succeed");
+        recorder_b.finalize().await.expect("8k finalize should succeed");
 
         let len_a = std::fs::metadata(&temp_path_a).unwrap().len();
         let len_b = std::fs::metadata(&temp_path_b).unwrap().len();
@@ -429,71 +429,71 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path_b);
     }
 
-    #[test]
-    fn test_recorder_dtmf_all_digits() {
+    #[tokio::test]
+    async fn test_recorder_dtmf_all_digits() {
         let temp_path = std::env::temp_dir().join("test_recorder_dtmf_all.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Test digits 0-9
         for digit in 0u8..=9u8 {
             let payload = vec![digit, 0x80, 0x03, 0x20];
             recorder
-                .write_dtmf_payload(Leg::A, &payload, 0, 8000)
+                .write_dtmf_payload(Leg::A, &payload, 0, 8000).await
                 .unwrap_or_else(|_| panic!("Should write DTMF {}", digit));
         }
 
         // Test * (code 10)
         let payload_star = vec![10, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_star, 0, 8000)
+            .write_dtmf_payload(Leg::A, &payload_star, 0, 8000).await
             .unwrap();
 
         // Test # (code 11)
         let payload_hash = vec![11, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_hash, 0, 8000)
+            .write_dtmf_payload(Leg::A, &payload_hash, 0, 8000).await
             .unwrap();
 
-        recorder.finalize().expect("Should finalize");
+        recorder.finalize().await.expect("Should finalize");
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_dtmf_invalid_payload() {
+    #[tokio::test]
+    async fn test_recorder_dtmf_invalid_payload() {
         let temp_path = std::env::temp_dir().join("test_dtmf_invalid.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Too short payload (should be ignored)
         let short_payload = vec![5, 0x80];
-        let result = recorder.write_dtmf_payload(Leg::A, &short_payload, 0, 8000);
+        let result = recorder.write_dtmf_payload(Leg::A, &short_payload, 0, 8000).await;
         assert!(result.is_ok(), "Short payload should be ignored gracefully");
 
         // Invalid digit code (>15)
         let invalid_payload = vec![99, 0x80, 0x03, 0x20];
-        let result = recorder.write_dtmf_payload(Leg::A, &invalid_payload, 0, 8000);
+        let result = recorder.write_dtmf_payload(Leg::A, &invalid_payload, 0, 8000).await;
         assert!(result.is_ok(), "Invalid digit should be ignored gracefully");
 
-        recorder.finalize().expect("Should finalize");
+        recorder.finalize().await.expect("Should finalize");
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_empty_finalize() {
+    #[tokio::test]
+    async fn test_recorder_empty_finalize() {
         let temp_path = std::env::temp_dir().join("test_empty.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Finalize without writing any samples
-        recorder.finalize().expect("Should finalize empty recorder");
+        recorder.finalize().await.expect("Should finalize empty recorder");
 
         // Should still have valid WAV header
         let metadata = std::fs::metadata(&temp_path).unwrap();
@@ -503,41 +503,41 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_multiple_finalize() {
+    #[tokio::test]
+    async fn test_recorder_multiple_finalize() {
         let temp_path = std::env::temp_dir().join("test_multi_finalize.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Multiple finalize calls should be safe
-        recorder.finalize().expect("First finalize should succeed");
-        recorder.finalize().expect("Second finalize should succeed");
-        recorder.finalize().expect("Third finalize should succeed");
+        recorder.finalize().await.expect("First finalize should succeed");
+        recorder.finalize().await.expect("Second finalize should succeed");
+        recorder.finalize().await.expect("Third finalize should succeed");
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_high_sample_rate() {
+    #[tokio::test]
+    async fn test_recorder_high_sample_rate() {
         let temp_path = std::env::temp_dir().join("test_high_rate.wav");
         let path_str = temp_path.to_str().unwrap();
 
         // Test with 48kHz (Opus sample rate)
-        let recorder = Recorder::new(path_str, CodecType::PCMU);
+        let recorder = Recorder::new(path_str, CodecType::PCMU).await;
         assert!(recorder.is_ok(), "Should support 48kHz sample rate");
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
     }
-    #[test]
-    fn test_recorder_transcoding() {
+    #[tokio::test]
+    async fn test_recorder_transcoding() {
         let temp_path = std::env::temp_dir().join("test_transcoding.wav");
         let path_str = temp_path.to_str().unwrap();
 
         // Recorder output is PCMU
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Input is PCMA (payload type 8)
         let frame = AudioFrame {
@@ -553,10 +553,10 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
             .expect("Should write PCMA sample to PCMU recorder");
 
-        recorder.finalize().expect("Should finalize");
+        recorder.finalize().await.expect("Should finalize");
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44, "WAV file should have audio data");
@@ -564,12 +564,12 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_alignment_with_gaps() {
+    #[tokio::test]
+    async fn test_recorder_alignment_with_gaps() {
         let temp_path = std::env::temp_dir().join("test_alignment.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Leg A starts at 0
         let frame_a = AudioFrame {
@@ -598,14 +598,14 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None).await
             .unwrap();
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None).await
             .unwrap();
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44);
@@ -613,13 +613,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_nominal_pcmu_packet_size_matches_rtp_duration() {
+    async fn test_recorder_nominal_pcmu_packet_size_matches_rtp_duration() {
         let temp_path = std::env::temp_dir().join("test_nominal_pcmu_duration.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         for i in 0..50u32 {
             let frame = AudioFrame {
@@ -635,11 +635,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert_eq!(
@@ -651,13 +651,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn repro_recorder_inflates_duration_when_frame_bytes_exceed_rtp_span() {
+    async fn repro_recorder_inflates_duration_when_frame_bytes_exceed_rtp_span() {
         let temp_path = std::env::temp_dir().join("test_recorder_inflated_duration.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).await.unwrap();
 
         for i in 0..50u32 {
             let frame = AudioFrame {
@@ -673,11 +673,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(
@@ -692,13 +692,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_uses_frame_clock_rate_for_timestamp_alignment() {
+    async fn test_recorder_uses_frame_clock_rate_for_timestamp_alignment() {
         let temp_path = std::env::temp_dir().join("test_recorder_mostly_silence.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).await.unwrap();
         let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
         let silence_byte = encoder.encode(&vec![0i16; 160])[0];
 
@@ -716,11 +716,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let file = std::fs::read(&temp_path).unwrap();
         let payload = &file[44..];
@@ -750,13 +750,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_prefers_raw_rtp_payload_over_mutated_frame_data() {
+    async fn test_recorder_prefers_raw_rtp_payload_over_mutated_frame_data() {
         let temp_path = std::env::temp_dir().join("test_recorder_prefers_raw_payload.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).await.unwrap();
 
         for i in 0..50u32 {
             let raw_payload = vec![0xD5; 160];
@@ -775,11 +775,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert_eq!(
@@ -791,13 +791,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_resets_timeline_on_rtp_stream_switch() {
+    async fn test_recorder_resets_timeline_on_rtp_stream_switch() {
         let temp_path = std::env::temp_dir().join("test_recorder_stream_switch.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).await.unwrap();
 
         for i in 0..50u32 {
             let raw_packet = RtpPacket::new(
@@ -817,7 +817,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
@@ -840,11 +840,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert_eq!(
@@ -856,13 +856,13 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_recorder_handles_183_early_media_then_200_ok_stream_switch() {
+    async fn test_recorder_handles_183_early_media_then_200_ok_stream_switch() {
         let temp_path = std::env::temp_dir().join("test_recorder_183_200_stream_switch.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).await.unwrap();
 
         // Phase 1: 183 early media arrives on the first RTP stream.
         for i in 0..100u32 {
@@ -884,7 +884,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
@@ -909,11 +909,11 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None).await
                 .unwrap();
         }
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert_eq!(
@@ -925,12 +925,12 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_recorder_g729_stereo() {
+    #[tokio::test]
+    async fn test_recorder_g729_stereo() {
         let temp_path = std::env::temp_dir().join("test_g729_stereo.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new(path_str, CodecType::G729).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::G729).await.unwrap();
 
         let frame_a = AudioFrame {
             data: vec![0; 10].into(), // 10 bytes G.729
@@ -957,13 +957,13 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None).await
             .unwrap();
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None).await
             .unwrap();
 
-        recorder.finalize().unwrap();
+        recorder.finalize().await.unwrap();
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44);
@@ -972,10 +972,10 @@ mod recorder_advanced_tests {
     }
 
     /// Test: Opus should convert to PCMU automatically
-    #[test]
-    fn test_opus_converts_to_pcmu() {
+    #[tokio::test]
+    async fn test_opus_converts_to_pcmu() {
         let temp_path = "/tmp/test_opus_convert.wav";
-        let recorder = Recorder::new(temp_path, CodecType::Opus);
+        let recorder = Recorder::new(temp_path, CodecType::Opus).await;
         assert!(recorder.is_ok());
 
         let mut rec = recorder.unwrap();
@@ -985,18 +985,18 @@ mod recorder_advanced_tests {
             "Opus should be converted to PCMU"
         );
 
-        rec.finalize().ok();
+        rec.finalize().await.ok();
         let _ = std::fs::remove_file(temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_dynamic_opus_payload_type_uses_codec_hint() {
+    async fn test_dynamic_opus_payload_type_uses_codec_hint() {
         use audio_codec::create_encoder;
         use bytes::Bytes;
 
         let temp_path = "/tmp/test_dynamic_opus_pt.wav";
-        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).await.unwrap();
         let mut encoder = create_encoder(CodecType::Opus);
         let pcm_samples = vec![100i16; 960 * 2];
         let encoded = encoder.encode(&pcm_samples);
@@ -1014,9 +1014,9 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, None, None, Some(CodecType::Opus))
+            .write_sample(Leg::A, &frame, None, None, Some(CodecType::Opus)).await
             .expect("Should write Opus sample with dynamic payload type");
-        recorder.finalize().expect("Should finalize recorder");
+        recorder.finalize().await.expect("Should finalize recorder");
 
         let metadata = std::fs::metadata(temp_path).unwrap();
         assert!(metadata.len() > 44, "WAV file should have audio data");
@@ -1024,16 +1024,15 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(temp_path);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
-    fn test_dynamic_opus_payload_type_uses_stored_leg_payloads() {
+    async fn test_dynamic_opus_payload_type_uses_stored_leg_payloads() {
         use audio_codec::create_encoder;
         use bytes::Bytes;
 
         let temp_path = "/tmp/test_dynamic_opus_pt_stored.wav";
-        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
-        recorder.set_leg_profile(
-            Leg::A,
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).await.unwrap();
+        recorder.set_profile(
             NegotiatedLegProfile {
                 audio: Some(NegotiatedCodec {
                     codec: CodecType::Opus,
@@ -1070,9 +1069,9 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, None, None, None)
+            .write_sample(Leg::A, &frame, None, None, None).await
             .expect("Should write Opus sample using stored leg payload mapping");
-        recorder.finalize().expect("Should finalize recorder");
+        recorder.finalize().await.expect("Should finalize recorder");
 
         let metadata = std::fs::metadata(temp_path).unwrap();
         assert!(metadata.len() > 44, "WAV file should have audio data");
@@ -1081,8 +1080,8 @@ mod recorder_advanced_tests {
     }
 
     /// Test: Supported codecs (PCMU, PCMA, G722, G729) all work
-    #[test]
-    fn test_supported_codecs() {
+    #[tokio::test]
+    async fn test_supported_codecs() {
         let codecs = vec![
             (CodecType::PCMU, "/tmp/test_supported_pcmu.wav"),
             (CodecType::PCMA, "/tmp/test_supported_pcma.wav"),
@@ -1091,21 +1090,21 @@ mod recorder_advanced_tests {
         ];
 
         for (codec, path) in codecs {
-            let recorder = Recorder::new(path, codec);
+            let recorder = Recorder::new(path, codec).await;
             assert!(recorder.is_ok(), "Recorder should support {:?}", codec);
-            recorder.unwrap().finalize().ok();
+            recorder.unwrap().finalize().await.ok();
             let _ = std::fs::remove_file(path);
         }
     }
 
     /// Test: Recording from both legs creates stereo output
-    #[test]
-    fn test_dual_leg_recording_stereo() {
+    #[tokio::test]
+    async fn test_dual_leg_recording_stereo() {
         use audio_codec::create_encoder;
         use bytes::Bytes;
 
         let temp_path = "/tmp/test_dual_leg_stereo.wav";
-        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).await.unwrap();
 
         // Generate test audio for both legs
         let mut encoder = create_encoder(CodecType::PCMU);
@@ -1125,7 +1124,7 @@ mod recorder_advanced_tests {
                 source_addr: None,
                 header_extension: None,
             });
-            recorder.write_sample(Leg::A, &frame, None, None, None).ok();
+            recorder.write_sample(Leg::A, &frame, None, None, None).await.ok();
         }
 
         // Leg B: callee (5 packets)
@@ -1142,10 +1141,10 @@ mod recorder_advanced_tests {
                 source_addr: None,
                 header_extension: None,
             });
-            recorder.write_sample(Leg::B, &frame, None, None, None).ok();
+            recorder.write_sample(Leg::B, &frame, None, None, None).await.ok();
         }
 
-        recorder.finalize().ok();
+        recorder.finalize().await.ok();
 
         // Verify file exists and has content
         let metadata = std::fs::metadata(temp_path).unwrap();
@@ -1158,12 +1157,12 @@ mod recorder_advanced_tests {
     }
 
     /// Test: DTMF is converted and recorded properly
-    #[test]
-    fn test_dtmf_recording() {
+    #[tokio::test]
+    async fn test_dtmf_recording() {
         use bytes::Bytes;
 
         let temp_path = "/tmp/test_dtmf_recording.wav";
-        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).await.unwrap();
 
         // Create DTMF payload (RFC 4733)
         // Format: [digit, flags, duration_high, duration_low]
@@ -1187,9 +1186,9 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, Some(101), Some(8000), None)
+            .write_sample(Leg::A, &frame, Some(101), Some(8000), None).await
             .ok();
-        recorder.finalize().ok();
+        recorder.finalize().await.ok();
 
         // Verify file was created
         assert!(
@@ -1275,7 +1274,7 @@ mod recorder_advanced_tests {
     /// packets) through the production `write_sample` entry point, relying on
     /// the negotiated leg profile for payload-type matching — exactly as the
     /// recorder drain task does in `sip_session.rs`.
-    fn feed_telephone_event_digit(
+    async fn feed_telephone_event_digit(
         recorder: &mut Recorder,
         leg: Leg,
         digit_code: u8,
@@ -1301,7 +1300,7 @@ mod recorder_advanced_tests {
                 header_extension: None,
             });
             recorder
-                .write_sample(leg, &frame, None, None, None)
+                .write_sample(leg, &frame, None, None, None).await
                 .expect("write_sample for telephone-event should succeed");
         }
     }
@@ -1354,16 +1353,15 @@ mod recorder_advanced_tests {
         );
     }
 
-    #[test]
-    fn test_telephone_event_recorded_as_dtmf_audio_digit5() {
+    #[tokio::test]
+    async fn test_telephone_event_recorded_as_dtmf_audio_digit5() {
         let temp_path = std::env::temp_dir().join("test_te_renders_dtmf_5.wav");
         let path_str = temp_path.to_str().unwrap();
-        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
 
         // Production-realistic: the leg profile carries the negotiated audio
         // payload type (PCMU=0) and the telephone-event payload type (101).
-        recorder.set_leg_profile(
-            Leg::A,
+        recorder.set_profile(
             NegotiatedLegProfile {
                 audio: Some(NegotiatedCodec {
                     codec: CodecType::PCMU,
@@ -1395,14 +1393,14 @@ mod recorder_advanced_tests {
             header_extension: None,
         });
         recorder
-            .write_sample(Leg::A, &anchor, None, None, None)
+            .write_sample(Leg::A, &anchor, None, None, None).await
             .expect("anchor write");
 
         // Digit '5' = row 770Hz / col 1336Hz, 200ms (1600 samples @ 8kHz),
         // delivered as a realistic begin/continue/end RFC 4733 burst.
-        feed_telephone_event_digit(&mut recorder, Leg::A, 5, 160, 1600, 101);
+        feed_telephone_event_digit(&mut recorder, Leg::A, 5, 160, 1600, 101).await;
 
-        recorder.finalize().expect("finalize");
+        recorder.finalize().await.expect("finalize");
 
         // Left channel (leg A): skip the 160-sample silence anchor, the rest is
         // the rendered tone.
@@ -1423,8 +1421,8 @@ mod recorder_advanced_tests {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    #[test]
-    fn test_telephone_event_recorded_for_multiple_digits() {
+    #[tokio::test]
+    async fn test_telephone_event_recorded_for_multiple_digits() {
         // Verify each standard digit renders its own distinct frequency pair by
         // checking that '1' (697/1209) and '#' (941/1477) are both detectable.
         for (digit_code, row, col, name) in [
@@ -1434,9 +1432,8 @@ mod recorder_advanced_tests {
         ] {
             let temp_path = std::env::temp_dir().join(format!("test_te_renders_{name}.wav"));
             let path_str = temp_path.to_str().unwrap();
-            let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
-            recorder.set_leg_profile(
-                Leg::A,
+            let mut recorder = Recorder::new(path_str, CodecType::PCMU).await.unwrap();
+            recorder.set_profile(
                 NegotiatedLegProfile {
                     audio: Some(NegotiatedCodec {
                         codec: CodecType::PCMU,
@@ -1453,8 +1450,8 @@ mod recorder_advanced_tests {
                     ..Default::default()
                 },
             );
-            feed_telephone_event_digit(&mut recorder, Leg::A, digit_code, 0, 1600, 101);
-            recorder.finalize().expect("finalize");
+            feed_telephone_event_digit(&mut recorder, Leg::A, digit_code, 0, 1600, 101).await;
+            recorder.finalize().await.expect("finalize");
 
             let pcm = read_pcmu_wav_channel(path_str, 0);
             assert!(pcm.len() > 800, "recording for digit {name} too short");
@@ -1469,12 +1466,12 @@ mod recorder_advanced_tests {
     /// Voicemail-style capture: only the caller (leg A) is recorded to a mono
     /// WAV at full amplitude. The egress leg B is silence, so the naive mix
     /// path would halve the level; caller-only must preserve it.
-    #[test]
-    fn test_mono_caller_only_recording_keeps_full_amplitude() {
+    #[tokio::test]
+    async fn test_mono_caller_only_recording_keeps_full_amplitude() {
         let temp_path = std::env::temp_dir().join("test_mono_caller_only.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new_with_channels(path_str, CodecType::PCMU, 1, true).unwrap();
+        let mut recorder = Recorder::new_with_channels(path_str, CodecType::PCMU, 1, true).await.unwrap();
         let profile = NegotiatedLegProfile {
             audio: Some(NegotiatedCodec {
                 codec: CodecType::PCMU,
@@ -1484,8 +1481,7 @@ mod recorder_advanced_tests {
             }),
             ..Default::default()
         };
-        recorder.set_leg_profile(Leg::A, profile.clone());
-        recorder.set_leg_profile(Leg::B, profile);
+        recorder.set_profile(profile);
 
         // Leg A: a loud constant signal (PCMU-encoded).
         let mut enc_a = audio_codec::create_encoder(CodecType::PCMU);
@@ -1503,7 +1499,7 @@ mod recorder_advanced_tests {
             header_extension: None,
         };
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None).await
             .expect("write leg A");
 
         // Leg B: silence (the voicemail egress leg).
@@ -1522,10 +1518,10 @@ mod recorder_advanced_tests {
             header_extension: None,
         };
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None).await
             .expect("write leg B");
 
-        recorder.finalize().expect("finalize");
+        recorder.finalize().await.expect("finalize");
 
         // Header must declare a single (mono) channel.
         let bytes = std::fs::read(&temp_path).unwrap();

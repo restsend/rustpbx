@@ -35,10 +35,6 @@ pub struct PlaybackOutcome {
     pub dtmf: String,
 }
 
-/// A recording session controller.
-#[derive(Debug, Clone)]
-pub struct RecordingHandle {}
-
 /// Details about a completed recording.
 #[derive(Debug, Clone)]
 pub struct RecordingInfo {
@@ -313,7 +309,7 @@ impl CallController {
         path: impl Into<String>,
         max_duration: Option<Duration>,
         beep: bool,
-    ) -> anyhow::Result<RecordingHandle> {
+    ) -> anyhow::Result<()> {
         self.start_recording_with_layout(path, max_duration, beep, None, None)
             .await
     }
@@ -328,7 +324,7 @@ impl CallController {
         path: impl Into<String>,
         max_duration: Option<Duration>,
         beep: bool,
-    ) -> anyhow::Result<RecordingHandle> {
+    ) -> anyhow::Result<()> {
         self.start_recording_with_layout(path, max_duration, beep, Some(1), Some(true))
             .await
     }
@@ -340,7 +336,7 @@ impl CallController {
         beep: bool,
         channels: Option<u16>,
         mono_caller_only: Option<bool>,
-    ) -> anyhow::Result<RecordingHandle> {
+    ) -> anyhow::Result<()> {
         let p = path.into();
         let config = crate::call::domain::RecordConfig {
             path: p.clone(),
@@ -352,7 +348,7 @@ impl CallController {
         };
         self.session
             .send_command(CallCommand::StartRecording { config })?;
-        Ok(RecordingHandle {})
+        Ok(())
     }
 
     /// Stop the active recording and wait for completion.

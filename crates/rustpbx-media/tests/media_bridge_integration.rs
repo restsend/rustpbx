@@ -8,18 +8,90 @@
 use rustpbx_media::audio_source::FileAudioSource;
 use rustpbx_media::ingress_tap::PacketDirection;
 use rustpbx_media::leg::{LegConfig, LegInner};
-use rustpbx_media::media_bridge::{BridgeOpts, LegSide, MediaBridge};
-use rustpbx_media::media_recorder::SipflowRecorder;
+use rustpbx_media::media_bridge::{LegSide, MediaBridge};
+use rustpbx_media::media_recorder::{MediaRecorder, SipflowRecorder};
 use rustpbx_media::negotiate;
-use rustpbx_media::recorder::Leg;
+use rustpbx_sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
+
+struct CaptureBackend {
+    tx: tokio::sync::mpsc::UnboundedSender<SipFlowItem>,
+}
+
+#[async_trait::async_trait]
+impl SipFlowBackend for CaptureBackend {
+    fn record(&self, _call_id: std::borrow::Cow<'_, str>, item: SipFlowItem) -> anyhow::Result<()> {
+        let _ = self.tx.send(item);
+        Ok(())
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn query_flow(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<SipFlowItem>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media_stats(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<SipFlowMediaStats>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+fn recorder_capture(
+    call_id: &str,
+) -> (
+    Box<dyn MediaRecorder>,
+    tokio::sync::mpsc::UnboundedReceiver<SipFlowItem>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = std::sync::Arc::new(CaptureBackend { tx });
+    (
+        Box::new(SipflowRecorder::new(backend, call_id.to_string())),
+        rx,
+    )
+}
+
+fn captured_direction(item: &SipFlowItem) -> PacketDirection {
+    match item.leg {
+        Some(0) => PacketDirection::Ingress,
+        Some(1) => PacketDirection::Egress,
+        leg => panic!("unexpected recording leg: {leg:?}"),
+    }
+}
+
+fn captured_payload_type(item: &SipFlowItem) -> u8 {
+    item.payload
+        .get(1)
+        .map(|value| value & 0x7f)
+        .expect("captured item must contain an RTP header")
+}
 
 /// Two RTP/PCMU legs: SDP offer/answer completes and both legs carry a
 /// negotiated audio profile.
 #[tokio::test]
 async fn two_rtp_legs_negotiate_via_sdp() {
-    let mut mb = MediaBridge::new("it-sdp", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-sdp");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
     // a offers, b answers.
     let offer = a.create_offer(vec![]).await.expect("offer");
@@ -42,9 +114,9 @@ async fn two_rtp_legs_negotiate_via_sdp() {
 /// Bridge two same-codec legs through the A/B model.
 #[tokio::test]
 async fn bridge_records_symmetric_routes() {
-    let mut mb = MediaBridge::new("it-bridge", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-bridge");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
 
@@ -74,8 +146,8 @@ async fn bridge_records_symmetric_routes() {
 /// Switching a leg's egress source (play/mute) must not panic.
 #[tokio::test]
 async fn play_then_mute_switches_egress_source() {
-    let mut mb = MediaBridge::new("it-play", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-play");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     // Generate a 100ms 8kHz mono WAV of silence to play.
@@ -94,24 +166,24 @@ async fn play_then_mute_switches_egress_source() {
     mb.close();
 }
 
-/// A SipflowRecorder backend attached via set_recorder receives packets fed
-/// through a leg's IngressTap (the RtpObserver path).
+/// A recorder sender installed on a tap receives packets from the observer.
 #[tokio::test]
-async fn sipflow_recorder_receives_ingress_via_tap() {
+async fn recorder_sender_receives_ingress_via_tap() {
     use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let rec = SipflowRecorder::new(tx);
+    let (recorder, mut rx) = recorder_capture("it-rec");
 
-    let mut mb = MediaBridge::new("it-rec", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rec");
+    let recorder_sender = mb.start_recorder(Some(recorder)).unwrap();
+    let a = LegInner::new(
+        "a",
+        &LegConfig::rtp_pcmu(),
+        Some(recorder_sender),
+    )
+    .unwrap();
     mb.replace_leg(LegSide::A, a).await;
-    mb.leg(LegSide::A)
-        .unwrap()
-        .ingress_tap()
-        .set_recorder(Some(rec.clone()));
 
     // Synthesize an ingress packet by calling the tap directly (the real RTP
     // path is covered by the transport tests).
@@ -126,31 +198,35 @@ async fn sipflow_recorder_receives_ingress_via_tap() {
         .await
         .expect("timed out")
         .expect("no item");
-    assert_eq!(item.direction, PacketDirection::Ingress);
-    assert_eq!(item.payload_type, 0);
+    assert_eq!(captured_direction(&item), PacketDirection::Ingress);
+    assert_eq!(captured_payload_type(&item), 0);
 
     mb.close();
 }
 
-/// DTMF telephone-event RTP packets must reach the SipflowRecorder's channel
+/// DTMF telephone-event RTP packets must reach the recorder sender's channel
 /// (not be dropped by the IngressTap's DTMF short-circuit). Without this, the
 /// sipflow WAV export has no DTMF data and cannot synthesize keypress tones.
 #[tokio::test]
-async fn sipflow_recorder_receives_dtmf_rtp_packets() {
+async fn recorder_sender_receives_dtmf_rtp_packets() {
     use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let rec = SipflowRecorder::new(tx);
+    let (recorder, mut rx) = recorder_capture("it-dtmf-rec");
 
-    let mut mb = MediaBridge::new("it-dtmf-rec", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-dtmf-rec");
+    let recorder_sender = mb.start_recorder(Some(recorder)).unwrap();
+    let a = LegInner::new(
+        "a",
+        &LegConfig::rtp_pcmu(),
+        Some(recorder_sender),
+    )
+    .unwrap();
     mb.replace_leg(LegSide::A, a).await;
     let leg_a = mb.leg(LegSide::A).unwrap();
     let tap = leg_a.ingress_tap();
     tap.set_dtmf_payload_types(vec![101]);
-    tap.set_recorder(Some(rec.clone()));
 
     let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
@@ -164,16 +240,16 @@ async fn sipflow_recorder_receives_dtmf_rtp_packets() {
         .expect("timed out waiting for DTMF RTP item")
         .expect("no item");
 
-    // The SipflowRecorder must have received the raw telephone-event packet
+    // The recording task sender must receive the raw telephone-event packet
     // via write_sample — this is what wav_utils parses to synthesize the tone.
-    assert_eq!(item.direction, PacketDirection::Ingress);
+    assert_eq!(captured_direction(&item), PacketDirection::Ingress);
     assert_eq!(
-        item.payload_type, 101,
+        captured_payload_type(&item), 101,
         "DTMF telephone-event PT must be preserved"
     );
     // Verify the raw RTP payload contains the RFC 4733 event data.
     assert!(
-        !item.raw.is_empty(),
+        item.payload.len() > 12,
         "raw RTP must be stored for WAV synthesis"
     );
 
@@ -187,8 +263,8 @@ async fn dtmf_bus_fans_out_digit() {
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
 
-    let mut mb = MediaBridge::new("it-dtmf", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-dtmf");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.leg(LegSide::A)
         .unwrap()
@@ -232,9 +308,9 @@ fn detect_transport_classification() {
 /// Play a file and verify the on_end callback fires when the file completes.
 #[tokio::test]
 async fn play_file_fires_on_end() {
-    let mut mb = MediaBridge::new("it-onend", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-onend");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -267,9 +343,9 @@ async fn play_file_fires_on_end() {
 /// MediaBridge::hold breaks the route, then MediaBridge::resume re-arms it.
 #[tokio::test]
 async fn mediabridge_hold_resume_preserves_route() {
-    let mut mb = MediaBridge::new("it-hold-route", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-hold-route");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
 
@@ -299,8 +375,8 @@ async fn mediabridge_hold_resume_preserves_route() {
 /// hold with looping music source does not terminate (has_data stays true).
 #[tokio::test]
 async fn hold_with_music_loops() {
-    let mut mb = MediaBridge::new("it-hold-music", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-hold-music");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     // Generate a tiny WAV and play it as looping hold music.
@@ -320,8 +396,8 @@ async fn hold_with_music_loops() {
 /// hold_file convenience method works end-to-end.
 #[tokio::test]
 async fn mediabridge_hold_file_plays_loop() {
-    let mut mb = MediaBridge::new("it-hold-file", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-hold-file");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let wav = tempfile_wav_silence(8000, 1, 160);
@@ -332,25 +408,14 @@ async fn mediabridge_hold_file_plays_loop() {
     mb.close();
 }
 
-/// Attach a FileRecorder to a leg's tap, feed real non-silence PCMU packets
-/// through the RtpObserver, then verify the WAV contains non-silence audio.
+/// Attach the unified recorder sender to a leg's tap, feed real non-silence
+/// PCMU packets, then verify its file output contains non-silence audio.
 #[tokio::test]
 async fn file_recorder_writes_wav() {
-    use rustpbx_media::media_recorder::FileRecorder;
     use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
 
-    let profiles = [
-        (
-            Leg::A,
-            rustpbx_media::negotiate::NegotiatedLegProfile::default(),
-        ),
-        (
-            Leg::B,
-            rustpbx_media::negotiate::NegotiatedLegProfile::default(),
-        ),
-    ];
     let tmp = std::env::temp_dir().join(format!(
         "it_rec_{}.wav",
         std::time::SystemTime::now()
@@ -360,17 +425,27 @@ async fn file_recorder_writes_wav() {
     ));
     let path = tmp.to_string_lossy().to_string();
 
-    let rec = FileRecorder::start(path.clone(), profiles)
-        .await
-        .expect("FileRecorder start");
+    let mut mb = MediaBridge::new("it-rec-file");
+    let recorder_sender = mb.start_recorder(None).unwrap();
 
-    // Create a leg, attach recorder, feed non-silence PCMU packets.
-    let mut mb = MediaBridge::new("it-rec-file", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    // Create the caller and its recording task together, then install the
+    // file backend through the bridge's control handle.
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
+    mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
-    la.ingress_tap().set_recorder(Some(rec));
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply answer");
+    mb.start_recording(path.clone(), 2, false, None)
+        .await
+        .expect("file output start");
 
+    // Feed non-silence PCMU packets through the caller tap.
     // Alternating µ-law codewords = audible non-silence PCMU (silence is 0xFF).
     let payload: Vec<u8> = (0..80)
         .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
@@ -384,14 +459,15 @@ async fn file_recorder_writes_wav() {
         la.ingress_tap().on_ingress(&pkt, addr);
     }
 
-    // Stop recording and check file exists with real content.
-    la.ingress_tap().finalize_recorder();
-    // FileRecorder finalize is fire-and-forget; let its background thread flush
-    // the WAV before we read it back.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let result = mb
+        .stop_recording()
+        .await
+        .expect("file recording finalize")
+        .expect("file recording result");
+    assert_eq!(result.path, path);
     mb.close();
 
-    let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("FileRecorder must create: {path}"));
+    let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("recorder must create: {path}"));
     assert!(
         bytes.len() >= 44,
         "WAV file must have at least header (44 bytes), got {}",
@@ -413,8 +489,8 @@ async fn file_recorder_writes_wav() {
 /// Leg starts as gated; accept() opens the gate.
 #[tokio::test]
 async fn leg_gate_starts_closed_then_accept_opens() {
-    let mut mb = MediaBridge::new("it-gate", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-gate");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     let la = mb.leg(LegSide::A).unwrap();
 
@@ -428,8 +504,8 @@ async fn leg_gate_starts_closed_then_accept_opens() {
 /// RTP timeout fires when no packets arrive after the leg is accepted.
 #[tokio::test]
 async fn rtp_timeout_fires_on_inactive_leg() {
-    let mut mb = MediaBridge::new("it-rtp-timeout", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-timeout");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -450,8 +526,8 @@ async fn rtp_timeout_fires_on_inactive_leg() {
 /// RTP timeout is paused during hold and does NOT fire; resume re-arms it.
 #[tokio::test]
 async fn rtp_timeout_paused_on_hold_resumes_after() {
-    let mut mb = MediaBridge::new("it-rtp-timeout-hold", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-timeout-hold");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -478,8 +554,8 @@ async fn rtp_timeout_paused_on_hold_resumes_after() {
 /// Disarming the timeout drops the sender → a pending receiver gets Canceled.
 #[tokio::test]
 async fn rtp_timeout_disarm_cancels_receiver() {
-    let mut mb = MediaBridge::new("it-rtp-timeout-disarm", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-timeout-disarm");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -501,8 +577,8 @@ async fn rtp_timeout_disarm_cancels_receiver() {
 /// again.
 #[tokio::test]
 async fn rtp_timeout_app_paused_suppresses_even_when_rearmed() {
-    let mut mb = MediaBridge::new("it-rtp-timeout-app-paused", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-timeout-app-paused");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -543,8 +619,8 @@ async fn rtp_timeout_does_not_fire_on_active_rtp() {
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
 
-    let mut mb = MediaBridge::new("it-rtp-active", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-active");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     let tap = mb.leg(LegSide::A).unwrap().ingress_tap().clone();
     let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
@@ -586,8 +662,8 @@ async fn rtp_timeout_does_not_fire_on_active_rtp() {
 /// arrives.
 #[tokio::test]
 async fn rtp_timeout_paused_during_playback_resumes_on_end() {
-    let mut mb = MediaBridge::new("it-rtp-play", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-play");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -629,8 +705,8 @@ async fn rtp_timeout_paused_during_playback_resumes_on_end() {
 /// session re-arming (e.g. hold resume) and the stale receiver firing late.
 #[tokio::test]
 async fn rtp_timeout_rearm_replaces_previous() {
-    let mut mb = MediaBridge::new("it-rtp-rearm", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-rearm");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx_first = mb
@@ -660,8 +736,8 @@ async fn rtp_timeout_rearm_replaces_previous() {
 /// RTP timeout also applies to the B (callee) leg — mirror of the A-leg test.
 #[tokio::test]
 async fn rtp_timeout_fires_on_inactive_b_leg() {
-    let mut mb = MediaBridge::new("it-rtp-b", BridgeOpts::default());
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-b");
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::B, b).await;
 
     let mut rx = mb
@@ -700,8 +776,8 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         comfort_noise: true,
         comfort_noise_level_db: -35.0,
     };
-    let mut mb = MediaBridge::new("it-rtp-webrtc", BridgeOpts::default());
-    let a = LegInner::new("a", &cfg).unwrap();
+    let mut mb = MediaBridge::new("it-rtp-webrtc");
+    let a = LegInner::new("a", &cfg, None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
 
     let mut rx = mb
@@ -719,9 +795,9 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
 /// route; resume re-arms it; unbridge tears it down.
 #[tokio::test]
 async fn relay_full_lifecycle_with_accept_gate() {
-    let mut mb = MediaBridge::new("it-e2e-relay", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-e2e-relay");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -769,9 +845,9 @@ async fn relay_full_lifecycle_with_accept_gate() {
 /// then resume restores the relay.
 #[tokio::test]
 async fn play_file_during_bridge_then_resume() {
-    let mut mb = MediaBridge::new("it-e2e-play-bridge", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-e2e-play-bridge");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -804,9 +880,9 @@ async fn play_file_during_bridge_then_resume() {
 /// Workflow with multiple bridge/unbridge and play cycles.
 #[tokio::test]
 async fn multi_cycle_bridge_play_hold_resume_unbridge() {
-    let mut mb = MediaBridge::new("it-e2e-multi", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-e2e-multi");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -853,15 +929,15 @@ async fn multi_cycle_bridge_play_hold_resume_unbridge() {
 /// on natural EOF (non-loop file that ends).
 #[tokio::test]
 async fn play_file_handle_completes_on_natural_eof() {
-    let mut mb = MediaBridge::new("it-p1-natural", BridgeOpts::default());
+    let mut mb = MediaBridge::new("it-p1-natural");
     mb.replace_leg(
         LegSide::A,
-        LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     mb.replace_leg(
         LegSide::B,
-        LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -894,15 +970,15 @@ async fn play_file_handle_completes_on_natural_eof() {
 /// P1: stop_play interrupts playback → done resolves with `interrupted: true`.
 #[tokio::test]
 async fn stop_play_interrupts_handle() {
-    let mut mb = MediaBridge::new("it-p1-interrupt", BridgeOpts::default());
+    let mut mb = MediaBridge::new("it-p1-interrupt");
     mb.replace_leg(
         LegSide::A,
-        LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     mb.replace_leg(
         LegSide::B,
-        LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -935,15 +1011,15 @@ async fn stop_play_interrupts_handle() {
 /// P1: a looping file does NOT resolve done on its own (keeps playing).
 #[tokio::test]
 async fn loop_playback_does_not_resolve_until_stopped() {
-    let mut mb = MediaBridge::new("it-p1-loop", BridgeOpts::default());
+    let mut mb = MediaBridge::new("it-p1-loop");
     mb.replace_leg(
         LegSide::A,
-        LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     mb.replace_leg(
         LegSide::B,
-        LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap(),
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
     let la = mb.leg(LegSide::A).unwrap();
@@ -989,9 +1065,9 @@ async fn replace_leg_releases_replaced_leg_and_rtcp_tasks() {
     use std::sync::Arc;
     use std::time::Duration;
 
-    let mut mb = MediaBridge::new("it-replace", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-replace");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b.clone()).await;
 
@@ -1015,7 +1091,7 @@ async fn replace_leg_releases_replaced_leg_and_rtcp_tasks() {
     let b_weak = Arc::downgrade(&b);
 
     // Transfer: replace B with a fresh, not-yet-negotiated leg.
-    let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap();
+    let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::B, b2).await;
     drop(lb);
     drop(b);
@@ -1047,9 +1123,9 @@ async fn replace_leg_releases_replaced_leg_and_rtcp_tasks() {
 async fn unbridge_bridge_cycles_do_not_accumulate_rtcp_tasks() {
     use std::time::Duration;
 
-    let mut mb = MediaBridge::new("it-cycles", BridgeOpts::default());
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    let mut mb = MediaBridge::new("it-cycles");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.replace_leg(LegSide::B, b).await;
 
