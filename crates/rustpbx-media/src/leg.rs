@@ -790,6 +790,13 @@ impl LegInner {
         if let Some(handle) = self.relay_arm_task.lock().take() {
             handle.abort();
         }
+        // Break the cross-leg RTP rewrite-bridge cycle BEFORE closing: in the
+        // relay fastpath, leg A's transport holds a RewriteBridge whose
+        // `target` is leg B's RtpTransport (and vice versa). rustrtc's
+        // `PeerConnection::close` does not clear the bridge, so without this
+        // the two `Arc<RtpTransport>`s keep each other alive forever and both
+        // PeerConnections leak (~16KB per call in the mediaproxy=all path).
+        self.pc.clear_rtp_rewrite_bridge();
         self.tap.finalize_recorder();
         self.pc.close();
     }
@@ -806,6 +813,10 @@ impl Drop for LegInner {
         if let Some(handle) = self.relay_arm_task.get_mut().take() {
             handle.abort();
         }
+        // Break the cross-leg rewrite-bridge Arc cycle before close (see
+        // `LegInner::stop`); otherwise the two RtpTransports keep each other
+        // alive and the PeerConnections leak.
+        self.pc.clear_rtp_rewrite_bridge();
         self.pc.close();
     }
 }
