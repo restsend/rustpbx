@@ -4330,11 +4330,12 @@ enum ConstructMode<'a> {
 
             let join = crate::utils::spawn(async move {
                 tokio::select! {
-                    _ = ct.cancelled() => {
-                        None
-                    }
+                    biased;
                     result = dlg.do_invite(invite_option, fork_tx) => {
                         Some((idx, result, callee_uri))
+                    }
+                    _ = ct.cancelled() => {
+                        None
                     }
                 }
             });
@@ -4381,6 +4382,7 @@ enum ConstructMode<'a> {
                             "Caller dialog terminated while parallel callee INVITEs were pending"
                         );
                         fork_cancel.cancel();
+                        self.cleanup_loser_fork_dialogs(&mut fork_set).await;
                         self.cancel_token.cancel();
                         return Err(into_callee_err(
                             &StatusCode::RequestTerminated,
@@ -4391,6 +4393,7 @@ enum ConstructMode<'a> {
                 }
                 _ = self.cancel_token.cancelled() => {
                     fork_cancel.cancel();
+                    self.cleanup_loser_fork_dialogs(&mut fork_set).await;
                     return Err(into_callee_err(
                         &StatusCode::RequestTerminated,
                         Some("Caller cancelled".to_string()),
@@ -4424,6 +4427,15 @@ enum ConstructMode<'a> {
 
                             // Cancel all remaining forks
                             fork_cancel.cancel();
+
+                            // Drain the loser forks: any that already got a 2xx
+                            // have their confirmed dialog registered in
+                            // dialog_layer by `do_invite`, but no
+                            // ClientDialogGuard is created for them — the old
+                            // cleanup only removed the leg from LegRegistry,
+                            // leaking the dialog entry. Remove + hang up each
+                            // confirmed loser.
+                            self.cleanup_loser_fork_dialogs(&mut fork_set).await;
 
                             let dialog_id = dialog.id();
 
@@ -4507,6 +4519,50 @@ enum ConstructMode<'a> {
         }
 
         Err(last_error)
+    }
+
+    /// Drain the remaining parallel-fork results after a fork race has been
+    /// decided (winner chosen or all cancelled).
+    ///
+    /// A losing fork that already received a 2xx has its confirmed dialog
+    /// registered in `dialog_layer` by rsipstack's `do_invite` (under the
+    /// confirmed dialog id) and no `ClientDialogGuard` is created for it — the
+    /// old cleanup only removed the leg from `LegRegistry`, which leaks the
+    /// dialog entry. This removes and hangs up each confirmed loser so the
+    /// dialog layer returns to empty once the call drains.
+    async fn cleanup_loser_fork_dialogs(
+        &self,
+        fork_set: &mut futures::stream::FuturesUnordered<
+            tokio::task::JoinHandle<
+                Option<(
+                    usize,
+                    rsipstack::Result<
+                        (InviteDialog, Option<rsipstack::sip::Response>),
+                    >,
+                    rsipstack::sip::Uri,
+                )>,
+            >,
+        >,
+    ) {
+        use futures::StreamExt;
+        use rsipstack::sip::StatusCodeKind;
+        while let Some(join_result) = fork_set.next().await {
+            if let Ok(Some((_loser_idx, Ok((loser_dialog, loser_resp)), _loser_uri))) = join_result {
+                let confirmed = loser_resp
+                    .as_ref()
+                    .is_some_and(|r| r.status_code.kind() == StatusCodeKind::Successful);
+                if confirmed {
+                    let loser_id = loser_dialog.id();
+                    self.server.dialog_layer.remove_dialog(&loser_id);
+                    let dlg = loser_dialog.clone();
+                    crate::utils::spawn(async move {
+                        if let Err(e) = dlg.hangup().await {
+                            warn!(id = %dlg.id(), error = %e, "fork loser hangup failed");
+                        }
+                    });
+                }
+            }
+        }
     }
 
     /// Send 183 Session Progress with early media audio played to the caller.

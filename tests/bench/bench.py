@@ -1101,11 +1101,22 @@ class P2PBenchmark:
         return False
 
     def _kill_rustpbx(self) -> None:
+        # Kill only the rustpbx process(es) we spawned — never blanket-match
+        # "rustpbx" in a cmdline, which would also hit unrelated processes such
+        # as `tmux new -t rustpbx`.
+        target = self.rustpbx_process.pid if self.rustpbx_process else None
         try:
-            subprocess.run(["pkill", "-TERM", "-f", "rustpbx"], capture_output=True)
-            time.sleep(1)
-            subprocess.run(["pkill", "-KILL", "-f", "rustpbx"], capture_output=True)
-            time.sleep(0.5)
+            if target:
+                subprocess.run(["kill", "-TERM", str(target)], capture_output=True)
+                time.sleep(1)
+                subprocess.run(["kill", "-KILL", str(target)], capture_output=True)
+                time.sleep(0.5)
+            else:
+                pat = "rustpbx --conf"
+                subprocess.run(["pkill", "-TERM", "-f", pat], capture_output=True)
+                time.sleep(1)
+                subprocess.run(["pkill", "-KILL", "-f", pat], capture_output=True)
+                time.sleep(0.5)
         except Exception:
             pass
 

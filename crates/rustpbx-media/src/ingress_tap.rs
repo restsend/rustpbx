@@ -7,10 +7,12 @@
 //! a single tap observes BOTH directions of a leg in ALL forwarding modes —
 //! exactly what per-leg bidirectional recording needs.
 //!
-//! The hot path is lock-free: 2 atomics for stats, 1 PT compare for DTMF,
-//! 1 `try_send` for recording. The DTMF detector and DTMF payload-type list
-//! live behind a `parking_lot::Mutex` acquired only on the (rare) telephone-
-//! event payload type, never on audio packets.
+//! The hot path is lock-free: 2 atomics for stats, a packed (ssrc, pt) atomic
+//! cache that skips the SSRC→PT DashMap write for steady-state packets, a
+//! lock-free DTMF PT bitmask test, and a recorder fast flag that skips the
+//! RwLock read when nothing is recording. The DTMF detector lives behind a
+//! `parking_lot::Mutex` acquired only on the (rare) telephone-event payload
+//! type, never on audio packets.
 //!
 //! This replaces the old `RecorderTap` (which implemented the post-bridge
 //! `RtpReceiverInterceptor` and missed relay packets). For NACK / RTCP
@@ -96,26 +98,40 @@ pub struct IngressTap {
     ingress_bytes: AtomicU64,
     egress_packets: AtomicU64,
     egress_bytes: AtomicU64,
+    /// Whether to keep populating `ingress_ssrc_pts` on the hot path. The map
+    /// exists only to let the RTCP relay rewrite a WebRTC receiver's PLI/NACK
+    /// back onto the peer's real sender SSRC; for plain RTP↔RTP bridges (no
+    /// WebRTC anywhere) no feedback relay is needed, so the leg can skip the
+    /// per-packet DashMap write entirely. Toggled by `MediaBridge::bridge`
+    /// once both legs' transports are known.
+    track_ingress_ssrc_pts: AtomicBool,
+    /// Last-seen packed `(ssrc, pt)` on ingress. SSRC + payload type are fixed
+    /// for the lifetime of a stream, so after the first packet of a given
+    /// (ssrc, pt) pair this cache lets `process` skip the DashMap lookup/insert
+    /// (previously a per-packet shard lock + SipHash + HashSet insert).
+    last_ingress_ssrc_pt: AtomicU64,
     /// Ingress SSRC → payload types seen (post-SRTP-unprotect, pre-rewrite).
     /// Lets the RTCP relay map a receiver's PLI/NACK (targeting the relayed
     /// SSRC) back onto the peer's real sender SSRC so the peer browser's
-    /// encoder actually responds. Written on the hot path (per new (ssrc,pt)),
-    /// read occasionally by the RTCP relay — a sharded concurrent map keeps
-    /// both non-blocking (no try_lock-skip semantics).
+    /// encoder actually responds. Written once per new (ssrc,pt) pair, read
+    /// occasionally by the RTCP relay — a sharded concurrent map keeps both
+    /// non-blocking (no try_lock-skip semantics).
     ingress_ssrc_pts: DashMap<u32, std::collections::HashSet<u8>>,
 
     // ── DTMF ────────────────────────────────────────────────────────────
-    /// Telephone-event payload types for this leg (e.g. `[101]`). Only
-    /// packets whose PT matches are passed to the detector, so audio packets
-    /// pay zero DTMF cost.
-    dtmf_payload_types: Mutex<Vec<u8>>,
+    /// Telephone-event payload types as a 128-bit bitmask (PT 0..=127), split
+    /// across two u64 words. Set once after SDP negotiation; read lock-free on
+    /// every packet so audio packets pay zero lock cost.
+    dtmf_pt_mask: [AtomicU64; 2],
     dtmf_detector: Mutex<DtmfDetector>,
     dtmf_tx: broadcast::Sender<DtmfEvent>,
 
     // ── recording ───────────────────────────────────────────────────────
-    /// Optional recorder backend. Read on every packet, written only when
-    /// the host attaches/detaches — a `RwLock` (uncontended, ~5ns read) is
-    /// cheaper than the trait-object complications of `ArcSwapOption<dyn>`.
+    /// Non-zero once a recorder is attached. Lets the common (no-recording)
+    /// fast-path skip the `recorder` RwLock read entirely.
+    has_recorder: AtomicBool,
+    /// Optional recorder backend. Read only when `has_recorder` is set; written
+    /// only when the host attaches/detaches.
     recorder: RwLock<Option<Arc<dyn MediaRecorder>>>,
     paused: AtomicBool,
 }
@@ -130,19 +146,48 @@ impl IngressTap {
             ingress_bytes: AtomicU64::new(0),
             egress_packets: AtomicU64::new(0),
             egress_bytes: AtomicU64::new(0),
+            track_ingress_ssrc_pts: AtomicBool::new(true),
+            last_ingress_ssrc_pt: AtomicU64::new(u64::MAX),
             ingress_ssrc_pts: DashMap::new(),
-            dtmf_payload_types: Mutex::new(Vec::new()),
+            dtmf_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
+            has_recorder: AtomicBool::new(false),
             recorder: RwLock::new(None),
             paused: AtomicBool::new(false),
         })
     }
 
+    /// Enable/disable hot-path SSRC→PT tracking (see `track_ingress_ssrc_pts`).
+    /// Call once the leg's peer transport is known; plain RTP↔RTP bridges can
+    /// disable it to skip the per-packet DashMap work entirely.
+    pub fn set_track_ingress_ssrc_pts(&self, track: bool) {
+        self.track_ingress_ssrc_pts.store(track, Ordering::Relaxed);
+    }
+
     /// Set the telephone-event payload type(s) negotiated for this leg.
     /// Called once after SDP negotiation (e.g. from the negotiated leg profile).
     pub fn set_dtmf_payload_types(&self, pts: Vec<u8>) {
-        *self.dtmf_payload_types.lock() = pts;
+        let mut lo = 0u64;
+        let mut hi = 0u64;
+        for p in pts {
+            if p < 64 {
+                lo |= 1u64 << p;
+            } else {
+                hi |= 1u64 << (p - 64);
+            }
+        }
+        self.dtmf_pt_mask[0].store(lo, Ordering::Relaxed);
+        self.dtmf_pt_mask[1].store(hi, Ordering::Relaxed);
+    }
+
+    /// Lock-free telephone-event check: is `pt` one of the negotiated DTMF
+    /// payload types?
+    #[inline]
+    fn is_dtmf_payload_type(&self, pt: u8) -> bool {
+        let word = (pt as usize) >> 6;
+        let bit = 1u64 << (pt & 63);
+        self.dtmf_pt_mask[word].load(Ordering::Relaxed) & bit != 0
     }
 
     /// Subscribe to deduplicated DTMF events (both directions).
@@ -152,6 +197,7 @@ impl IngressTap {
 
     /// Attach a recording / capture backend (replaces any previous one).
     pub fn set_recorder(&self, recorder: Option<Arc<dyn MediaRecorder>>) {
+        self.has_recorder.store(recorder.is_some(), Ordering::Release);
         *self.recorder.write() = recorder;
     }
 
@@ -159,7 +205,9 @@ impl IngressTap {
     /// not called and stats still advance (so RTP-timeout detection works).
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Release);
-        if let Some(rec) = self.recorder.read().as_ref() {
+        if self.has_recorder.load(Ordering::Acquire)
+            && let Some(rec) = self.recorder.read().as_ref()
+        {
             rec.set_paused(paused);
         }
     }
@@ -194,7 +242,9 @@ impl IngressTap {
 
     /// Finalize the recorder backend, if any.
     pub fn finalize_recorder(&self) {
-        if let Some(rec) = self.recorder.read().as_ref() {
+        if self.has_recorder.load(Ordering::Acquire)
+            && let Some(rec) = self.recorder.read().as_ref()
+        {
             rec.finalize();
         }
     }
@@ -209,12 +259,20 @@ impl IngressTap {
                 self.ingress_bytes.fetch_add(payload_len, Ordering::Relaxed);
                 // Remember which SSRC carries which payload type (needed by the
                 // RTCP relay to rewrite PLI/NACK back onto the peer's sender
-                // SSRC). DashMap: shard-locked, non-blocking; a tiny set per
-                // SSRC, so an existing key just gets a PT inserted.
-                self.ingress_ssrc_pts
-                    .entry(packet.header.ssrc)
-                    .or_default()
-                    .insert(packet.header.payload_type);
+                // SSRC). SSRC+PT are stable per stream, so a packed atomic
+                // cache lets us skip the DashMap entirely for the (overwhelming)
+                // steady-state packets; the map is only touched when a new
+                // (ssrc,pt) pair first appears.
+                if self.track_ingress_ssrc_pts.load(Ordering::Relaxed) {
+                    let key = ((packet.header.ssrc as u64) << 8) | packet.header.payload_type as u64;
+                    if self.last_ingress_ssrc_pt.load(Ordering::Relaxed) != key {
+                        self.last_ingress_ssrc_pt.store(key, Ordering::Relaxed);
+                        self.ingress_ssrc_pts
+                            .entry(packet.header.ssrc)
+                            .or_default()
+                            .insert(packet.header.payload_type);
+                    }
+                }
             }
             PacketDirection::Egress => {
                 self.egress_packets.fetch_add(1, Ordering::Relaxed);
@@ -222,15 +280,10 @@ impl IngressTap {
             }
         }
 
-        // DTMF: only telephone-event payloads are inspected. The PT list is
-        // behind a Mutex but is only locked to read the (tiny) Vec; for audio
-        // packets the lock+iter is a few ns and uncontended.
+        // DTMF: only telephone-event payloads are inspected. Lock-free bitmask
+        // check; audio packets pay a single atomic load + bit test.
         let pt = packet.header.payload_type;
-        let is_dtmf_pt = {
-            let pts = self.dtmf_payload_types.lock();
-            pts.iter().any(|&p| p == pt)
-        };
-        if is_dtmf_pt {
+        if self.is_dtmf_payload_type(pt) {
             trace!(pt, len = payload_len, "tap: telephone-event packet");
             let digit = self
                 .dtmf_detector
@@ -257,7 +310,9 @@ impl IngressTap {
         if self.paused.load(Ordering::Acquire) {
             return;
         }
-        if let Some(rec) = self.recorder.read().as_ref() {
+        if self.has_recorder.load(Ordering::Acquire)
+            && let Some(rec) = self.recorder.read().as_ref()
+        {
             rec.write_sample(direction, packet);
         }
     }
@@ -420,6 +475,47 @@ mod tests {
         tap.on_ingress(&p, test_addr()); // must not panic
         tap.finalize_recorder(); // no-op, must not panic
         assert_eq!(tap.ingress_packet_count(), 1);
+    }
+
+    /// The packed (ssrc, pt) cache must still record a *new* pair even after
+    /// many packets of an existing pair — a mid-call SSRC/PT change must be
+    /// visible to the RTCP relay lookup.
+    #[test]
+    fn ingress_ssrc_pt_cache_captures_new_pairs() {
+        let tap = IngressTap::new(8);
+        // Steady-state audio: 100 packets on (1001, 0).
+        for seq in 1..=100u16 {
+            let p = make_packet(0, seq, 160, 1001, vec![1u8; 160]);
+            tap.on_ingress(&p, test_addr());
+        }
+        // Same SSRC, different PT (e.g. telephone-event 101 on the audio SSRC).
+        tap.on_ingress(&make_packet(101, 1, 0, 1001, vec![1u8, 0x80, 10, 0xA0]), test_addr());
+        // New SSRC entirely (e.g. video).
+        tap.on_ingress(&make_packet(96, 1, 3000, 2002, vec![1u8; 200]), test_addr());
+
+        // All three (ssrc, pt) pairs must resolve.
+        assert_eq!(tap.ingress_ssrc_for_pts(&[0]), Some(1001));
+        assert_eq!(tap.ingress_ssrc_for_pts(&[101]), Some(1001));
+        assert_eq!(tap.ingress_ssrc_for_pts(&[96]), Some(2002));
+    }
+
+    /// When SSRC→PT tracking is disabled (plain RTP↔RTP bridge, no RTCP relay
+    /// needed), ingress packets must not populate the map but stats still
+    /// advance.
+    #[test]
+    fn tracking_disabled_skips_ssrc_pt_map() {
+        let tap = IngressTap::new(8);
+        tap.set_track_ingress_ssrc_pts(false);
+        for seq in 1..=3u16 {
+            let p = make_packet(0, seq, 160, 1001, vec![1u8; 160]);
+            tap.on_ingress(&p, test_addr());
+        }
+        assert_eq!(tap.ingress_packet_count(), 3, "stats must still advance");
+        assert_eq!(
+            tap.ingress_ssrc_for_pts(&[0]),
+            None,
+            "disabled tracking must not record (ssrc, pt)"
+        );
     }
 
     /// Malformed / random telephone-event payloads must never panic the DTMF

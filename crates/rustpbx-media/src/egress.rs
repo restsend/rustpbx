@@ -301,6 +301,18 @@ impl EgressTask {
                 .as_ref()
                 .is_some_and(|g| g.load(Ordering::Acquire))
                 && matches!(self.source, EgressSource::Silence);
+            // While parked (relay or pre-answer silence) no frames are produced,
+            // so don't arm the ptime timer at all: 1600 legs waking at 50 Hz to
+            // run an empty tick branch is pure CPU. Use a pending future so the
+            // select only wakes on commands/cancel.
+            let tick: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> =
+                if is_relay || gated {
+                    Box::pin(std::future::pending())
+                } else {
+                    Box::pin(async {
+                        interval.tick().await;
+                    })
+                };
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
@@ -368,18 +380,16 @@ impl EgressTask {
                     }
                     None => break,
                 },
-                _ = interval.tick() => {
-                    if !is_relay && !gated {
-                        if let Some(frame) = self.next_frame().await {
-                            // DropOldest semantics: if the PC sender is saturated
-                            // (slow remote), drop the oldest rather than block the
-                            // pacing task. try_send never awaits.
-                            let clear_marker = self.marker_pending;
-                            if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
-                                trace!("egress: sender full, dropping frame to keep cadence");
-                            } else if clear_marker {
-                                self.marker_pending = false;
-                            }
+                _ = tick => {
+                    if let Some(frame) = self.next_frame().await {
+                        // DropOldest semantics: if the PC sender is saturated
+                        // (slow remote), drop the oldest rather than block the
+                        // pacing task. try_send never awaits.
+                        let clear_marker = self.marker_pending;
+                        if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
+                            trace!("egress: sender full, dropping frame to keep cadence");
+                        } else if clear_marker {
+                            self.marker_pending = false;
                         }
                     }
                 }

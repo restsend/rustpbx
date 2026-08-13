@@ -146,8 +146,9 @@ struct DtmfSendState {
     timestamp: u32,
 }
 
-/// Shared RTP inactivity timeout state. The monitor task reads these atomics
-/// on a fixed 100ms interval; the session toggles them via
+/// Shared RTP inactivity timeout state. The monitor task only polls while a
+/// timeout is armed (`armed_at.is_some()`); arming/resuming wakes it via
+/// [`RtpTimeoutState::armed`]. The session toggles the fields via
 /// [`LegInner::arm_rtp_timeout`] etc.
 pub struct RtpTimeoutState {
     /// Whether the timeout is currently armed and counting.
@@ -166,6 +167,9 @@ pub struct RtpTimeoutState {
     /// Fire channel: sent once when no ingress packets arrive within the
     /// duration. Dropped on disarm → the receiver gets `Err(Canceled)`.
     pub fire_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Wakes the wire_leg monitor when a timeout is armed/resumed, so it
+    /// doesn't poll a 100ms interval for legs that never arm one.
+    pub armed: tokio::sync::Notify,
 }
 
 impl Default for RtpTimeoutState {
@@ -176,6 +180,7 @@ impl Default for RtpTimeoutState {
             duration_ms: AtomicU64::new(0),
             armed_at: Mutex::new(None),
             fire_tx: Mutex::new(None),
+            armed: tokio::sync::Notify::new(),
         }
     }
 }
@@ -222,7 +227,14 @@ impl LegInner {
 
         // Egress audio track: create the push/source pair and add the track to
         // the PC so it appears in the SDP.
-        let (sender, track, _feedback) = sample_track(MediaKind::Audio, 500);
+        //
+        // The ring capacity only needs to absorb producer/consumer jitter: the
+        // egress pacing task pushes exactly one frame per ptime (20 ms) and the
+        // packetizer drains immediately, so a handful of slots is plenty. The
+        // original 500 pre-allocated ~95 KB of `MaybeUninit<MediaSample>` slots
+        // per leg (drop-oldest semantics mean depth never meaningfully exceeds
+        // 1-2), which at 1600 legs ≈ 150 MB of wasted reserved memory.
+        let (sender, track, _feedback) = sample_track(MediaKind::Audio, 8);
         let params = RtpCodecParameters {
             payload_type: first_codec.payload_type,
             clock_rate: first_codec.clock_rate,
@@ -236,7 +248,7 @@ impl LegInner {
         // and provides the video sender SSRC used as the relay destination.
         // The sender's source stays idle — relayed video bypasses it entirely.
         if let Some(first_video) = video_caps.first() {
-            let (_, video_track, _) = sample_track(MediaKind::Video, 100);
+            let (_, video_track, _) = sample_track(MediaKind::Video, 8);
             let video_params = RtpCodecParameters {
                 payload_type: first_video.payload_type,
                 clock_rate: first_video.clock_rate,
@@ -246,7 +258,9 @@ impl LegInner {
         }
 
         // Plaintext bidirectional observer (stats / DTMF / recording).
-        let tap = IngressTap::new(64);
+        // 8 DTMF-event slots is plenty: digits are rare and lagged receivers
+        // are dropped, never blocking the hot path.
+        let tap = IngressTap::new(8);
         pc.add_observer(tap.clone());
 
         // Gate: closed until the call is answered (`accept`). The egress
@@ -722,6 +736,7 @@ impl LegInner {
             .store(duration.as_millis() as u64, Ordering::Relaxed);
         *state.armed_at.lock() = Some(Instant::now());
         *state.fire_tx.lock() = Some(tx);
+        state.armed.notify_one();
         rx
     }
 
@@ -736,6 +751,7 @@ impl LegInner {
         let state = &self.rtp_timeout;
         state.active.store(true, Ordering::Release);
         *state.armed_at.lock() = Some(Instant::now());
+        state.armed.notify_one();
     }
 
     /// Set the app-level suppression flag. When `true` the monitor never fires
@@ -800,7 +816,11 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
-        rtp_buffer_capacity: 500,
+        // ICE pre-ready buffering: packets are buffered only until the RTP
+        // transport is set up, and DropOldest means depth stays tiny in steady
+        // state. 500 reserved ~5x the rustrtc default (100) and is almost never
+        // reached, so restore the default to cut per-leg reserved memory.
+        rtp_buffer_capacity: 100,
         runtime_handle: tokio::runtime::Handle::try_current().ok(),
         media_capabilities: Some(rustrtc::config::MediaCapabilities {
             audio: cfg.codecs.iter().map(audio_capability_from_codec).collect(),

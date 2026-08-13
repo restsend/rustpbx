@@ -133,7 +133,7 @@ pub struct MediaBridge {
 
 impl MediaBridge {
     pub fn new(session_id: impl Into<String>, _opts: BridgeOpts) -> Self {
-        let (dtmf_bus, _) = broadcast::channel(64);
+        let (dtmf_bus, _) = broadcast::channel(8);
         Self {
             session_id: session_id.into(),
             leg_a: None,
@@ -224,7 +224,28 @@ impl MediaBridge {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_count = tap.ingress_packet_count();
+            // Only poll the 100ms interval while a timeout is actually armed.
+            // Most legs never arm one (plain P2P), so polling unconditionally
+            // would wake 1600 tasks at 10 Hz for nothing. The arm/resume paths
+            // notify `timeout.armed`, waking this loop to resume polling.
+            let mut monitoring = false;
             loop {
+                let armed = timeout.armed_at.lock().is_some();
+                if armed && !monitoring {
+                    monitoring = true;
+                    interval.reset();
+                    last_count = tap.ingress_packet_count();
+                } else if !armed {
+                    monitoring = false;
+                }
+                let monitor: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> =
+                    if monitoring {
+                        Box::pin(async {
+                            interval.tick().await;
+                        })
+                    } else {
+                        Box::pin(timeout.armed.notified())
+                    };
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
@@ -235,7 +256,10 @@ impl MediaBridge {
                         Ok(_) => {}
                         Err(_) => break,
                     },
-                    _ = interval.tick() => {
+                    _ = monitor => {
+                        if !armed || !monitoring {
+                            continue;
+                        }
                         if !timeout.active.load(Ordering::Relaxed)
                             || timeout.app_paused.load(Ordering::Relaxed)
                         {
@@ -591,6 +615,18 @@ impl MediaBridge {
             if let Some(old) = self.rtcp_cancel.replace(rtcp_cancel.clone()) {
                 old.cancel();
             }
+            // The ingress SSRC→PT map that the relay reads is only needed when a
+            // WebRTC leg is involved; for a plain RTP↔RTP bridge (no WebRTC on
+            // either side) the relay has nothing to rewrite, so disable tracking
+            // on both legs to skip the per-packet DashMap write entirely.
+            // (The relay itself stays wired — RTCP forwarders are no-ops for
+            // RTP-only legs and upstream's cancellation lifecycle depends on it.)
+            let needs_ssrc_pt_tracking = a_transport == rustrtc::TransportMode::WebRtc
+                || b_transport == rustrtc::TransportMode::WebRtc;
+            la.ingress_tap()
+                .set_track_ingress_ssrc_pts(needs_ssrc_pt_tracking);
+            lb.ingress_tap()
+                .set_track_ingress_ssrc_pts(needs_ssrc_pt_tracking);
             wire_rtcp_relay(
                 &la,
                 &lb,
@@ -632,6 +668,11 @@ impl MediaBridge {
                 b_codec = ?cb.codec,
                 "transcoding activated"
             );
+            // No RTCP PLI/NACK relay in the transcode path (packets are decoded
+            // and re-encoded), so the ingress SSRC→PT map is never read here —
+            // disable tracking to skip the per-packet DashMap write.
+            la.ingress_tap().set_track_ingress_ssrc_pts(false);
+            lb.ingress_tap().set_track_ingress_ssrc_pts(false);
         }
 
         self.route_active = true;
