@@ -1315,9 +1315,9 @@ impl Default for ProxyConfig {
             routes_files: Vec::new(),
             acl_files: Vec::new(),
             routes: None,
-            session_timer: false,
+            session_timer: true,
             session_timer_always: false,
-            session_expires: None,
+            session_expires: Some(600),
             rtp_timeout: default_rtp_timeout(),
             session_cmd_channel_capacity: default_session_cmd_channel_capacity(),
             session_state_channel_capacity: default_session_state_channel_capacity(),
@@ -1681,12 +1681,20 @@ mod tests {
     }
 
     #[test]
+    fn test_session_timer_mode_defaults_to_supported() {
+        // RFC 4028 session timer is ON by default (Supported mode): a silently
+        // disconnected peer (e.g. WebRTC over WS closed without BYE) is detected
+        // via the refresh/expiry cycle instead of leaking the session forever.
+        let config = ProxyConfig::default();
+        assert_eq!(config.session_timer_mode(), SessionTimerMode::Supported);
+        assert_eq!(config.session_expires, Some(600));
+    }
+
+    #[test]
     fn test_session_timer_mode_uses_always_flag() {
         let mut config = ProxyConfig::default();
 
-        assert_eq!(config.session_timer_mode(), SessionTimerMode::Off);
-
-        config.session_timer = true;
+        // Default: timer on in Supported mode (off only when explicitly set).
         assert_eq!(config.session_timer_mode(), SessionTimerMode::Supported);
 
         config.session_timer_always = true;

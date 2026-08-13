@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -110,6 +110,15 @@ pub struct MediaBridge {
     /// when the leg is replaced (`replace_leg`) or the bridge is closed, so
     /// old monitoring tasks never leak across transfers / REFERs.
     leg_wire_cancels: HashMap<LegSide, CancellationToken>,
+    /// Cancellation token for the current batch of RTCP-relay forwarder
+    /// tasks (`wire_rtcp_sender_forward`). Regenerated on every `bridge()`
+    /// fast-path activation; the previous batch is cancelled so those tasks
+    /// exit promptly instead of pinning replaced legs (and their
+    /// PeerConnections) alive for the rest of the session.
+    rtcp_cancel: Option<CancellationToken>,
+    /// Live count of RTCP-relay forwarder tasks (observability / leak
+    /// regression tests). Incremented on spawn, decremented on task exit.
+    rtcp_forwarder_count: Arc<AtomicUsize>,
     /// Legs currently playing a Media source. `play` inserts; the egress
     /// `on_end` callback removes.
     active_play: Arc<parking_lot::Mutex<HashSet<LegSide>>>,
@@ -135,6 +144,8 @@ impl MediaBridge {
             dtmf_bus,
             root_cancel: CancellationToken::new(),
             leg_wire_cancels: HashMap::new(),
+            rtcp_cancel: None,
+            rtcp_forwarder_count: Arc::new(AtomicUsize::new(0)),
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             last_bridged: None,
         }
@@ -181,6 +192,14 @@ impl MediaBridge {
     /// True when a P2P route is currently active between A and B.
     pub fn is_bridged(&self) -> bool {
         self.route_active
+    }
+
+    /// Number of live RTCP-relay forwarder tasks (observability / leak
+    /// regression tests). Returns to the per-activation count (0 after
+    /// `unbridge`, 2 for an audio-only bridge) once cancelled generations
+    /// have exited.
+    pub fn active_rtcp_forwarders(&self) -> usize {
+        self.rtcp_forwarder_count.load(Ordering::Relaxed)
     }
 
     /// Wire a leg's DTMF into the bridge bus, attach the default recorder, and
@@ -263,9 +282,23 @@ impl MediaBridge {
     /// Use this for call transfer / REFER.
     pub async fn replace_leg(&mut self, side: LegSide, new_leg: Leg) {
         self.wire_leg(side, &new_leg);
-        match side {
-            LegSide::A => self.leg_a = Some(new_leg),
-            LegSide::B => self.leg_b = Some(new_leg),
+        let old = match side {
+            LegSide::A => self.leg_a.replace(new_leg),
+            LegSide::B => self.leg_b.replace(new_leg),
+        };
+        // The replaced leg is no longer part of this bridge (transfer /
+        // REFER). Stop its PeerConnection NOW so ICE/DTLS/SRTP resources are
+        // released even while other Arc holders (e.g. a still-exiting RTCP
+        // relay task, cancelled via `rtcp_cancel`) linger on the wrapper.
+        if let Some(old) = old {
+            old.stop();
+        }
+        // The replaced leg's RTCP forwarders reference the old transport(s).
+        // Cancel that generation now: if the new leg is not yet negotiated,
+        // `bridge()` below returns early without regenerating the token, so
+        // without this the old tasks would keep pinning the replaced leg.
+        if let Some(old) = self.rtcp_cancel.take() {
+            old.cancel();
         }
         if self.route_active {
             // The leg instance changed (e.g. transfer swaps the B leg to a new
@@ -551,7 +584,21 @@ impl MediaBridge {
             // across the legs (rewriting media_ssrc to the peer's real sender
             // SSRC). Without this, a missed initial keyframe is unrecoverable →
             // one-way black video.
-            wire_rtcp_relay(&la, &lb, &pa, &pb);
+            // Regenerate the RTCP-relay cancellation generation: the previous
+            // batch of forwarder tasks (from an earlier bridge activation or a
+            // replaced leg) exits immediately instead of pinning old legs alive.
+            let rtcp_cancel = self.root_cancel.child_token();
+            if let Some(old) = self.rtcp_cancel.replace(rtcp_cancel.clone()) {
+                old.cancel();
+            }
+            wire_rtcp_relay(
+                &la,
+                &lb,
+                &pa,
+                &pb,
+                rtcp_cancel,
+                self.rtcp_forwarder_count.clone(),
+            );
         } else {
             // ── transcoding: decode peer codec → re-encode own codec ──
             let b_recv = get_audio_recv_track(lb.pc())
@@ -596,6 +643,9 @@ impl MediaBridge {
     pub async fn unbridge(&mut self) -> Result<()> {
         self.route_active = false;
         self.last_bridged = None;
+        if let Some(old) = self.rtcp_cancel.take() {
+            old.cancel();
+        }
         if let Some(la) = self.leg_a.as_ref() {
             la.set_egress_source(EgressSource::Silence).await?;
         }
@@ -925,6 +975,9 @@ impl MediaBridge {
     /// teardown).
     fn teardown(&mut self) {
         self.root_cancel.cancel();
+        if let Some(old) = self.rtcp_cancel.take() {
+            old.cancel();
+        }
         for (_, cancel) in self.leg_wire_cancels.drain() {
             cancel.cancel();
         }
@@ -1091,6 +1144,8 @@ fn wire_rtcp_relay(
     b: &Leg,
     pa: &NegotiatedLegProfile,
     pb: &NegotiatedLegProfile,
+    cancel: CancellationToken,
+    forwarder_count: Arc<AtomicUsize>,
 ) {
     let a_video_pts: Vec<u8> = pa.video.iter().map(|v| v.payload_type).collect();
     let b_video_pts: Vec<u8> = pb.video.iter().map(|v| v.payload_type).collect();
@@ -1098,14 +1153,35 @@ fn wire_rtcp_relay(
     let b_audio_pt = pb.audio.as_ref().map(|c| c.payload_type);
 
     // Bob's feedback (leg A senders) → forward to alice (leg B transport).
-    wire_rtcp_sender_forward(a.clone(), b.clone(), MediaKind::Video, b_video_pts);
+    wire_rtcp_sender_forward(
+        a.clone(),
+        b.clone(),
+        MediaKind::Video,
+        b_video_pts,
+        cancel.clone(),
+        forwarder_count.clone(),
+    );
     let b_audio_pts: Vec<u8> = b_audio_pt.into_iter().collect();
-    wire_rtcp_sender_forward(a.clone(), b.clone(), MediaKind::Audio, b_audio_pts);
+    wire_rtcp_sender_forward(
+        a.clone(),
+        b.clone(),
+        MediaKind::Audio,
+        b_audio_pts,
+        cancel.clone(),
+        forwarder_count.clone(),
+    );
 
     // Alice's feedback (leg B senders) → forward to bob (leg A transport).
-    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Video, a_video_pts);
+    wire_rtcp_sender_forward(
+        b.clone(),
+        a.clone(),
+        MediaKind::Video,
+        a_video_pts,
+        cancel.clone(),
+        forwarder_count.clone(),
+    );
     let a_audio_pts: Vec<u8> = a_audio_pt.into_iter().collect();
-    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Audio, a_audio_pts);
+    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Audio, a_audio_pts, cancel, forwarder_count);
 }
 
 /// Spawn one RTCP-forwarding task: feedback (PLI/NACK) targeting a sender of
@@ -1120,6 +1196,8 @@ fn wire_rtcp_sender_forward(
     dst_leg: Leg,
     kind: MediaKind,
     dst_pts: Vec<u8>,
+    cancel: CancellationToken,
+    forwarder_count: Arc<AtomicUsize>,
 ) {
     use rustrtc::rtp::{GenericNack, PictureLossIndication, RtcpPacket};
 
@@ -1135,9 +1213,20 @@ fn wire_rtcp_sender_forward(
     }
     let mut rx = sender.subscribe_rtcp();
     let dst_tap = dst_leg.ingress_tap().clone();
+    forwarder_count.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
+        // Decrement on EVERY exit path so the leak regression counter stays
+        // accurate even when the task aborts early (cancelled / no transport).
+        struct Guard(Arc<AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = Guard(forwarder_count);
         // Wait for the destination leg's send transport (created on DTLS/SRTP
-        // setup after the remote answers) — a few seconds max.
+        // setup after the remote answers) — a few seconds max. Abort early if
+        // the relay generation is cancelled (e.g. leg replaced / unbridge).
         let mut dst_tx = None;
         for _ in 0..50 {
             dst_tx = leg_send_transport(&dst_leg, kind)
@@ -1145,34 +1234,44 @@ fn wire_rtcp_sender_forward(
             if dst_tx.is_some() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            }
         }
         let Some(dst_tx) = dst_tx else {
             return;
         };
 
-        while let Ok(packet) = rx.recv().await {
-            // The peer's real sender SSRC for this media type; skip until the
-            // peer has actually started sending it.
-            let Some(target) = dst_tap.ingress_ssrc_for_pts(&dst_pts) else {
-                continue;
-            };
-            let forwarded = match &packet {
-                RtcpPacket::PictureLossIndication(p) => {
-                    RtcpPacket::PictureLossIndication(PictureLossIndication {
-                        sender_ssrc: p.sender_ssrc,
-                        media_ssrc: target,
-                    })
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                packet = rx.recv() => {
+                    let Ok(packet) = packet else { break };
+                    // The peer's real sender SSRC for this media type; skip
+                    // until the peer has actually started sending it.
+                    let Some(target) = dst_tap.ingress_ssrc_for_pts(&dst_pts) else {
+                        continue;
+                    };
+                    let forwarded = match &packet {
+                        RtcpPacket::PictureLossIndication(p) => {
+                            RtcpPacket::PictureLossIndication(PictureLossIndication {
+                                sender_ssrc: p.sender_ssrc,
+                                media_ssrc: target,
+                            })
+                        }
+                        RtcpPacket::GenericNack(n) => RtcpPacket::GenericNack(GenericNack {
+                            sender_ssrc: n.sender_ssrc,
+                            media_ssrc: target,
+                            lost_packets: n.lost_packets.clone(),
+                        }),
+                        _ => continue,
+                    };
+                    if dst_tx.send_rtcp(&[forwarded]).await.is_err() {
+                        break;
+                    }
                 }
-                RtcpPacket::GenericNack(n) => RtcpPacket::GenericNack(GenericNack {
-                    sender_ssrc: n.sender_ssrc,
-                    media_ssrc: target,
-                    lost_packets: n.lost_packets.clone(),
-                }),
-                _ => continue,
-            };
-            if dst_tx.send_rtcp(&[forwarded]).await.is_err() {
-                break;
             }
         }
     });

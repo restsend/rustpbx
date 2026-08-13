@@ -97,8 +97,16 @@ media_proxy = "auto"
 # sip_worker_threads = 4
 # media_worker_threads = 28
 
+# RFC 4028 session timer: ON by default (Supported mode) so a silently
+# disconnected peer (e.g. WebRTC over WS closed without BYE) is detected via
+# the refresh/expiry cycle instead of leaking the session forever. Set
+# session_timer = false to disable, or session_timer_always = true to keep
+# refreshing even if the peer does not negotiate the session timer.
 # session_timer = true
-# session_timer_always = false # Keep refreshing even if peer does not negotiate session timer
+# session_timer_always = false
+# Default refresh/expiry interval in seconds when the peer sends no
+# Session-Expires of its own (default 600).
+# session_expires = 600
 # Base directory for generated routing/trunk/ACL files
 generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]

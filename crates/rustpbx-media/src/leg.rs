@@ -113,6 +113,11 @@ pub struct LegInner {
     /// Handle of the background observer-attach task, so `stop` can abort it
     /// (prevents a leaked task waiting on a transport that never appears).
     observer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Handle of the deferred fast-path relay-arming task (spawned when a
+    /// WebRTC peer's SRTP transport is not ready yet). Aborted on `stop` /
+    /// `Drop` and before re-spawning, so stale arming tasks never pile up
+    /// across negotiation churn / leg replacement.
+    relay_arm_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Outbound DTMF (RFC 2833) send state: the RTP payload type used for
     /// telephone-events and the next sequence number / timestamp. Only valid
     /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
@@ -286,6 +291,7 @@ impl LegInner {
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: AtomicBool::new(false),
             observer_task: Mutex::new(None),
+            relay_arm_task: Mutex::new(None),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
             comfort_noise_level_db,
@@ -522,6 +528,15 @@ impl LegInner {
         dtmf.dtmf_clock_rate = profile.dtmf.as_ref().map(|d| d.clock_rate).unwrap_or(8000);
     }
 
+    /// Update the leg's negotiated profile from an SDP. Used by the session's
+    /// re-INVITE path, which builds answers outside [`Self::apply_sdp`]; keeps
+    /// `MediaBridge::bridge()` re-evaluation in sync with the renegotiated
+    /// codec instead of the stale call-setup profile.
+    pub fn apply_profile_from_sdp(&self, sdp: &str) {
+        let profile = negotiate::MediaNegotiator::extract_leg_profile(sdp);
+        self.apply_profile(&profile);
+    }
+
     // ── Egress control ───────────────────────────────────────────────────
 
     /// Whether the leg's egress source is the fast-path relay (vs the paced
@@ -565,7 +580,7 @@ impl LegInner {
                     let peer = peer_pc.clone();
                     let options = options.clone();
                     let rules = rules.clone();
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         let result =
                             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                                 pc.wait_for_rtp_transport_ready(timeout).await?;
@@ -585,6 +600,11 @@ impl LegInner {
                             }
                         }
                     });
+                    // Replace any previous arming task: a stale task must not
+                    // arm a rewrite bridge on a PC we've since re-purposed.
+                    if let Some(prev) = self.relay_arm_task.lock().replace(handle) {
+                        prev.abort();
+                    }
                 } else {
                     self.pc.wait_for_rtp_transport_ready(timeout).await?;
                     peer_pc.wait_for_rtp_transport_ready(timeout).await?;
@@ -751,6 +771,9 @@ impl LegInner {
         if let Some(handle) = self.observer_task.lock().take() {
             handle.abort();
         }
+        if let Some(handle) = self.relay_arm_task.lock().take() {
+            handle.abort();
+        }
         self.tap.finalize_recorder();
         self.pc.close();
     }
@@ -761,6 +784,12 @@ impl Drop for LegInner {
         // Egress cancellation + PC close are fully synchronous (rustrtc close
         // path has no tokio::spawn), so this never panics during teardown.
         self.egress.stop();
+        if let Some(handle) = self.observer_task.get_mut().take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.relay_arm_task.get_mut().take() {
+            handle.abort();
+        }
         self.pc.close();
     }
 }

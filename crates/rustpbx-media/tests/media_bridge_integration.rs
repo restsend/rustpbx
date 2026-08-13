@@ -977,6 +977,108 @@ async fn loop_playback_does_not_resolve_until_stopped() {
     mb.close();
 }
 
+/// Regression: replacing a leg (transfer / REFER) must release the replaced
+/// leg and exit the RTCP-relay forwarder tasks that previously pinned it.
+///
+/// Before the fix, `wire_rtcp_sender_forward` tasks held `Leg` (`Arc<LegInner>`)
+/// clones and never exited (the broadcast RTCP receiver only closes when the
+/// PeerConnection closes, and the PC only closes when the last Arc drops) — a
+/// reference cycle that leaked the replaced PeerConnection forever.
+#[tokio::test]
+async fn replace_leg_releases_replaced_leg_and_rtcp_tasks() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let mut mb = MediaBridge::new("it-replace", BridgeOpts::default());
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    mb.replace_leg(LegSide::A, a).await;
+    mb.replace_leg(LegSide::B, b.clone()).await;
+
+    // SDP exchange + accept both → fast-path relay, RTCP forwarders spawned.
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.unwrap();
+    let answer = lb.answer(&offer).await.unwrap();
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged());
+    assert!(
+        mb.active_rtcp_forwarders() > 0,
+        "fast-path bridge must wire RTCP forwarders"
+    );
+
+    // Weak handle to the (soon-to-be-replaced) B leg.
+    let b_weak = Arc::downgrade(&b);
+
+    // Transfer: replace B with a fresh, not-yet-negotiated leg.
+    let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu()).unwrap();
+    mb.replace_leg(LegSide::B, b2).await;
+    drop(lb);
+    drop(b);
+
+    // Give the cancelled RTCP tasks + per-leg monitor tasks time to exit.
+    for _ in 0..100 {
+        if b_weak.upgrade().is_none() && mb.active_rtcp_forwarders() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        b_weak.upgrade().is_none(),
+        "replaced leg must be fully released (RTCP relay tasks pinned it before the fix); live forwarders={}",
+        mb.active_rtcp_forwarders()
+    );
+    assert_eq!(
+        mb.active_rtcp_forwarders(),
+        0,
+        "RTCP relay tasks must exit after the leg is replaced"
+    );
+
+    mb.close();
+}
+
+/// Regression: repeated unbridge/bridge cycles (hold → play → resume) must
+/// not accumulate RTCP-relay forwarder tasks within a session.
+#[tokio::test]
+async fn unbridge_bridge_cycles_do_not_accumulate_rtcp_tasks() {
+    use std::time::Duration;
+
+    let mut mb = MediaBridge::new("it-cycles", BridgeOpts::default());
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu()).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu()).unwrap();
+    mb.replace_leg(LegSide::A, a).await;
+    mb.replace_leg(LegSide::B, b).await;
+
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer(vec![]).await.unwrap();
+    let answer = lb.answer(&offer).await.unwrap();
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged());
+
+    for _ in 0..5 {
+        mb.unbridge().await.unwrap();
+        mb.bridge().await.unwrap();
+    }
+    // Let cancelled generations observe cancellation and exit.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        mb.active_rtcp_forwarders(),
+        2,
+        "only the current generation (audio A→B + B→A) may remain; old ones must not accumulate"
+    );
+    mb.close();
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Write a minimal silent PCM WAV to a temp path and return the path.

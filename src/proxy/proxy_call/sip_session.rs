@@ -6680,6 +6680,21 @@ enum ConstructMode<'a> {
         // Align answer direction with offer per RFC 3264 §5.1
         answer_sdp = Self::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
 
+        // Refresh the bridge leg's negotiated profile from the re-INVITE answer
+        // so `update_anchored_forwarding_from_sdp` → `mb.bridge()` re-evaluates
+        // with the renegotiated codec instead of the stale call-setup profile.
+        // Otherwise relay rules / RTCP relay generation can stay wrong (and
+        // re-accumulate) after a mid-call codec change.
+        if let Some(mb) = self.media.bridge.as_ref() {
+            let side_leg = match side {
+                DialogSide::Caller => mb.leg(crate::media::media_bridge::LegSide::A),
+                DialogSide::Callee => mb.leg(crate::media::media_bridge::LegSide::B),
+            };
+            if let Some(leg) = side_leg {
+                leg.apply_profile_from_sdp(&answer_sdp);
+            }
+        }
+
         match side {
             DialogSide::Caller => {
                 self.media.caller_offer = Some(offer_sdp.to_string());
