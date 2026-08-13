@@ -1092,6 +1092,17 @@ tab_notes_desc = "标签、备注"
 # Recording section
 section_recording = "录音与参与者"
 section_recording_desc = "验证主叫方标识、坐席映射，并回放原始媒体流。"
+
+# Media quality section (per-leg RTCP)
+section_media_quality = "媒体质量"
+section_media_quality_desc = "每腿 RTP 计数与通话结束时媒体桥采集的 RTCP 抖动、RTT 与丢包率。"
+mq_col_leg = "腿"
+mq_col_codec = "编码"
+mq_col_rx = "收包"
+mq_col_tx = "发包"
+mq_col_jitter = "抖动"
+mq_col_rtt = "RTT"
+mq_col_loss = "丢包率"
 section_error = "错误信息"
 error_open_reference = "打开错误码参考"
 tab_trace = "通话轨迹"

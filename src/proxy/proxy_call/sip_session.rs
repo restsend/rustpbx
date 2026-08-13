@@ -8342,6 +8342,18 @@ enum ConstructMode<'a> {
             meta
         };
 
+        let media_quality = self
+            .bridge()
+            .map(|mb| {
+                let legs = mb.quality_summary();
+                if legs.is_empty() {
+                    None
+                } else {
+                    serde_json::to_value(&legs).ok()
+                }
+            })
+            .flatten();
+
         CallSessionRecordSnapshot {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
@@ -8360,6 +8372,7 @@ enum ConstructMode<'a> {
             callee_call_ids: self.meta.callee_call_ids.iter().cloned().collect(),
             server_dialog_id: self.caller_dialog_id(),
             metadata,
+            media_quality,
             extensions,
         }
     }

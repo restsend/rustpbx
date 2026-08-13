@@ -1096,6 +1096,17 @@ tab_notes_desc = "Tags, notes"
 # Recording section
 section_recording = "Recording & participants"
 section_recording_desc = "Validate caller identification, agent mapping, and playback the original media stream."
+
+# Media quality section (per-leg RTCP)
+section_media_quality = "Media quality"
+section_media_quality_desc = "Per-leg RTP counters and RTCP-derived jitter, RTT and packet loss captured by the media bridge at call end."
+mq_col_leg = "Leg"
+mq_col_codec = "Codec"
+mq_col_rx = "Received"
+mq_col_tx = "Sent"
+mq_col_jitter = "Jitter"
+mq_col_rtt = "RTT"
+mq_col_loss = "Loss"
 section_error = "Error"
 error_open_reference = "Open error reference"
 tab_trace = "Trace"

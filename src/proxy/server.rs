@@ -1278,6 +1278,7 @@ impl SipServer {
         let mut tx_count: u64 = 0;
         while let Some(mut tx) = incoming.recv().await {
             crate::metrics::transaction::received();
+            crate::sip_telemetry::SipTelemetry::tx_received();
             tx_count += 1;
             if tx_count % 100 == 0 {
                 let stats = self.inner.endpoint.inner.get_stats();
@@ -1377,6 +1378,7 @@ impl SipServer {
                     }
                 };
                 crate::metrics::transaction::latency_seconds(start_time.elapsed().as_secs_f64());
+                crate::sip_telemetry::SipTelemetry::record_tx_latency(start_time.elapsed());
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 let is_mid_dialog = tx
                     .original

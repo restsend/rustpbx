@@ -228,6 +228,14 @@ pub struct Config {
     pub ssl_private_key: Option<String>,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
+    /// Optional local stats log path. When set, one JSON line is appended to
+    /// this file every `stats_interval` seconds with system + PBX summary
+    /// metrics (load, registrations, message volume, media loss, DB/tokio
+    /// pressure) for local analysis without Prometheus. Empty/unset disables.
+    pub stats_log: Option<String>,
+    /// Local stats log refresh interval in seconds. Default 5.
+    #[serde(default = "default_stats_interval")]
+    pub stats_interval: u64,
     #[serde(default)]
     pub log_rotation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,6 +342,10 @@ fn default_session_registry_heartbeat() -> u64 {
 
 fn default_max_audio_download_bytes() -> u64 {
     crate::utils::MAX_AUDIO_DOWNLOAD_BYTES
+}
+
+fn default_stats_interval() -> u64 {
+    5
 }
 
 fn default_locale() -> String {
@@ -1389,6 +1401,8 @@ impl Default for Config {
             ssl_private_key: None,
             log_level: None,
             log_file: None,
+            stats_log: None,
+            stats_interval: default_stats_interval(),
             log_rotation: String::new(),
             http_access_skip_paths: Vec::new(),
             proxy: ProxyConfig::default(),

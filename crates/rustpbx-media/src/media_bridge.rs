@@ -124,25 +124,35 @@ pub struct MediaBridge {
     /// so a mid-call video codec change re-arms the relay rules.
     last_bridged:
         Option<(audio_codec::CodecType, audio_codec::CodecType, Option<(String, u8, String, u8)>)>,
+    /// Snapshot of the current legs, readable from the background 5s stats
+    /// task without borrowing `&mut self`. Kept in sync by `replace_leg` /
+    /// `teardown`.
+    legs_shared: Arc<parking_lot::Mutex<(Option<Leg>, Option<Leg>)>>,
 }
 
 impl MediaBridge {
     pub fn new(session_id: impl Into<String>) -> Self {
         let (dtmf_bus, _) = broadcast::channel(8);
+        let legs_shared = Arc::new(parking_lot::Mutex::new((None, None)));
+        let cancel = CancellationToken::new();
+        let session = session_id.into();
+        crate::telemetry::MediaTelemetry::register_bridge();
+        spawn_bridge_stats_task(session.clone(), Arc::clone(&legs_shared), cancel.child_token());
         Self {
-            session_id: session_id.into(),
+            session_id: session,
             leg_a: None,
             leg_b: None,
             route_active: false,
             recorder_handle: None,
             recorder_join: None,
             dtmf_bus,
-            root_cancel: CancellationToken::new(),
+            root_cancel: cancel,
             leg_wire_cancels: HashMap::new(),
             rtcp_cancel: None,
             rtcp_forwarder_count: Arc::new(AtomicUsize::new(0)),
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             last_bridged: None,
+            legs_shared,
         }
     }
 
@@ -378,6 +388,7 @@ impl MediaBridge {
             LegSide::A => self.leg_a.replace(new_leg),
             LegSide::B => self.leg_b.replace(new_leg),
         };
+        *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
         // The replaced leg is no longer part of this bridge (transfer /
         // REFER). Stop its PeerConnection NOW so ICE/DTLS/SRTP resources are
         // released even while other Arc holders (e.g. a still-exiting RTCP
@@ -411,8 +422,10 @@ impl MediaBridge {
     // ── Routing ──────────────────────────────────────────────────────────
 
     /// Bridge A ↔ B. Both legs must exist and be answered (gate open). Selects
-    /// [`EgressSource::RewriteRelay`] when the negotiated audio codecs match,
-    /// otherwise [`EgressSource::TranscodePeer`].
+    /// [`EgressSource::RewriteRelay`] when the negotiated audio codecs match
+    /// AND the legs share a video codec (or neither negotiated video);
+    /// otherwise [`EgressSource::TranscodePeer`] (audio-only — video cannot be
+    /// relayed without a common codec and is never transcoded).
     pub async fn bridge(&mut self) -> Result<()> {
         let (la, lb) = (self.leg_a.clone(), self.leg_b.clone());
         let (Some(la), Some(lb)) = (la, lb) else {
@@ -434,6 +447,17 @@ impl MediaBridge {
         let video_match =
             crate::negotiate::MediaNegotiator::find_common_video_codec(&pa.video, &pb.video);
 
+        // rustrtc's rewrite bridge forwards EVERY inbound packet — rules only
+        // rewrite headers, there is no drop action — so with no common video
+        // codec an unmatched video PT would fall through the audio catch-all
+        // rule and leak to the peer in a codec it never negotiated (the peer
+        // may even misroute it onto another track). When both legs negotiated
+        // video but share no codec, degrade to the transcoding path: audio
+        // still flows (decode → re-encode) and video stops entirely.
+        let video_mismatch = !pa.video.is_empty()
+            && !pb.video.is_empty()
+            && video_match.is_none();
+
         // Idempotent re-bridge: same codec pair on an already-active route is
         // a no-op (avoid rebuilding decoders / re-arming the relay).
         let bridged_key = (
@@ -448,7 +472,16 @@ impl MediaBridge {
         }
         self.last_bridged = Some(bridged_key);
 
-        if ca.codec == cb.codec {
+        if video_mismatch {
+            warn!(
+                session = %self.session_id,
+                a_video = ?pa.video.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+                b_video = ?pb.video.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+                "legs share no video codec — degrading to audio-only (transcoded)"
+            );
+        }
+
+        if ca.codec == cb.codec && !video_mismatch {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
@@ -1021,6 +1054,37 @@ impl MediaBridge {
         }
     }
 
+    /// Per-leg media quality, captured at call end for the call record.
+    /// Empty when no legs are present.
+    pub fn quality_summary(&self) -> Vec<crate::leg_stats::LegQualityReport> {
+        let mut out = Vec::new();
+        for (side, leg) in [
+            (LegSide::A, self.leg_a.as_ref()),
+            (LegSide::B, self.leg_b.as_ref()),
+        ] {
+            let Some(leg) = leg else { continue };
+            let tap = leg.stats();
+            let rtcp = leg.rtcp_stats().snapshot();
+            let codec = leg
+                .negotiated()
+                .and_then(|p| p.audio.as_ref().map(|c| format!("{:?}", c.codec)));
+            out.push(crate::leg_stats::LegQualityReport {
+                side: match side {
+                    LegSide::A => "A",
+                    LegSide::B => "B",
+                },
+                codec,
+                ingress_packets: tap.ingress_packets,
+                egress_packets: tap.egress_packets,
+                transport_rx_packets: leg.pc().received_rtp_packets(),
+                jitter_us: rtcp.jitter_us,
+                rtt_us: rtcp.rtt_us,
+                loss_pct: rtcp.loss_pct(),
+            });
+        }
+        out
+    }
+
     /// Tear down everything (called on session end; also via Drop).
     pub fn close(&mut self) {
         self.route_active = false;
@@ -1038,6 +1102,8 @@ impl MediaBridge {
         for (_, cancel) in self.leg_wire_cancels.drain() {
             cancel.cancel();
         }
+        crate::telemetry::MediaTelemetry::unregister_bridge();
+        *self.legs_shared.lock() = (None, None);
         if let Some(la) = self.leg_a.take() {
             la.stop();
         }
@@ -1054,6 +1120,194 @@ impl Drop for MediaBridge {
     fn drop(&mut self) {
         self.teardown();
     }
+}
+
+// ── Periodic per-bridge stats task ────────────────────────────────────────────
+
+/// One leg's transport/tap/RTCP counters at a single sample point.
+#[derive(Debug, Clone, Default)]
+struct LegSample {
+    ingress: u64,
+    egress: u64,
+    transport_rx: u64,
+    sr_packet_count: u64,
+    sr_ssrc: u32,
+    has_sr: bool,
+    jitter_us: u64,
+    rtt_us: u64,
+    fraction_lost: u8,
+}
+
+fn sample_leg(leg: &Leg) -> LegSample {
+    let tap = leg.stats();
+    let rtcp = leg.rtcp_stats().snapshot();
+    LegSample {
+        ingress: tap.ingress_packets,
+        egress: tap.egress_packets,
+        transport_rx: leg.pc().received_rtp_packets(),
+        sr_packet_count: rtcp.sr_packet_count,
+        sr_ssrc: rtcp.sr_ssrc,
+        has_sr: rtcp.has_sr,
+        jitter_us: rtcp.jitter_us,
+        rtt_us: rtcp.rtt_us,
+        fraction_lost: rtcp.fraction_lost,
+    }
+}
+
+/// 5s window delta for one leg.
+#[derive(Debug, Clone, Default)]
+struct LegSampleDelta {
+    ingress: u64,
+    egress: u64,
+    transport_rx: u64,
+    sr: u64,
+    jitter_us: u64,
+    rtt_us: u64,
+    fraction_lost: u8,
+}
+
+fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelta {
+    let Some(cur) = cur else { return LegSampleDelta::default() };
+    let prev = prev.cloned().unwrap_or_default();
+    // SR packet count is only meaningful once a Sender Report has arrived.
+    // If the remote SSRC changed (stream restart / audio↔video SR flip) the
+    // cumulative counter resets, so treat the window as "fresh stream" instead
+    // of computing a bogus huge delta.
+    let sr = if cur.has_sr {
+        if cur.sr_ssrc != 0 && prev.sr_ssrc != 0 && cur.sr_ssrc != prev.sr_ssrc {
+            cur.sr_packet_count
+        } else {
+            cur.sr_packet_count.saturating_sub(prev.sr_packet_count)
+        }
+    } else {
+        0
+    };
+    LegSampleDelta {
+        ingress: cur.ingress.saturating_sub(prev.ingress),
+        egress: cur.egress.saturating_sub(prev.egress),
+        transport_rx: cur.transport_rx.saturating_sub(prev.transport_rx),
+        sr,
+        jitter_us: cur.jitter_us,
+        rtt_us: cur.rtt_us,
+        fraction_lost: cur.fraction_lost,
+    }
+}
+
+fn fmt_ms(us: u64) -> String {
+    if us == 0 {
+        "-".to_string()
+    } else {
+        format!("{:.1}ms", us as f64 / 1000.0)
+    }
+}
+
+/// Spawn the 5s media-quality sampler for a bridge. Publishes receive/send
+/// deltas into the process-wide [`crate::telemetry::MediaTelemetry`] (feeding
+/// the host's local stats log / Prometheus) and logs an `info!` line ONLY when
+/// a quality anomaly is detected (internal drops or >=1% loss in either
+/// direction), so idle bridges stay silent.
+fn spawn_bridge_stats_task(
+    session_id: String,
+    legs_shared: Arc<parking_lot::Mutex<(Option<Leg>, Option<Leg>)>>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // skip the immediate first tick
+        let mut prev_a: Option<LegSample> = None;
+        let mut prev_b: Option<LegSample> = None;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let (la, lb) = {
+                        let g = legs_shared.lock();
+                        (g.0.clone(), g.1.clone())
+                    };
+                    let sa = la.as_ref().map(|l| sample_leg(l));
+                    let sb = lb.as_ref().map(|l| sample_leg(l));
+
+                    let da = leg_delta(sa.as_ref(), prev_a.as_ref());
+                    let db = leg_delta(sb.as_ref(), prev_b.as_ref());
+
+                    // Same-codec relay fast-path? Only then is "ingress on one
+                    // leg minus egress on the peer" a clean internal-drop signal.
+                    // In transcode mode the two legs run at different packet
+                    // rates / ptime, so ingress-vs-egress is confounded by the
+                    // codec rate difference and MUST NOT be reported as drops.
+                    let relay_mode = match (la.as_ref(), lb.as_ref()) {
+                        (Some(a), Some(b)) => match (a.negotiated(), b.negotiated()) {
+                            (Some(pa), Some(pb)) => {
+                                matches!((pa.audio.as_ref(), pb.audio.as_ref()),
+                                    (Some(ca), Some(cb)) if ca.codec == cb.codec)
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+
+                    // ── rx bucket (system received) ──
+                    let rx_packets_d = da.transport_rx + db.transport_rx;
+                    let rx_expected_d = da.sr + db.sr;
+                    let rx_lost_d = rx_expected_d.saturating_sub(rx_packets_d);
+                    // Internal drops: received on one leg but not emitted on the
+                    // peer leg (rustrtc mpsc/SPSC saturation, relay stall, ...).
+                    // Relay-only (see `relay_mode`).
+                    let rx_idrop_d = if relay_mode {
+                        let dir_ab_drop = da.ingress.saturating_sub(db.egress);
+                        let dir_ba_drop = db.ingress.saturating_sub(da.egress);
+                        dir_ab_drop + dir_ba_drop
+                    } else {
+                        0
+                    };
+
+                    // ── tx bucket (system sent) ──
+                    let tx_packets_d = da.egress + db.egress;
+                    let tx_lost_d = (da.fraction_lost as f64 / 255.0 * da.egress as f64).round() as u64
+                        + (db.fraction_lost as f64 / 255.0 * db.egress as f64).round() as u64;
+
+                    let rx_loss_pct = if rx_expected_d > 0 {
+                        rx_lost_d as f64 / rx_expected_d as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    let tx_loss_pct = if tx_packets_d > 0 {
+                        tx_lost_d as f64 / tx_packets_d as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    crate::telemetry::MediaTelemetry::record_rx(rx_packets_d, rx_lost_d, rx_idrop_d);
+                    crate::telemetry::MediaTelemetry::record_tx(tx_packets_d, tx_lost_d, 0);
+
+                    let anomalous = rx_idrop_d > 0 || rx_loss_pct >= 1.0 || tx_loss_pct >= 1.0;
+                    if anomalous && rx_packets_d + tx_packets_d > 0 {
+                        info!(
+                            bridge_id = %session_id,
+                            relay = relay_mode,
+                            a_ingress = da.ingress, a_egress = da.egress, a_rx = da.transport_rx,
+                            a_jitter = fmt_ms(da.jitter_us), a_rtt = fmt_ms(da.rtt_us),
+                            a_flost = format!("{:.1}%", da.fraction_lost as f64 / 255.0 * 100.0),
+                            b_ingress = db.ingress, b_egress = db.egress, b_rx = db.transport_rx,
+                            b_jitter = fmt_ms(db.jitter_us), b_rtt = fmt_ms(db.rtt_us),
+                            b_flost = format!("{:.1}%", db.fraction_lost as f64 / 255.0 * 100.0),
+                            rx_packets = rx_packets_d,
+                            rx_loss = format!("{:.2}%", rx_loss_pct),
+                            rx_idrop = rx_idrop_d,
+                            tx_packets = tx_packets_d,
+                            tx_loss = format!("{:.2}%", tx_loss_pct),
+                            tx_idrop = 0u64,
+                            "bridge media quality anomaly [5s]"
+                        );
+                    }
+
+                    prev_a = sa;
+                    prev_b = sb;
+                }
+            }
+        }
+    });
 }
 
 /// The audio receiver track of a PC — the depacketized inbound audio that

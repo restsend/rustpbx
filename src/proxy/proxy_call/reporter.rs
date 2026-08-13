@@ -220,6 +220,12 @@ impl CallReporter {
             hangup_reason.as_ref(),
         );
 
+        // Per-leg media quality (packets, RTCP jitter/RTT/loss) for the detail
+        // UI. Persists into the `metadata` JSON column of the call record.
+        if let Some(media_quality) = &snapshot.media_quality {
+            metadata_map.insert("media_quality".to_string(), media_quality.clone());
+        }
+
         let mut details = CallDetails {
             direction,
             status,
@@ -593,6 +599,7 @@ mod tests {
             },
             extensions: http::Extensions::new(),
             metadata: std::collections::HashMap::new(),
+            media_quality: None,
         };
 
         let roles = build_sip_leg_roles(&snapshot);

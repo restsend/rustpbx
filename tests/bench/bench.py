@@ -781,11 +781,16 @@ class P2PBenchmark:
             self.sipflow_process = None
 
     def start_rustpbx(self, mediaproxy: str = "all", sipflow: bool = False, wholesale: bool = False,
-                      recording: bool = False, webrtc: bool = False) -> bool:
+                      recording: bool = False, webrtc: bool = False,
+                      uas_webrtc: bool | None = None) -> bool:
         """Start rustpbx with specified configuration."""
+        uas_webrtc = webrtc if uas_webrtc is None else uas_webrtc
+        cross_transport = uas_webrtc != webrtc
         print(f"\n{'='*60}")
         print(f"Starting rustpbx (mediaproxy={mediaproxy}, sipflow={sipflow}, wholesale={wholesale}, "
-              f"recording={recording}, webrtc={webrtc})")
+              f"recording={recording}, webrtc={webrtc}"
+              + (f", CROSS-TRANSPORT (UAC=WebRTC UAS=RTP)" if cross_transport else "")
+              + ")")
         print(f"{'='*60}")
 
         self._kill_rustpbx()
@@ -798,7 +803,8 @@ class P2PBenchmark:
 
         db_suffix = self._create_database()
         config_path = self._create_config(mediaproxy, sipflow, db_suffix, wholesale=wholesale,
-                                          recording=recording, webrtc=webrtc)
+                                          recording=recording, webrtc=webrtc,
+                                          uas_webrtc=uas_webrtc)
         if not config_path:
             return False
 
@@ -944,7 +950,7 @@ class P2PBenchmark:
 
     def _create_config(self, mediaproxy: str, sipflow: bool, db_suffix: str = "",
                        wholesale: bool = False, recording: bool = False,
-                       webrtc: bool = False) -> str | None:
+                       webrtc: bool = False, uas_webrtc: bool | None = None) -> str | None:
         """Create a temporary config file with specified settings."""
         try:
             with open(self.rustpbx_config, "r") as f:
@@ -993,9 +999,20 @@ class P2PBenchmark:
                         )
 
             # WebRTC: mark the memory users WebRTC-capable (DTLS-SRTP).
-            if webrtc:
+            # For cross-transport (WebRTC→RTP), only the caller (alice) needs
+            # the flag — the callee (bob) stays plain RTP.
+            uas_webrtc_resolved = webrtc if uas_webrtc is None else uas_webrtc
+            if webrtc and uas_webrtc_resolved:
+                # Both legs WebRTC → mark both bob and alice.
                 config_content = re.sub(
                     r'(?m)^(username\s*=\s*"(?:bob|alice)")[^\S\n]*\n',
+                    lambda m: m.group(1) + "\nis_support_webrtc = true\n",
+                    config_content,
+                )
+            elif webrtc and not uas_webrtc_resolved:
+                # Cross-transport: only alice (UAC/caller) is WebRTC.
+                config_content = re.sub(
+                    r'(?m)^(username\s*=\s*"alice")[^\S\n]*\n',
                     lambda m: m.group(1) + "\nis_support_webrtc = true\n",
                     config_content,
                 )
@@ -1418,9 +1435,18 @@ class P2PBenchmark:
         uac_codecs: str = "pcmu",
         recording: bool = False,
         webrtc: bool = False,
+        uas_webrtc: bool | None = None,
+        uac_webrtc: bool | None = None,
         audio_quality: bool = False,
     ) -> BenchmarkResult:
         """Run a single benchmark scenario."""
+        # Resolve per-leg webrtc flags (default to the shared `webrtc` value).
+        # For cross-transport (WebRTC→RTP) scenarios, the caller passes
+        # uas_webrtc=False, uac_webrtc=True so only the caller leg uses DTLS-SRTP.
+        uas_webrtc = webrtc if uas_webrtc is None else uas_webrtc
+        uac_webrtc = webrtc if uac_webrtc is None else uac_webrtc
+        cross_transport = uas_webrtc != uac_webrtc
+
         # In wall-time (soak) mode, derive total so the batch sustains for the
         # full duration: total = cps * wall_time. Concurrency ≈ cps * duration.
         soak = wall_time > 0
@@ -1460,7 +1486,8 @@ class P2PBenchmark:
         try:
             # 1. Start rustpbx
             if not self.start_rustpbx(mediaproxy=mediaproxy, sipflow=sipflow, wholesale=wholesale,
-                                      recording=recording, webrtc=webrtc):
+                                      recording=recording, webrtc=uac_webrtc,
+                                      uas_webrtc=uas_webrtc):
                 result.errors.append("Failed to start rustpbx")
                 return result
 
@@ -1468,8 +1495,8 @@ class P2PBenchmark:
 
             # 2. Start UAS instances (hangup > call_duration so UAS doesn't hang up early)
             if not self.start_uas_instances(uas_count, base_port=uas_base_port, hangup=duration + 30,
-                                            verbose=not soak, codecs=uas_codecs, webrtc=webrtc,
-                                            audio_quality=audio_quality):
+                                             verbose=not soak, codecs=uas_codecs, webrtc=uas_webrtc,
+                                             audio_quality=audio_quality):
                 result.errors.append("Failed to start UAS instances")
                 return result
 
@@ -1485,7 +1512,7 @@ class P2PBenchmark:
             # 4. Run UAC batch (loops sipbot batches in soak mode)
             uac_output, wall_time = self.run_uac_batch(
                 total, cps, duration, soak=soak, wall_time=wall_time,
-                cancel_prob=self.cancel_prob, codecs=uac_codecs, webrtc=webrtc,
+                cancel_prob=self.cancel_prob, codecs=uac_codecs, webrtc=uac_webrtc,
                 audio_quality=audio_quality,
             )
             result.test_duration_s = wall_time
@@ -2697,7 +2724,10 @@ Examples:
                  "webrtc_fastpath", "webrtc_fastpath_rec", "webrtc_fastpath_sipflow",
                  "webrtc_fastpath_rec_sipflow", "webrtc_transcode",
                  "webrtc_transcode_rec", "webrtc_transcode_sipflow",
-                 "webrtc_transcode_rec_sipflow"],
+                 "webrtc_transcode_rec_sipflow",
+                 "webrtc_to_rtp", "webrtc_to_rtp_rec", "webrtc_to_rtp_sipflow",
+                 "webrtc_to_rtp_transcode", "webrtc_to_rtp_transcode_rec",
+                 "webrtc_to_rtp_transcode_sipflow"],
         default="all",
         help="Benchmark scenario (default: all). "
              "matrix = full 16-combo media matrix (RTP|WebRTC × fastpath|transcode "
@@ -3065,6 +3095,18 @@ Examples:
         scenarios = list(MATRIX_COMBOS)
     elif args.scenario in _combo_map:
         scenarios = [_combo_map[args.scenario]]
+    elif args.scenario == "webrtc_to_rtp":
+        scenarios = [("webrtc_to_rtp", "all", False, "pcmu", "pcmu", False, True)]
+    elif args.scenario == "webrtc_to_rtp_rec":
+        scenarios = [("webrtc_to_rtp_rec", "all", False, "pcmu", "pcmu", True, True)]
+    elif args.scenario == "webrtc_to_rtp_sipflow":
+        scenarios = [("webrtc_to_rtp_sipflow", "all", True, "pcmu", "pcmu", False, True)]
+    elif args.scenario == "webrtc_to_rtp_transcode":
+        scenarios = [("webrtc_to_rtp_transcode", "all", False, "pcmu", "opus", False, True)]
+    elif args.scenario == "webrtc_to_rtp_transcode_rec":
+        scenarios = [("webrtc_to_rtp_transcode_rec", "all", False, "pcmu", "opus", True, True)]
+    elif args.scenario == "webrtc_to_rtp_transcode_sipflow":
+        scenarios = [("webrtc_to_rtp_transcode_sipflow", "all", True, "pcmu", "opus", False, True)]
 
     # In soak (wall-time) mode, running all 4 scenarios back-to-back would take
     # 4× the wall time. Force a single scenario, defaulting to forward_sipflow
@@ -3081,10 +3123,14 @@ Examples:
     all_results: list[BenchmarkResult] = []
     try:
         for idx, (name, mediaproxy, sipflow, uas_codecs, uac_codecs, recording, webrtc) in enumerate(scenarios):
+            # Cross-transport scenarios: UAC=WebRTC, UAS=RTP.
+            is_cross = name.startswith("webrtc_to_rtp")
+
             print(f"\n{'#'*70}")
             print(f"# SCENARIO {idx + 1}/{len(scenarios)}: {name}")
             print(f"# codecs: UAS={uas_codecs} UAC={uac_codecs} "
-                  f"recording={recording} webrtc={webrtc} sipflow={sipflow}")
+                  f"recording={recording} webrtc={webrtc} sipflow={sipflow}"
+                  + (" [CROSS-TRANSPORT: UAC=WebRTC UAS=RTP]" if is_cross else ""))
             print(f"{'#'*70}")
 
             result = benchmark.run_benchmark(
@@ -3103,6 +3149,8 @@ Examples:
                 uac_codecs=uac_codecs,
                 recording=recording,
                 webrtc=webrtc,
+                uas_webrtc=False if is_cross else None,
+                uac_webrtc=True if is_cross else None,
                 audio_quality=args.audio_quality,
             )
 

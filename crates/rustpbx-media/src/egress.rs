@@ -183,6 +183,7 @@ impl EgressPipeline {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, ptime)],
             noise_state: 0x9E37_79B9,
@@ -266,6 +267,7 @@ struct EgressTask {
     playback_started_at: Instant,
     sequence_number: u16,
     marker_pending: bool,
+    tick_count: u64,
     /// Source DTMF event timestamp and its timestamp on the output timeline.
     /// Every packet belonging to one event keeps the same RTP timestamp.
     dtmf_event_timestamp: Option<(u32, u32)>,
@@ -382,6 +384,11 @@ impl EgressTask {
                 },
                 _ = tick => {
                     if let Some(frame) = self.next_frame().await {
+                        self.tick_count = self.tick_count.wrapping_add(1);
+                        if self.tick_count <= 5 || self.tick_count % 100 == 0 {
+                            tracing::info!(tick = self.tick_count, pt = frame.payload_type,
+                                "egress tick: produced frame");
+                        }
                         // DropOldest semantics: if the PC sender is saturated
                         // (slow remote), drop the oldest rather than block the
                         // pacing task. try_send never awaits.
@@ -499,6 +506,8 @@ impl EgressTask {
                         self.build_frame(encoded)
                     }
                     Ok(Ok(MediaSample::Audio(input))) => {
+                        tracing::trace!(pt = input.payload_type, expected_pt = *source_audio_payload_type,
+                            "transcode: non-audio PT frame (telephone-event?)");
                         match self.build_dtmf_frame(&input) {
                             Some(frame) => frame,
                             None => {
@@ -506,6 +515,16 @@ impl EgressTask {
                                 self.build_frame(encoded)
                             }
                         }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "transcode: peer.recv() error, emitting silence");
+                        let encoded = self.encode_silence();
+                        self.build_frame(encoded)
+                    }
+                    Err(_) => {
+                        tracing::trace!("transcode: peer.recv() timeout (no audio yet), emitting silence");
+                        let encoded = self.encode_silence();
+                        self.build_frame(encoded)
                     }
                     _ => {
                         let encoded = self.encode_silence();
@@ -906,6 +925,7 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
@@ -981,10 +1001,11 @@ mod tests {
             resampler: Some(Resampler::new(48_000, 8000)),
             ptime: Duration::from_millis(20),
             gate: None,
-            playback_timestamp_base: 90_000,
+            playback_timestamp_base: 0,
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
@@ -1055,6 +1076,7 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
+            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,

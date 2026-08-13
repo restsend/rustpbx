@@ -348,6 +348,65 @@
 
                 </div>
 
+                <!-- Media Quality (per-leg RTCP: jitter / RTT / loss) -->
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5"
+                    x-show="mediaMetrics && mediaMetrics.length">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{
+                                "call_record_detail.section_media_quality" | t }}</h2>
+                            <p class="mt-1 text-xs text-slate-500">{{
+                                "call_record_detail.section_media_quality_desc" | t }}</p>
+                        </div>
+                    </div>
+                    <div class="mt-4 overflow-x-auto">
+                        <table class="w-full text-left text-xs">
+                            <thead class="bg-slate-50 text-slate-500">
+                                <tr>
+                                    <th class="px-3 py-2 font-semibold">{{
+                                        "call_record_detail.mq_col_leg" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold">{{
+                                        "call_record_detail.mq_col_codec" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold text-right">{{
+                                        "call_record_detail.mq_col_rx" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold text-right">{{
+                                        "call_record_detail.mq_col_tx" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold text-right">{{
+                                        "call_record_detail.mq_col_jitter" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold text-right">{{
+                                        "call_record_detail.mq_col_rtt" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold text-right">{{
+                                        "call_record_detail.mq_col_loss" | t }}</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                <template x-for="(leg, idx) in mediaMetrics" :key="idx">
+                                    <tr class="hover:bg-slate-50">
+                                        <td class="px-3 py-2">
+                                            <span
+                                                class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"
+                                                x-text="leg.side"></span>
+                                        </td>
+                                        <td class="px-3 py-2 font-mono text-slate-600"
+                                            x-text="leg.codec || '—'"></td>
+                                        <td class="px-3 py-2 font-mono text-slate-600 text-right"
+                                            x-text="formatInteger(leg.ingressPackets)"></td>
+                                        <td class="px-3 py-2 font-mono text-slate-600 text-right"
+                                            x-text="formatInteger(leg.egressPackets)"></td>
+                                        <td class="px-3 py-2 font-mono text-slate-600 text-right"
+                                            x-text="leg.jitterUs ? formatJitter(leg.jitterUs / 1000) : '—'"></td>
+                                        <td class="px-3 py-2 font-mono text-slate-600 text-right"
+                                            x-text="leg.rttUs ? formatJitter(leg.rttUs / 1000) : '—'"></td>
+                                        <td class="px-3 py-2 font-mono text-right"
+                                            :class="packetLossClass(leg.lossPct)"
+                                            x-text="formatPercent(leg.lossPct)"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
             </div>
 
             <div x-show="detailTab === 'trace'" x-cloak x-transition.opacity class="space-y-4"
@@ -929,6 +988,7 @@
                 this.tagError = '';
                 this.noteError = '';
                 this.participants = Array.isArray(data.participants) ? data.participants : [];
+                this.mediaMetrics = Array.isArray(data.media_metrics) ? data.media_metrics : [];
                 this.billing = data.billing || {
                     summary: (this.record && this.record.billing) || {},
                     snapshot: null,

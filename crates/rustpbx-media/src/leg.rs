@@ -36,6 +36,7 @@ use tracing::debug;
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
 use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
 use crate::leg_id::LegId;
+use crate::leg_stats::{LegRtcpStats, SrTimeTracker, spawn_rtcp_listener};
 use crate::media_recorder::RecorderSender;
 use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
 
@@ -119,6 +120,11 @@ pub struct LegInner {
     /// `Drop` and before re-spawning, so stale arming tasks never pile up
     /// across negotiation churn / leg replacement.
     relay_arm_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// RTCP-derived quality (jitter / RTT / fraction lost) plus the remote SR
+    /// packet count, updated lock-free by the RTCP listener task(s).
+    rtcp_stats: Arc<LegRtcpStats>,
+    /// Handles of the per-leg RTCP listener tasks, aborted on `stop` / `Drop`.
+    rtcp_listener_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Outbound DTMF (RFC 2833) send state: the RTP payload type used for
     /// telephone-events and the next sequence number / timestamp. Only valid
     /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
@@ -221,6 +227,13 @@ impl LegInner {
             .map(|caps| caps.video.clone())
             .unwrap_or_default();
 
+        // RTCP stats plumbing: track SR send times (for RTT) by injecting a
+        // sender interceptor, then subscribe the audio/video senders' RTCP to
+        // extract jitter / fraction lost / remote SR packet count.
+        let sr_times = SrTimeTracker::new();
+        rtc_config.recorder_interceptors.senders.push(sr_times.clone());
+        let rtcp_stats = LegRtcpStats::new();
+
         let pc = {
             let handle = tokio::runtime::Handle::try_current();
             let _guard = handle.as_ref().ok().map(|h| h.enter());
@@ -295,6 +308,25 @@ impl LegInner {
             Some(gated.clone()),
         );
 
+        // Subscribe audio (and video, when present) senders' RTCP broadcast for
+        // quality extraction. Senders exist once the tracks were added above.
+        let mut rtcp_listener_tasks = Vec::new();
+        for kind in [rustrtc::MediaKind::Audio, rustrtc::MediaKind::Video] {
+            let sender = pc
+                .get_transceivers()
+                .into_iter()
+                .find(|t| t.kind() == kind)
+                .and_then(|t| t.sender());
+            if let Some(sender) = sender {
+                rtcp_listener_tasks.push(spawn_rtcp_listener(
+                    sender,
+                    Arc::clone(&rtcp_stats),
+                    Arc::clone(&sr_times.times),
+                    first_codec.clock_rate,
+                ));
+            }
+        }
+
         Ok(Arc::new(LegInner {
             id: LegId::from(label),
             pc,
@@ -307,6 +339,8 @@ impl LegInner {
             observer_attached: AtomicBool::new(false),
             observer_task: Mutex::new(None),
             relay_arm_task: Mutex::new(None),
+            rtcp_stats,
+            rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
             comfort_noise_level_db,
@@ -380,6 +414,11 @@ impl LegInner {
 
     pub fn stats(&self) -> TapStats {
         self.tap.stats()
+    }
+
+    /// RTCP-derived quality (jitter / RTT / fraction lost) for this leg.
+    pub fn rtcp_stats(&self) -> Arc<LegRtcpStats> {
+        Arc::clone(&self.rtcp_stats)
     }
 
     pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
@@ -793,6 +832,9 @@ impl LegInner {
         if let Some(handle) = self.relay_arm_task.lock().take() {
             handle.abort();
         }
+        for handle in self.rtcp_listener_tasks.lock().drain(..) {
+            handle.abort();
+        }
         // Break the cross-leg RTP rewrite-bridge cycle BEFORE closing: in the
         // relay fastpath, leg A's transport holds a RewriteBridge whose
         // `target` is leg B's RtpTransport (and vice versa). rustrtc's
@@ -813,6 +855,9 @@ impl Drop for LegInner {
             handle.abort();
         }
         if let Some(handle) = self.relay_arm_task.get_mut().take() {
+            handle.abort();
+        }
+        for handle in self.rtcp_listener_tasks.get_mut().drain(..) {
             handle.abort();
         }
         // Break the cross-leg rewrite-bridge Arc cycle before close (see
@@ -869,7 +914,13 @@ pub(crate) fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result
 /// changes the send codec we re-assert it to be safe across versions.
 fn sync_sender_codec(pc: &PeerConnection, payload_type: u8, clock_rate: u32, channels: u16) {
     for t in pc.get_transceivers() {
-        if let Some(sender) = t.sender() {
+        // Only the audio sender carries audio params; setting them on a video
+        // sender would clobber the video PT/clock rustrtc negotiated (used for
+        // RTX / SDP). Video is relayed at the transport level and never uses
+        // these params.
+        if t.kind() == rustrtc::MediaKind::Audio
+            && let Some(sender) = t.sender()
+        {
             sender.set_params(RtpCodecParameters {
                 payload_type,
                 clock_rate,

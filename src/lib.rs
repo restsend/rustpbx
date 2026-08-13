@@ -26,6 +26,8 @@ pub mod proxy;
 pub mod rwi;
 pub use rustpbx_sipflow as sipflow;
 pub use rustpbx_storage as storage;
+pub mod sip_telemetry;
+pub mod stats_log;
 pub mod tls_reloader;
 pub mod tts;
 pub mod untracked_tasks;

@@ -64,6 +64,37 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
 
 ---
 
+## Performance Highlights
+
+**Low-latency, zero-loss media relay & transcoding** measured on commodity x86-64 hardware (AMD Ryzen 7 5700X, 16 threads). CPU figures are **per-core** (100% = one logical core):
+
+| Metric | Result |
+|---|---|
+| **Call setup latency** | ~6.4 ms end-to-end (2.7× faster than the previous media layer) |
+| **RTP relay (same codec)** | ~0.14% core / ~0.57 MB per concurrent call |
+| **Transcoding (Opus↔PCMU)** | ~0.42% core / ~0.93 MB per concurrent call |
+| **Packet loss** | **0%** at all loads — even 800 concurrent WebRTC↔RTP or ~2.1 cores of transcoding |
+| **Media continuity** | no sequence/timestamp jumps (no audio glitches) across all stress runs |
+| **Memory** | flat plateau over 18,000 calls — no leaks (steady ~199 MB) |
+
+**Zero-packet-loss stress results** (G.711 PCMU, CPS=100, 1 fork/call; CPU in per-core %):
+
+| Scenario | Concurrent | Completion | Packet Loss | CPU cores (avg/peak) | Memory |
+|---|---|---|---|---|---|
+| SIP signaling only | 800 | 100% | 0% | — | — |
+| RTP relay (`forward`) | 800 | 100% | 0% | 0.94 / 1.05 | 433 MB |
+| **WebRTC→RTP** relay (pcmu↔pcmu) | 800 | 100% | **0%** | 1.19 / 1.39 | 484 MB |
+| **WebRTC→RTP** transcode (opus↔pcmu) | 500 | 100% | **0%** | 2.12 / 2.64 | 508 MB |
+
+Key takeaways:
+- **Same-codec calls relay at ~3× the capacity** of cross-codec transcoding (CPU-bound, not memory-bound).
+- **WebRTC clients and plain SIP/RTP peers interoperate** through the PBX with zero packet loss.
+- Media-layer optimizations — lock-free ingress tap, parked egress pacing, cross-leg relay teardown — keep the hot path lean at scale.
+
+> See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
+
+---
+
 ## Core Capabilities
 
 **SIP & Media** — Full SIP stack (UDP/TCP/WS/TLS/WebRTC), RTP relay, NAT traversal, TLS/SRTP with auto ACME certs. Fast registration via JWT or HTTP token (skip 401/407).
@@ -152,6 +183,15 @@ Tested on 2026-07-09 · RustPBX 0.4.10 · rustrtc 0.3.89 · Linux x86_64 · AMD 
 | 5000 | + sipflow | 100% | 4693 | 0% | 378% / 297% | 2416 MB |
 
 Per-channel overhead: ~0.008% CPU (signaling) / ~0.076% CPU (RTP proxy).  Scaling is linear — 5000 concurrent uses ~3.8 cores, leaving ~12 cores for additional load (~16000+ theoretical).
+
+### WebRTC ↔ RTP Cross-Transport
+
+Caller (WebRTC/DTLS-SRTP) → callee (plain RTP), bridged by the PBX. Same codec → zero-copy rewrite relay; differing codecs → decode/resample/re-encode. CPU in per-core % (100% = one logical core).
+
+| Concurrent | Codecs | Completion | Packet Loss | CPU cores (avg/peak) | Memory | Audio | Continuity |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 800 | pcmu↔pcmu (relay) | 100% | 0% | 1.19 / 1.39 | 484 MB | PASS | PASS |
+| 500 | opus↔pcmu (transcode) | 100% | 0% | 2.12 / 2.68 | 508 MB | PASS | PASS |
 
 > See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
 

@@ -256,6 +256,7 @@ impl CallSessionBuilder {
             },
             extensions: dialplan.extensions.clone(),
             metadata,
+            media_quality: None,
         };
 
         reporter.report(snapshot);

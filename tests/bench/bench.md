@@ -252,6 +252,113 @@ Per-scenario log files in the log directory:
 | Memory (RSS) | 173.3 MB | **191.8 MB** | 244.3 MB | **264.8 MB** | 251.6 MB | **280.3 MB** |
 | Concurrent Calls | 765.0 | **800** | 765.4 | **800** | 765.4 | **800** |
 
+### 2026-08-13 Regression / Optimization Runs (refactor_media)
+
+Same-machine apples-to-apples (main@940178e7 baseline vs refactor_media HEAD, 1 fork/call,
+`--uas-count 2`, no jemalloc). The refactor's media-layer rewrite started with a measurable
+CPU/memory regression; the fixes below brought it **below baseline**.
+
+> CPU figures throughout this doc are **per-core** (`ps %CPU`, 100% = one logical core,
+> 16 cores available). e.g. 93.6% ≈ 0.94 cores.
+
+| Metric | baseline main | refactor (pre-fix) | refactor (post-fix) |
+|--------|:---:|:---:|:---:|
+| **800 conc CPU avg** | 95.0% (~0.95 core) | 106.1% (~1.06 cores) | **93.6% (~0.94 core)** |
+| **800 conc Mem peak** | 452.2 MB | 473.6 MB | **433.4 MB** |
+| **Setup latency** | 17.36 ms | 17 ms | **6.42 ms** (2.7× faster) |
+| Success / Loss | 100% / 0% | 100% / 0% | 100% / 0% |
+
+**Key optimizations (all in `crates/rustpbx-media/`):**
+- **Dialog leak fix** (`sip_session.rs`): parallel-fork loser legs that got a 2xx before
+  being cancelled left their confirmed dialog in `dialog_layer` with no guard → removed +
+  hung up on all exit paths.
+- **Egress sender ring** `sample_track(Audio, 500→8)` / `(Video, 100→8)`: the ring only needs
+  to absorb producer/consumer jitter (1 frame / 20 ms); 500 slots pre-allocated ~95 KB/leg
+  (~150 MB at 1600 legs).
+- **`rtp_buffer_capacity` 500→100**: ICE pre-ready buffer, idle in steady state with DropOldest.
+- **IngressTap fastpath**: packed `(ssrc, pt)` atomic cache skips the per-packet DashMap write;
+  lock-free DTMF PT bitmask; `has_recorder` flag skips the recorder RwLock when nothing records.
+  SSRC/PT tracking disabled for plain RTP↔RTP bridges (no RTCP PLI/NACK relay needed).
+- **Egress pacing parked while relay/gated**: a `pending()` future replaces the 20 ms
+  interval tick when no frames are produced (relay fastpath or pre-answer silence),
+  eliminating 50 Hz × 1600 legs of empty wakeups.
+- **RTP-timeout wire_leg monitor parked when unarmed**: a `Notify` wakes it only on
+  arm/resume instead of a fixed 100 ms poll.
+- **Rewrite-bridge cycle leak fixed** (`leg.rs`): in the relay fastpath leg A's RtpTransport
+  holds a `RewriteBridge` targeting leg B's transport (and vice versa). `PeerConnection::close`
+  does not clear the bridge, so the two `Arc<RtpTransport>`s kept each other alive — every
+  call leaked ~16 KB. `LegInner::stop`/`Drop` now call `pc.clear_rtp_rewrite_bridge()` first.
+
+### WebRTC ↔ RTP Cross-Transport Stress
+
+New scenarios (`--scenario webrtc_to_rtp*`): the **caller (alice) uses WebRTC (DTLS-SRTP)** and the
+**callee (bob) uses plain RTP**. Only alice is marked `is_support_webrtc = true` in the config.
+Both legs negotiate PCMU → the PBX uses the fast-path rewrite relay with WebRTC→RTP extension
+stripping; differing codecs (opus↔pcmu) exercise the transcode path.
+
+| Scenario | Codecs | Conc | Completion | Loss | CPU avg / peak (per-core) | Mem peak | Audio fmt | Continuity |
+|----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `webrtc_to_rtp` | pcmu↔pcmu (relay) | 100 | 100% | 0% | 16.1% / 21.8% (~0.16/0.22 core) | 109 MB | PASS | PASS |
+| `webrtc_to_rtp` | pcmu↔pcmu (relay) | 500 | 100% (497/500) | 0% | 71.2% / 82.4% (~0.71/0.82 core) | 328 MB | PASS | PASS |
+| `webrtc_to_rtp` | pcmu↔pcmu (relay) | 800 | 100% | 0% | 119.1% / 139.0% (~1.19/1.39 cores) | 484 MB | PASS | PASS |
+| `webrtc_to_rtp_transcode` | opus↔pcmu (transcode) | 100 | 100% | 0% | 36.8% / 51.3% (~0.37/0.51 core) | 145 MB | PASS | PASS |
+| `webrtc_to_rtp_transcode` | opus↔pcmu (transcode) | 500 | 100% (494/500) | 0% | 212.1% / 264.0% (~2.12/2.64 cores) | 508 MB | PASS | PASS |
+| `webrtc_to_rtp_transcode` | opus↔pcmu (transcode) | 500 | 100% (2nd run) | 0% | 216.7% / 268.0% (~2.17/2.68 cores) | 504 MB | PASS | PASS |
+
+Notes:
+- **0% packet loss at all loads**, even at ~2.1 cores (212% per-core CPU) during opus↔pcmu
+  transcoding. `media_continuity` (seq/ts-jump) PASS confirms no audio glitches.
+- Cross-transport relay is confirmed by `strip_a_to_b=true strip_b_to_a=false` in the
+  `fast-path relay activated` logs (WebRTC→RTP direction strips extensions).
+- Transcode is confirmed by `transcoding activated a_codec=Opus b_codec=PCMU`.
+- Opus encode dominates the transcode CPU (perf: `CeltEncoder::encode_impl` 13.96%,
+  `Resampler::resample` 4.79%, `pvq` 2.8–3.7%) — expected cost, not a bottleneck.
+- `tx_packets=0` in transcode results is a sipbot reporting quirk (sipbot counts TX
+  differently when the UAC/UAS codecs differ); `rx_packets` still validates media flow.
+
+#### Transcode vs Relay — Memory
+
+| Metric | Relay (pcmu↔pcmu) | Transcode (opus↔pcmu) | Δ |
+|--------|:---:|:---:|:---:|
+| **Mem / call** (500 conc, minus ~45 MB idle) | ~0.57 MB | ~0.93 MB | **1.6×** |
+| CPU / call | 0.142% | 0.424% | **3.0×** |
+| Mem peak (500 conc) | 328 MB | 508 MB | +180 MB |
+
+Transcode memory is only ~1.6× relay — far smaller than the 3× CPU gap. The extra is
+**fixed per-leg objects**, not per-packet cost:
+- decoder (Opus decode state, ~30–60 KB/leg)
+- resampler: `coeffs` (256 phases × 24 taps × 4 B ≈ 24 KB) + history buffer
+- one encoder per leg (present in both modes)
+
+Scaling estimate (idle ≈ 45 MB):
+
+```
+relay:     Mem ≈ 45 + conc × 0.57 MB   → 16 GB ≈ 28,000 conc (theoretical)
+transcode: Mem ≈ 45 + conc × 0.93 MB   → 16 GB ≈ 17,000 conc (theoretical)
+```
+
+> **Bottleneck takeaway**: transcode is CPU-bound (3× relay), not memory-bound (1.6× relay).
+> Size CPU at ~0.42% per-core / call and memory at ~0.93 MB/call for cross-codec calls;
+> same-codec calls relay at ~0.14% per-core / call / ~0.57 MB/call.
+>
+> Per-core % → cores: divide by 100 (e.g. 0.42%/call × 500 calls ≈ 2.1 cores; 16 cores
+> ≈ ~3,800 concurrent transcoded calls).
+
+### 30-minute Memory-Leak Verification (18000 calls, 90 batches)
+
+`--memleak --total 18000 --batch-size 200 --cps 200 --duration 15 --uas-count 2`:
+
+| Metric | Before rewrite-bridge fix | After rewrite-bridge fix |
+|--------|:---:|:---:|
+| Final RSS | 752.4 MB (+707.5 MB) | **199.0 MB (+154.1 MB)** |
+| RSS slope | +6.70 MB/batch (linear leak) | **+0.44 MB/batch (plateau)** |
+| Final dialogs | 12 | 3 |
+| tasks.total | 6 (reclaimed) | 6 |
+| Verdict | "NO LEAK" (task-based, false negative) | **NO LEAK** (actual) |
+
+The baseline (main@940178e7) plateaus at ~186 MB under the same load; the refactor now
+matches that after the rewrite-bridge cycle fix.
+
 ### Full Comparison
 
 | Level | Scenario | Completion | Peak Conc | Loss | Setup Latency | CPU Peak | CPU Avg | Mem Peak |
@@ -333,6 +440,28 @@ All RTP traffic flows through the PBX media proxy (ForwardingTrack).
 
 ### mediaproxy=all + sipflow
 With SIP flow recording enabled for all SIP signaling.
+
+### webrtc_to_rtp / webrtc_to_rtp_rec / webrtc_to_rtp_sipflow
+WebRTC → RTP cross-transport call. The caller (alice) registers as a WebRTC endpoint
+(`is_support_webrtc = true`, DTLS-SRTP media) while the callee (bob) stays plain RTP. The PBX
+bridges the two transports: same negotiated codec → fast-path rewrite relay (WebRTC→RTP strips
+extension headers); recording / sipflow variants suffix the name.
+
+### webrtc_to_rtp_transcode / _rec / _sipflow
+Same cross-transport WebRTC → RTP setup, but the caller negotiates **opus** while the callee
+uses **pcmu** — forcing the decode → resample → re-encode transcode path. Exercises Opus
+encoding and the 48 kHz ↔ 8 kHz resampler at scale.
+
+```bash
+# Quick smoke (100 concurrent)
+python tests/bench/bench.py --scenario webrtc_to_rtp --total 100 --cps 20 --duration 15 --uas-count 2
+
+# 500 concurrent relay
+python tests/bench/bench.py --scenario webrtc_to_rtp --total 500 --cps 100 --duration 60 --uas-count 2
+
+# 500 concurrent opus↔pcmu transcode
+python tests/bench/bench.py --scenario webrtc_to_rtp_transcode --total 500 --cps 100 --duration 60 --uas-count 2
+```
 
 ## Troubleshooting
 

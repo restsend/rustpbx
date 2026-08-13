@@ -1691,11 +1691,14 @@ fn build_detail_payload(
         build_record_payload(record, related, state, inline_recording_url.as_deref());
     let participants = build_participants(record, related);
 
-    let media_metrics = json!({
-        "audio_codec": Value::Null,
-        "rtp_packets": 0,
-        "rtcp_observations": Value::Array(vec![]),
-    });
+    // Per-leg media quality captured by the MediaBridge at call end (RTCP
+    // jitter/RTT/loss + packet counters), stored in metadata["media_quality"].
+    let media_metrics = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("media_quality"))
+        .cloned()
+        .unwrap_or(Value::Null);
 
     let signaling = if let Some(data) = cdr {
         build_signaling_from_cdr(data)

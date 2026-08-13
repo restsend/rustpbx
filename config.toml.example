@@ -6,6 +6,10 @@ http_addr = "0.0.0.0:8080"
 # http_gzip = true
 log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
+# Local stats log (one JSON line per stats_interval seconds, system+PBX summary
+# for loss/load diagnostics without Prometheus). Empty/unset disables.
+#stats_log = "/var/log/rustpbx.stats.log"
+#stats_interval = 5
 # Paths can include a trailing * to skip whole subtrees
 # http_access_skip_paths = ["/health", "/metrics*"]
 # SQLite database (default)

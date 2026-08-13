@@ -797,6 +797,31 @@ impl VideoTestHarness {
         }
     }
 
+    /// Feed audio frames from test_a until test_b receives one (verifies the
+    /// audio path stays up in the degraded / transcoded mode).
+    async fn relay_audio_a_to_b(&mut self, timeout_ms: u64) -> Option<AudioFrame> {
+        let frames = encode_codec_frames(CodecType::PCMU, 20);
+        assert!(!frames.is_empty(), "must have PCMU frames");
+        let rate = CodecType::PCMU.samplerate();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut ts = 0u32;
+        loop {
+            for _ in 0..2 {
+                self.test_a.send_audio(frames[0].clone(), ts);
+                ts = ts.wrapping_add(rate / 50);
+            }
+            if let Some(frame) = self.test_b.recv_audio(25).await {
+                if !frame.data.is_empty() {
+                    return Some(frame);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     fn close(&mut self) {
         self.mb.close();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -877,6 +902,10 @@ async fn video_codec_mismatch_degrades_to_audio_only() {
     )
     .await;
     h.assert_video_not_relayed().await;
+    // Audio must keep flowing after the degradation: the bridge falls back to
+    // the transcoding path (PCMU → decode → PCMU), so B still receives audio.
+    let audio = h.relay_audio_a_to_b(3000).await;
+    assert!(audio.is_some(), "audio must survive the video degradation");
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
@@ -1592,6 +1621,99 @@ async fn ivr_playback_is_recorded_as_a_leg_egress() {
         has_egress,
         "IVR/locally-generated audio must be recorded as A-leg egress, got {:?}",
         captured.iter().map(|(d, _)| *d).collect::<Vec<_>>()
+    );
+}
+
+/// Mid-call re-INVITE codec change must resync the leg's egress encoder AND
+/// sender PT.
+///
+/// Regression: `Leg::apply_profile_from_sdp` (the session's re-INVITE answer
+/// path) used to only update the negotiated profile, leaving the egress
+/// encoder on the old codec while the answer promised the new one. rustrtc's
+/// sender stamps the track's params PT (not the frame's), so the wire then
+/// carried e.g. a PCMU payload under the PCMA PT — the remote decoded the
+/// playback as silence/garbage. After the fix the same function updates the
+/// egress codec + sender PT, so locally-generated audio goes out in the new
+/// codec.
+#[tokio::test]
+async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.mb.accept(LegSide::A).await;
+
+    // The session's re-INVITE answer changes the A leg's negotiated codec to
+    // PCMA. In the real flow this answer is built outside `Leg::apply_sdp` and
+    // surfaced onto the media-bridge leg via `apply_profile_from_sdp`.
+    let pcma_answer_sdp = concat!(
+        "v=0\r\n",
+        "o=- 1 1 IN IP4 127.0.0.1\r\n",
+        "s=-\r\n",
+        "c=IN IP4 127.0.0.1\r\n",
+        "t=0 0\r\n",
+        "m=audio 10000 RTP/AVP 8\r\n",
+        "a=rtpmap:8 PCMA/8000\r\n",
+        "a=sendrecv\r\n",
+    )
+    .to_string();
+    let leg_a = h.mb.leg(LegSide::A).expect("leg A");
+    leg_a
+        .apply_profile_from_sdp(&pcma_answer_sdp)
+        .await
+        .expect("apply_profile_from_sdp");
+
+    // The negotiated profile is renegotiated to PCMA...
+    let profile = leg_a.negotiated().expect("negotiated profile");
+    let audio = profile.audio.as_ref().expect("audio codec");
+    assert_eq!(audio.codec, CodecType::PCMA);
+    assert_eq!(audio.payload_type, 8);
+
+    // ...and the sender's wire PT is synced to the new codec.
+    let sender_pt = leg_a
+        .pc()
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.sender())
+        .map(|s| s.params().payload_type);
+    assert_eq!(
+        sender_pt,
+        Some(8),
+        "sender PT must follow the renegotiated codec"
+    );
+
+    // Locally-generated playback must be encoded with the NEW codec (PCMA) —
+    // observed as PT 8 on the wire, not stale PCMU (PT 0).
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let rec = SipflowRecorder::new(tx);
+    h.mb.set_recorder_for(LegSide::A, rec);
+
+    let _handle = h
+        .mb
+        .play(LegSide::A, Box::new(TestBeep::new(8000)), true)
+        .await
+        .expect("play");
+    let captured = drain_sipflow_items(&mut rx, 600).await;
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(
+        captured
+            .iter()
+            .any(|(d, pt)| *d == PacketDirection::Egress && *pt == 8),
+        "re-INVITE'd leg must send playback as PCMA (PT 8), got {:?}",
+        captured
+    );
+    assert!(
+        !captured
+            .iter()
+            .any(|(d, pt)| *d == PacketDirection::Egress && *pt == 0),
+        "must not keep sending PCMU (PT 0) after re-INVITE codec change, got {:?}",
+        captured
     );
 }
 

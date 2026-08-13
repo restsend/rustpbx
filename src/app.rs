@@ -577,6 +577,32 @@ impl AppStateBuilder {
             tracing::error!("Failed to initialize addons: {}", e);
         }
 
+        // ── Local stats log (optional; Prometheus-independent summary) ─────
+        if let Some(path) = config
+            .stats_log
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        {
+            let interval = std::time::Duration::from_secs(config.stats_interval.max(1));
+            let cancel = core.token.child_token();
+            match crate::stats_log::StatsLogger::try_new(
+                path,
+                app_state.clone(),
+                cancel,
+                interval,
+            ) {
+                Ok(logger) => {
+                    logger.spawn();
+                    tracing::info!(
+                        path,
+                        interval_secs = interval.as_secs(),
+                        "local stats log enabled"
+                    );
+                }
+                Err(e) => tracing::warn!(path, error = %e, "local stats log disabled: cannot open file"),
+            }
+        }
+
         // ── Wire cluster AMI sync ────────────────────────────────────────
         // Build the peer list for AMI-based cluster sync, excluding self.
         //

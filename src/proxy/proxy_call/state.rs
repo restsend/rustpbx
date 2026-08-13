@@ -33,6 +33,10 @@ pub struct CallSessionRecordSnapshot {
     /// Values are JSON so structured entries (e.g. the `trace` array) persist
     /// cleanly into the call-record `metadata` column.
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
+    /// Per-leg media quality (packets, RTCP jitter/RTT/loss) captured from the
+    /// MediaBridge at call end. Persisted into the call-record `metadata` under
+    /// `media_quality`.
+    pub media_quality: Option<serde_json::Value>,
     pub extensions: http::Extensions,
 }
 
