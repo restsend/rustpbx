@@ -142,6 +142,7 @@ enum DialogSide {
 pub type CalleeError = (u16, String, Option<String>);
 
 /// Format a millisecond duration for trace messages, e.g. `1.2s`, `850ms`.
+/// Percent-decode a query-string value (replace `+` with space, then URL-decode).
 fn format_duration_ms(ms: i64) -> String {
     if ms >= 1000 {
         format!("{:.1}s", ms as f64 / 1000.0)
@@ -1595,7 +1596,10 @@ enum ConstructMode<'a> {
         if use_media_proxy {
             let offer_sdp =
                 String::from_utf8_lossy(server_dialog.initial_request().body()).to_string();
-            session.media.caller_offer = Some(offer_sdp);
+            session.media.caller_offer = Some(offer_sdp.clone());
+            // Preserve the caller's raw original offer for hold/unhold
+            // re-INVITE SDP (Chrome rejects PBX-rewritten re-offers).
+            session.media.raw_caller_offer = Some(offer_sdp);
         }
 
         let dialog_guard = ServerDialogGuard::new(server.dialog_layer.clone(), server_dialog.id());
@@ -7081,9 +7085,6 @@ enum ConstructMode<'a> {
         let direction = if sendonly { "sendonly" } else { "sendrecv" };
         Ok(rustrtc::modify_sdp_direction(base_sdp, direction))
     }
-
-    /// Send a re-INVITE with given SDP body to all callee dialogs and return
-    /// the first SDP answer if any.
     async fn send_reinvite_to_callee_dialogs(&mut self, sdp: &str) -> Result<Option<String>> {
         let dialog_layer = self.server.dialog_layer.clone();
         let headers = Self::sdp_headers();
@@ -8735,6 +8736,10 @@ impl SipSession {
 
             CallCommand::JoinMixer { mixer_id } => {
                 Self::ok_or_failure(self.handle_join_mixer(mixer_id).await)
+            }
+
+            CallCommand::JoinMixerLeg { mixer_id, leg_id } => {
+                Self::ok_or_failure(self.handle_join_mixer_leg(mixer_id, leg_id).await)
             }
 
             CallCommand::LeaveMixer => Self::ok_or_failure(self.handle_leave_mixer().await),

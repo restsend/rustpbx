@@ -445,6 +445,50 @@ impl SipSession {
         Ok(())
     }
 
+    /// Join a specific leg of this session into a conference mixer.
+    ///
+    /// Mirrors `handle_join_mixer` but bridges a chosen leg (caller/callee)
+    /// instead of the hard-coded `{session}-callee`. Used by the consult-
+    /// transfer merge flow (`ConsultTransferManager::merge_to_conference`)
+    /// to put session_a's customer leg (A) and session_b's expert leg (C)
+    /// into the same mixer so they continue talking after B exits.
+    ///
+    /// `start_bridge_full_duplex` registers the participant exactly once
+    /// with the composite leg id `{session}-{leg}` returned by
+    /// `participant_leg()`, so the caller must NOT pre-register via
+    /// `add_participant` (would create orphan/duplicate entries).
+    pub(super) async fn handle_join_mixer_leg(
+        &mut self,
+        mixer_id: String,
+        leg_id: LegId,
+    ) -> Result<()> {
+        info!(session_id = %self.id, %mixer_id, %leg_id, "Joining mixer/conference (specific leg)");
+
+        let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
+        if self
+            .server
+            .conference_server
+            .get_conference(&conf_id_obj)
+            .await
+            .is_none()
+        {
+            return Err(anyhow!("Conference {} not found", mixer_id));
+        }
+
+        // Composite id mirrors handle_join_mixer / handle_bridge_cross_session
+        // and ensures the participant is registered exactly once by
+        // start_bridge_full_duplex.
+        let participant_leg = self.participant_leg(&leg_id);
+        self.try_start_and_store_bridge(
+            &mixer_id,
+            &participant_leg,
+            "consult-transfer 3-way merge",
+        )
+        .await;
+
+        Ok(())
+    }
+
     pub(super) async fn handle_leave_mixer(&mut self) -> Result<()> {
         info!(session_id = %self.id, "Leaving mixer/conference");
 

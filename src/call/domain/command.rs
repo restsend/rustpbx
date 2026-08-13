@@ -293,6 +293,20 @@ pub enum CallCommand {
         mixer_id: String,
     },
 
+    /// Join a specific leg of this session into a conference mixer.
+    ///
+    /// Used by consult-transfer merge to bridge exactly the right leg per
+    /// session: session_a's "caller" leg (the customer A) and session_b's
+    /// "callee" leg (the expert C). The plain `JoinMixer` variant
+    /// hard-codes the callee leg, which would bridge B instead of A and
+    /// leave the conference silent once B exits.
+    JoinMixerLeg {
+        /// Mixer ID / conference room ID
+        mixer_id: String,
+        /// Which leg of this session to bridge ("caller" or "callee").
+        leg_id: LegId,
+    },
+
     /// Leave the current conference mixer
     LeaveMixer,
 
