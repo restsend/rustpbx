@@ -398,7 +398,14 @@ impl BridgeSideState {
     }
 
     fn replace_pc(&self, new_pc: PeerConnection) {
-        *self.pc.lock() = new_pc;
+        let old_pc = std::mem::replace(&mut *self.pc.lock(), new_pc);
+        // Close the replaced PeerConnection so its ICE sockets, DTLS session and
+        // SRTP key state are released immediately instead of lingering until the
+        // last Arc clone (held by a still-running forwarder / stats logger) drops.
+        // pc().close() spawns internally; guard against a missing runtime handle.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            old_pc.close();
+        }
     }
 }
 
@@ -616,6 +623,11 @@ pub struct BridgePeer {
     caller: BridgeSideState,
     callee: BridgeSideState,
     bridge_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Tasks spawned per forwarding "generation" (RTCP listeners, stats logger,
+    /// N-peer loops). These are re-spawned on every `start_bridge` restart and
+    /// must be aborted/drained on restart to avoid accumulating live tasks that
+    /// hold strong `PeerConnection`/track references.
+    forwarding_generation_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     sub_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     cancel_token: CancellationToken,
     /// Separate token for file-output clock tasks, NOT affected by
@@ -690,6 +702,7 @@ impl BridgePeer {
             caller: BridgeSideState::new(caller_pc),
             callee: BridgeSideState::new(callee_pc),
             bridge_tasks: parking_lot::Mutex::new(Vec::new()),
+            forwarding_generation_tasks: parking_lot::Mutex::new(Vec::new()),
             sub_tasks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
             file_output_token: CancellationToken::new(),
@@ -997,7 +1010,7 @@ impl BridgePeer {
                 clock_rate,
                 cancel.clone(),
             );
-            self.bridge_tasks.lock().push(h);
+            self.forwarding_generation_tasks.lock().push(h);
         }
         if let Some(sender) = self.caller.audio_sender.lock().clone() {
             let clock_rate = sender.params().clock_rate;
@@ -1008,7 +1021,7 @@ impl BridgePeer {
                 clock_rate,
                 cancel.clone(),
             );
-            self.bridge_tasks.lock().push(h);
+            self.forwarding_generation_tasks.lock().push(h);
         }
         // Subscribe video audio-sender RTCP if available (replaced/created dynamically).
         if let Some(sender) = self.callee.video_sender.lock().clone() {
@@ -1020,7 +1033,7 @@ impl BridgePeer {
                 clock_rate,
                 cancel.clone(),
             );
-            self.bridge_tasks.lock().push(h);
+            self.forwarding_generation_tasks.lock().push(h);
         }
         if let Some(sender) = self.caller.video_sender.lock().clone() {
             let clock_rate = sender.params().clock_rate;
@@ -1031,7 +1044,7 @@ impl BridgePeer {
                 clock_rate,
                 cancel.clone(),
             );
-            self.bridge_tasks.lock().push(h);
+            self.forwarding_generation_tasks.lock().push(h);
         }
 
         // Spawn a 5-second periodic stats logger for all bridge legs
@@ -1196,7 +1209,7 @@ impl BridgePeer {
             })
         };
 
-        let mut tasks = self.bridge_tasks.lock();
+        let mut tasks = self.forwarding_generation_tasks.lock();
         *self.forwarder_handle.lock() = Some(bidirectional_task);
         tasks.push(stats_task);
         tasks.push(self.spawn_peer_forward_loops());
@@ -2472,6 +2485,23 @@ impl BridgePeer {
         for task in tasks {
             let _ = task.await;
         }
+
+        // Abort and drain the per-generation tasks (RTCP listeners, stats
+        // logger, N-peer loops). Without this, every restart leaks one more
+        // live stats logger (holding a strong PeerConnection clone) plus RTCP
+        // listeners until the bridge is finally dropped.
+        let generation = self
+            .forwarding_generation_tasks
+            .lock()
+            .drain(..)
+            .collect::<Vec<_>>();
+        for task in &generation {
+            task.abort();
+        }
+        for task in generation {
+            let _ = task.await;
+        }
+
         self.await_audio_forwarding_shutdown().await;
     }
 
@@ -2529,6 +2559,12 @@ impl BridgePeer {
         for task in self.sub_tasks.lock().iter() {
             task.abort();
         }
+        // Abort per-generation tasks (stats logger, RTCP listeners, N-peer
+        // loops) so they don't retain the (soon-to-be-superseded) PeerConnections
+        // across a return-to-IVR cycle. They are re-spawned by start_bridge().
+        for task in self.forwarding_generation_tasks.lock().iter() {
+            task.abort();
+        }
         self.reset_audio_forwarding();
         self.forwarding_stopped.store(true, Ordering::Release);
     }
@@ -2584,6 +2620,10 @@ impl BridgePeer {
         for task in self.bridge_tasks.lock().iter() {
             task.abort();
         }
+        // Abort per-generation tasks (stats logger, RTCP listeners, N-peer loops).
+        for task in self.forwarding_generation_tasks.lock().iter() {
+            task.abort();
+        }
         let sub = self.sub_tasks.lock();
         for task in sub.iter() {
             task.abort();
@@ -2609,6 +2649,11 @@ impl Drop for BridgePeer {
         }
         // Drain and abort bridge tasks to release Arc references immediately.
         for task in self.bridge_tasks.get_mut().drain(..) {
+            task.abort();
+        }
+        // Drain and abort per-generation tasks (stats logger, RTCP listeners,
+        // N-peer loops) so they can't outlive the bridge.
+        for task in self.forwarding_generation_tasks.get_mut().drain(..) {
             task.abort();
         }
         // Drain and abort sub-tasks.

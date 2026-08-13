@@ -7755,7 +7755,14 @@ impl SipSession {
                 bridge.callee_pc().set_local_description(offer)?;
             }
 
-            self.media.media_bridge = Some(bridge.clone());
+            // Replace any previously-created bridge (e.g. an app/IVR bridge whose
+            // `caller_answer_uses_media_bridge` flag was already reset) with the
+            // fresh transport bridge. Close the old one explicitly so its
+            // PeerConnections/tasks are released immediately instead of waiting
+            // for the media engine's async AttachBridge handler to stop it.
+            if let Some(old_bridge) = self.media.media_bridge.replace(bridge.clone()) {
+                old_bridge.close_sync();
+            }
 
             // Give the media engine the bridge used by playback and DTMF commands.
             {
@@ -9393,11 +9400,42 @@ impl SipSession {
             }
         }
 
+        // De-register any legs that joined a conference. The ConferenceManager
+        // retains participant state (leg_to_conference, mixer participant,
+        // channels) keyed by leg; without an explicit removal a leg that hangs
+        // up without a `conference_remove` command leaks that state (and keeps
+        // the audio-mixer task alive) until the conference is destroyed.
+        let conference_leg_ids: Vec<LegId> = self.legs.keys().cloned().collect();
+        self.legs.stop_all_conference_bridge_handles();
+        self.conference_bridge.stop_bridge();
+        for leg_id in conference_leg_ids {
+            if let Err(error) = self
+                .server
+                .conference_manager
+                .remove_leg_from_all(&leg_id)
+                .await
+            {
+                debug!(
+                    session_id = %self.context.session_id,
+                    %leg_id,
+                    error = %error,
+                    "Conference participant cleanup failed"
+                );
+            }
+        }
+
         // Destroy the engine session last — after all bridge cleanup.
         // This drops the engine's sole recorder-control handle, so the worker
         // exits and finalizes. The RAII guard's Drop synchronously removes the
         // MediaSession from the engine's map and finalizes its other resources.
         drop(self.media_session_guard.take());
+
+        // Remove this session's RWI CallMetaStore entry now that every call event
+        // (call_hangup and any hook-emitted events) has already been emitted and
+        // enriched. Without this the store grows one entry per call, unbounded.
+        if let Some(ref gw) = self.server.rwi_gateway {
+            gw.read().meta_store.remove(&self.context.session_id);
+        }
     }
 
     /// Enrich `meta.hangup_reason` with higher-level context before emitting
@@ -12351,6 +12389,12 @@ impl Drop for SipSession {
     fn drop(&mut self) {
         self.cancel_token.cancel();
 
+        // Cancel the running app's event loop synchronously. On the normal path
+        // cleanup() → stop_app() already cancelled it (so this is a no-op), but
+        // on abnormal teardown (task abort/panic) the app loop would otherwise
+        // keep blocking on its event channel and retain ApplicationContext.
+        self.app_runtime.cancel_sync();
+
         // Safety net for task abort, panic, or runtime shutdown before cleanup.
         self.concurrent_call_lease.release_all();
 
@@ -12422,6 +12466,11 @@ impl Drop for SipSession {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }
+        }
+
+        // Remove the RWI CallMetaStore entry (parking_lot read guard — sync).
+        if let Some(ref gw) = self.server.rwi_gateway {
+            gw.read().meta_store.remove(&self.context.session_id);
         }
 
         debug!(session_id = %self.context.session_id, "SipSession drop complete");

@@ -248,6 +248,14 @@ impl AppRuntime for DefaultAppRuntime {
         }
     }
 
+    fn cancel_sync(&self) {
+        if let Ok(guard) = self.running.try_read()
+            && let Some(running) = guard.as_ref()
+        {
+            running.cancel_token.cancel();
+        }
+    }
+
     fn status(&self) -> AppStatus {
         if self.is_running() {
             AppStatus::Running

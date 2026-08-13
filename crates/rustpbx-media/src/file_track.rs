@@ -236,6 +236,11 @@ impl FileTrack {
 
         let _handle = tokio::runtime::Handle::try_current();
         let _guard = _handle.as_ref().ok().map(|h| h.enter());
+        // Close the previous PeerConnection before replacing it so its UDP
+        // port/ICE state is released promptly (pc.close() spawns internally).
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.pc.close();
+        }
         self.pc = PeerConnection::new(config);
         self.pc
             .add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
