@@ -931,6 +931,11 @@ mod recorder_advanced_tests {
         let path_str = temp_path.to_str().unwrap();
 
         let mut recorder = Recorder::new(path_str, CodecType::G729).await.unwrap();
+        assert_eq!(
+            recorder.codec,
+            CodecType::PCMU,
+            "G729 recordings must be decoded and stored as browser-compatible PCMU WAV"
+        );
 
         let frame_a = AudioFrame {
             data: vec![0; 10].into(), // 10 bytes G.729
@@ -967,6 +972,14 @@ mod recorder_advanced_tests {
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44);
+        let bytes = std::fs::read(&temp_path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(
+            u16::from_le_bytes([bytes[20], bytes[21]]),
+            7,
+            "G729 recordings must use the PCMU WAV format tag"
+        );
 
         let _ = std::fs::remove_file(&temp_path);
     }
