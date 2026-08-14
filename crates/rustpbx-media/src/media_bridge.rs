@@ -422,10 +422,11 @@ impl MediaBridge {
     // ── Routing ──────────────────────────────────────────────────────────
 
     /// Bridge A ↔ B. Both legs must exist and be answered (gate open). Selects
-    /// [`EgressSource::RewriteRelay`] when the negotiated audio codecs match
-    /// AND the legs share a video codec (or neither negotiated video);
-    /// otherwise [`EgressSource::TranscodePeer`] (audio-only — video cannot be
-    /// relayed without a common codec and is never transcoded).
+    /// [`EgressSource::RewriteRelay`] when both legs use plain RTP, the
+    /// negotiated audio codecs match, AND the legs share a video codec (or
+    /// neither negotiated video). If either leg uses WebRTC, use
+    /// [`EgressSource::TranscodePeer`] instead (audio-only — video is never
+    /// transcoded).
     pub async fn bridge(&mut self) -> Result<()> {
         let (la, lb) = (self.leg_a.clone(), self.leg_b.clone());
         let (Some(la), Some(lb)) = (la, lb) else {
@@ -457,6 +458,10 @@ impl MediaBridge {
         let video_mismatch = !pa.video.is_empty()
             && !pb.video.is_empty()
             && video_match.is_none();
+        let a_transport = la.pc().config().transport_mode.clone();
+        let b_transport = lb.pc().config().transport_mode.clone();
+        let has_webrtc_leg = a_transport == rustrtc::TransportMode::WebRtc
+            || b_transport == rustrtc::TransportMode::WebRtc;
 
         // Idempotent re-bridge: same codec pair on an already-active route is
         // a no-op (avoid rebuilding decoders / re-arming the relay).
@@ -481,7 +486,7 @@ impl MediaBridge {
             );
         }
 
-        if ca.codec == cb.codec && !video_mismatch {
+        if ca.codec == cb.codec && !video_mismatch && !has_webrtc_leg {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
@@ -493,8 +498,6 @@ impl MediaBridge {
             // destination's SDES-MID extension header on forwarded packets
             // (when the destination is WebRTC), so the browser attributes
             // them to the correct audio track regardless of SSRC.
-            let a_transport = la.pc().config().transport_mode.clone();
-            let b_transport = lb.pc().config().transport_mode.clone();
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
             let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
             let a_relay_ssrc = distinct_relay_ssrc(a_playback_ssrc);
@@ -715,6 +718,7 @@ impl MediaBridge {
                 session = %self.session_id,
                 a_codec = ?ca.codec,
                 b_codec = ?cb.codec,
+                has_webrtc_leg,
                 "transcoding activated"
             );
             // No RTCP PLI/NACK relay in the transcode path (packets are decoded
@@ -1707,11 +1711,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webrtc_legs_negotiate_and_bridge_fastpath() {
+    async fn webrtc_legs_negotiate_and_bridge_with_transcoding() {
         use rustrtc::SdpType;
 
-        // Two WebRtc (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
-        // other and the bridge activates the same-codec (opus) fast-path.
+        // Two WebRTC (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
+        // other. WebRTC legs deliberately skip the same-codec fast-path.
         let cfg = LegConfig {
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
@@ -1751,18 +1755,20 @@ mod tests {
         mb.accept(LegSide::B).await;
 
         assert!(mb.is_bridged(), "route should be active after both answer");
+        for side in [LegSide::A, LegSide::B] {
+            assert!(
+                !mb.leg(side).expect("leg").egress_is_relay(),
+                "WebRTC leg {side:?} should use transcoding"
+            );
+        }
         mb.close();
     }
 
-    /// Two WebRTC legs that both carry VIDEO (VP8 + H264) negotiate and bridge
-    /// over the fast-path relay. This exercises the all-payload-type video
-    /// rewrite rules AND the RTCP PLI/NACK relay wiring (`wire_rtcp_relay`)
-    /// — regression guard for the one-way black-video bug. In the unit-test
-    /// environment the DTLS transports never come up, so the RTCP-forwarding
-    /// tasks must degrade gracefully (no panic, no spin) while the RTP relay
-    /// rules are still installed and both legs report fast-path egress.
+    /// WebRTC legs deliberately skip the relay even when their audio and video
+    /// codecs match. The current transcoding path is audio-only, so video is
+    /// not relayed in this mode.
     #[tokio::test]
-    async fn webrtc_video_legs_bridge_fastpath_with_rtcp_relay() {
+    async fn webrtc_video_legs_skip_fastpath() {
         use rustrtc::SdpType;
 
         let cfg = LegConfig {
@@ -1803,12 +1809,11 @@ mod tests {
         assert!(mb.is_bridged(), "route should be active after both answer");
         for side in [LegSide::A, LegSide::B] {
             let leg = mb.leg(side).expect("leg");
-            assert!(leg.egress_is_relay(), "leg {side:?} should use fast-path relay");
+            assert!(
+                !leg.egress_is_relay(),
+                "WebRTC leg {side:?} should use transcoding"
+            );
         }
-
-        // Give the RTCP-forwarding tasks a moment: with no DTLS transport in
-        // the unit-test env they must time out quietly (never panic/spin).
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         mb.close();
     }
 
@@ -1881,15 +1886,10 @@ mod tests {
         mb.close();
     }
 
-    /// Regression: bridging a WebRTC caller leg whose DTLS/SRTP transport is
-    /// not yet ready (the remote only starts DTLS after it receives the 200 OK)
-    /// with a same-codec RTP callee must NOT block the fast-path relay arming.
-    /// Before the fix `Leg::set_egress_source(RewriteRelay)` synchronously
-    /// waited up to 2s per leg for the WebRTC transport, which deadlocked call
-    /// setup (the 200 OK is sent only after this returns). Now the arming is
-    /// deferred to a background task and the call path returns immediately.
+    /// A same-codec WebRTC↔RTP bridge uses transcoding and must not wait for
+    /// the WebRTC DTLS/SRTP transport before call setup can continue.
     #[tokio::test]
-    async fn fastpath_relay_does_not_block_on_unready_webrtc_transport() {
+    async fn same_codec_webrtc_rtp_bridge_uses_transcoding_without_waiting() {
         use rustrtc::SdpType;
 
         let webrtc_cfg = LegConfig {
@@ -1966,8 +1966,8 @@ mod tests {
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
 
-        // Same codec (opus) on both legs → fast-path branch would hit
-        // wait_for_rtp_transport_ready. It must NOT block now.
+        // Same codec on both legs would normally qualify for fast-path, but
+        // the WebRTC leg forces the audio transcoding route.
         let start = std::time::Instant::now();
         mb.accept(LegSide::A).await;
         mb.accept(LegSide::B).await;
@@ -1977,6 +1977,14 @@ mod tests {
             "accept must not block on the unready WebRTC transport (took {elapsed:?})"
         );
         assert!(mb.is_bridged(), "route should be active after both answer");
+        assert!(
+            !mb.leg(LegSide::A).unwrap().egress_is_relay(),
+            "WebRTC caller leg should use transcoding"
+        );
+        assert!(
+            !mb.leg(LegSide::B).unwrap().egress_is_relay(),
+            "RTP callee leg should use transcoding when its peer is WebRTC"
+        );
         mb.close();
     }
 
