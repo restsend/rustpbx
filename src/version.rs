@@ -1,7 +1,9 @@
 use sea_orm::{EntityTrait, PaginatorTrait};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::debug;
+#[cfg(not(debug_assertions))]
+use tracing::info;
 
 const VERSION_INFO: &str = concat!(
     "rustpbx ",
