@@ -91,4 +91,11 @@ pub trait AppRuntime: Send + Sync {
     fn get_queue_name(&self) -> Option<String> {
         None
     }
+
+    /// Synchronous best-effort cancellation of the running app's event loop.
+    ///
+    /// Used by `SipSession::drop` (which cannot `.await`) so an orphaned app
+    /// loop cannot outlive the session on abnormal teardown (task abort/panic).
+    /// Default no-op for runtimes that don't support sync cancellation.
+    fn cancel_sync(&self) {}
 }

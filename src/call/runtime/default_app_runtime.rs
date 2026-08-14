@@ -260,6 +260,14 @@ impl AppRuntime for DefaultAppRuntime {
         }
     }
 
+    fn cancel_sync(&self) {
+        if let Ok(guard) = self.running.try_read()
+            && let Some(running) = guard.as_ref()
+        {
+            running.cancel_token.cancel();
+        }
+    }
+
     fn current_app(&self) -> Option<String> {
         if let Ok(guard) = self.running.try_read() {
             guard.as_ref().map(|r| r.name.clone())

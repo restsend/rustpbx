@@ -7486,11 +7486,40 @@ enum ConstructMode<'a> {
             }
         }
 
+        // De-register any legs that joined a conference. The ConferenceManager
+        // retains participant state (leg_to_conference, mixer participant,
+        // channels) keyed by leg; without an explicit removal a leg that hangs
+        // up without a `conference_remove` command leaks that state (and keeps
+        // the audio-mixer task alive) until the conference is destroyed.
+        let conference_leg_ids: Vec<LegId> = self.legs.keys().cloned().collect();
+        for leg_id in conference_leg_ids {
+            if let Err(error) = self
+                .server
+                .conference_manager
+                .remove_leg_from_all(&leg_id)
+                .await
+            {
+                debug!(
+                    session_id = %self.context.session_id,
+                    %leg_id,
+                    error = %error,
+                    "Conference participant cleanup failed"
+                );
+            }
+        }
+
         // MediaBridge teardown is handled by the session Drop / cleanup path.
         // Close it eagerly so per-leg wire_leg monitor tasks and the DTMF
         // forwarder stop now, not only when the session object drops.
         if let Some(mut mb) = self.media.bridge.take() {
             mb.close();
+        }
+
+        // Remove this session's RWI CallMetaStore entry now that every call
+        // event has been emitted and enriched. Without this the store grows
+        // one entry per call, unbounded.
+        if let Some(ref gw) = self.server.rwi_gateway {
+            gw.read().meta_store.remove(&self.context.session_id);
         }
     }
 
@@ -10697,6 +10726,13 @@ impl Drop for SipSession {
     fn drop(&mut self) {
         self.cancel_token.cancel();
 
+        // Cancel the running app's event loop synchronously. On the normal
+        // path cleanup() → stop_app() already cancelled it (so this is a
+        // no-op), but on abnormal teardown (task abort/panic) the app loop
+        // would otherwise keep blocking on its event channel and retain
+        // ApplicationContext.
+        self.app_runtime.cancel_sync();
+
         // Safety net for task abort, panic, or runtime shutdown before cleanup.
         self.concurrent_call_lease.release_all();
         // Routed-leg leases release their permits when dropped (each permit is
@@ -10770,6 +10806,11 @@ impl Drop for SipSession {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }
+        }
+
+        // Remove the RWI CallMetaStore entry (parking_lot read guard — sync).
+        if let Some(ref gw) = self.server.rwi_gateway {
+            gw.read().meta_store.remove(&self.context.session_id);
         }
     }
 }
