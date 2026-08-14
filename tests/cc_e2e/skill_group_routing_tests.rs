@@ -1646,9 +1646,11 @@
             .resolve_target_with_policy("skill-group:support", None, "call-1")
             .await;
 
+        // Busy and Ringing are reliable states — an agent already reserved by
+        // another call must NOT be returned by the fallback. The call should
+        // queue instead of double-dialling the same agent.
         assert!(
-            uris.len() == 1,
-            "fallback returns all skill-matched agents (status-agnostic), got {uris:?}"
+            uris.is_empty(),
+            "fallback must exclude Ringing agents (already reserved), got {uris:?}"
         );
-        assert_eq!(uris[0], "sip:1001@localhost");
     }
