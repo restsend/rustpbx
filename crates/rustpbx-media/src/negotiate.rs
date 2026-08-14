@@ -39,6 +39,7 @@ impl CodecInfo {
     pub fn to_params(&self) -> rustrtc::RtpCodecParameters {
         rustrtc::RtpCodecParameters {
             payload_type: self.payload_type,
+            name: self.codec_name().to_string(),
             clock_rate: self.clock_rate,
             channels: Self::clamp_channels(self.channels),
         }

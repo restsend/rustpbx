@@ -60,6 +60,7 @@ impl RtcTrack {
         let mut audio_params = RtpCodecParameters::default();
         if let Some(info) = rtp_map.first() {
             audio_params.payload_type = info.payload_type;
+            audio_params.name = info.codec_name().to_string();
             audio_params.clock_rate = info.clock_rate;
             audio_params.channels = info.channels as u8;
         }
@@ -70,6 +71,7 @@ impl RtcTrack {
                 rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Video, 100);
             let video_params = RtpCodecParameters {
                 payload_type: video_cap.payload_type,
+                name: video_cap.codec_name.clone(),
                 clock_rate: video_cap.clock_rate,
                 channels: 0,
             };

@@ -259,6 +259,7 @@ impl SipSession {
 
             let params = RtpCodecParameters {
                 payload_type: 0,
+                name: "PCMU".to_string(),
                 clock_rate: 8000,
                 channels: 1,
             };

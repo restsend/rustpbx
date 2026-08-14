@@ -31,7 +31,7 @@ use rustrtc::{
     rtp::{RtpHeader, RtpPacket},
 };
 use tokio::sync::{broadcast, oneshot};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
 use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
@@ -252,6 +252,7 @@ impl LegInner {
         let (sender, track, _feedback) = sample_track(MediaKind::Audio, 8);
         let params = RtpCodecParameters {
             payload_type: first_codec.payload_type,
+            name: first_codec.codec_name().to_string(),
             clock_rate: first_codec.clock_rate,
             channels: first_codec.channels as u8,
         };
@@ -266,6 +267,7 @@ impl LegInner {
             let (_, video_track, _) = sample_track(MediaKind::Video, 8);
             let video_params = RtpCodecParameters {
                 payload_type: first_video.payload_type,
+                name: first_video.codec_name.clone(),
                 clock_rate: first_video.clock_rate,
                 channels: 0,
             };
@@ -565,6 +567,7 @@ impl LegInner {
             sync_sender_codec(
                 &self.pc,
                 audio.payload_type,
+                audio.to_codec_info().codec_name(),
                 audio.clock_rate,
                 audio.channels,
             );
@@ -647,12 +650,14 @@ impl LegInner {
                             })
                             .await;
                         match result {
-                            Ok(Ok(())) => {}
+                            Ok(Ok(())) => {
+                                info!("deferred fast-path relay armed successfully");
+                            }
                             Ok(Err(e)) => {
-                                debug!(error = %e, "deferred fast-path relay arming failed");
+                                warn!(error = %e, "deferred fast-path relay arming failed");
                             }
                             Err(_) => {
-                                debug!("deferred fast-path relay arming timed out");
+                                warn!("deferred fast-path relay arming timed out");
                             }
                         }
                     });
@@ -912,7 +917,13 @@ pub(crate) fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result
 /// R1: update the sender's params so it stamps the negotiated PT. rustrtc's
 /// `handle_reinvite` (>= 0.3.111) does this internally, but for an answer that
 /// changes the send codec we re-assert it to be safe across versions.
-fn sync_sender_codec(pc: &PeerConnection, payload_type: u8, clock_rate: u32, channels: u16) {
+fn sync_sender_codec(
+    pc: &PeerConnection,
+    payload_type: u8,
+    codec_name: &str,
+    clock_rate: u32,
+    channels: u16,
+) {
     for t in pc.get_transceivers() {
         // Only the audio sender carries audio params; setting them on a video
         // sender would clobber the video PT/clock rustrtc negotiated (used for
@@ -923,6 +934,7 @@ fn sync_sender_codec(pc: &PeerConnection, payload_type: u8, clock_rate: u32, cha
         {
             sender.set_params(RtpCodecParameters {
                 payload_type,
+                name: codec_name.to_string(),
                 clock_rate,
                 channels: channels as u8,
             });
