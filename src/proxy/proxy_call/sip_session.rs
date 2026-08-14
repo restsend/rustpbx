@@ -9133,7 +9133,8 @@ impl SipSession {
     }
 
     /// Send a SIP INFO request to the dialog identified by the given leg.
-    /// Currently supports `leg_id = "callee"` using `connected_callee_dialog_id`.
+    /// Supports `leg_id = "caller"` (the inbound caller dialog) and
+    /// `leg_id = "callee"` (the connected callee dialog).
     async fn handle_send_info(
         &self,
         leg_id: LegId,
@@ -9141,6 +9142,7 @@ impl SipSession {
         body: Vec<u8>,
     ) -> Result<()> {
         let dialog_id = match leg_id.as_str() {
+            "caller" => self.caller_dialog.as_ref().map(|_| self.caller_dialog_id()),
             "callee" => self.meta.connected_callee_dialog_id.clone(),
             other => {
                 warn!(session_id = %self.id,
