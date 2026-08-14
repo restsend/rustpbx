@@ -80,6 +80,12 @@ pub struct RwiCommandProcessor {
     sip_server: Option<SipServerRef>,
     queue_states: Arc<DashMap<String, QueueState>>,
     record_states: Arc<DashSet<String>>,
+    /// call_id → recorder file path for recordings started via RWI (either a
+    /// mid-call `record.start` or `call.originate` with a `record` option).
+    /// The originate task reads this when it emits its CDR so the call record
+    /// carries the recording (→ `recording_url`, and the call-record hooks can
+    /// emit `recording_metadata_available` / `record_end`).
+    record_files: Arc<DashMap<String, String>>,
     conference_manager: Arc<ConferenceManager>,
     transfer_controller: Arc<RwLock<TransferController>>,
     command_dedup_cache: CommandDeduplicationCache,
@@ -122,6 +128,7 @@ impl RwiCommandProcessor {
             sip_server: None,
             queue_states: Arc::new(DashMap::new()),
             record_states: Arc::new(DashSet::new()),
+            record_files: Arc::new(DashMap::new()),
             conference_manager,
             transfer_controller,
             command_dedup_cache: CommandDeduplicationCache::with_default_ttl(),
@@ -1011,6 +1018,9 @@ impl RwiCommandProcessor {
         let dialog_layer = server.dialog_layer.clone();
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
+        let record_on_answer = req.record.clone();
+        let record_states = self.record_states.clone();
+        let record_files = self.record_files.clone();
 
         // CDR data for call completion reporting
         let cdr_sender = server.callrecord_sender.clone();
@@ -1034,11 +1044,32 @@ impl RwiCommandProcessor {
             let cdr_sender_owned = cdr_sender.clone();
             let cdr_answered = cdr_answered.clone();
             let cdr_answered_for_store = cdr_answered.clone();
+            let cdr_record_files = record_files.clone();
             let cleanup = move || {
                 if let Some(ref sender) = cdr_sender_owned.as_ref() {
                     use crate::callrecord::CallRecordHangupReason;
                     let end_time = chrono::Utc::now();
                     let answered = cdr_answered.load(std::sync::atomic::Ordering::Relaxed);
+                    // Attach the recorder media when a recording was started on
+                    // this call (originate `record` option or mid-call
+                    // record.start) so the CDR carries recording_url and the
+                    // call-record hooks can emit recording_metadata_available /
+                    // record_end.
+                    let recorder: Vec<crate::callrecord::CallRecordMedia> = cdr_record_files
+                        .get(&cdr_call_id)
+                        .map(|entry| {
+                            let path = entry.value().clone();
+                            let size =
+                                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            crate::callrecord::CallRecordMedia {
+                                track_id: "mixed".to_string(),
+                                path,
+                                size,
+                                extra: None,
+                            }
+                        })
+                        .into_iter()
+                        .collect();
                     let record = crate::callrecord::CallRecord {
                         call_id: cdr_call_id.clone(),
                         caller: cdr_caller.clone(),
@@ -1054,7 +1085,7 @@ impl RwiCommandProcessor {
                             CallRecordHangupReason::Canceled
                         }),
                         hangup_messages: vec![],
-                        recorder: vec![],
+                        recorder,
                         sip_leg_roles: std::collections::HashMap::new(),
                         leg_timeline: crate::callrecord::LegTimeline::default(),
                         details: crate::callrecord::CallDetails {
@@ -1263,6 +1294,41 @@ impl RwiCommandProcessor {
                         }
                         session_cancel.cancel();
                     });
+
+                    // Auto-start recording when the originate carried a
+                    // `record` option (recording on answer). The command goes
+                    // through the normal StartRecording path (MediaBridge
+                    // recorder), and the file is tracked so the CDR picks it
+                    // up. Use a short grace so the UAC command loop is armed
+                    // before the command lands in cmd_rx (mpsc is buffered, so
+                    // sending early is safe regardless).
+                    if let Some(rec) = record_on_answer.as_ref() {
+                        let path = if rec.storage.path.trim().is_empty() {
+                            default_originate_recorder_path(&server, &call_id)
+                        } else {
+                            rec.storage.path.clone()
+                        };
+                        let send_result = handle.send_command(CallCommand::StartRecording {
+                            config: crate::call::domain::RecordConfig {
+                                path: path.clone(),
+                                max_duration_secs: rec.max_duration_secs,
+                                beep: rec.beep.unwrap_or(false),
+                                format: None,
+                                channels: None,
+                                mono_caller_only: None,
+                            },
+                        });
+                        if send_result.is_ok() {
+                            record_states.insert(call_id.clone());
+                            record_files.insert(call_id.clone(), path);
+                            let gw = gateway.read();
+                            gw.send_to_owner(&crate::rwi::RecordStarted {
+                                call_id: call_id.clone(),
+                            });
+                        } else {
+                            tracing::warn!(call_id = %call_id, "originate record option: failed to send StartRecording");
+                        }
+                    }
 
                     // Forward subsequent callee dialog-state events (BYE / re-INVITE)
                     // from the INVITE's state channel into the session loop.
@@ -1878,7 +1944,7 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::StartRecording {
                 config: RecordConfig {
-                    path,
+                    path: path.clone(),
                     max_duration_secs: req.max_duration_secs,
                     beep: req.beep.unwrap_or(false),
                     format: None,
@@ -1888,6 +1954,9 @@ impl RwiCommandProcessor {
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         self.record_states.insert(req.call_id.clone());
+        if !path.trim().is_empty() {
+            self.record_files.insert(req.call_id.clone(), path.clone());
+        }
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::RecordStarted {
             call_id: req.call_id.clone(),
@@ -2660,6 +2729,24 @@ pub enum CommandResult {
         value: Option<String>,
     },
 }
+
+/// Default recorder file for an originated call's `record` option:
+/// `<[recording].path>/<sanitized call_id>.wav` (mirrors
+/// `AppState::get_recorder_file`), creating the directory when needed.
+fn default_originate_recorder_path(server: &SipServerRef, call_id: &str) -> String {
+    let policy_guard = server.recording_policy.load();
+    let root = policy_guard
+        .as_ref()
+        .as_ref()
+        .map(|policy| policy.recorder_path())
+        .unwrap_or_else(crate::config::default_config_recorder_path);
+    let root = std::path::Path::new(&root);
+    let _ = std::fs::create_dir_all(root);
+    let mut file = root.join(crate::utils::sanitize_id(call_id));
+    file.set_extension("wav");
+    file.to_string_lossy().to_string()
+}
+
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CallInfo {

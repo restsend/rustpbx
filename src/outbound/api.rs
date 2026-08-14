@@ -89,6 +89,7 @@ pub async fn execute_dial_core(
         extra_headers: req.extra_headers.clone(),
         trunk: req.trunk.clone(),
         route_originated_calls: None,
+        record: req.record.clone(),
     };
 
     // Fire the originate — events arrive via the gateway tap.

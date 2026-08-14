@@ -275,6 +275,31 @@ Valid `reason` values: `busy`, `forbidden`, `not_found`
 |---------|-------------|
 | `media.play` | Play audio file |
 | `media.stop` | Stop playback |
+| `call.transfer` → `voip_bridge:` / `bridge:` | Bidirectional PCM16 over WebSocket (see below) |
+
+**Real-time bidirectional PCM (voip_bridge):**
+
+`media.stream_start` / `media.inject_start` were removed — the supported
+mechanism for real-time bidirectional PCM is transferring the call (or a leg)
+to a `voip_bridge:` / `bridge:` WebSocket endpoint. The PBX dials out to the
+given `ws(s)://` URL and shuttles little-endian PCM16 binary frames both ways
+(DTMF is relayed as JSON text frames). Works for **inbound and outbound
+(originated) calls** — transfer the `caller` leg after `call_answered`:
+
+```json
+{
+  "action": "call.transfer",
+  "action_id": "req-012",
+  "params": {
+    "call_id": "c_92f4",
+    "target": "voip_bridge:ws://media.example.com:9000/ws?samplerate=8000&codec=pcm"
+  }
+}
+```
+
+Optional query parameters: `samplerate` (default 8000), `codec`, `timeout_ms`,
+`_hdr_<name>` (custom headers), `return_app` / `return_target` (where the call
+returns if the bridge disconnects).
 
 **Play audio:**
 
@@ -325,6 +350,32 @@ Valid `reason` values: `busy`, `forbidden`, `not_found`
     "storage": {
       "path": "records/2026/03/13/c_92f4.wav"
     }
+  }
+}
+```
+
+`record.start` works on inbound **and outbound (originated) calls** — an
+explicit start is honoured regardless of the dialplan auto-record flag. When
+the recording finishes (explicit stop or call hangup) the owner receives
+`record_stopped`, and the CDR carries the recording file (→ `recording_url`).
+With `[recording]` enabled, `recording_metadata_available` and `record_end`
+are also emitted.
+
+**Recording on originate (auto-start on answer):** `call.originate` (and
+`POST /ami/v1/outbound/dial`) accepts a `record` object with the same shape as
+`record.start`; recording starts automatically once the call is answered.
+An empty `storage.path` uses the default location
+(`[recording].path/<call_id>.wav`):
+
+```json
+{
+  "action": "call.originate",
+  "action_id": "req-021",
+  "params": {
+    "call_id": "c_out1",
+    "destination": "sip:1002@pbx.local",
+    "caller_id": "sip:1000@pbx.local",
+    "record": { "mode": "mixed", "beep": false, "storage": { "path": "" } }
   }
 }
 ```
@@ -679,7 +730,7 @@ no_answer_transfer_target = "sip:voicemail@local"
 
 ## 11. Command Implementation Status
 
-> Last updated: 2026-03-24
+> Last updated: 2026-08-14
 
 ### Legend
 - ✅ **Fully Implemented** - Command fully functional
@@ -693,11 +744,11 @@ no_answer_transfer_target = "sip:voicemail@local"
 | **Session Commands** | ✅ Complete | All session commands fully implemented |
 | **Call Control** | ✅ Complete | Originate, answer, hangup, bridge, transfer all working |
 | **Media Playback** | ✅ Complete | Play, stop, hold music fully functional |
-| **Recording** | ✅ Complete | Start, pause, resume, stop implemented |
+| **Recording** | ✅ Complete | Start, pause, resume, stop implemented; inline `record` on `call.originate` / `outbound/dial` (auto-start on answer); CDR carries the file → `recording_metadata_available` + `record_end` |
 | **Queue** | ✅ Complete | Enqueue, dequeue, hold, unhold working |
 | **Supervisor** | ⚠️ Partial | Commands implemented, **actual audio mixing TODO** |
 | **Conference** | ⚠️ Partial | Create/add/remove/destroy working, **mute/unmute in mixer TODO** |
-| **Media Stream/Inject** | 🔧 Stub | State tracking only, **binary PCM transport not implemented** |
+| **Media Stream/Inject** | ➖ Superseded | Commands removed — use `call.transfer` → `voip_bridge:` for bidirectional PCM |
 | **SIP Messages** | 🔧 Stub | Event stubs only, **real SIP sending TODO** |
 
 ### Known Limitations
@@ -708,7 +759,7 @@ no_answer_transfer_target = "sip:voicemail@local"
 
 3. **Conference Muting**: `conference.mute` / `conference.unmute` emit events but do not actually mute audio in the mixer.
 
-4. **PCM Stream**: `media.stream_start` / `media.inject_start` track state but do not establish actual binary PCM transport over WebSocket.
+4. **PCM Stream**: `media.stream_start` / `media.inject_start` were removed. Real-time bidirectional PCM is provided by `call.transfer` to a `voip_bridge:` / `bridge:` WebSocket endpoint (works for inbound and outbound calls).
 
 5. **SIP MESSAGE/NOTIFY**: `sip.message` / `sip.notify` accept commands and emit events, but do not actually send SIP messages.
 
@@ -855,7 +906,7 @@ Clients can subscribe at different levels:
 
 1. **SIP header passthrough**: `sip_headers` in `call.incoming` is read-only and only contains headers explicitly whitelisted in `[rwi.sip_header_passthrough]`.
 
-2. **PCM stream**: Requires separate media WebSocket configuration; current version supports state tracking only (binary PCM frames not yet implemented).
+2. **PCM stream**: Provided via `call.transfer` → `voip_bridge:` WebSocket endpoint (bidirectional PCM16 binary frames); the old `media.stream_start` / `media.inject_start` commands are removed.
 
 3. **External MCU**: External conference backend requires SIP MCU server integration.
 

@@ -301,6 +301,7 @@ fn main() -> Result<()> {
     let media_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(media_workers)
         .thread_name("media-worker")
+        .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build media runtime: {}", e))?;
@@ -309,6 +310,11 @@ fn main() -> Result<()> {
     let sip_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(sip_workers)
         .thread_name("sip-worker")
+        // The SIP call-setup path (originate → attach_caller_dialog →
+        // ensure_caller_leg → rustrtc SDP negotiation) is a very deep async
+        // call chain whose debug-build frames are large. The tokio default
+        // (2 MB) overflows on originated calls; 8 MB is a safe margin.
+        .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build SIP runtime: {}", e))?;

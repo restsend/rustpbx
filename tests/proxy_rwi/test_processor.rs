@@ -563,6 +563,7 @@ use rustpbx::rwi::*;
                     extra_headers: std::collections::HashMap::new(),
                     trunk: None,
                     route_originated_calls: None,
+                    record: None,
                 },
             ))
             .await;
@@ -588,6 +589,7 @@ use rustpbx::rwi::*;
                     extra_headers: std::collections::HashMap::new(),
                     trunk: None,
                     route_originated_calls: None,
+                    record: None,
                 },
             ))
             .await;
@@ -647,6 +649,7 @@ use rustpbx::rwi::*;
                     extra_headers: std::collections::HashMap::new(),
                     trunk: None,
                     route_originated_calls: Some(true),
+                    record: None,
                 },
             ))
             .await;
@@ -718,6 +721,7 @@ use rustpbx::rwi::*;
                     extra_headers: std::collections::HashMap::new(),
                     trunk: Some("gw1".to_string()),
                     route_originated_calls: Some(true),
+                    record: None,
                 },
             ))
             .await;

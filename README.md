@@ -133,8 +133,8 @@ JSON-over-WebSocket for in-call control:
 | Category | Commands |
 |---|---|
 | Call Control | `originate`, `answer`, `hangup`, `bridge`, `transfer`, `hold` |
-| Media | `play`, `stop`, `stream_start`, `inject_start` (PCM) |
-| Recording | `record.start`, `pause`, `resume`, `stop` |
+| Media | `play`, `stop`, real-time bidirectional PCM via `transfer` → `voip_bridge:` WebSocket (inbound + outbound) |
+| Recording | `record.start`, `pause`, `resume`, `stop` (also inline `record` on `originate`) |
 | Queue | `enqueue`, `dequeue`, `assign_agent`, `requeue` |
 | Supervisor | `listen`, `whisper`, `barge`, `takeover` |
 | Conference | `create`, `add`, `remove`, `mute`, `destroy` |

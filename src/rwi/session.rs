@@ -356,6 +356,12 @@ pub struct OriginateRequest {
     /// default.
     #[serde(default)]
     pub route_originated_calls: Option<bool>,
+    /// Recording control: when present, recording starts automatically once
+    /// the originated call is answered (same parameters as `record.start`;
+    /// `call_id` inside is ignored). `storage.path` may be empty to use the
+    /// default recorder file location (`[recording].path/<call_id>.wav`).
+    #[serde(default)]
+    pub record: Option<RecordStartRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -412,7 +418,7 @@ fn default_dtmf_timeout_ms() -> u64 {
     10_000
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecordStartRequest {
     #[serde(default)]
     pub call_id: String,
@@ -428,7 +434,7 @@ fn default_mode() -> String {
     "mixed".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecordStorage {
     #[serde(default)]
     pub path: String,

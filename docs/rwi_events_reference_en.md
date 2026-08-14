@@ -405,7 +405,7 @@ Dispatch: call_owner
 
 ### 6.3 Media Events
 
-#### media_hold_started / media_hold_stopped / media_stream_started / media_stream_stopped
+#### media_hold_started / media_hold_stopped
 
 Dispatch: call_owner
 
@@ -413,6 +413,11 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | *+ctx* | | Flat context fields |
+
+> `media_stream_started` / `media_stream_stopped` were removed together with
+> the `media.stream_start` / `media.inject_start` commands. Real-time
+> bidirectional PCM now uses `call.transfer` → a `voip_bridge:` WebSocket
+> endpoint (inbound and outbound calls); these events no longer exist.
 
 #### media_ringback_passthrough_started / media_ringback_passthrough_stopped
 
@@ -1345,8 +1350,6 @@ Dispatch: broadcast
 | `media_ringback_passthrough_stopped` | owner | yes | — |
 | `media_play_started` | owner | yes | +ctx |
 | `media_play_finished` | owner | yes | +ctx |
-| `media_stream_started` | owner | yes | +ctx |
-| `media_stream_stopped` | owner | yes | +ctx |
 | `record_started` | owner | yes | +ctx |
 | `record_paused` | owner | yes | +ctx |
 | `record_resumed` | owner | yes | +ctx |

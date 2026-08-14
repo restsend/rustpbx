@@ -336,7 +336,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 
 ### 6.3 媒体事件
 
-#### media_hold_started / media_hold_stopped / media_stream_started / media_stream_stopped
+#### media_hold_started / media_hold_stopped
 
 分发：call_owner
 
@@ -344,6 +344,11 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | *+ctx* | | 扁平化上下文 |
+
+> `media_stream_started` / `media_stream_stopped` 已随 `media.stream_start`
+> / `media.inject_start` 命令一并移除。实时双向 PCM 改用
+> `call.transfer` → `voip_bridge:` WebSocket 端点（呼入/外呼均支持），
+> 不再产生这两个事件。
 
 #### media_ringback_passthrough_started / media_ringback_passthrough_stopped
 
@@ -1254,8 +1259,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `media_ringback_passthrough_stopped` | owner | ✅ | — |
 | `media_play_started` | owner | ✅ | +ctx |
 | `media_play_finished` | owner | ✅ | +ctx |
-| `media_stream_started` | owner | ✅ | +ctx |
-| `media_stream_stopped` | owner | ✅ | +ctx |
 | `record_started` | owner | ✅ | +ctx |
 | `record_paused` | owner | ✅ | +ctx |
 | `record_resumed` | owner | ✅ | +ctx |

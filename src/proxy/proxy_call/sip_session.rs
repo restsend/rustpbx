@@ -2512,6 +2512,17 @@ enum ConstructMode<'a> {
                 }
             }
         }
+
+        // The originate (UAC) path never feeds the caller dialog's state
+        // channel into the main loop (process_uac passes state_rx = None), so
+        // the normal DialogState::Confirmed → Connected transition in
+        // handle_dialog_state never fires. The caller dialog is, by
+        // construction, already answered at this point (we're attaching the
+        // 200 OK dialog), so transition the caller leg to Connected here.
+        // Without this, any later transfer / voip_bridge on the caller leg
+        // fails with "Cannot transfer leg caller: invalid state Initializing".
+        self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+        info!(session_id = %self.id, "UAC caller leg marked Connected after attaching caller dialog");
     }
 
     /// Ensure the callee (B leg) exists in the MediaBridge for the originate
@@ -7423,6 +7434,23 @@ enum ConstructMode<'a> {
         // carry the same, accurate terminal outcome.
         self.resolve_final_hangup_reason().await;
 
+        // Finalize any in-flight recording before the CDR snapshot: flush the
+        // WAV file and emit RecordStopped. Explicit `record.stop` paths come
+        // here as a harmless no-op (stop_recording on an already-stopped
+        // bridge returns Ok(None)). This covers sessions whose hangup never
+        // runs the dialog-terminated finalize path — notably RWI-originated
+        // (UAC) calls, whose caller dialog state channel is not wired into the
+        // main loop.
+        if let Some(bridge) = self.bridge_mut() {
+            match bridge.stop_recording().await {
+                Ok(Some(result)) => self.publish_recording_complete(result),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(session_id = %self.id, error = %e, "Failed to finalize recording on cleanup");
+                }
+            }
+        }
+
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
             reporter.report(snapshot);
@@ -8590,9 +8618,13 @@ impl SipSession {
 
             CallCommand::StartRecording { config } => {
                 let result = async {
-                    if !self.context.dialplan.recording.enabled {
-                        return Err(anyhow!("Recording is not enabled for this call"));
-                    }
+                    // Note: the dialplan `recording.enabled` flag governs only
+                    // *automatic* recording on answer (see call/mod.rs). An
+                    // explicit record.start command (e.g. from RWI on an
+                    // outbound-originated call, where the dialplan never sets
+                    // recording.enabled) must be honoured on demand — so we do
+                    // NOT gate on it here. Recording still requires a
+                    // MediaBridge (the actual media plane).
                     let bridge = self
                         .bridge_mut()
                         .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
