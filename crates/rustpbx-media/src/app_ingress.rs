@@ -86,7 +86,12 @@ impl From<LegPcmFrame> for PcmFrame {
 /// one PCM frame per ptime tick (silence frames keep cadence when the leg is
 /// muted/held/starved). This is the building block for the conference /
 /// supervisor data source, which needs per-leg PCM input to the mixer.
+///
+/// Dropping the stream detaches the leg: its decode task is cancelled and the
+/// forwarding observer deactivated, so consumers that start/stop per-leg taps
+/// repeatedly (live transcription, supervisor) never accumulate observers.
 pub struct LegPcmStream {
+    agg: Arc<AppIngressAggregator>,
     rx: broadcast::Receiver<LegPcmFrame>,
     leg: LegId,
 }
@@ -103,7 +108,11 @@ impl LegPcmStream {
         let agg = AppIngressAggregator::new(16);
         agg.attach_leg(leg_id.clone(), pc.clone(), profile, parent_token)?;
         let rx = agg.subscribe_pcm();
-        Ok(Self { rx, leg: leg_id })
+        Ok(Self {
+            agg,
+            rx,
+            leg: leg_id,
+        })
     }
 
     /// Receive the next PCM frame for this leg. Returns `None` when closed.
@@ -115,6 +124,12 @@ impl LegPcmStream {
                 Err(_) => return None,
             }
         }
+    }
+}
+
+impl Drop for LegPcmStream {
+    fn drop(&mut self) {
+        self.agg.detach_leg(&self.leg);
     }
 }
 

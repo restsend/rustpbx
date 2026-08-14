@@ -286,6 +286,8 @@ git submodule update --remote src/addons/cc
 | [Configuration Guide](docs/configuration.md) | All config options |
 | [Authentication](docs/config/03-auth-users.md) | User backends, JWT & HTTP token fast registration |
 | [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Call Control, Recording |
+| [Outbound Dial SSE API](docs/outbound_dial_api.md) | Predictive outbound dialing over SSE |
+| [Live Transcript SSE API](docs/live_transcript_api.md) | Real-time call transcription over SSE |
 | [RWI Protocol](docs/rwi.md) | WebSocket Interface |
 | [RWI Events Reference](docs/rwi_events_reference.md) | Event types, fields, JSON examples (中文) |
 | [RWI Events Reference (EN)](docs/rwi_events_reference_en.md) | Event types, fields, JSON examples (English) |

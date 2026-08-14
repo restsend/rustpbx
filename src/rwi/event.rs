@@ -243,6 +243,47 @@ pub struct RecordResumed {
 rwi_event!(RecordResumed, "record_resumed");
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TranscriptStarted {
+    pub call_id: String,
+    /// Which sides carry their own ASR stream ("caller", "callee").
+    pub sides: Vec<String>,
+    /// Provider identifier (e.g. "deepgram").
+    pub provider: Option<String>,
+}
+rwi_event!(TranscriptStarted, "transcript_started");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptSegmentEvent {
+    pub call_id: String,
+    /// "caller" | "callee"
+    pub side: String,
+    pub text: String,
+    /// `true` for interim hypotheses, `false` for finalized utterances.
+    pub partial: bool,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub lang: Option<String>,
+}
+rwi_event!(TranscriptSegmentEvent, "transcript_segment");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptError {
+    pub call_id: String,
+    /// "caller" | "callee" | null (whole provider)
+    pub side: Option<String>,
+    pub error: String,
+}
+rwi_event!(TranscriptError, "transcript_error");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptEnded {
+    pub call_id: String,
+    /// Why transcription stopped ("stopped", "call_ended", "error", ...).
+    pub reason: String,
+}
+rwi_event!(TranscriptEnded, "transcript_ended");
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MediaHoldStarted {
     pub call_id: String,
 }

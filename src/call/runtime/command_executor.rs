@@ -124,6 +124,17 @@ impl ExecutionContext {
                     }
                 }
             }
+            CallCommand::StartTranscription { .. } => {
+                // Like supervision, transcription taps decoded leg media —
+                // impossible in bypass mode (no MediaBridge).
+                if self.media_profile.can_supervise() {
+                    MediaCapabilityCheck::Allowed
+                } else {
+                    MediaCapabilityCheck::Denied {
+                        reason: "transcription not supported in bypass mode".to_string(),
+                    }
+                }
+            }
             CallCommand::Hold { music: Some(_), .. } => {
                 if self.media_profile.supports_media_injection {
                     MediaCapabilityCheck::Allowed

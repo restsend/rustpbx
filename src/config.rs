@@ -138,6 +138,15 @@ pub enum RecordingType {
     S3,
 }
 
+/// `[proxy.transcript]` section. Only the `remote` sub-table is typed; the
+/// offline sensevoice fields (`command`, `models_path`, ...) live in the raw
+/// TOML and are parsed ad-hoc by the transcript addon.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TranscriptSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<crate::call::transcription::remote::RemoteTranscriptConfig>,
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default, rename_all = "snake_case")]
@@ -838,6 +847,11 @@ pub struct ProxyConfig {
     pub ivr_files: Vec<String>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
+    /// Transcription settings (`[proxy.transcript]`). Only the `remote`
+    /// sub-table is typed here (live streaming ASR); the offline sensevoice
+    /// fields are read ad-hoc from the raw TOML by the transcript addon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscriptSection>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     #[serde(default)]
@@ -1341,6 +1355,7 @@ impl Default for ProxyConfig {
             ivr_dir: None,
             ivr_files: Vec::new(),
             recording: None,
+            transcript: None,
             generated_dir: default_generated_config_dir(),
             generated_db: false,
             nat_fix: true,
