@@ -533,6 +533,47 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `duration_secs` | u64 | 录音时长（秒） |
 | `file_size` | u64 | 文件大小（字节） |
 
+#### transcript_started / transcript_segment / transcript_error / transcript_ended
+
+分发：call_owner
+
+> 触发方式：懒启动——首个 SSE 订阅者连接 `GET /cc/calls/{call_id}/transcript`（或发送 `StartTranscription` 命令）时自动开始；最后一个订阅者断开或通话挂断时停止。参见 [Live Transcript SSE API](live_transcript_api.md)。
+
+**transcript_started**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `sides` | Vec\<String\> | 开启 ASR 流的侧（`"caller"` / `"callee"`） |
+| `provider` | Option\<String\> | provider 标识（如 `"deepgram"`） |
+
+**transcript_segment**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `side` | String | `"caller"` / `"callee"` |
+| `text` | String | 识别文本 |
+| `partial` | bool | `true` = 中间假设（会被同侧后续 segment 替换），`false` = 最终结果 |
+| `start_ms` | u64 | 相对转录起点偏移（毫秒） |
+| `end_ms` | u64 | 相对转录起点偏移（毫秒） |
+| `lang` | Option\<String\> | 语言 |
+
+**transcript_error**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `side` | Option\<String\> | `null` = 整个 provider 不可用（流终止）；非 null = 单侧失败（流继续） |
+| `error` | String | 错误信息 |
+
+**transcript_ended**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `reason` | String | `"stopped"`（订阅者全部断开）/ `"call_ended"` 等 |
+
 ---
 
 ### 6.5 IVR 事件
@@ -1221,6 +1262,10 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `record_stopped` | owner | ✅ | 自有字段+enrich |
 | `record_failed` | owner | ✅ | +ctx |
 | `recording_metadata_available` | owner | ✅ | — |
+| `transcript_started` | owner | ✅ | 自有字段 |
+| `transcript_segment` | owner | ✅ | 自有字段+enrich |
+| `transcript_error` | owner | ✅ | 自有字段+enrich |
+| `transcript_ended` | owner | ✅ | 自有字段 |
 | `dtmf` | fan_out | ✅ | +ctx |
 | `dtmf_collected` | owner | ✅ | +ctx |
 | `dtmf_collection_timeout` | owner | ✅ | +ctx |

@@ -114,6 +114,7 @@ use tokio_util::{
 use tracing::{debug, error, info, trace, warn};
 
 mod conference;
+mod live_transcription;
 mod supervisor;
 mod transfer;
 
@@ -346,6 +347,9 @@ pub struct SipSession {
     /// is playing and when it started. Used to emit `Play` trace events with
     /// duration + interruption. `record_play_end` is idempotent via `remove`.
     active_plays: std::collections::HashMap<String, crate::proxy::proxy_call::state::ActivePlay>,
+
+    /// Live transcription state; `None` while nobody subscribes.
+    live_transcription: Option<live_transcription::LiveTranscription>,
 }
 
 #[derive(Clone)]
@@ -1452,6 +1456,7 @@ enum ConstructMode<'a> {
             handle: sip_handle.clone(),
             dtmf_digits: Vec::new(),
             active_plays: std::collections::HashMap::new(),
+            live_transcription: None,
         };
 
         // Phase 0: Initialize MediaBridge eagerly when media is anchored.
@@ -7322,6 +7327,9 @@ enum ConstructMode<'a> {
         // and Drop.
         self.cancel_token.cancel();
 
+        // Stop live transcription (closes ASR streams, emits transcript_ended).
+        self.stop_live_transcription("call_ended").await;
+
         // Flush any in-flight media plays that finished naturally (without an
         // explicit stop) so the trace shows their full duration + completion.
         let leftover: Vec<String> = self.active_plays.keys().cloned().collect();
@@ -8643,6 +8651,39 @@ impl SipSession {
                     .ok_or_else(|| anyhow!("Recording requires MediaBridge"))
                     .and_then(MediaBridge::resume_recording),
             ),
+
+            CallCommand::StartTranscription { language } => {
+                // Reference-counted: bump the count when already running.
+                if let Some(lt) = self.live_transcription.as_mut() {
+                    lt.refs += 1;
+                    return CommandResult::success();
+                }
+                match self.start_live_transcription(language).await {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => {
+                        // Surface the failure to subscribers (SSE / webhook).
+                        self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
+                            call_id: self.context.session_id.clone(),
+                            side: None,
+                            error: e.to_string(),
+                        });
+                        CommandResult::failure(e.to_string())
+                    }
+                }
+            }
+
+            CallCommand::StopTranscription => {
+                match self.live_transcription.as_mut() {
+                    None => CommandResult::success(),
+                    Some(lt) => {
+                        lt.refs = lt.refs.saturating_sub(1);
+                        if lt.refs == 0 {
+                            self.stop_live_transcription("stopped").await;
+                        }
+                        CommandResult::success()
+                    }
+                }
+            }
 
             CallCommand::Transfer {
                 leg_id,

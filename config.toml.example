@@ -210,6 +210,27 @@ type = "extension"
 #                      # Media upload is handled by [recording] (type = http/s3),
 #                      # not [sipflow.upload].
 
+# ── Live transcription (streaming ASR) ───────────────────────────────────────
+# Real-time call transcription over a streaming ASR WebSocket. When configured,
+# `GET /cc/calls/{call_id}/transcript` (SSE) lazily starts transcription on
+# first subscribe and streams text segments; cc-phone shows a live transcript
+# panel. Without this section the feature reports unavailable (503) and the
+# cc-phone transcript button is grayed out.
+#
+# The wire protocol is Deepgram-compatible raw PCM streaming
+# (`/v1/listen?encoding=linear16&sample_rate=16000`); any endpoint speaking
+# the same envelope works.
+#
+# [proxy.transcript.remote]
+# # API key (falls back to the DEEPGRAM_API_KEY env var)
+# # api_key = "your-key"
+# # Override endpoint (default wss://api.deepgram.com)
+# # url = "wss://api.deepgram.com"
+# # model = "nova-2"
+# # language = "multi"        # BCP-47 tag, or "multi"
+# # interim_results = true    # stream partial hypotheses
+# # punctuate = true
+
 # ── CDR (Call Detail Records) ─────────────────────────────────────────────────
 # Call records are persisted to the `rustpbx_call_records` table in the primary
 # database by default, even without any [callrecord] section.

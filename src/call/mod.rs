@@ -32,6 +32,7 @@ pub mod policy;
 pub mod queue_config;
 pub mod runtime;
 pub mod sip;
+pub mod transcription;
 pub mod user;
 pub use cookie::{
     CalleeDisplayName, CalleeOfflineMarker, OutboundTrunkContext, TransactionCookie, TrunkContext,

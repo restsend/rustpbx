@@ -239,6 +239,21 @@ Manage calls that are currently in progress.
    }
    ```
 
+### 2.1.1 Live Call Transcription (SSE)
+Stream real-time transcription text for an active call. Transcription starts
+lazily on first subscriber and stops when the last one disconnects or the call
+ends. Requires `[proxy.transcript.remote]` (streaming ASR, Deepgram-compatible)
+in config; returns `503` when unconfigured.
+
+**Endpoint**: `GET /cc/calls/{call_id}/transcript` (SSE, text-only events:
+`started` / `segment` / `error` / `ended`)
+
+The same segments are also delivered as standard RWI events
+(`transcript_started` / `transcript_segment` / `transcript_error` /
+`transcript_ended`) to webhooks / RWI WebSocket subscribers.
+
+Full protocol, config and examples: [Live Transcript SSE API](live_transcript_api.md)
+
 ### 2.2 System Management (CRUD)
 
 | Resource | Endpoint | Methods | Description |

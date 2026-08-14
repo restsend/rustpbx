@@ -708,6 +708,7 @@ mod tests {
             playback_timestamp_base: 0,
             playback_started_at: Instant::now(),
             sequence_number: 0,
+            tick_count: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
