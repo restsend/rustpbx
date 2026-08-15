@@ -233,9 +233,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     }
                     TransferTarget::Queue {
                         name: queue_name,
-                        return_app: ReturnTargetSpec::from_query_pairs(
-                            return_query.into_iter(),
-                        ),
+                        return_app: ReturnTargetSpec::from_query_pairs(return_query.into_iter()),
                         target_overrides,
                     }
                 }
@@ -307,9 +305,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 };
                 TransferTarget::Sip {
                     uri: clean_uri,
-                    return_app: ReturnTargetSpec::from_query_pairs(
-                        return_query.into_iter(),
-                    ),
+                    return_app: ReturnTargetSpec::from_query_pairs(return_query.into_iter()),
                 }
             }
         };
@@ -397,12 +393,8 @@ impl SipSession {
                 target_overrides,
             } => {
                 info!(session_id = %self.id, %leg_id, queue = %name, ?return_app, overrides = %target_overrides.len(), "Handling queue transfer");
-                self.handle_queue_transfer(
-                    &name,
-                    return_app,
-                    target_overrides,
-                )
-                .await
+                self.handle_queue_transfer(&name, return_app, target_overrides)
+                    .await
             }
             TransferTarget::Ivr { name, params } => {
                 info!(session_id = %self.id, %leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
@@ -436,10 +428,7 @@ impl SipSession {
                 )
                 .await
             }
-            TransferTarget::Sip {
-                uri,
-                return_app,
-            } => {
+            TransferTarget::Sip { uri, return_app } => {
                 self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
 
                 let realm = self.server.proxy_config.load().select_realm("");
@@ -805,10 +794,7 @@ impl SipSession {
     /// For `"ivr"` apps the `target` field is resolved through
     /// `data_context.resolve_ivr_file`.  For all other apps the params
     /// HashMap is serialised to JSON as-is.
-    async fn resolve_return_app(
-        &self,
-        raw: Option<ReturnTargetSpec>,
-    ) -> Option<ReturnAppSpec> {
+    async fn resolve_return_app(&self, raw: Option<ReturnTargetSpec>) -> Option<ReturnAppSpec> {
         let spec = raw?;
         match spec.app_name.as_str() {
             "ivr" => {
@@ -932,14 +918,13 @@ impl SipSession {
 
             let tracks = peer.get_tracks().await;
             for t in &tracks {
-                let guard = t.lock().await;
                 if forward_sink.is_none() {
-                    if let Some(sender) = guard.get_sender() {
+                    if let Some(sender) = t.get_sender() {
                         forward_sink = Some(BridgeForwardSink::Track(sender));
                     }
                 }
                 if pc.is_none() {
-                    pc = guard.get_peer_connection().await;
+                    pc = t.get_peer_connection().await;
                 }
             }
         }
@@ -956,11 +941,9 @@ impl SipSession {
                 info!(session_id = %self.id, %leg_id, rate = ws_sample_rate,
                     "Bridge sourcing caller media from MediaBridge A leg (raw PCM channel)");
                 if forward_sink.is_none() {
-                    match mb.bridge_play_pcm(
-                        crate::media::media_bridge::LegSide::A,
-                        ws_sample_rate,
-                    )
-                    .await
+                    match mb
+                        .bridge_play_pcm(crate::media::media_bridge::LegSide::A, ws_sample_rate)
+                        .await
                     {
                         Ok(tx) => forward_sink = Some(BridgeForwardSink::Pcm(tx)),
                         Err(e) => warn!(session_id = %self.id, %leg_id, error = %e,
@@ -1083,7 +1066,10 @@ impl SipSession {
                 } else {
                     None
                 };
-                let enc_sample_rate = encoder.as_ref().map(|e| e.sample_rate()).unwrap_or(ws_sample_rate);
+                let enc_sample_rate = encoder
+                    .as_ref()
+                    .map(|e| e.sample_rate())
+                    .unwrap_or(ws_sample_rate);
                 let clock_rate = codec_type.clock_rate() as u32;
                 let rtp_ticks_per_frame = clock_rate * 20 / 1000;
                 let mut rtp_ts: u32 = rand::random();
@@ -1693,8 +1679,9 @@ mod tests {
 
     #[test]
     fn test_parse_transfer_target_queue_with_target_and_return_to_ivr() {
-        let t =
-            parse_transfer_target("queue:support?target=skillgroup:sales&return_app=ivr&return_target=main_menu");
+        let t = parse_transfer_target(
+            "queue:support?target=skillgroup:sales&return_app=ivr&return_target=main_menu",
+        );
         assert_eq!(
             t,
             TransferTarget::Queue {

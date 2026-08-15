@@ -1,12 +1,10 @@
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
 use rustrtc::{
     PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType, SessionDescription,
     media::SampleStreamSource,
 };
 use tracing::debug;
 
-use crate::Track;
 use crate::negotiate;
 
 pub struct RtcTrack {
@@ -79,13 +77,12 @@ impl RtcTrack {
     }
 }
 
-#[async_trait]
-impl Track for RtcTrack {
-    fn id(&self) -> &str {
+impl RtcTrack {
+    pub fn id(&self) -> &str {
         &self.track_id
     }
 
-    async fn handshake(&self, remote_offer: String, answer_type: SdpType) -> Result<String> {
+    pub async fn handshake(&self, remote_offer: String, answer_type: SdpType) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
         match self.pc.signaling_state() {
             rustrtc::SignalingState::Stable => {
@@ -112,7 +109,7 @@ impl Track for RtcTrack {
         Ok(sdp)
     }
 
-    async fn local_description(&self) -> Result<String> {
+    pub async fn local_description(&self) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
         match self.pc.create_offer().await {
             Ok(offer) => {
@@ -131,30 +128,26 @@ impl Track for RtcTrack {
         }
     }
 
-    async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
+    pub async fn set_remote_description(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
         self.pc.wait_for_gathering_complete().await;
         self.set_remote(&self.pc, remote, sdp_type).await
     }
 
-    async fn stop(&self) {
+    pub async fn stop(&self) {
         self.pc.close();
     }
 
-    async fn get_peer_connection(&self) -> Option<PeerConnection> {
+    pub async fn get_peer_connection(&self) -> Option<PeerConnection> {
         Some(self.pc.clone())
     }
 
-    async fn set_muted(&self, muted: bool) -> bool {
+    pub async fn set_muted(&self, muted: bool) -> bool {
         self.muted
             .store(muted, std::sync::atomic::Ordering::Relaxed);
         true
     }
 
-    fn is_muted(&self) -> bool {
-        self.muted.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn get_sender(&self) -> Option<SampleStreamSource> {
+    pub fn get_sender(&self) -> Option<SampleStreamSource> {
         self.sender.clone()
     }
 }

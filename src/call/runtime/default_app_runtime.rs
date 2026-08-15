@@ -89,8 +89,8 @@ impl Drop for DefaultAppRuntime {
 
 #[async_trait]
 impl AppRuntime for DefaultAppRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    fn app_context(&self) -> Option<&std::sync::Arc<crate::call::app::ApplicationContext>> {
+        Some(&self.context)
     }
 
     async fn start_app(

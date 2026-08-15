@@ -198,8 +198,7 @@ impl RtpTrackBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Track;
-use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
+    use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
 
     /// CSV 功能清单 L41/L42: the built WebRTC track must switch
     /// `ice_transport_policy` to `Relay` when a `turn:`/`turns:` server is
@@ -212,10 +211,7 @@ use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
                 urls.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             )])
             .build();
-        let pc = track
-            .get_peer_connection()
-            .await
-            .expect("peer connection");
+        let pc = track.get_peer_connection().await.expect("peer connection");
         pc.config().ice_transport_policy.clone()
     }
 

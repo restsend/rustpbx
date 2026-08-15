@@ -1,6 +1,6 @@
 //! Conference Strategy lifecycle integration tests
 //!
-//! Verifies the full `MediaPathStrategy` decision flow as the active leg set
+//! Verifies the full ConferenceStrategy decision flow as the active leg set
 //! of a session changes: P2P → MCU → P2P → none, using a mock session that
 //! implements [`LegMediaBridger`] against a real [`ConferenceServer`].
 
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use rustpbx::call::domain::LegId;
 use rustpbx::call::runtime::{
     ConferenceId, ConferenceManager, ConferenceServer, ConferenceStrategy, LegMediaBridger,
-    MediaPathContext, MediaPathDecision, MediaPathStrategy, SessionId,
+    MediaPathContext, MediaPathDecision, SessionId,
 };
 
 /// Mock session that tracks which legs it bridged into a conference.
@@ -67,7 +67,10 @@ async fn test_p2p_to_mcu_to_p2p_lifecycle() {
         "session-x",
         vec![LegId::new("a"), LegId::new("b"), LegId::new("c")],
     );
-    assert_eq!(strategy.decide(&c3.active_legs).unwrap(), MediaPathDecision::Conference);
+    assert_eq!(
+        strategy.decide(&c3.active_legs).unwrap(),
+        MediaPathDecision::Conference
+    );
     strategy.apply_multi_party(&c3, &mut session).await.unwrap();
 
     let conf_id = strategy.conference_id_for(&SessionId::from("session-x"));
@@ -84,7 +87,10 @@ async fn test_p2p_to_mcu_to_p2p_lifecycle() {
         strategy.decide(&c2b.active_legs).unwrap(),
         MediaPathDecision::Direct(vec![LegId::new("a"), LegId::new("b")])
     );
-    strategy.leave_multi_party(&c2b, &mut session).await.unwrap();
+    strategy
+        .leave_multi_party(&c2b, &mut session)
+        .await
+        .unwrap();
 
     assert!(
         manager
@@ -96,7 +102,10 @@ async fn test_p2p_to_mcu_to_p2p_lifecycle() {
 
     // Phase 4: 1 leg → None
     let c1 = ctx("session-x", vec![LegId::new("a")]);
-    assert_eq!(strategy.decide(&c1.active_legs).unwrap(), MediaPathDecision::None);
+    assert_eq!(
+        strategy.decide(&c1.active_legs).unwrap(),
+        MediaPathDecision::None
+    );
 }
 
 #[tokio::test]
@@ -120,9 +129,17 @@ async fn test_growing_conference_keeps_existing_participants() {
     // 4 legs → apply again; only the new leg gets bridged (idempotent)
     let c4 = ctx(
         "session-y",
-        vec![LegId::new("a"), LegId::new("b"), LegId::new("c"), LegId::new("d")],
+        vec![
+            LegId::new("a"),
+            LegId::new("b"),
+            LegId::new("c"),
+            LegId::new("d"),
+        ],
     );
-    assert_eq!(strategy.decide(&c4.active_legs).unwrap(), MediaPathDecision::Conference);
+    assert_eq!(
+        strategy.decide(&c4.active_legs).unwrap(),
+        MediaPathDecision::Conference
+    );
     strategy.apply_multi_party(&c4, &mut session).await.unwrap();
 
     let conf_id = strategy.conference_id_for(&SessionId::from("session-y"));

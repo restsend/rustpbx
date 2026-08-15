@@ -20,9 +20,8 @@ pub mod negotiate;
 pub mod recorder;
 pub mod rtc_track;
 pub mod rtp_track_builder;
-pub mod telephone_event;
 pub mod telemetry;
-pub mod track;
+pub mod telephone_event;
 pub mod wav_reader;
 pub mod wav_writer;
 
@@ -42,7 +41,6 @@ pub use mixer::AudioMixer;
 pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;
-pub use track::Track;
 
 // ── Shared utility types ────────────────────────────────────────────
 

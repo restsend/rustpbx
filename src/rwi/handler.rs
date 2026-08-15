@@ -535,9 +535,8 @@ fn parse_action(
         })
     };
 
-    let req: crate::rwi::session::RwiRequest =
+    let mut req: crate::rwi::session::RwiRequest =
         serde_json::from_value(json).map_err(|e| e.to_string())?;
-
-    Ok(req.into())
+    req.payload.normalize();
+    Ok(req.payload)
 }
-

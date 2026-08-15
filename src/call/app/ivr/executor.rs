@@ -1,6 +1,8 @@
 use super::common::{self, ActionResult, SessionData, TerminalAction, WaitEvent};
 use super::config::{ActionNode, EntryAction};
-use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
+use super::provider::{
+    ActionProvider, ProviderContext, ProviderEvent, SessionContext, SessionEndReason, SessionEndTag,
+};
 use super::trace::{IvrTraceCollector, IvrTraceEntry, IvrTraceSession};
 use crate::call::app::{
     AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController, RecordingInfo,
@@ -56,7 +58,7 @@ pub struct StepIvrApp {
     step_prev_duration_ms: u64,
     /// How this session entered IVR: `None` (fresh inbound), `"agent"`, `"queue"`.
     transferred_from: Option<String>,
-    /// Last transfer target string (for EndReason classification).
+    /// Last transfer target string (for SessionEndReason classification).
     last_transfer_target: Option<String>,
     /// Whether the last terminal action was caused by a DTMF timeout (max
     /// retries exceeded). Used in `on_exit` to classify the end reason as
@@ -662,7 +664,10 @@ impl StepIvrApp {
         }
     }
 
-    async fn request_next(&mut self, mut event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
+    async fn request_next(
+        &mut self,
+        mut event: Option<ProviderEvent>,
+    ) -> anyhow::Result<ActionNode> {
         // A digit buffered during a non-interruptible step (or while the
         // previous provider response was in flight) is delivered before the
         // natural event, so caller input is never silently lost. An explicit
@@ -1348,10 +1353,7 @@ impl CallApp for StepIvrApp {
             // would leave the stale pending_menu intercepting future DTMF.
             if let Some(ref menu) = self.pending_menu {
                 self.awaiting_dtmf = true;
-                ctrl.set_timeout(
-                    "ivr_dtmf_timeout",
-                    Duration::from_millis(menu.timeout_ms),
-                );
+                ctrl.set_timeout("ivr_dtmf_timeout", Duration::from_millis(menu.timeout_ms));
             }
             return Ok(AppAction::Continue);
         }
@@ -1385,30 +1387,57 @@ impl CallApp for StepIvrApp {
             crate::call::app::ExitReason::RemoteHangup(_) | crate::call::app::ExitReason::Cancelled
         );
         let mut end_reason = match reason {
-            crate::call::app::ExitReason::Normal => EndReason::Normal,
-            crate::call::app::ExitReason::Hangup => EndReason::Hangup,
-            crate::call::app::ExitReason::RemoteHangup(_) => EndReason::UserHangup,
+            crate::call::app::ExitReason::Normal => SessionEndReason {
+                reason: SessionEndTag::Normal,
+                detail: None,
+            },
+            crate::call::app::ExitReason::Hangup => SessionEndReason {
+                reason: SessionEndTag::Hangup,
+                detail: None,
+            },
+            crate::call::app::ExitReason::RemoteHangup(_) => SessionEndReason {
+                reason: SessionEndTag::UserHangup,
+                detail: None,
+            },
             crate::call::app::ExitReason::Transferred => {
                 // Determine transfer target type from the last action.
                 let target = self.last_transfer_target.clone().unwrap_or_default();
                 if target.starts_with("queue:") {
-                    EndReason::TransferToQueue(target)
+                    SessionEndReason {
+                        reason: SessionEndTag::TransferToQueue,
+                        detail: Some(target),
+                    }
                 } else if target.starts_with("toivr:") || target.starts_with("ivr:") {
-                    EndReason::TransferToIvr(target)
+                    SessionEndReason {
+                        reason: SessionEndTag::TransferToIvr,
+                        detail: Some(target),
+                    }
                 } else {
-                    EndReason::Transfer(target)
+                    SessionEndReason {
+                        reason: SessionEndTag::Transfer,
+                        detail: Some(target),
+                    }
                 }
             }
-            crate::call::app::ExitReason::Error(e) => EndReason::Error(e),
-            crate::call::app::ExitReason::Cancelled => EndReason::Hangup,
-            _ => EndReason::Normal,
+            crate::call::app::ExitReason::Error(e) => SessionEndReason {
+                reason: SessionEndTag::Error,
+                detail: Some(e),
+            },
+            crate::call::app::ExitReason::Cancelled => SessionEndReason {
+                reason: SessionEndTag::Hangup,
+                detail: None,
+            },
+            _ => SessionEndReason {
+                reason: SessionEndTag::Normal,
+                detail: None,
+            },
         };
 
         // If the exit was caused by a DTMF timeout (provider returned Hangup
         // in response to a DtmfTimeout/DtmfMenuTimeout event), refine the end
         // reason from `Hangup` to `Timeout`.
-        if self.timeout_induced && matches!(end_reason, EndReason::Hangup) {
-            end_reason = EndReason::Timeout;
+        if self.timeout_induced && matches!(end_reason.reason, SessionEndTag::Hangup) {
+            end_reason.reason = SessionEndTag::Timeout;
             end_reason_label = "timeout".to_string();
         }
         let session_id = self
@@ -1417,7 +1446,7 @@ impl CallApp for StepIvrApp {
             .get("session_id")
             .cloned()
             .unwrap_or_default();
-        let end_sr = end_reason.to_session_end_reason();
+        let end_sr = end_reason.clone();
 
         // Always record the session_end trace entry — including on
         // RemoteHangup/Cancelled (caller hung up or system terminated the
@@ -1608,7 +1637,7 @@ mod tests {
 
         async fn on_session_end(
             &self,
-            _reason: &EndReason,
+            _reason: &SessionEndReason,
             _session_id: &str,
         ) -> anyhow::Result<()> {
             *self.end_called.lock().unwrap() = true;
@@ -1626,7 +1655,11 @@ mod tests {
             self.0.on_session_start(ctx).await
         }
 
-        async fn on_session_end(&self, reason: &EndReason, session_id: &str) -> anyhow::Result<()> {
+        async fn on_session_end(
+            &self,
+            reason: &SessionEndReason,
+            session_id: &str,
+        ) -> anyhow::Result<()> {
             self.0.on_session_end(reason, session_id).await
         }
     }
@@ -1665,13 +1698,14 @@ mod tests {
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }))
         }
 
         async fn on_session_end(
             &self,
-            _reason: &EndReason,
+            _reason: &SessionEndReason,
             _session_id: &str,
         ) -> anyhow::Result<()> {
             self.end_called.store(true, Ordering::SeqCst);
@@ -1694,7 +1728,8 @@ mod tests {
             Box::new(mock_app(vec![ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             })])),
             "1001",
             "2000",
@@ -1725,7 +1760,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -1768,7 +1804,8 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack =
@@ -1805,14 +1842,16 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
         entries.insert(
             "2".into(),
             ActionNode::new(EntryAction::Queue {
                 target: "support".into(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -1905,7 +1944,8 @@ mod tests {
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }))
         }
     }
@@ -1983,7 +2023,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2199,7 +2240,8 @@ mod tests {
                 create_room_uri: "https://voip.example.com/rooms".into(),
                 headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
                 timeout_ms: Some(30000),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
                 success: None,
                 failure: None,
             })])),
@@ -2226,7 +2268,8 @@ mod tests {
                 create_room_uri: "wss://voip.example.com/room1".into(),
                 headers: HashMap::new(),
                 timeout_ms: None,
-                return_app: Some("ivr".into()), return_target: Some("main".into()),
+                return_app: Some("ivr".into()),
+                return_target: Some("main".into()),
                 success: Some(Box::new(ActionNode::new(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
@@ -2268,9 +2311,11 @@ mod tests {
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "1001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "1001"),
+            )
             .await;
     }
 
@@ -2282,7 +2327,8 @@ mod tests {
         let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         })]);
         app.trace = Some(trace.clone());
         app.ivr_name = Some("test-ivr".to_string());
@@ -2349,7 +2395,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2440,7 +2487,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
         let resp = serde_json::to_value(&entry).unwrap();
@@ -2484,7 +2532,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2560,7 +2609,8 @@ mod tests {
         let transfer_resp = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let url = spawn_mock_provider(vec![
@@ -2627,7 +2677,8 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack =
@@ -2689,7 +2740,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "3003".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2737,7 +2789,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2818,7 +2871,8 @@ mod tests {
                 ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
                     params: HashMap::new(),
-                    return_app: None, return_target: None,
+                    return_app: None,
+                    return_target: None,
                 }),
             ),
         );
@@ -2859,7 +2913,9 @@ mod tests {
         // Valid key press → local menu match → next node (prompt_break) runs.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "play prompt_break", |c| {
@@ -2905,7 +2961,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2002".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -2920,7 +2977,8 @@ mod tests {
             timeout_action: Some(Box::new(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }))),
             invalid_action: None,
             greeting_api_url: None,
@@ -2987,12 +3045,12 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
-        let mut stack =
-            MockCallStack::run(Box::new(mock_app(vec![menu, prompt])), "1001", "2000");
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, prompt])), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -3013,7 +3071,9 @@ mod tests {
         // Digit forwarded to provider → provider returns prompt_break node.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "play prompt_break", |c| {
@@ -3058,7 +3118,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2002".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -3107,9 +3168,7 @@ mod tests {
         // must fall through to Hangup.
         stack.timeout("ivr_dtmf_timeout");
         stack
-            .assert_cmd(200, "hangup", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -3127,7 +3186,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -3212,7 +3272,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -3295,7 +3356,8 @@ mod tests {
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack =
@@ -3497,7 +3559,8 @@ mod tests {
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
 
@@ -3600,7 +3663,8 @@ mod tests {
             EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             },
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
@@ -3609,7 +3673,8 @@ mod tests {
         app.current_node = Some(ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         }));
         app.current_step_id = Some("step-7".to_string());
         app.sess
@@ -3655,7 +3720,8 @@ mod tests {
             EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             },
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
@@ -3663,18 +3729,15 @@ mod tests {
         app.current_node = Some(ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         }));
         app.current_step_id = Some("step-9".to_string());
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
-        app.sess
-            .variables
-            .insert("caller".into(), "1001".into());
-        app.sess
-            .variables
-            .insert("callee".into(), "2000".into());
+        app.sess.variables.insert("caller".into(), "1001".into());
+        app.sess.variables.insert("callee".into(), "2000".into());
 
         let mut gw = crate::rwi::gateway::RwiGateway::new();
         let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
@@ -3831,7 +3894,8 @@ mod tests {
                 serde_json::to_value(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
                     params: HashMap::new(),
-                    return_app: None, return_target: None,
+                    return_app: None,
+                    return_target: None,
                 }))
                 .unwrap(),
             )
@@ -3907,7 +3971,8 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack =
@@ -3944,7 +4009,8 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack = MockCallStack::run(
@@ -3991,7 +4057,8 @@ mod tests {
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
         });
 
         let mut stack =
@@ -4046,8 +4113,7 @@ mod tests {
     }
 
     fn start_mock_step_provider() -> MockStepProviderServer {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
         let url = format!(
             "http://{}/ivr/step",
             listener.local_addr().expect("mock provider addr")
@@ -4078,11 +4144,7 @@ mod tests {
             if reader.read_line(&mut line)? == 0 {
                 return Ok(());
             }
-            let path = line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("/")
-                .to_string();
+            let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
             // Headers
             let mut content_length = 0usize;
             loop {
@@ -4194,7 +4256,7 @@ mod tests {
                 sip_headers: None,
                 event: None,
                 route_name: None,
-                    custom_data: None,
+                custom_data: None,
                 step_start_time: None,
                 step_end_time: None,
                 step_duration_ms: None,
@@ -4210,7 +4272,13 @@ mod tests {
         );
 
         step_provider
-            .on_session_end(&EndReason::Normal, "test-session")
+            .on_session_end(
+                &SessionEndReason {
+                    reason: SessionEndTag::Normal,
+                    detail: None,
+                },
+                "test-session",
+            )
             .await
             .unwrap();
     }
@@ -4268,7 +4336,8 @@ mod tests {
                     Ok(ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     }))
                 }
                 _ => Ok(ActionNode::new(EntryAction::Hangup {
@@ -4285,7 +4354,7 @@ mod tests {
 
         async fn on_session_end(
             &self,
-            _reason: &EndReason,
+            _reason: &SessionEndReason,
             _session_id: &str,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -4359,7 +4428,9 @@ mod tests {
         // Press 2 during the interruptible welcome → immediate barge-in.
         stack.dtmf("2");
         stack
-            .assert_cmd(500, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(500, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
             .assert_cmd(
@@ -4401,7 +4472,7 @@ mod tests {
 
         async fn on_session_end(
             &self,
-            _reason: &EndReason,
+            _reason: &SessionEndReason,
             _session_id: &str,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -4410,8 +4481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_step_provider_runaway_loop_guard_hangs_up() {
-        let app = StepIvrApp::with_provider(Box::new(LoopingProvider))
-            .with_max_repeat_prompts(2);
+        let app = StepIvrApp::with_provider(Box::new(LoopingProvider)).with_max_repeat_prompts(2);
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack

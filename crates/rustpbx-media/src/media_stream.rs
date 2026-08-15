@@ -2,13 +2,10 @@ use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use rustrtc::SdpType;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::Track;
-
-pub type TrackMap = DashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>;
+use crate::rtc_track::RtcTrack;
 
 pub struct MediaStreamBuilder {
     id: Option<String>,
@@ -51,20 +48,20 @@ impl MediaStreamBuilder {
 pub struct MediaStream {
     pub id: String,
     pub cancel_token: CancellationToken,
-    tracks: DashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>,
+    tracks: DashMap<String, Arc<RtcTrack>>,
 }
 
 impl MediaStream {
-    pub async fn update_track(&self, track: Box<dyn Track>, play_id: Option<String>) {
+    pub async fn update_track(&self, track: RtcTrack, play_id: Option<String>) {
         let id = track.id().to_string();
-        let wrapped = Arc::new(AsyncMutex::new(track));
+        let wrapped = Arc::new(track);
         self.tracks.insert(id.clone(), wrapped.clone());
         if let Some(play_id) = play_id {
             debug!(track_id = %id, play_id = %play_id, "track updated (playback id)");
         }
     }
 
-    pub async fn get_tracks(&self) -> Vec<Arc<AsyncMutex<Box<dyn Track>>>> {
+    pub async fn get_tracks(&self) -> Vec<Arc<RtcTrack>> {
         self.tracks.iter().map(|e| e.value().clone()).collect()
     }
 
@@ -78,31 +75,24 @@ impl MediaStream {
         let Some(track) = track else {
             return Err(anyhow!("track not found: {track_id}"));
         };
-        let guard = track.lock().await;
-        guard.set_remote_description(remote, sdp_type).await
+        track.set_remote_description(remote, sdp_type).await
     }
 
     /// Mute a track by ID
     /// Returns true if the track was found and muted
     pub async fn mute_track(&self, track_id: &str) -> bool {
-        let track = self.tracks.get(track_id).map(|e| e.value().clone());
-        if let Some(track) = track {
-            let guard = track.lock().await;
-            guard.set_muted(true).await
-        } else {
-            false
+        match self.tracks.get(track_id).map(|e| e.value().clone()) {
+            Some(track) => track.set_muted(true).await,
+            None => false,
         }
     }
 
     /// Unmute a track by ID
     /// Returns true if the track was found and unmuted
     pub async fn unmute_track(&self, track_id: &str) -> bool {
-        let track = self.tracks.get(track_id).map(|e| e.value().clone());
-        if let Some(track) = track {
-            let guard = track.lock().await;
-            guard.set_muted(false).await
-        } else {
-            false
+        match self.tracks.get(track_id).map(|e| e.value().clone()) {
+            Some(track) => track.set_muted(false).await,
+            None => false,
         }
     }
 }

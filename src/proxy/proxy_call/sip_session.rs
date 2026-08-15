@@ -30,9 +30,9 @@ pub struct SessionSnapshot {
 use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
+use crate::media::RtpTrackBuilder;
 use crate::media::media_bridge::MediaBridge;
 use crate::media::negotiate::MediaNegotiator;
-use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::{
     media_peer::MediaPeer,
@@ -196,7 +196,11 @@ pub(crate) async fn route_outbound_leg(
         let routing_state = server.routing_state.read().clone();
         let mut fns = server.create_route_invites.iter();
         if let Some(f) = fns.next() {
-            match f(server.clone(), server.proxy_config.load_full(), routing_state) {
+            match f(
+                server.clone(),
+                server.proxy_config.load_full(),
+                routing_state,
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to create RouteInvite for originated leg");
@@ -220,23 +224,19 @@ pub(crate) async fn route_outbound_leg(
 
     // From/To headers must be present: header-based match rules and addons
     // (wholesale) read them off `origin`.
-    headers.push(
-        rsipstack::sip::Header::From(
-            format!("<{}>", caller)
-                .try_into()
-                .map_err(|e| anyhow!("invalid From header for routed leg: {:?}", e))?,
-        ),
-    );
+    headers.push(rsipstack::sip::Header::From(
+        format!("<{}>", caller)
+            .try_into()
+            .map_err(|e| anyhow!("invalid From header for routed leg: {:?}", e))?,
+    ));
     headers.push(rsipstack::sip::Header::To(
         format!("<{}>", target_uri).into(),
     ));
     headers.push(rsipstack::sip::Header::CallId(
-        rsipstack::transaction::make_call_id(
-            server.endpoint.inner.option.callid_suffix.as_deref(),
-        )
-        .value()
-        .to_string()
-        .into(),
+        rsipstack::transaction::make_call_id(server.endpoint.inner.option.callid_suffix.as_deref())
+            .value()
+            .to_string()
+            .into(),
     ));
     headers.push(rsipstack::sip::Header::CSeq(
         format!("20 INVITE")
@@ -261,7 +261,12 @@ pub(crate) async fn route_outbound_leg(
     };
 
     match route_invite
-        .route_invite(option, &synthetic_request, &DialDirection::Outbound, &cookie)
+        .route_invite(
+            option,
+            &synthetic_request,
+            &DialDirection::Outbound,
+            &cookie,
+        )
         .await
     {
         Ok(result) => Ok(Some(result)),
@@ -329,7 +334,7 @@ pub struct SipSession {
     /// Strategy that decides how to route media as the active leg set changes
     /// (P2P direct bridge vs. multi-party conference). Hides MCU knowledge
     /// from this session.
-    pub media_path_strategy: Arc<dyn crate::call::runtime::MediaPathStrategy>,
+    pub media_path_strategy: Arc<crate::call::runtime::ConferenceStrategy>,
 
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
@@ -566,8 +571,10 @@ impl BuiltinAppFactory {
                             Ok(Some(c)) => c,
                             Ok(None) => {
                                 tracing::warn!("IVR config '{}' not found in config store", file);
-                                *diagnostic =
-                                    Some(format!("IVR config '{}' not found in config store", file));
+                                *diagnostic = Some(format!(
+                                    "IVR config '{}' not found in config store",
+                                    file
+                                ));
                                 return None;
                             }
                             Err(e) => {
@@ -819,8 +826,8 @@ fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
         .get(1)
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(5060);
-     Some((host.to_string(), port))
- }
+    Some((host.to_string(), port))
+}
 
 /// Parse a dial target that may be either a bare SIP URI (e.g.
 /// `sip:1001@example.com;transport=ws`) or a full Contact header value as
@@ -848,7 +855,7 @@ enum ConstructMode<'a> {
     Uac,
 }
 
- impl SipSession {
+impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1065,9 +1072,7 @@ enum ConstructMode<'a> {
 
     /// Build the per-call Sipflow adapter over the server's shared backend when
     /// caller leg A and its recording task are created.
-    fn sipflow_recorder(
-        &self,
-    ) -> Option<Box<dyn crate::media::media_recorder::MediaRecorder>> {
+    fn sipflow_recorder(&self) -> Option<Box<dyn crate::media::media_recorder::MediaRecorder>> {
         let recording = &self.context.dialplan.recording;
         if !recording.enabled || recording.force_file {
             return None;
@@ -1245,17 +1250,15 @@ enum ConstructMode<'a> {
             let tracks = peer.get_tracks().await;
             if let Some(wanted) = prefer_track_id {
                 for t in &tracks {
-                    let guard = t.lock().await;
-                    if guard.id() == wanted {
-                        if let Some(pc) = guard.get_peer_connection().await {
+                    if t.id() == wanted {
+                        if let Some(pc) = t.get_peer_connection().await {
                             return Some(pc);
                         }
                     }
                 }
             }
             for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(pc) = guard.get_peer_connection().await {
+                if let Some(pc) = t.get_peer_connection().await {
                     return Some(pc);
                 }
             }
@@ -1417,7 +1420,9 @@ enum ConstructMode<'a> {
         let (caller_dialog_field, caller_leg_dialog) = match mode {
             ConstructMode::Uas { server_dialog } => (
                 Some(server_dialog.clone()),
-                Some(rsipstack::dialog::dialog::Dialog::Invite(server_dialog.clone())),
+                Some(rsipstack::dialog::dialog::Dialog::Invite(
+                    server_dialog.clone(),
+                )),
             ),
             ConstructMode::Uac => (None, None),
         };
@@ -1465,9 +1470,10 @@ enum ConstructMode<'a> {
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
-            media_path_strategy: Arc::new(crate::call::runtime::ConferenceStrategy::new(
-                conference_server.clone(),
-            ).with_session_id(session_id_str.clone())),
+            media_path_strategy: Arc::new(
+                crate::call::runtime::ConferenceStrategy::new(conference_server.clone())
+                    .with_session_id(session_id_str.clone()),
+            ),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
@@ -1505,7 +1511,9 @@ enum ConstructMode<'a> {
             cancel_token,
             call_record_sender,
             context,
-            ConstructMode::Uas { server_dialog: &server_dialog },
+            ConstructMode::Uas {
+                server_dialog: &server_dialog,
+            },
             use_media_proxy,
             caller_peer,
             callee_peer,
@@ -2277,24 +2285,20 @@ enum ConstructMode<'a> {
         if let Err((status_code, text, reason)) = setup_result {
             warn!(session_id = %self.context.session_id, ?status_code, ?text, ?reason, "Dialplan execution failed");
 
-            let caller_cancelled = self
-                .caller_dialog
-                .as_ref()
-                .is_some_and(|dialog| {
-                    matches!(
-                        dialog.state(),
-                        DialogState::Terminated(_, TerminatedReason::UacCancel)
-                    )
-                });
+            let caller_cancelled = self.caller_dialog.as_ref().is_some_and(|dialog| {
+                matches!(
+                    dialog.state(),
+                    DialogState::Terminated(_, TerminatedReason::UacCancel)
+                )
+            });
 
             if caller_cancelled {
                 info!(
                     session_id = %self.context.session_id,
                     "Caller cancelled during setup; skipping rejection and failure tone"
                 );
-                self.meta.error_code = Some(
-                    &crate::proxy::proxy_call::error_catalog::DIAL_CALLER_CANCELLED,
-                );
+                self.meta.error_code =
+                    Some(&crate::proxy::proxy_call::error_catalog::DIAL_CALLER_CANCELLED);
                 self.meta.last_error = Some((
                     StatusCode::RequestTerminated,
                     Some("Caller cancelled".to_string()),
@@ -2470,13 +2474,9 @@ enum ConstructMode<'a> {
         } else {
             None
         };
-        let mb = self
-            .bridge_mut()
-            .ok_or_else(|| anyhow!("No MediaBridge"))?;
+        let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
         let recorder_sender = match side {
-            crate::media::media_bridge::LegSide::A => {
-                Some(mb.start_recorder(sipflow_recorder)?)
-            }
+            crate::media::media_bridge::LegSide::A => Some(mb.start_recorder(sipflow_recorder)?),
             crate::media::media_bridge::LegSide::B => None,
         };
         let leg = crate::media::leg::LegInner::new(leg_label, &cfg, recorder_sender)?;
@@ -2801,7 +2801,13 @@ enum ConstructMode<'a> {
             .load()
             .session_expires
             .unwrap_or(crate::proxy::proxy_call::session_timer::DEFAULT_SESSION_EXPIRES);
-        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
+        if self
+            .server
+            .proxy_config
+            .load()
+            .session_timer_mode()
+            .is_enabled()
+        {
             headers.extend(
                 crate::proxy::proxy_call::session_timer::build_default_session_timer_headers(
                     default_expires,
@@ -3105,7 +3111,8 @@ enum ConstructMode<'a> {
                     .ok();
             }
             DialogState::Info(_, request, tx_handle) => {
-                self.handle_dialog_info(DialogSide::Caller, request, tx_handle).await?;
+                self.handle_dialog_info(DialogSide::Caller, request, tx_handle)
+                    .await?;
             }
             DialogState::Notify(_, request, tx_handle) => {
                 self.handle_dialog_notify(request, tx_handle).await?;
@@ -3206,24 +3213,22 @@ enum ConstructMode<'a> {
                 DialogSide::Caller => {
                     // Forward to the connected callee dialog
                     match self.meta.connected_callee_dialog_id.clone() {
-                        Some(callee_id) => {
-                            match self.server.dialog_layer.get_dialog(&callee_id) {
-                                Some(dlg) => {
-                                    let fwd_headers = vec![rsipstack::sip::Header::ContentType(
-                                        rsipstack::sip::headers::ContentType::from(
-                                            "application/dtmf-relay",
-                                        ),
-                                    )];
-                                    Self::send_info_to_dialog(
-                                        &dlg,
-                                        fwd_headers,
-                                        request.body().to_vec(),
-                                    )
-                                    .await
-                                }
-                                None => Ok(()),
+                        Some(callee_id) => match self.server.dialog_layer.get_dialog(&callee_id) {
+                            Some(dlg) => {
+                                let fwd_headers = vec![rsipstack::sip::Header::ContentType(
+                                    rsipstack::sip::headers::ContentType::from(
+                                        "application/dtmf-relay",
+                                    ),
+                                )];
+                                Self::send_info_to_dialog(
+                                    &dlg,
+                                    fwd_headers,
+                                    request.body().to_vec(),
+                                )
+                                .await
                             }
-                        }
+                            None => Ok(()),
+                        },
                         None => Ok(()),
                     }
                 }
@@ -4022,12 +4027,8 @@ enum ConstructMode<'a> {
         let has_resolved_agents = !agent_uris.is_empty();
 
         // Store resolved plan in context for the queue app factory
-        if let Some(runtime) = self
-            .app_runtime
-            .as_any()
-            .downcast_ref::<DefaultAppRuntime>()
-        {
-            *runtime.context.pending_queue.lock() = Some(PendingQueuePlan {
+        if let Some(ctx) = self.app_runtime.app_context() {
+            *ctx.pending_queue.lock() = Some(PendingQueuePlan {
                 plan: plan.clone(),
                 agent_uris,
                 parallel: is_parallel,
@@ -4344,7 +4345,12 @@ enum ConstructMode<'a> {
             .load()
             .session_expires
             .unwrap_or(DEFAULT_SESSION_EXPIRES);
-        let _session_timer_enabled = self.server.proxy_config.load().session_timer_mode().is_enabled();
+        let _session_timer_enabled = self
+            .server
+            .proxy_config
+            .load()
+            .session_timer_mode()
+            .is_enabled();
 
         // Build INVITE options for every target
         let dialog_layer = self.server.dialog_layer.clone();
@@ -4586,9 +4592,7 @@ enum ConstructMode<'a> {
             tokio::task::JoinHandle<
                 Option<(
                     usize,
-                    rsipstack::Result<
-                        (InviteDialog, Option<rsipstack::sip::Response>),
-                    >,
+                    rsipstack::Result<(InviteDialog, Option<rsipstack::sip::Response>)>,
                     rsipstack::sip::Uri,
                 )>,
             >,
@@ -4597,7 +4601,8 @@ enum ConstructMode<'a> {
         use futures::StreamExt;
         use rsipstack::sip::StatusCodeKind;
         while let Some(join_result) = fork_set.next().await {
-            if let Ok(Some((_loser_idx, Ok((loser_dialog, loser_resp)), _loser_uri))) = join_result {
+            if let Ok(Some((_loser_idx, Ok((loser_dialog, loser_resp)), _loser_uri))) = join_result
+            {
                 let confirmed = loser_resp
                     .as_ref()
                     .is_some_and(|r| r.status_code.kind() == StatusCodeKind::Successful);
@@ -5592,14 +5597,20 @@ enum ConstructMode<'a> {
         self.callee_guards.push(callee_guard);
 
         self.accept_call(Some(callee_uri.to_string()), caller_answer)
-        .await
-        .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
+            .await
+            .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
 
         // Register callee dialog in unified map
         if let Some(dlg) = self.server.dialog_layer.get_dialog(&dialog_id) {
             self.legs.set_dialog(LegId::from("callee"), dlg);
         }
-        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
+        if self
+            .server
+            .proxy_config
+            .load()
+            .session_timer_mode()
+            .is_enabled()
+        {
             if let Some(ref response) = response {
                 let requested_session_interval = invite_option
                     .headers
@@ -5899,11 +5910,7 @@ enum ConstructMode<'a> {
                 let existing_caller_track = if let Some(peer) = self.caller_peer() {
                     let mut found = None;
                     for track in peer.get_tracks().await {
-                        let is_caller_track = {
-                            let guard = track.lock().await;
-                            guard.id() == Self::CALLER_TRACK_ID
-                        };
-                        if is_caller_track {
+                        if track.id() == Self::CALLER_TRACK_ID {
                             found = Some(track);
                             break;
                         }
@@ -5914,8 +5921,7 @@ enum ConstructMode<'a> {
                 };
 
                 if let Some(track) = existing_caller_track {
-                    let guard = track.lock().await;
-                    match guard.handshake(caller_offer.clone(), callee_sdp_type).await {
+                    match track.handshake(caller_offer.clone(), callee_sdp_type).await {
                         Ok(answer_sdp) => {
                             let answer_sdp = self.rewrite_answer_to_selected_codecs(
                                 &answer_sdp,
@@ -5984,7 +5990,7 @@ enum ConstructMode<'a> {
                                 "Generated PBX answer SDP for caller (anchored media)"
                             );
                             if let Some(peer) = self.caller_peer() {
-                                peer.update_track(Box::new(track), None).await;
+                                peer.update_track(track, None).await;
                             }
                             Some(answer_sdp)
                         }
@@ -6081,9 +6087,8 @@ enum ConstructMode<'a> {
     ) -> Option<rustrtc::PeerConnection> {
         let tracks = peer.get_tracks().await;
         for t in &tracks {
-            let guard = t.lock().await;
-            if guard.id() == track_id {
-                return guard.get_peer_connection().await;
+            if t.id() == track_id {
+                return t.get_peer_connection().await;
             }
         }
         None
@@ -6184,9 +6189,7 @@ enum ConstructMode<'a> {
                     .as_ref()
                     .map(|offer| {
                         crate::media::negotiate::MediaNegotiator::video_caps_for_config(
-                            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(
-                                offer,
-                            ),
+                            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(offer),
                         )
                     })
                     .unwrap_or_default()
@@ -6244,9 +6247,9 @@ enum ConstructMode<'a> {
             }
 
             let video_caps = if self.video_relay_enabled() {
-                MediaNegotiator::video_caps_for_config(
-                    &MediaNegotiator::extract_video_codecs(caller_offer),
-                )
+                MediaNegotiator::video_caps_for_config(&MediaNegotiator::extract_video_codecs(
+                    caller_offer,
+                ))
             } else {
                 Vec::new()
             };
@@ -6263,7 +6266,7 @@ enum ConstructMode<'a> {
         let sdp = track.local_description().await?;
 
         if let Some(peer) = self.callee_peer() {
-            peer.update_track(Box::new(track), None).await;
+            peer.update_track(track, None).await;
         }
 
         Ok(sdp)
@@ -6308,9 +6311,9 @@ enum ConstructMode<'a> {
         }
 
         let video_caps = if self.video_relay_enabled() {
-            MediaNegotiator::video_caps_for_config(
-                &MediaNegotiator::extract_video_codecs(&caller_offer),
-            )
+            MediaNegotiator::video_caps_for_config(&MediaNegotiator::extract_video_codecs(
+                &caller_offer,
+            ))
         } else {
             Vec::new()
         };
@@ -6347,7 +6350,7 @@ enum ConstructMode<'a> {
                     "Caller answer SDP content (ensure_caller_answer_sdp)"
                 );
                 if let Some(peer) = self.caller_peer() {
-                    peer.update_track(Box::new(track), None).await;
+                    peer.update_track(track, None).await;
                 }
                 self.media.answer = Some(answer_sdp.clone());
                 Some(answer_sdp)
@@ -6363,13 +6366,8 @@ enum ConstructMode<'a> {
         }
     }
 
-    pub async fn accept_call(
-        &mut self,
-        callee: Option<String>,
-        sdp: Option<String>,
-    ) -> Result<()> {
-        if false {
-            }
+    pub async fn accept_call(&mut self, callee: Option<String>, sdp: Option<String>) -> Result<()> {
+        if false {}
 
         self.meta.connected_callee = callee.clone();
         // A real callee/agent leg answered. Record this permanently so the
@@ -6386,7 +6384,13 @@ enum ConstructMode<'a> {
         }
 
         let mut timer_headers = vec![];
-        if self.server.proxy_config.load().session_timer_mode().is_enabled() {
+        if self
+            .server
+            .proxy_config
+            .load()
+            .session_timer_mode()
+            .is_enabled()
+        {
             let default_expires = self
                 .server
                 .proxy_config
@@ -6922,7 +6926,10 @@ enum ConstructMode<'a> {
                 if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&hold_sdp).await? {
                     self.media.callee_answer_sdp = Some(response_sdp);
                 }
-            } else if let Err(e) = self.send_reinvite_to_leg(&LegId::from("caller"), hold_sdp).await {
+            } else if let Err(e) = self
+                .send_reinvite_to_leg(&LegId::from("caller"), hold_sdp)
+                .await
+            {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to send hold re-INVITE to caller");
             }
         }
@@ -6946,12 +6953,14 @@ enum ConstructMode<'a> {
         } else {
             let unhold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), false)?;
             if matches!(side, crate::media::media_bridge::LegSide::B) {
-                if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&unhold_sdp).await?
+                if let Some(response_sdp) =
+                    self.send_reinvite_to_callee_dialogs(&unhold_sdp).await?
                 {
                     self.media.callee_answer_sdp = Some(response_sdp);
                 }
-            } else if let Err(e) =
-                self.send_reinvite_to_leg(&LegId::from("caller"), unhold_sdp).await
+            } else if let Err(e) = self
+                .send_reinvite_to_leg(&LegId::from("caller"), unhold_sdp)
+                .await
             {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to send unhold re-INVITE to caller");
             }
@@ -7026,8 +7035,9 @@ enum ConstructMode<'a> {
                         {
                             warn!(session_id = %self.id, error = %e, "Failed to propagate hold to callee");
                         }
-                    } else if let Err(e) =
-                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::B).await
+                    } else if let Err(e) = self
+                        .propagate_unhold_to_side(crate::media::media_bridge::LegSide::B)
+                        .await
                     {
                         warn!(session_id = %self.id, error = %e, "Failed to propagate unhold to callee");
                     }
@@ -7052,8 +7062,9 @@ enum ConstructMode<'a> {
                         {
                             warn!(session_id = %self.id, error = %e, "Failed to propagate hold to caller");
                         }
-                    } else if let Err(e) =
-                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::A).await
+                    } else if let Err(e) = self
+                        .propagate_unhold_to_side(crate::media::media_bridge::LegSide::A)
+                        .await
                     {
                         warn!(session_id = %self.id, error = %e, "Failed to propagate unhold to caller");
                     }
@@ -7267,10 +7278,7 @@ enum ConstructMode<'a> {
         }
     }
 
-    fn publish_recording_complete(
-        &self,
-        result: crate::media::media_recorder::RecordingResult,
-    ) {
+    fn publish_recording_complete(&self, result: crate::media::media_recorder::RecordingResult) {
         let path = result.path;
         let duration = Duration::from_secs_f64(result.duration_secs);
         let file_size = result.file_size;
@@ -7377,7 +7385,6 @@ enum ConstructMode<'a> {
         for lease in self.transient_leases.drain(..) {
             lease.release_all();
         }
-
 
         // Disarm any RTP inactivity timeouts on both legs.
         if let Some(mb) = self.media.bridge.as_mut() {
@@ -7625,12 +7632,10 @@ enum ConstructMode<'a> {
             } else {
                 format!("Caller abandoned queue '{}'", queue_name)
             };
-            let mut ev = crate::call_errors::TraceEvent::new(
-                crate::call_errors::TraceKind::Queue,
-                msg,
-            )
-            .severity(crate::call_errors::ErrSeverity::Warn)
-            .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code);
+            let mut ev =
+                crate::call_errors::TraceEvent::new(crate::call_errors::TraceKind::Queue, msg)
+                    .severity(crate::call_errors::ErrSeverity::Warn)
+                    .code(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code);
             let mut detail = serde_json::json!({});
             if !queue_name.is_empty() {
                 detail["queue_name"] = serde_json::Value::String(queue_name);
@@ -7642,8 +7647,7 @@ enum ConstructMode<'a> {
                 .and_then(|m| m.get("resolved_agent_id").cloned())
                 .unwrap_or_default();
             if !resolved_agent_id.is_empty() {
-                detail["agent"] =
-                    serde_json::Value::String(resolved_agent_id);
+                detail["agent"] = serde_json::Value::String(resolved_agent_id);
             }
             ev = ev.detail(detail);
             self.record_trace(ev);
@@ -7659,13 +7663,9 @@ enum ConstructMode<'a> {
         if self.meta.rtp_timeout_fired {
             return;
         }
-        if let Some(runtime) = self
-            .app_runtime
-            .as_any()
-            .downcast_ref::<DefaultAppRuntime>()
-        {
-            let ivr_end = runtime.context.get_var("ivr_end_reason");
-            let ivr_error = runtime.context.get_var("ivr_last_error");
+        if let Some(ctx) = self.app_runtime.app_context() {
+            let ivr_end = ctx.get_var("ivr_end_reason");
+            let ivr_error = ctx.get_var("ivr_last_error");
 
             let ivr_override = match ivr_end.as_deref() {
                 Some("normal") => {
@@ -7676,7 +7676,7 @@ enum ConstructMode<'a> {
                     self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_HANGUP);
                     Some(CallRecordHangupReason::BySystem)
                 }
-                // NOTE: EndReason::UserHangup serializes as "user_hangup";
+                // NOTE: SessionEndTag::UserHangup serializes as "user_hangup";
                 // "remote_hangup" is a legacy value kept for compatibility.
                 Some("user_hangup") | Some("remote_hangup") => {
                     self.meta.error_code = Some(&crate::call::app::error_catalog::IVR_USER_HANGUP);
@@ -8340,10 +8340,7 @@ enum ConstructMode<'a> {
                 );
             }
             if let Some(leg) = self.meta.rtp_timeout_leg.clone() {
-                meta.insert(
-                    "rtpTimeoutLeg".to_string(),
-                    serde_json::Value::String(leg),
-                );
+                meta.insert("rtpTimeoutLeg".to_string(), serde_json::Value::String(leg));
             }
             // Call trace: ordered timeline of transitions + media plays +
             // terminal outcome. Stored as a real JSON array under `trace`.
@@ -8618,7 +8615,7 @@ impl SipSession {
                     .await
                 {
                     Ok(()) => {
-                                        self.sync_rtp_timeout_pause();
+                        self.sync_rtp_timeout_pause();
                         CommandResult::success()
                     }
                     Err(e) => CommandResult::failure(e.to_string()),
@@ -8765,18 +8762,16 @@ impl SipSession {
                 }
             }
 
-            CallCommand::StopTranscription => {
-                match self.live_transcription.as_mut() {
-                    None => CommandResult::success(),
-                    Some(lt) => {
-                        lt.refs = lt.refs.saturating_sub(1);
-                        if lt.refs == 0 {
-                            self.stop_live_transcription("stopped").await;
-                        }
-                        CommandResult::success()
+            CallCommand::StopTranscription => match self.live_transcription.as_mut() {
+                None => CommandResult::success(),
+                Some(lt) => {
+                    lt.refs = lt.refs.saturating_sub(1);
+                    if lt.refs == 0 {
+                        self.stop_live_transcription("stopped").await;
                     }
+                    CommandResult::success()
                 }
-            }
+            },
 
             CallCommand::Transfer {
                 leg_id,
@@ -8944,25 +8939,23 @@ impl SipSession {
                 }
                 // Notify the running queue app that the agent is ringing so
                 // it can track per-leg state and emit QueueAgentOffered.
-                let agent_uri = self
-                    .legs
-                    .get(&leg_id)
-                    .and_then(|l| l.endpoint.clone());
+                let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
                     let resolved_agent_id = self
                         .extensions
                         .read()
                         .get::<std::collections::HashMap<String, String>>()
                         .and_then(|m| m.get("resolved_agent_id").cloned());
-                    self.app_event_bridge
-                        .send_app_event(crate::call::app::ControllerEvent::Custom(
+                    self.app_event_bridge.send_app_event(
+                        crate::call::app::ControllerEvent::Custom(
                             "agent_ringing".to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
                                 "agent_id": resolved_agent_id,
                             }),
-                        ));
+                        ),
+                    );
                 }
                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                     call_id: self.context.session_id.clone(),
@@ -9017,25 +9010,23 @@ impl SipSession {
                 }
 
                 // Forward to running app before processing so the app can react
-                let agent_uri = self
-                    .legs
-                    .get(&leg_id)
-                    .and_then(|l| l.endpoint.clone());
+                let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
                     let resolved_agent_id = self
                         .extensions
                         .read()
                         .get::<std::collections::HashMap<String, String>>()
                         .and_then(|m| m.get("resolved_agent_id").cloned());
-                    self.app_event_bridge
-                        .send_app_event(crate::call::app::ControllerEvent::Custom(
+                    self.app_event_bridge.send_app_event(
+                        crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
                                 "agent_id": resolved_agent_id,
                             }),
-                        ));
+                        ),
+                    );
                 }
                 if let Some(sdp) = answer_sdp.clone() {
                     self.legs.set_answer(leg_id.clone(), sdp);
@@ -9089,10 +9080,7 @@ impl SipSession {
                     && self.bridge.contains_leg(&LegId::from("caller"))
                     && self.bridge.contains_leg(&leg_id);
                 // Forward to running app before removing the leg (so we can get the URI)
-                let agent_uri = self
-                    .legs
-                    .get(&leg_id)
-                    .and_then(|l| l.endpoint.clone());
+                let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 let event_name = if reason.contains("486") || reason.to_lowercase().contains("busy")
                 {
                     "agent_busy"
@@ -9118,8 +9106,8 @@ impl SipSession {
                         .to_string()
                 };
                 {
-                    self.app_event_bridge
-                        .send_app_event(crate::call::app::ControllerEvent::Custom(
+                    self.app_event_bridge.send_app_event(
+                        crate::call::app::ControllerEvent::Custom(
                             event_name.to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
@@ -9127,7 +9115,8 @@ impl SipSession {
                                 "agent_id": agent_id,
                                 "reason": reason,
                             }),
-                        ));
+                        ),
+                    );
                 }
 
                 // Surface agent rejection / no-answer in the call trace so
@@ -9236,8 +9225,9 @@ impl SipSession {
             // Unhold leg if requested.
             if let Some(leg_id) = &completion.unhold_leg {
                 if leg_id.as_str() == "callee" {
-                    if let Err(e) =
-                        self.propagate_unhold_to_side(crate::media::media_bridge::LegSide::B).await
+                    if let Err(e) = self
+                        .propagate_unhold_to_side(crate::media::media_bridge::LegSide::B)
+                        .await
                     {
                         warn!(session_id = %self.id,
                             session_id = %self.context.session_id,
@@ -9396,8 +9386,7 @@ impl SipSession {
         if cmd.reason == Some(crate::callrecord::CallRecordHangupReason::RtpTimeout) {
             self.meta.rtp_timeout_fired = true;
             if self.meta.error_code.is_none() {
-                self.meta.error_code =
-                    Some(&crate::proxy::proxy_call::error_catalog::RTP_TIMEOUT);
+                self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::RTP_TIMEOUT);
             }
             if let Some(side) = cmd.rtp_timeout_side {
                 if self.meta.rtp_timeout_side.is_none() {
@@ -9685,7 +9674,7 @@ impl SipSession {
         &self,
         leg_id: &LegId,
         mode: rustrtc::TransportMode,
-    ) -> Result<(Arc<dyn MediaPeer>, Box<dyn crate::media::Track>, String)> {
+    ) -> Result<(Arc<dyn MediaPeer>, String)> {
         let track_id = format!("leg-{}-{}", self.id.0, leg_id);
 
         // Create media stream
@@ -9728,15 +9717,9 @@ impl SipSession {
             .map_err(|e| anyhow!("Failed to get local description: {}", e))?;
 
         // Add track to peer (moves track)
-        peer.update_track(Box::new(track), None).await;
+        peer.update_track(track, None).await;
 
-        // Re-create a placeholder track for the return value (the real one is inside peer now)
-        let placeholder_track = crate::media::RtpTrackBuilder::new(track_id)
-            .with_cancel_token(self.cancel_token.child_token())
-            .with_cname(self.server.rtc_cname.clone())
-            .build();
-
-        Ok((peer, Box::new(placeholder_track), sdp))
+        Ok((peer, sdp))
     }
 
     /// Initiate a SIP INVITE for a dynamic leg.
@@ -9766,8 +9749,7 @@ impl SipSession {
             );
             (None, sdp_offer)
         } else {
-            let (peer, _track, sdp_offer) =
-                self.create_leg_peer(leg_id, transport_mode.clone()).await?;
+            let (peer, sdp_offer) = self.create_leg_peer(leg_id, transport_mode.clone()).await?;
             self.legs.set_peer(leg_id.clone(), peer.clone());
             (Some(peer), sdp_offer)
         };
@@ -10069,7 +10051,8 @@ impl crate::call::runtime::LegMediaBridger for SipSession {
         } else {
             self.start_conference_media_bridge(conf_id, leg_id).await?
         };
-        self.legs.set_conference_bridge_handle(leg_id.clone(), handle);
+        self.legs
+            .set_conference_bridge_handle(leg_id.clone(), handle);
         Ok(())
     }
 
@@ -11089,10 +11072,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AppRuntime for DtmfAppRuntime {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         async fn start_app(
             &self,
             _app_name: &str,
@@ -11102,17 +11081,11 @@ mod tests {
             Ok(())
         }
 
-        async fn stop_app(
-            &self,
-            _reason: Option<String>,
-        ) -> crate::call::runtime::AppResult<()> {
+        async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
             Ok(())
         }
 
-        fn inject_event(
-            &self,
-            _event: serde_json::Value,
-        ) -> crate::call::runtime::AppResult<()> {
+        fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
             self.inject_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -11155,9 +11128,10 @@ mod tests {
         assert_eq!(uri.user().as_deref(), Some("1001"));
         assert_eq!(uri.host().to_string(), "10.0.0.1");
         assert!(
-            uri.params
-                .iter()
-                .any(|p| matches!(p, rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Udp))),
+            uri.params.iter().any(|p| matches!(
+                p,
+                rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Udp)
+            )),
             "bare URI transport param must be preserved"
         );
     }
@@ -11169,9 +11143,10 @@ mod tests {
         assert_eq!(uri.user().as_deref(), Some("2itejs7c"));
         assert_eq!(uri.host().to_string(), "k0euab21f8ta.invalid");
         assert!(
-            uri.params
-                .iter()
-                .any(|p| matches!(p, rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Ws))),
+            uri.params.iter().any(|p| matches!(
+                p,
+                rsipstack::sip::Param::Transport(rsipstack::sip::Transport::Ws)
+            )),
             "transport=ws inside the contact URI must be preserved"
         );
     }
@@ -12684,11 +12659,8 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
         let context = CallContext {
             session_id: "video-strip".to_string(),
             dialplan: Arc::new({
-                let mut dp = Dialplan::new(
-                    "video-strip".to_string(),
-                    request,
-                    DialDirection::Inbound,
-                );
+                let mut dp =
+                    Dialplan::new("video-strip".to_string(), request, DialDirection::Inbound);
                 dp.media.video_policy = Some(crate::proxy::routing::VideoPolicy::Strip);
                 dp
             }),
@@ -12953,11 +12925,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             original_request,
             DialDirection::Inbound,
         );
-        dialplan.allow_codecs = vec![
-            CodecType::PCMU,
-            CodecType::PCMA,
-            CodecType::G722,
-        ];
+        dialplan.allow_codecs = vec![CodecType::PCMU, CodecType::PCMA, CodecType::G722];
         let context = CallContext {
             session_id: "callee-codec-answer".to_string(),
             dialplan: Arc::new(dialplan),
@@ -13012,8 +12980,8 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             "configured codecs must control the callee offer"
         );
 
-        let callee = LegInner::new("callee-answer", &LegConfig::rtp_pcmu(), None)
-            .expect("callee leg");
+        let callee =
+            LegInner::new("callee-answer", &LegConfig::rtp_pcmu(), None).expect("callee leg");
         let callee_answer = callee.answer(&callee_offer).await.expect("callee answer");
         let caller_answer = session
             .prepare_caller_answer_from_callee_sdp(
@@ -13027,7 +12995,10 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 
         let caller_answer_profile = MediaNegotiator::extract_leg_profile(&caller_answer);
         assert_eq!(
-            caller_answer_profile.audio.as_ref().map(|codec| codec.codec),
+            caller_answer_profile
+                .audio
+                .as_ref()
+                .map(|codec| codec.codec),
             Some(CodecType::PCMU),
             "caller answer must follow the codec selected in the callee answer"
         );
@@ -13371,7 +13342,9 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
         // The method reads answer first, then caller_offer
         session.media.answer = Some(sendrecv_sdp);
 
-        let hold_sdp = session.generate_sdp_for_side(&LegId::from("caller"), true).expect("hold SDP");
+        let hold_sdp = session
+            .generate_sdp_for_side(&LegId::from("caller"), true)
+            .expect("hold SDP");
         assert!(
             hold_sdp.contains("a=sendonly"),
             "hold SDP must be sendonly, got: {}",
@@ -13382,7 +13355,9 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             "hold SDP must NOT contain sendrecv"
         );
 
-        let unhold_sdp = session.generate_sdp_for_side(&LegId::from("caller"), false).expect("unhold SDP");
+        let unhold_sdp = session
+            .generate_sdp_for_side(&LegId::from("caller"), false)
+            .expect("unhold SDP");
         assert!(
             unhold_sdp.contains("a=sendrecv"),
             "unhold SDP must be sendrecv, got: {}",
@@ -13847,8 +13822,7 @@ max_retries = 3
         use crate::media::leg::{LegConfig, LegInner};
         use crate::media::media_bridge::LegSide;
 
-        let mut mb =
-            crate::media::media_bridge::MediaBridge::new("rtp-timeout-session-test");
+        let mut mb = crate::media::media_bridge::MediaBridge::new("rtp-timeout-session-test");
         mb.replace_leg(
             LegSide::A,
             LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
@@ -13993,7 +13967,10 @@ max_retries = 3
         let result = result.expect("expected a Forward result");
         match result {
             crate::config::RouteResult::Forward(option, _hints) => {
-                assert_eq!(option.destination.as_ref().unwrap().addr.to_string(), "gateway.rustpbx.test:5060");
+                assert_eq!(
+                    option.destination.as_ref().unwrap().addr.to_string(),
+                    "gateway.rustpbx.test:5060"
+                );
                 let cred = option.credential.as_ref().expect("credential stamped");
                 assert_eq!(cred.username, "gwuser");
             }
@@ -14069,7 +14046,10 @@ max_retries = 3
             .await
             .expect("routing should not error when disabled");
         assert_eq!(routed.aor, loc.aor);
-        assert!(routed.destination.is_none(), "no trunk applied when disabled");
+        assert!(
+            routed.destination.is_none(),
+            "no trunk applied when disabled"
+        );
         assert!(hints.is_none());
     }
 
@@ -14102,12 +14082,8 @@ max_retries = 3
         let context = CallContext {
             session_id: "sess-route-on".to_string(),
             dialplan: Arc::new(
-                Dialplan::new(
-                    "sess-route-on".to_string(),
-                    request,
-                    DialDirection::Inbound,
-                )
-                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+                Dialplan::new("sess-route-on".to_string(), request, DialDirection::Inbound)
+                    .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
             ),
             cookie: TransactionCookie::default(),
             start_time: Instant::now(),
@@ -14253,12 +14229,8 @@ max_retries = 3
         let context = CallContext {
             session_id: "sess-hints".to_string(),
             dialplan: Arc::new(
-                Dialplan::new(
-                    "sess-hints".to_string(),
-                    request,
-                    DialDirection::Inbound,
-                )
-                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+                Dialplan::new("sess-hints".to_string(), request, DialDirection::Inbound)
+                    .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
             ),
             cookie: TransactionCookie::default(),
             start_time: Instant::now(),
@@ -14305,7 +14277,11 @@ max_retries = 3
         // Dropping the session must release the tracked lease's permit.
         let limiter_arc = Arc::new(limiter);
         drop(session);
-        assert_eq!(limiter_arc.current(), 0, "routed-leg lease must be released on session drop");
+        assert_eq!(
+            limiter_arc.current(),
+            0,
+            "routed-leg lease must be released on session drop"
+        );
     }
 
     // ── effective_ring_timeout ────────────────────────────────────────────
@@ -14326,8 +14302,8 @@ max_retries = 3
 
     #[tokio::test]
     async fn effective_ring_timeout_precedence_and_disabled() {
-        use crate::proxy::tests::common::create_test_server;
         use crate::config::ProxyConfig;
+        use crate::proxy::tests::common::create_test_server;
 
         let (server, _) = create_test_server().await;
 

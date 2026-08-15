@@ -49,13 +49,7 @@ impl SipSession {
             // entry (one bridged, one orphaned).
             if let Some(peer) = peer {
                 if let Err(e) = self
-                    .start_conference_media_bridge_for_peer(
-                        conf_id_str,
-                        &leg_id,
-                        &peer,
-                        None,
-                        None,
-                    )
+                    .start_conference_media_bridge_for_peer(conf_id_str, &leg_id, &peer, None, None)
                     .await
                 {
                     warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
@@ -84,8 +78,7 @@ impl SipSession {
         let tracks = peer.get_tracks().await;
         let mut audio_sender = None;
         for t in &tracks {
-            let guard = t.lock().await;
-            if let Some(sender) = guard.get_sender() {
+            if let Some(sender) = t.get_sender() {
                 audio_sender = Some(sender);
                 break;
             }

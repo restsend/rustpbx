@@ -13,7 +13,7 @@ use std::time::Duration;
 use rustpbx::call::domain::LegId;
 use rustpbx::call::runtime::{
     ConferenceId, ConferenceManager, ConferenceServer, ConferenceStrategy, LegMediaBridger,
-    MediaPathContext, MediaPathDecision, MediaPathStrategy, SessionId,
+    MediaPathContext, MediaPathDecision, SessionId,
 };
 use rustpbx::media::conference_mixer::AudioFrame;
 
@@ -24,7 +24,10 @@ fn new_manager() -> Arc<ConferenceManager> {
 #[tokio::test]
 async fn test_many_participants_single_conference() {
     let manager = new_manager();
-    manager.create_conference("load-conf".into(), None).await.unwrap();
+    manager
+        .create_conference("load-conf".into(), None)
+        .await
+        .unwrap();
 
     const N: usize = 32;
     let mut txs = Vec::with_capacity(N);
@@ -50,9 +53,9 @@ async fn test_many_participants_single_conference() {
 
     // Every participant should receive non-silent mixed audio of frame size 160.
     for (i, rx) in rxs.iter_mut().enumerate() {
-        let frame = rx.try_recv().unwrap_or_else(|_| {
-            panic!("participant {i} should receive mixed audio under load")
-        });
+        let frame = rx
+            .try_recv()
+            .unwrap_or_else(|_| panic!("participant {i} should receive mixed audio under load"));
         assert!(
             frame.samples.iter().any(|&s| s != 0),
             "participant {i} received silence"
@@ -60,7 +63,10 @@ async fn test_many_participants_single_conference() {
         assert_eq!(frame.samples.len(), 160);
     }
 
-    manager.destroy_conference(&"load-conf".into()).await.unwrap();
+    manager
+        .destroy_conference(&"load-conf".into())
+        .await
+        .unwrap();
     assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
 }
 
@@ -111,7 +117,10 @@ async fn test_many_conferences_no_cross_contamination() {
 #[tokio::test]
 async fn test_rapid_join_leave_no_panics() {
     let manager = new_manager();
-    manager.create_conference("churn-conf".into(), None).await.unwrap();
+    manager
+        .create_conference("churn-conf".into(), None)
+        .await
+        .unwrap();
 
     // Keep one persistent participant so the conference never auto-destroys
     // mid-churn (auto-destroy only fires when the last participant leaves).
@@ -142,7 +151,10 @@ async fn test_rapid_join_leave_no_panics() {
     assert_eq!(leg_map, 1, "keeper should still be in the conference");
     assert_eq!(ch, 1, "keeper channel should remain");
     assert_eq!(out, 1, "keeper output should remain");
-    manager.destroy_conference(&"churn-conf".into()).await.unwrap();
+    manager
+        .destroy_conference(&"churn-conf".into())
+        .await
+        .unwrap();
     assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
 }
 
@@ -151,7 +163,10 @@ async fn test_no_dashmap_leak_after_lifecycle() {
     let manager = new_manager();
     for cycle in 0..10 {
         let cid: ConferenceId = format!("leak-conf-{cycle}").into();
-        manager.create_conference(cid.clone(), Some(10)).await.unwrap();
+        manager
+            .create_conference(cid.clone(), Some(10))
+            .await
+            .unwrap();
         let leg_a = LegId::new(format!("la-{cycle}"));
         let leg_b = LegId::new(format!("lb-{cycle}"));
         manager.add_participant(&cid, leg_a.clone()).await.unwrap();
@@ -203,7 +218,10 @@ async fn test_destroy_within_bounded_time() {
 #[tokio::test]
 async fn test_channel_backpressure_no_oom() {
     let manager = new_manager();
-    manager.create_conference("bp-conf".into(), None).await.unwrap();
+    manager
+        .create_conference("bp-conf".into(), None)
+        .await
+        .unwrap();
 
     let fast = LegId::new("fast-talker");
     let slow = LegId::new("slow-listener");
@@ -218,10 +236,7 @@ async fn test_channel_backpressure_no_oom() {
 
     // Take the slow listener's output so it is NEVER drained (bounded output
     // channel must drop rather than grow).
-    let _slow_output = manager
-        .take_participant_output_rx(&slow)
-        .await
-        .unwrap();
+    let _slow_output = manager.take_participant_output_rx(&slow).await.unwrap();
 
     // Flood the mixer's INPUT channel with try_send. The channel is bounded at
     // capacity 100 — flooding faster than the 20ms mix tick MUST eventually
@@ -331,7 +346,10 @@ async fn test_p2p_to_mcu_transition_latency() {
     // Teardown back to 2 legs is also fast.
     let c2b = strategy_ctx("latency-s", vec![LegId::new("a"), LegId::new("b")]);
     let start = std::time::Instant::now();
-    strategy.leave_multi_party(&c2b, &mut session).await.unwrap();
+    strategy
+        .leave_multi_party(&c2b, &mut session)
+        .await
+        .unwrap();
     let teardown = start.elapsed();
     assert!(
         teardown < Duration::from_millis(100),

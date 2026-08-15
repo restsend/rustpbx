@@ -1,6 +1,8 @@
 use super::common::SessionData;
 use super::config::{ActionNode, EntryAction};
-use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
+use super::provider::{
+    ActionProvider, ProviderContext, ProviderEvent, SessionContext, SessionEndReason,
+};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -735,7 +737,11 @@ impl ActionProvider for ThirdPartyTreeProvider {
         Ok(())
     }
 
-    async fn on_session_end(&self, _reason: &EndReason, _session_id: &str) -> anyhow::Result<()> {
+    async fn on_session_end(
+        &self,
+        _reason: &SessionEndReason,
+        _session_id: &str,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

@@ -53,9 +53,6 @@ impl AlreadyRunningThenOkRuntime {
 
 #[async_trait]
 impl AppRuntime for AlreadyRunningThenOkRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn start_app(
         &self,
         app_name: &str,
@@ -91,7 +88,6 @@ impl AppRuntime for AlreadyRunningThenOkRuntime {
     fn current_app(&self) -> Option<String> {
         None
     }
-
 }
 
 struct AlwaysFailStartRuntime;
@@ -110,9 +106,6 @@ impl StartOnlyRuntime {
 
 #[async_trait]
 impl AppRuntime for AlwaysFailStartRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn start_app(
         &self,
         app_name: &str,
@@ -137,14 +130,10 @@ impl AppRuntime for AlwaysFailStartRuntime {
     fn current_app(&self) -> Option<String> {
         None
     }
-
 }
 
 #[async_trait]
 impl AppRuntime for StartOnlyRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn start_app(
         &self,
         _app_name: &str,
@@ -170,7 +159,6 @@ impl AppRuntime for StartOnlyRuntime {
     fn current_app(&self) -> Option<String> {
         None
     }
-
 }
 
 /// Test runtime that records the name of every app started, so tests can
@@ -193,19 +181,13 @@ impl NameCapturingRuntime {
 
 #[async_trait]
 impl AppRuntime for NameCapturingRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn start_app(
         &self,
         app_name: &str,
         _params: Option<serde_json::Value>,
         _auto_answer: bool,
     ) -> crate::call::runtime::AppResult<()> {
-        self.started_apps
-            .lock()
-            .unwrap()
-            .push(app_name.to_string());
+        self.started_apps.lock().unwrap().push(app_name.to_string());
         Ok(())
     }
 
@@ -224,7 +206,6 @@ impl AppRuntime for NameCapturingRuntime {
     fn current_app(&self) -> Option<String> {
         None
     }
-
 }
 
 async fn build_session(dialplan: Dialplan) -> SipSession {
@@ -641,11 +622,7 @@ async fn test_queue_transfer_without_return_to_ivr_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(
-            "support",
-            None,
-            Vec::new(),
-        )
+        .handle_queue_transfer("support", None, Vec::new())
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -960,12 +937,12 @@ async fn test_leg_failed_in_queue_records_agent_rejection_trace() {
     session.meta.queue_name = Some("support".to_string());
 
     // Mirror the live queue state the queue app publishes via set_queue_name.
-    let runtime = session
+    let ctx = session
         .app_runtime
-        .as_any()
-        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
-        .expect("test session uses DefaultAppRuntime");
-    *runtime.context.queue_name.write().await = Some("support".to_string());
+        .app_context()
+        .expect("test session uses DefaultAppRuntime")
+        .clone();
+    *ctx.queue_name.write().await = Some("support".to_string());
 
     // Mirror custom-target resolution: agent AOR user part in session extensions.
     let mut map = HashMap::new();
@@ -1018,12 +995,12 @@ async fn test_leg_no_answer_in_queue_records_agent_trace() {
     let mut session = build_session(dialplan).await;
     session.meta.queue_name = Some("support".to_string());
 
-    let runtime = session
+    let ctx = session
         .app_runtime
-        .as_any()
-        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
-        .expect("test session uses DefaultAppRuntime");
-    *runtime.context.queue_name.write().await = Some("support".to_string());
+        .app_context()
+        .expect("test session uses DefaultAppRuntime")
+        .clone();
+    *ctx.queue_name.write().await = Some("support".to_string());
 
     let mut map = HashMap::new();
     map.insert("resolved_agent_id".to_string(), "1001".to_string());
@@ -1099,14 +1076,13 @@ async fn test_resolve_final_hangup_reason_no_stale_ivr_end_trace() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
     let mut session = build_session(dialplan).await;
 
-    session.meta.error_code =
-        Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
-    let runtime = session
+    session.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
+    let ctx = session
         .app_runtime
-        .as_any()
-        .downcast_ref::<crate::call::runtime::DefaultAppRuntime>()
-        .expect("test session uses DefaultAppRuntime");
-    runtime.context.set_var("ivr_end_reason", "cancelled");
+        .app_context()
+        .expect("test session uses DefaultAppRuntime")
+        .clone();
+    ctx.set_var("ivr_end_reason", "cancelled");
 
     session.resolve_final_hangup_reason().await;
 
@@ -1158,8 +1134,7 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
         .trace
         .iter()
         .find(|e| {
-            e.kind == crate::call_errors::TraceKind::Queue
-                && e.message == "Entered queue 'support'"
+            e.kind == crate::call_errors::TraceKind::Queue && e.message == "Entered queue 'support'"
         })
         .expect("queue entry must be recorded in the trace");
     assert!(
@@ -1475,7 +1450,10 @@ async fn queue_agent_connect_activates_media_bridge() {
         .create_callee_track(false)
         .await
         .expect("create callee track");
-    assert!(agent_offer.contains("m=audio"), "agent offer must carry audio m-line");
+    assert!(
+        agent_offer.contains("m=audio"),
+        "agent offer must carry audio m-line"
+    );
 
     // Simulate the agent answering: build a scratch RTP/PCMU leg to answer the
     // offer, yielding the agent's answer SDP.
@@ -1484,7 +1462,10 @@ async fn queue_agent_connect_activates_media_bridge() {
         .answer(&agent_offer)
         .await
         .expect("agent answer");
-    assert!(agent_answer.contains("m=audio"), "agent answer must carry audio m-line");
+    assert!(
+        agent_answer.contains("m=audio"),
+        "agent answer must carry audio m-line"
+    );
 
     // Register the dynamic queue-agent leg, then feed LegConnected.
     let agent_leg = LegId::from("queue-agent-1");
@@ -1577,11 +1558,7 @@ async fn queue_no_agents_play_then_hangup_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(
-            "support",
-            None,
-            Vec::new(),
-        )
+        .handle_queue_transfer("support", None, Vec::new())
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -1656,11 +1633,7 @@ async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(
-            "missing-queue",
-            None,
-            Vec::new(),
-        )
+        .handle_queue_transfer("missing-queue", None, Vec::new())
         .await
         .expect("missing-queue fallback should start the queue app (announcement + hangup)");
 
@@ -1702,7 +1675,11 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
     );
     let mut session = build_session(dialplan).await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("voicemail.wav").to_string_lossy().into_owned();
+    let path = dir
+        .path()
+        .join("voicemail.wav")
+        .to_string_lossy()
+        .into_owned();
     let mut bridge = playable_bridge("shutdown-recording").await;
     bridge
         .start_recording(path, 1, true, None)
@@ -1764,11 +1741,7 @@ async fn queue_no_agents_hangup_fallback_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(
-            "support",
-            None,
-            Vec::new(),
-        )
+        .handle_queue_transfer("support", None, Vec::new())
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -1848,9 +1821,6 @@ impl FailQueueStartRuntime {
 
 #[async_trait]
 impl AppRuntime for FailQueueStartRuntime {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn start_app(
         &self,
         app_name: &str,
@@ -1860,10 +1830,7 @@ impl AppRuntime for FailQueueStartRuntime {
         if app_name == "queue" {
             return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
         }
-        self.started_apps
-            .lock()
-            .unwrap()
-            .push(app_name.to_string());
+        self.started_apps.lock().unwrap().push(app_name.to_string());
         Ok(())
     }
 
@@ -1882,7 +1849,6 @@ impl AppRuntime for FailQueueStartRuntime {
     fn current_app(&self) -> Option<String> {
         None
     }
-
 }
 
 #[tokio::test]
@@ -1991,12 +1957,17 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
     let mut session = build_session_on_server(server, dialplan).await;
 
     let agent_leg = LegId::from("queue-agent");
-    session.legs.insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+    session
+        .legs
+        .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
 
     session
-        .execute_command(CallCommand::LegRinging {
-            leg_id: agent_leg.clone(),
-        }, None)
+        .execute_command(
+            CallCommand::LegRinging {
+                leg_id: agent_leg.clone(),
+            },
+            None,
+        )
         .await;
 
     assert_eq!(

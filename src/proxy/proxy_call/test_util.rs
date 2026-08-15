@@ -1,6 +1,6 @@
 #[cfg(test)]
 pub mod tests {
-    use crate::media::Track;
+    use crate::media::RtcTrack;
     use crate::proxy::proxy_call::media_peer::MediaPeer;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -8,7 +8,7 @@ pub mod tests {
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
-    pub type TrackHandle = Arc<tokio::sync::Mutex<Box<dyn Track>>>;
+    pub type TrackHandle = Arc<RtcTrack>;
 
     /// Enhanced MockMediaPeer for comprehensive testing
     pub struct MockMediaPeer {
@@ -51,11 +51,11 @@ pub mod tests {
             self.cancel_token.clone()
         }
 
-        async fn update_track(&self, _track: Box<dyn Track>, _play_id: Option<String>) {
+        async fn update_track(&self, _track: RtcTrack, _play_id: Option<String>) {
             self.update_track_call_count.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn get_tracks(&self) -> Vec<Arc<tokio::sync::Mutex<Box<dyn Track>>>> {
+        async fn get_tracks(&self) -> Vec<TrackHandle> {
             self.get_tracks_call_count.fetch_add(1, Ordering::SeqCst);
             self.tracks.lock().unwrap().clone()
         }
@@ -98,15 +98,9 @@ pub mod tests {
         }
 
         #[tokio::test]
-        async fn test_mock_media_peer_update_track_increments_counter() {
+        async fn test_mock_media_peer_update_track_counter_starts_at_zero() {
             let peer = MockMediaPeer::new();
-
             assert_eq!(peer.update_track_call_count(), 0);
-
-            // update_track takes a Box<dyn Track> - we can't easily create one in test
-            // but we can verify the counter mechanism works via the trait implementation
-            let _ = peer.update_track_call_count();
-            assert_eq!(peer.update_track_call_count(), 0); // not called yet
         }
     }
 }

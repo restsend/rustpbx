@@ -1,9 +1,8 @@
-use crate::call::domain::{CallCommand, LegId};
 use crate::call::cookie::TransactionCookie;
+use crate::call::domain::{CallCommand, LegId};
 
 use crate::call::runtime::ConferenceId;
 use crate::call::runtime::ConferenceManager;
-use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use crate::proxy::server::SipServerRef;
@@ -173,9 +172,7 @@ impl RwiCommandProcessor {
     ///
     /// Returns a guard that removes the subscription and stops the task when
     /// dropped, so a disconnected WebSocket never leaks a listener.
-    pub async fn register_transfer_notify_listener(
-        &self,
-    ) -> Option<TransferNotifyListener> {
+    pub async fn register_transfer_notify_listener(&self) -> Option<TransferNotifyListener> {
         let server = self.sip_server.clone()?;
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::call::domain::ReferNotifyEvent>();
@@ -389,8 +386,12 @@ impl RwiCommandProcessor {
                     .handle_transfer_replace(call_id.clone(), target.clone())
                     .await;
             }
-            RwiCommandPayload::TransferAttended { call_id, target, .. } => {
-                return self.handle_attended_transfer(call_id.clone(), target.clone()).await;
+            RwiCommandPayload::TransferAttended {
+                call_id, target, ..
+            } => {
+                return self
+                    .handle_attended_transfer(call_id.clone(), target.clone())
+                    .await;
             }
             RwiCommandPayload::TransferComplete {
                 call_id,
@@ -627,7 +628,10 @@ impl RwiCommandProcessor {
         ))
     }
 
-    fn handle_session_resume(&self, last_sequence: Option<u64>) -> Result<CommandResult, CommandError> {
+    fn handle_session_resume(
+        &self,
+        last_sequence: Option<u64>,
+    ) -> Result<CommandResult, CommandError> {
         let gw = self.gateway.read();
         let (entries, current_seq) = gw.resume_session(last_sequence);
         let replayed_count = entries.len() as u64;
@@ -960,56 +964,52 @@ impl RwiCommandProcessor {
         let routing_enabled = req
             .route_originated_calls
             .unwrap_or(server.proxy_config.load().route_originated_calls);
-        let routed_hints: Option<crate::config::DialplanHints> = if explicit_trunk
-            || !routing_enabled
-        {
-            None
-        } else {
-            let contact = invite_option.contact.clone();
-            match crate::proxy::proxy_call::sip_session::route_outbound_leg(
-                &server,
-                &destination_uri,
-                &caller_uri,
-                &contact,
-                None,
-                TransactionCookie::default(),
-            )
-            .await
-            {
-                Ok(Some(crate::config::RouteResult::Forward(
-                    routed_option,
-                    hints,
-                ))) => {
-                    invite_option.callee = routed_option.callee.clone();
-                    if let Some(dest) = routed_option.destination.clone() {
-                        invite_option.destination = Some(dest);
+        let routed_hints: Option<crate::config::DialplanHints> =
+            if explicit_trunk || !routing_enabled {
+                None
+            } else {
+                let contact = invite_option.contact.clone();
+                match crate::proxy::proxy_call::sip_session::route_outbound_leg(
+                    &server,
+                    &destination_uri,
+                    &caller_uri,
+                    &contact,
+                    None,
+                    TransactionCookie::default(),
+                )
+                .await
+                {
+                    Ok(Some(crate::config::RouteResult::Forward(routed_option, hints))) => {
+                        invite_option.callee = routed_option.callee.clone();
+                        if let Some(dest) = routed_option.destination.clone() {
+                            invite_option.destination = Some(dest);
+                        }
+                        if let Some(cred) = routed_option.credential.clone() {
+                            invite_option.credential = Some(cred);
+                        }
+                        if let Some(headers) = routed_option.headers.clone() {
+                            invite_option
+                                .headers
+                                .get_or_insert_with(Vec::new)
+                                .extend(headers);
+                        }
+                        tracing::info!(
+                            call_id = %req.call_id,
+                            trunk_dest = ?invite_option.destination,
+                            "originate routed through route table"
+                        );
+                        hints
                     }
-                    if let Some(cred) = routed_option.credential.clone() {
-                        invite_option.credential = Some(cred);
+                    Ok(Some(crate::config::RouteResult::Abort(code, reason))) => {
+                        return Err(CommandError::CommandFailed(format!(
+                            "route aborted for originate: {} {}",
+                            code.code(),
+                            reason.unwrap_or_default()
+                        )));
                     }
-                    if let Some(headers) = routed_option.headers.clone() {
-                        invite_option
-                            .headers
-                            .get_or_insert_with(Vec::new)
-                            .extend(headers);
-                    }
-                    tracing::info!(
-                        call_id = %req.call_id,
-                        trunk_dest = ?invite_option.destination,
-                        "originate routed through route table"
-                    );
-                    hints
+                    _ => None, // NotHandled / Queue / Application / disabled → legacy direct dial
                 }
-                Ok(Some(crate::config::RouteResult::Abort(code, reason))) => {
-                    return Err(CommandError::CommandFailed(format!(
-                        "route aborted for originate: {} {}",
-                        code.code(),
-                        reason.unwrap_or_default()
-                    )));
-                }
-                _ => None, // NotHandled / Queue / Application / disabled → legacy direct dial
-            }
-        };
+            };
 
         let call_id = req.call_id.clone();
         let gateway = self.gateway.clone();
@@ -1059,8 +1059,7 @@ impl RwiCommandProcessor {
                         .get(&cdr_call_id)
                         .map(|entry| {
                             let path = entry.value().clone();
-                            let size =
-                                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             crate::callrecord::CallRecordMedia {
                                 track_id: "mixed".to_string(),
                                 path,
@@ -1118,7 +1117,7 @@ impl RwiCommandProcessor {
                 .with_cancel_token(cancel_token.clone());
             let caller_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
                 Arc::new(caller_media_builder.build());
-            caller_peer.update_track(Box::new(media_track), None).await;
+            caller_peer.update_track(media_track, None).await;
 
             let callee_media_builder = crate::media::MediaStreamBuilder::new()
                 .with_id(format!("{}-callee", call_id))
@@ -1176,7 +1175,7 @@ impl RwiCommandProcessor {
             {
                 let tracks = caller_peer.get_tracks().await;
                 if let Some(first_track) = tracks.first() {
-                    if let Ok(local_sdp) = first_track.lock().await.local_description().await {
+                    if let Ok(local_sdp) = first_track.local_description().await {
                         session.media.caller_offer = Some(local_sdp);
                     }
                 }
@@ -1269,8 +1268,6 @@ impl RwiCommandProcessor {
                         let tracks = caller_peer.get_tracks().await;
                         if let Some(first_track) = tracks.first() {
                             let _ = first_track
-                                .lock()
-                                .await
                                 .set_remote_description(answer, rustrtc::SdpType::Answer)
                                 .await;
                         }
@@ -1433,7 +1430,6 @@ impl RwiCommandProcessor {
             call_id: req.call_id,
         })
     }
-
 
     pub async fn list_calls(&self) -> Vec<CallInfo> {
         self.call_registry
@@ -2675,7 +2671,6 @@ impl RwiCommandProcessor {
         }
         Ok(CommandResult::Success)
     }
-
 }
 
 #[derive(Debug)]
@@ -2750,7 +2745,6 @@ fn default_originate_recorder_path(server: &SipServerRef, call_id: &str) -> Stri
     file.set_extension("wav");
     file.to_string_lossy().to_string()
 }
-
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CallInfo {
@@ -2917,5 +2911,4 @@ impl RwiCommandProcessor {
             ))),
         }
     }
-
 }

@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use crate::call::domain::LegId;
 use crate::call::runtime::{
-    ConferenceId, ConferenceServer, LegMediaBridger, MediaPathContext, MediaPathDecision,
-    MediaPathStrategy, SessionId,
+    ConferenceId, ConferenceServer, LegMediaBridger, MediaPathContext, MediaPathDecision, SessionId,
 };
 
 /// Strategy that switches between P2P direct bridging and conference/MCU
@@ -51,9 +50,9 @@ impl ConferenceStrategy {
     }
 }
 
-#[async_trait::async_trait]
-impl MediaPathStrategy for ConferenceStrategy {
-    fn decide(&self, active_legs: &[LegId]) -> anyhow::Result<MediaPathDecision> {
+impl ConferenceStrategy {
+    /// Decide the desired routing for the given active legs.
+    pub fn decide(&self, active_legs: &[LegId]) -> anyhow::Result<MediaPathDecision> {
         Ok(match active_legs.len() {
             2 => MediaPathDecision::Direct(active_legs.to_vec()),
             0 | 1 => MediaPathDecision::None,
@@ -61,7 +60,7 @@ impl MediaPathStrategy for ConferenceStrategy {
         })
     }
 
-    async fn apply_multi_party(
+    pub async fn apply_multi_party(
         &self,
         ctx: &MediaPathContext,
         bridger: &mut (dyn LegMediaBridger + Send + Sync),
@@ -98,7 +97,7 @@ impl MediaPathStrategy for ConferenceStrategy {
         Ok(())
     }
 
-    async fn leave_multi_party(
+    pub async fn leave_multi_party(
         &self,
         ctx: &MediaPathContext,
         bridger: &mut (dyn LegMediaBridger + Send + Sync),
@@ -117,12 +116,14 @@ impl MediaPathStrategy for ConferenceStrategy {
         Ok(())
     }
 
-    fn shutdown(&self) {
+    pub fn shutdown(&self) {
         // Best-effort teardown of the session's auto conference so the audio
         // mixer and participant registrations don't leak when the session is
         // dropped without a clean `leave_multi_party`. Runs on the current
         // tokio runtime if one is available; no-ops during runtime teardown.
-        let Some(sid) = self.session_id.as_ref() else { return };
+        let Some(sid) = self.session_id.as_ref() else {
+            return;
+        };
         let conf_id = self.conference_id_for(&SessionId::from(sid.clone()));
         let server = self.server.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -189,13 +190,17 @@ mod tests {
         )));
         let s = ConferenceStrategy::new(server);
         assert_eq!(s.decide(&[]).unwrap(), MediaPathDecision::None);
-        assert_eq!(s.decide(&[LegId::new("a")]).unwrap(), MediaPathDecision::None);
+        assert_eq!(
+            s.decide(&[LegId::new("a")]).unwrap(),
+            MediaPathDecision::None
+        );
         assert_eq!(
             s.decide(&[LegId::new("a"), LegId::new("b")]).unwrap(),
             MediaPathDecision::Direct(vec![LegId::new("a"), LegId::new("b")])
         );
         assert_eq!(
-            s.decide(&[LegId::new("a"), LegId::new("b"), LegId::new("c")]).unwrap(),
+            s.decide(&[LegId::new("a"), LegId::new("b"), LegId::new("c")])
+                .unwrap(),
             MediaPathDecision::Conference
         );
     }
@@ -221,7 +226,13 @@ mod tests {
             .unwrap();
         assert_eq!(conf.participant_count(), 3);
         assert_eq!(
-            bridger.bridges.as_ref().unwrap().get(&conf_id).unwrap().value(),
+            bridger
+                .bridges
+                .as_ref()
+                .unwrap()
+                .get(&conf_id)
+                .unwrap()
+                .value(),
             &3
         );
     }
@@ -244,7 +255,13 @@ mod tests {
 
         let conf_id = s.conference_id_for(&SessionId::from("session-2"));
         assert_eq!(
-            bridger.bridges.as_ref().unwrap().get(&conf_id).unwrap().value(),
+            bridger
+                .bridges
+                .as_ref()
+                .unwrap()
+                .get(&conf_id)
+                .unwrap()
+                .value(),
             &3
         );
     }

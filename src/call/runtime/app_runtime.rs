@@ -42,8 +42,12 @@ pub type AppResult<T> = Result<T, AppRuntimeError>;
 /// Implementations manage the actual app instance and event routing.
 #[async_trait]
 pub trait AppRuntime: Send + Sync {
-    /// Downcast to Any for accessing implementation-specific state.
-    fn as_any(&self) -> &dyn std::any::Any;
+    /// Access the shared application context (variables, pending app state).
+    /// Returns `None` for runtimes without a context; consumers fall back to
+    /// their default behavior instead of downcasting.
+    fn app_context(&self) -> Option<&std::sync::Arc<crate::call::app::ApplicationContext>> {
+        None
+    }
 
     /// Start an application
     ///

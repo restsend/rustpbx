@@ -48,33 +48,3 @@ pub trait LegMediaBridger: Send + Sync {
     async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> anyhow::Result<()>;
     async fn unbridge(&mut self, conf_id: &str, leg_id: &LegId) -> anyhow::Result<()>;
 }
-
-/// Strategy that decides and manages media routing for a session.
-#[async_trait::async_trait]
-pub trait MediaPathStrategy: Send + Sync {
-    /// Decide the desired routing for the given active legs.
-    /// An `Err` means the strategy cannot route this leg set; callers should
-    /// fall back to no routing (stop all bridges) and surface a warning.
-    fn decide(&self, active_legs: &[LegId]) -> anyhow::Result<MediaPathDecision>;
-
-    /// Apply multi-party routing: bridge all active legs into a conference.
-    /// The strategy is responsible for creating/ensuring the conference and
-    /// bridging each active leg via `bridger`.
-    async fn apply_multi_party(
-        &self,
-        ctx: &MediaPathContext,
-        bridger: &mut (dyn LegMediaBridger + Send + Sync),
-    ) -> anyhow::Result<()>;
-
-    /// Tear down any active multi-party routing.
-    async fn leave_multi_party(
-        &self,
-        ctx: &MediaPathContext,
-        bridger: &mut (dyn LegMediaBridger + Send + Sync),
-    ) -> anyhow::Result<()>;
-
-    /// Release resources owned by the strategy (session shutdown).
-    fn shutdown(&self);
-}
-
-

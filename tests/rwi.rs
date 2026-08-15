@@ -17,3 +17,6 @@ mod leg_timeline_tests;
 mod resume_e2e;
 #[path = "rwi/server.rs"]
 mod server;
+
+#[path = "rwi/wire_format.rs"]
+mod wire_format;

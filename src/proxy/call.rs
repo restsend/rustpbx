@@ -5,7 +5,7 @@ use crate::call::{
     Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
-use crate::media::{Track, recorder::RecorderOption};
+use crate::media::recorder::RecorderOption;
 use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::CallSessionBuilder;
@@ -504,7 +504,11 @@ impl CallModule {
                 .with_ice_servers(rtp.ice_servers.clone())
                 .with_enable_latching(self.inner.server.proxy_config.load().enable_latching)
                 .with_probation_max_packets(
-                    self.inner.server.proxy_config.load().latching_probation_max_packets,
+                    self.inner
+                        .server
+                        .proxy_config
+                        .load()
+                        .latching_probation_max_packets,
                 )
                 .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
         };
@@ -860,7 +864,9 @@ impl CallModule {
                 DialStrategy::Sequential(l) | DialStrategy::Parallel(l) => l.iter().collect(),
             };
             let internal = callee_is_same_realm
-                || locs.iter().any(|t| t.registered_aor.is_some() || t.home_proxy.is_some());
+                || locs
+                    .iter()
+                    .any(|t| t.registered_aor.is_some() || t.home_proxy.is_some());
             if internal {
                 Some(crate::proxy::routing::HeaderPassthrough::all())
             } else if let Some(target) = locs.first().copied() {
