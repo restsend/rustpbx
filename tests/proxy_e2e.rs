@@ -38,3 +38,6 @@ mod test_session_hook_e2e;
 
 #[path = "proxy_e2e/test_cluster_home_proxy_e2e.rs"]
 mod test_cluster_home_proxy_e2e;
+
+#[path = "proxy_e2e/test_cluster_session_registry.rs"]
+mod test_cluster_session_registry;

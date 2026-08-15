@@ -1193,6 +1193,10 @@ impl RwiCommandProcessor {
             };
             registry.upsert(entry, handle.clone());
 
+            // Publish the originated session's owning node in the cluster
+            // session registry (no-op backend in single-node mode).
+            session.register_in_session_registry().await;
+
             // Callee dialog-state channel — fed after the INVITE is answered.
             let (callee_evt_tx, callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
             session.callee_event_tx = Some(callee_evt_tx);

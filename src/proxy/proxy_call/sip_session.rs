@@ -339,6 +339,11 @@ pub struct SipSession {
 
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
+    /// Cluster session-registry RAII guard: registers this session's owning
+    /// node at birth and unregisters on drop (any exit path). `None` when the
+    /// registry is a no-op backend (single-node) or registration failed.
+    session_registry_guard: Option<crate::call::runtime::SessionGuard>,
+
     /// This session's own handle (used to send commands back into the session
     /// from spawned tasks, e.g. restore the media route after playback).
     pub handle: SipSessionHandle,
@@ -1466,6 +1471,7 @@ enum ConstructMode<'a> {
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
+            session_registry_guard: None,
             dtmf_digits: Vec::new(),
             active_plays: std::collections::HashMap::new(),
             live_transcription: None,
@@ -1631,6 +1637,10 @@ enum ConstructMode<'a> {
         server
             .active_call_registry
             .register_dialog(server_dialog.id().to_string(), handle.clone());
+
+        // Publish this session's owning node in the cluster session registry
+        // (no-op backend in single-node mode).
+        session.register_in_session_registry().await;
 
         // Emit CallIncoming event via RWI gateway if configured.
         let incoming_sip_headers = {
@@ -8464,6 +8474,45 @@ enum ConstructMode<'a> {
 }
 
 impl SipSession {
+    /// Register this session in the cluster-wide session registry (which node
+    /// owns this call). Called once after the local handle registration; the
+    /// RAII [`SessionGuard`] unregisters on drop. Failure is non-fatal — the
+    /// registry is a routing aid, not a call-state store.
+    pub async fn register_in_session_registry(&mut self) {
+        if self.session_registry_guard.is_some() {
+            return;
+        }
+        let node_id = self
+            .server
+            .cluster_self_addr
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "local".to_string());
+        let info = crate::call::runtime::SessionInfo {
+            call_id: self.id.to_string(),
+            node_id,
+            caller: self.context.original_caller.clone(),
+            callee: self.context.original_callee.clone(),
+            direction: self.context.dialplan.direction.to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        match crate::call::runtime::SessionGuard::register(
+            self.server.session_registry.clone(),
+            info,
+        )
+        .await
+        {
+            Ok(guard) => self.session_registry_guard = Some(guard),
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %self.id,
+                    error = %e,
+                    "session registry registration failed (cluster routing degraded)"
+                );
+            }
+        }
+    }
+
     pub async fn execute_command(
         &mut self,
         command: CallCommand,

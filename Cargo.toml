@@ -282,6 +282,18 @@ tower = { version = "0.5", features = ["util"] }
 serde_urlencoded = "0.7"
 ctor = "1.0.7"
 metrics-util = "0.20.4"
+sea-orm = { version = "2", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "sqlx-mysql",
+    "sqlx-postgres",
+] }
+sea-orm-migration = { version = "2", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "sqlx-mysql",
+    "sqlx-postgres",
+] }
 
 [build-dependencies]
 chrono = "0.4"

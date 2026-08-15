@@ -380,48 +380,24 @@ async fn forward_command_to_peers(
     if peers.is_empty() {
         return None;
     }
+    let Some(server) = state.sip_server() else {
+        return None;
+    };
 
     let ami_path = get_ami_path(state);
-    let body = json!({
-        "session_id": session_id,
-        "payload": payload,
-    });
-
     let client = state.http_client().clone();
-    let mut handles: Vec<tokio::task::JoinHandle<Option<Response>>> = Vec::new();
+    let body = serde_json::to_value(payload).ok()?;
 
-    for peer in &peers {
-        let url = format!(
-            "http://{}:{}{}/cluster/dispatch_command",
-            peer.addr, peer.ami_port, ami_path
-        );
-        let client = client.clone();
-        let body = body.clone();
-
-        handles.push(tokio::spawn(async move {
-            let opts = crate::http_util::HttpFetchOptions::new()
-                .with_timeout(std::time::Duration::from_secs(CLUSTER_FORWARD_TIMEOUT_SECS));
-            let req = client.post(&url).json(&body);
-            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_value = resp.json::<serde_json::Value>().await.ok()?;
-                    Some((status, Json(body_value)).into_response())
-                }
-                Err(_) => None,
-            }
-        }));
-    }
-
-    for handle in handles {
-        match handle.await {
-            Ok(Some(resp)) => return Some(resp),
-            Ok(None) => continue,
-            Err(_) => continue,
-        }
-    }
-
-    None
+    crate::proxy::cluster_forward::dispatch_call_command(
+        &server.session_registry,
+        &peers,
+        &ami_path,
+        &client,
+        session_id,
+        &body,
+    )
+    .await
+    .map(|(status, body)| (status, Json(body)).into_response())
 }
 
 #[cfg(feature = "commerce")]
@@ -430,42 +406,22 @@ async fn query_session_from_peers(state: &ConsoleState, session_id: &str) -> Opt
     if peers.is_empty() {
         return None;
     }
+    let Some(server) = state.sip_server() else {
+        return None;
+    };
 
     let ami_path = get_ami_path(state);
     let client = state.http_client().clone();
-    let mut handles: Vec<tokio::task::JoinHandle<Option<Response>>> = Vec::new();
 
-    for peer in &peers {
-        let url = format!(
-            "http://{}:{}{}/cluster/show_session/{}",
-            peer.addr, peer.ami_port, ami_path, session_id
-        );
-        let client = client.clone();
-
-        handles.push(tokio::spawn(async move {
-            let opts = crate::http_util::HttpFetchOptions::new()
-                .with_timeout(std::time::Duration::from_secs(CLUSTER_FORWARD_TIMEOUT_SECS));
-            let req = client.get(&url);
-            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_value = resp.json::<serde_json::Value>().await.ok()?;
-                    Some((status, Json(body_value)).into_response())
-                }
-                Err(_) => None,
-            }
-        }));
-    }
-
-    for handle in handles {
-        match handle.await {
-            Ok(Some(resp)) => return Some(resp),
-            Ok(None) => continue,
-            Err(_) => continue,
-        }
-    }
-
-    None
+    crate::proxy::cluster_forward::query_session(
+        &server.session_registry,
+        &peers,
+        &ami_path,
+        &client,
+        session_id,
+    )
+    .await
+    .map(|(status, body)| (status, Json(body)).into_response())
 }
 
 #[cfg(feature = "commerce")]

@@ -72,6 +72,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             "/cluster/show_session/{session_id}",
             get(cluster_show_session_handler),
         )
+        .route(
+            "/cluster/session_owner/{call_id}",
+            get(cluster_session_owner_handler),
+        )
         .route("/cluster/list_calls", get(cluster_list_calls_handler))
         // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
         .route("/cluster/event/presence", post(cluster_event_presence))
@@ -1689,6 +1693,30 @@ async fn cluster_show_session_handler(
         }
     }))
     .into_response()
+}
+
+/// GET /cluster/session_owner/{call_id} — which cluster node owns this call?
+///
+/// Answers from the session registry (`"addr:sip_port"`, matching the
+/// `[cluster].peers` entries) so supervisor / RWI / load-balancer callers
+/// can redirect call-scoped operations to the hosting node. `local` means
+/// the call is hosted on this node (or single-node mode); 404 when the
+/// registry has no record.
+#[cfg(feature = "commerce")]
+async fn cluster_session_owner_handler(
+    State(state): State<AppState>,
+    Path(call_id): Path<String>,
+) -> Response {
+    let session_registry = state.sip_server().inner.session_registry.clone();
+    match session_registry.lookup_owner(&call_id).await {
+        Some(owner) => Json(serde_json::json!({ "data": { "call_id": call_id, "node": owner } }))
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "message": "No registry record for call" })),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(feature = "commerce")]

@@ -13,6 +13,9 @@ pub mod auth;
 pub mod call;
 pub mod capability_headers;
 pub mod cluster_event;
+
+#[cfg(feature = "commerce")]
+pub mod cluster_forward;
 pub mod cluster_sync;
 pub mod data;
 pub mod dialog_auth_cache;
