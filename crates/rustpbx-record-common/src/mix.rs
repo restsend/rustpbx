@@ -21,7 +21,9 @@ pub fn mix_pcm(a: &[u8], b: &[u8], mode: MixMode) -> Vec<u8> {
         let sa = i16::from_le_bytes([a[i], a[i + 1]]);
         let sb = i16::from_le_bytes([b[i], b[i + 1]]);
         let mixed: i16 = match mode {
-            MixMode::ClampSum => (i32::from(sa) + i32::from(sb)).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            MixMode::ClampSum => {
+                (i32::from(sa) + i32::from(sb)).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            }
             MixMode::Average => ((i32::from(sa) + i32::from(sb)) / 2) as i16,
         };
         out.extend_from_slice(&mixed.to_le_bytes());
@@ -62,8 +64,14 @@ mod tests {
 
     #[test]
     fn mix_average_and_clamp() {
-        let a: Vec<u8> = [1000i16, 2000i16].iter().flat_map(|s| s.to_le_bytes()).collect();
-        let b: Vec<u8> = [3000i16, 32000i16].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let a: Vec<u8> = [1000i16, 2000i16]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let b: Vec<u8> = [3000i16, 32000i16]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
         let avg = mix_pcm(&a, &b, MixMode::Average);
         assert_eq!(i16::from_le_bytes([avg[0], avg[1]]), 2000);
         assert_eq!(i16::from_le_bytes([avg[2], avg[3]]), 17000);

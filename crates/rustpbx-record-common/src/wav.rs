@@ -86,9 +86,19 @@ mod tests {
 
     #[test]
     fn pcm_header_fields() {
-        let h = wav_header(&WavSpec { codec: None, sample_rate: 16000, channels: 2 }, 1000);
+        let h = wav_header(
+            &WavSpec {
+                codec: None,
+                sample_rate: 16000,
+                channels: 2,
+            },
+            1000,
+        );
         let (tag, ch, rate, br, align, bits) = fields(&h);
-        assert_eq!((tag, ch, rate, br, align, bits), (FORMAT_PCM, 2, 16000, 64000, 4, 16));
+        assert_eq!(
+            (tag, ch, rate, br, align, bits),
+            (FORMAT_PCM, 2, 16000, 64000, 4, 16)
+        );
         assert_eq!(&h[0..4], b"RIFF");
         assert_eq!(&h[8..12], b"WAVE");
         assert_eq!(&h[36..40], b"data");
@@ -98,14 +108,31 @@ mod tests {
 
     #[test]
     fn pcmu_header_fields() {
-        let h = wav_header(&WavSpec { codec: Some(CodecType::PCMU), sample_rate: 8000, channels: 1 }, 8000);
+        let h = wav_header(
+            &WavSpec {
+                codec: Some(CodecType::PCMU),
+                sample_rate: 8000,
+                channels: 1,
+            },
+            8000,
+        );
         let (tag, ch, rate, br, align, bits) = fields(&h);
-        assert_eq!((tag, ch, rate, br, align, bits), (FORMAT_PCMU, 1, 8000, 8000, 1, 8));
+        assert_eq!(
+            (tag, ch, rate, br, align, bits),
+            (FORMAT_PCMU, 1, 8000, 8000, 1, 8)
+        );
     }
 
     #[test]
     fn g722_header_matches_reader_expectations() {
-        let h = wav_header(&WavSpec { codec: Some(CodecType::G722), sample_rate: 8000, channels: 1 }, 0);
+        let h = wav_header(
+            &WavSpec {
+                codec: Some(CodecType::G722),
+                sample_rate: 8000,
+                channels: 1,
+            },
+            0,
+        );
         let (tag, _, _, br, _, bits) = fields(&h);
         assert_eq!(tag, FORMAT_G722);
         assert_eq!(bits, 8, "reader accepts 0 or 8; players prefer 8");
@@ -114,7 +141,14 @@ mod tests {
 
     #[test]
     fn g729_header_matches_reader_expectations() {
-        let h = wav_header(&WavSpec { codec: Some(CodecType::G729), sample_rate: 8000, channels: 1 }, 0);
+        let h = wav_header(
+            &WavSpec {
+                codec: Some(CodecType::G729),
+                sample_rate: 8000,
+                channels: 1,
+            },
+            0,
+        );
         let (tag, _, _, br, align, bits) = fields(&h);
         assert_eq!(tag, FORMAT_G729);
         assert_eq!(bits, 8, "reader requires 8 bits for G.729");
