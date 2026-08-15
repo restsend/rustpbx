@@ -72,55 +72,9 @@ impl CodecWavWriter {
         channels: u16,
         data_size: u32,
     ) -> [u8; 44] {
-        let mut header = [0u8; 44];
-        header[0..4].copy_from_slice(b"RIFF");
-        let file_size = 36 + data_size;
-        header[4..8].copy_from_slice(&file_size.to_le_bytes());
-        header[8..12].copy_from_slice(b"WAVE");
-        header[12..16].copy_from_slice(b"fmt ");
-        header[16..20].copy_from_slice(&16u32.to_le_bytes());
-
-        let format_tag: u16 = match codec {
-            Some(CodecType::PCMU) => 7,
-            Some(CodecType::PCMA) => 6,
-            Some(CodecType::G722) => 0x0065,
-            Some(CodecType::G729) => 0x0083,
-            None => 1,
-            _ => 1,
-        };
-
-        header[20..22].copy_from_slice(&format_tag.to_le_bytes());
-        header[22..24].copy_from_slice(&channels.to_le_bytes());
-        header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
-
-        let (bits_per_sample, byte_rate, block_align) = match codec {
-            Some(CodecType::PCMU) | Some(CodecType::PCMA) => {
-                let bps = 8;
-                let br = sample_rate * channels as u32 * (bps as u32 / 8);
-                let ba = channels * (bps / 8);
-                (bps, br, ba)
-            }
-            Some(CodecType::G722) => {
-                let bps = 8;
-                let br = sample_rate * channels as u32 / 2;
-                let ba = channels;
-                (bps, br, ba)
-            }
-            Some(CodecType::G729) => (0u16, 1000 * channels as u32, 10 * channels),
-            _ => {
-                let bps = 16;
-                let br = sample_rate * channels as u32 * (bps as u32 / 8);
-                let ba = channels * (bps / 8);
-                (bps, br, ba)
-            }
-        };
-
-        header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
-        header[32..34].copy_from_slice(&block_align.to_le_bytes());
-        header[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
-        header[36..40].copy_from_slice(b"data");
-        header[40..44].copy_from_slice(&data_size.to_le_bytes());
-
-        header
+        rustpbx_record_common::wav_header(
+            &rustpbx_record_common::WavSpec { codec, sample_rate, channels },
+            data_size,
+        )
     }
 }

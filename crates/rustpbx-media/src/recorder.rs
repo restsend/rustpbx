@@ -775,14 +775,11 @@ impl Recorder {
 
     fn interleave(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
         let (_, bytes_per_block) = self.block_info();
-        let len = data_a.len().min(data_b.len());
-        let mut interleaved = Vec::with_capacity(len * 2);
-        let num_blocks = len / bytes_per_block;
-        for i in 0..num_blocks {
-            interleaved.extend_from_slice(&data_a[i * bytes_per_block..(i + 1) * bytes_per_block]);
-            interleaved.extend_from_slice(&data_b[i * bytes_per_block..(i + 1) * bytes_per_block]);
-        }
-        Ok(interleaved)
+        Ok(rustpbx_record_common::interleave_blocks(
+            data_a,
+            data_b,
+            bytes_per_block,
+        ))
     }
 
     fn mix(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
@@ -832,7 +829,7 @@ impl Recorder {
     }
 }
 
-pub use rustpbx_sipflow::wav_utils::DtmfGenerator;
+pub use rustpbx_record_common::DtmfGenerator;
 
 #[cfg(test)]
 mod tests {

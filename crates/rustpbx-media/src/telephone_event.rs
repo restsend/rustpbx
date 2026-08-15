@@ -1,6 +1,6 @@
 /// RFC 4733 telephone-event code to character mapping.
 pub fn dtmf_code_to_char(code: u8) -> Option<char> {
-    rustpbx_sipflow::wav_utils::dtmf_code_to_char(code)
+    rustpbx_record_common::dtmf_code_to_char(code)
 }
 
 /// RFC 4733 character to telephone-event code mapping.
@@ -23,7 +23,7 @@ pub fn dtmf_char_to_code(c: char) -> Option<u8> {
 /// "End of event" + "Reserved" bits in byte 1 are not both set in a way that
 /// real audio would produce.
 pub fn looks_like_dtmf_payload(payload: &[u8]) -> bool {
-    rustpbx_sipflow::wav_utils::looks_like_dtmf_payload(payload)
+    rustpbx_record_common::looks_like_dtmf_payload(payload)
 }
 
 /// Build an RFC 4733 telephone-event payload for one DTMF digit.

@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use audio_codec::{CodecType, Decoder, Resampler, create_decoder, create_encoder};
+use audio_codec::{CodecType, create_encoder};
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Cursor, Seek, SeekFrom, Write},
@@ -7,15 +7,8 @@ use std::{
 
 use crate::{SipFlowItem, SipFlowMsgType, extract_rtp_addr, extract_sdp};
 
-pub fn dtmf_code_to_char(code: u8) -> Option<char> {
-    match code {
-        0..=9 => Some((b'0' + code) as char),
-        10 => Some('*'),
-        11 => Some('#'),
-        12..=15 => Some((b'A' + (code - 12)) as char),
-        _ => None,
-    }
-}
+pub use rustpbx_record_common::dtmf::DtmfGenerator;
+pub use rustpbx_record_common::dtmf::{dtmf_code_to_char, looks_like_dtmf_payload};
 
 struct CodecInfo {
     payload_type: u8,
@@ -37,14 +30,9 @@ fn extract_codecs_from_sdp(sdp: &str) -> Vec<CodecInfo> {
                             .get(1)
                             .and_then(|s| s.parse::<u32>().ok())
                             .unwrap_or(8000);
-                        let codec = match *name {
-                            "PCMU" => CodecType::PCMU,
-                            "PCMA" => CodecType::PCMA,
-                            "G722" => CodecType::G722,
-                            "G729" => CodecType::G729,
-                            "opus" | "OPUS" => CodecType::Opus,
-                            "telephone-event" => CodecType::TelephoneEvent,
-                            _ => continue,
+                        let Some(codec) = rustpbx_record_common::codec_from_rtpmap_name(name)
+                        else {
+                            continue;
                         };
                         codecs.push(CodecInfo {
                             payload_type: pt,
@@ -59,58 +47,8 @@ fn extract_codecs_from_sdp(sdp: &str) -> Vec<CodecInfo> {
     codecs
 }
 
-/// Dual-tone DTMF synthesizer (standard 697–941 Hz × 1209–1633 Hz matrix).
-pub struct DtmfGenerator {
-    sample_rate: u32,
-}
 
-impl DtmfGenerator {
-    pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate }
-    }
-
-    pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
-        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
-        self.generate_samples(digit, num_samples)
-    }
-
-    pub fn generate_samples(&self, digit: char, num_samples: usize) -> Vec<i16> {
-        let freqs = match digit {
-            '1' => (697.0, 1209.0),
-            '2' => (697.0, 1336.0),
-            '3' => (697.0, 1477.0),
-            '4' => (770.0, 1209.0),
-            '5' => (770.0, 1336.0),
-            '6' => (770.0, 1477.0),
-            '7' => (852.0, 1209.0),
-            '8' => (852.0, 1336.0),
-            '9' => (852.0, 1477.0),
-            '*' => (941.0, 1209.0),
-            '0' => (941.0, 1336.0),
-            '#' => (941.0, 1477.0),
-            'A' => (697.0, 1633.0),
-            'B' => (770.0, 1633.0),
-            'C' => (852.0, 1633.0),
-            'D' => (941.0, 1633.0),
-            _ => return Vec::new(),
-        };
-        let mut samples = Vec::with_capacity(num_samples);
-        for i in 0..num_samples {
-            let t = i as f32 / self.sample_rate as f32;
-            let s1 = (2.0 * std::f32::consts::PI * freqs.0 * t).sin();
-            let s2 = (2.0 * std::f32::consts::PI * freqs.1 * t).sin();
-            let s = (s1 + s2) / 2.0;
-            samples.push((s * 32767.0) as i16);
-        }
-        samples
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PayloadDescriptor {
-    codec: CodecType,
-    clock_rate: u32,
-}
+pub(crate) use rustpbx_record_common::PayloadDescriptor;
 
 pub(crate) type PayloadTypeMap = HashMap<u8, PayloadDescriptor>;
 pub(crate) type LegPayloadTypeMap = HashMap<i32, PayloadTypeMap>;
@@ -125,32 +63,7 @@ struct RtpPacketView<'a> {
 }
 
 fn default_payload_descriptor(pt: u8) -> PayloadDescriptor {
-    match pt {
-        0 => PayloadDescriptor {
-            codec: CodecType::PCMU,
-            clock_rate: 8000,
-        },
-        8 => PayloadDescriptor {
-            codec: CodecType::PCMA,
-            clock_rate: 8000,
-        },
-        9 => PayloadDescriptor {
-            codec: CodecType::G722,
-            clock_rate: 8000,
-        },
-        18 => PayloadDescriptor {
-            codec: CodecType::G729,
-            clock_rate: 8000,
-        },
-        96 | 111 => PayloadDescriptor {
-            codec: CodecType::Opus,
-            clock_rate: 48000,
-        },
-        _ => PayloadDescriptor {
-            codec: CodecType::PCMU,
-            clock_rate: 8000,
-        },
-    }
+    rustpbx_record_common::default_payload_descriptor(pt)
 }
 
 fn parse_borrowed_rtp_packet(leg: i32, capture_ts: u64, raw: &[u8]) -> Option<RtpPacketView<'_>> {
@@ -321,13 +234,6 @@ fn parse_dtmf_payload(payload: &[u8], clock_rate: u32) -> Option<(char, u32)> {
     Some((digit, duration_ms.max(20)))
 }
 
-pub fn looks_like_dtmf_payload(payload: &[u8]) -> bool {
-    if payload.len() != 4 {
-        return false;
-    }
-
-    matches!(payload[0], 0..=15) && (payload[1] & 0x40) == 0
-}
 
 fn encode_dtmf_tone(
     digit: char,
@@ -345,12 +251,9 @@ fn encode_dtmf_tone(
 }
 
 fn silence_chunk(target_codec: Option<CodecType>, step_samples: u32) -> Vec<u8> {
-    match target_codec {
-        Some(CodecType::PCMU) => vec![0x7F; step_samples as usize],
-        Some(CodecType::PCMA) => vec![0xD5; step_samples as usize],
-        None => vec![0u8; (step_samples * 2) as usize],
-        _ => vec![0u8; step_samples as usize],
-    }
+    // Zero-PCM encoded by the codec encoder: PCMU → 0x7F, PCMA → 0xD5,
+    // byte-for-byte identical to the previous hand-rolled table.
+    rustpbx_record_common::silence_chunk(target_codec, step_samples)
 }
 
 fn insert_chunked(
@@ -370,19 +273,7 @@ fn insert_chunked(
 }
 
 fn mix_pcm_chunks(audio_chunk: &[u8], dtmf_chunk: &[u8]) -> Vec<u8> {
-    let sample_count = audio_chunk.len().min(dtmf_chunk.len()) / 2;
-    let mut mixed = Vec::with_capacity(sample_count * 2);
-
-    for i in 0..sample_count {
-        let offset = i * 2;
-        let audio = i16::from_le_bytes([audio_chunk[offset], audio_chunk[offset + 1]]);
-        let dtmf = i16::from_le_bytes([dtmf_chunk[offset], dtmf_chunk[offset + 1]]);
-        let sum = audio as i32 + dtmf as i32;
-        let clamped = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        mixed.extend_from_slice(&clamped.to_le_bytes());
-    }
-
-    mixed
+    rustpbx_record_common::mix_pcm(audio_chunk, dtmf_chunk, rustpbx_record_common::MixMode::ClampSum)
 }
 
 pub fn write_wav_header<W: Write + Seek>(
@@ -393,55 +284,10 @@ pub fn write_wav_header<W: Write + Seek>(
     data_size: u32,
 ) -> Result<()> {
     writer.seek(SeekFrom::Start(0))?;
-
-    let mut header = [0u8; 44];
-    header[0..4].copy_from_slice(b"RIFF");
-    let file_size = 36 + data_size;
-    header[4..8].copy_from_slice(&file_size.to_le_bytes());
-    header[8..12].copy_from_slice(b"WAVE");
-    header[12..16].copy_from_slice(b"fmt ");
-    header[16..20].copy_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-
-    let format_tag: u16 = match codec {
-        Some(CodecType::PCMU) => 7,      // mu-law
-        Some(CodecType::PCMA) => 6,      // a-law
-        Some(CodecType::G722) => 0x0065, // G.722
-        Some(CodecType::G729) => 0x0083, // G.729
-        None => 1,                       // PCM
-        _ => 1,                          // Default to PCM
-    };
-
-    header[20..22].copy_from_slice(&format_tag.to_le_bytes());
-    header[22..24].copy_from_slice(&channels.to_le_bytes());
-    header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
-
-    let (bits_per_sample, byte_rate, block_align) = match codec {
-        Some(CodecType::PCMU) | Some(CodecType::PCMA) => {
-            let bps = 8;
-            let br = sample_rate * channels as u32 * (bps as u32 / 8);
-            let ba = channels * (bps / 8);
-            (bps, br, ba)
-        }
-        Some(CodecType::G722) => {
-            let bps = 0; // Often 0 for compressed
-            let br = 8000 * channels as u32; // 64kbps per channel
-            let ba = channels;
-            (bps, br, ba)
-        }
-        _ => {
-            let bps = 16;
-            let br = sample_rate * channels as u32 * (bps as u32 / 8);
-            let ba = channels * (bps / 8);
-            (bps, br, ba)
-        }
-    };
-
-    header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
-    header[32..34].copy_from_slice(&block_align.to_le_bytes());
-    header[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
-    header[36..40].copy_from_slice(b"data");
-    header[40..44].copy_from_slice(&data_size.to_le_bytes());
-
+    let header = rustpbx_record_common::wav_header(
+        &rustpbx_record_common::WavSpec { codec, sample_rate, channels },
+        data_size,
+    );
     writer.write_all(&header)?;
     Ok(())
 }
@@ -600,8 +446,7 @@ pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(
     let mut dtmf_buffer_a: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut dtmf_buffer_b: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
 
-    let mut decoders: HashMap<(i32, u8), Box<dyn Decoder>> = HashMap::new();
-    let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
+    let mut decode_pipeline = rustpbx_record_common::LegCodecPipeline::new();
     let mut stream_rtp_bases: HashMap<(i32, u32), u32> = HashMap::new();
     let mut stream_target_bases: HashMap<(i32, u32), u64> = HashMap::new();
 
@@ -677,21 +522,8 @@ pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(
         let decoder_needed = target_codec.is_none();
 
         let processed_data: Vec<u8> = if decoder_needed {
-            let decoder = decoders
-                .entry((rtp.leg, pt))
-                .or_insert_with(|| create_decoder(codec));
-            let samples = decoder.decode(payload);
-
-            let current_rate = decoder.sample_rate();
-            let final_samples = if current_rate != target_sample_rate {
-                let resampler = resamplers.entry((rtp.leg, pt)).or_insert_with(|| {
-                    Resampler::new(current_rate as usize, target_sample_rate as usize)
-                });
-                resampler.resample(&samples)
-            } else {
-                samples
-            };
-
+            let final_samples =
+                decode_pipeline.decode(rtp.leg, pt, codec, descriptor.clock_rate, payload, target_sample_rate);
             audio_codec::samples_to_bytes(&final_samples)
         } else {
             payload.to_vec()
@@ -705,8 +537,6 @@ pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(
     }
 
     drop(parsed_packets);
-    drop(decoders);
-    drop(resamplers);
     drop(stream_rtp_bases);
     drop(stream_target_bases);
     drop(leg_audio_clock_rates);
