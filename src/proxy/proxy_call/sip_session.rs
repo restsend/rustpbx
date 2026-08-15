@@ -8996,6 +8996,21 @@ impl SipSession {
                     mb.accept(crate::media::media_bridge::LegSide::B).await;
                     mb.accept(crate::media::media_bridge::LegSide::A).await;
                     let _ = mb.bridge().await;
+
+                    // The queue-agent leg answering IS the call-connect moment
+                    // for the agent (the caller was already answered by the
+                    // IVR/queue app, so accept_call's hook never sees this
+                    // transition). Fire the session lifecycle hooks here —
+                    // CcCallSessionHook emits cc_answered and moves the agent
+                    // Ringing → Busy. Without this the CC layer never learns
+                    // the agent connected (agent stuck in Ringing, no
+                    // cc_answered webhook).
+                    if !self.server.session_hooks.is_empty() {
+                        let ctx = self.session_hook_ctx();
+                        for hook in self.server.session_hooks.iter() {
+                            hook.on_call_connected(&ctx).await;
+                        }
+                    }
                 }
 
                 self.update_leg_state(&leg_id, LegState::Connected);
