@@ -103,10 +103,6 @@ impl TransferTransaction {
         self.sip_status = Some(status);
     }
 
-    pub fn set_error(&mut self, message: String) {
-        self.error_message = Some(message);
-    }
-
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status,
@@ -193,21 +189,13 @@ impl TransferController {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn initiate_blind_transfer(
         &self,
         call_id: String,
         target: String,
     ) -> Result<TransferTransaction, TransferFailureReason> {
         self.initiate_transfer(call_id, target, TransferMode::SipRefer, "blind")
-            .await
-    }
-
-    pub async fn initiate_replace_transfer(
-        &self,
-        call_id: String,
-        target: String,
-    ) -> Result<TransferTransaction, TransferFailureReason> {
-        self.initiate_transfer(call_id, target, TransferMode::Replaces, "replace")
             .await
     }
 
@@ -682,41 +670,6 @@ impl TransferController {
             .map(|r| r.value().transfer_id.clone())?;
         self.handle_notify(transfer_id, notify_status).await
     }
-
-    pub async fn get_transaction(&self, transfer_id: &str) -> Option<TransferTransaction> {
-        self.transactions.get(transfer_id).map(|v| v.clone())
-    }
-
-    pub async fn get_transaction_by_call_id(&self, call_id: &str) -> Option<TransferTransaction> {
-        self.transactions
-            .iter()
-            .find(|r| r.value().call_id == call_id)
-            .map(|r| r.value().clone())
-    }
-
-    pub async fn cleanup_terminal_transactions(&self) -> usize {
-        let before = self.transactions.len();
-        self.transactions.retain(|_, tx| !tx.is_terminal());
-        before - self.transactions.len()
-    }
-
-    pub async fn get_active_transfer_count(&self) -> usize {
-        self.transactions
-            .iter()
-            .filter(|r| !r.value().is_terminal())
-            .count()
-    }
-
-    pub async fn cancel_all_transfers_for_call(&self, call_id: &str) -> usize {
-        let mut count = 0;
-        for mut r in self.transactions.iter_mut() {
-            if r.value().call_id == call_id && !r.value().is_terminal() {
-                r.value_mut().update_status(TransferStatus::Canceled);
-                count += 1;
-            }
-        }
-        count
-    }
 }
 
 #[cfg(test)]
@@ -1091,82 +1044,6 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ────────────────────────────────────────────────────────────────────────────
-    // cancel_all_transfers_for_call tests
-    // ────────────────────────────────────────────────────────────────────────────
-
-    /// cancel_all_transfers_for_call returns 0 when there are no transfers.
-    #[tokio::test]
-    async fn test_cancel_all_transfers_for_call_empty() {
-        let ctrl = make_controller();
-        let count = ctrl.cancel_all_transfers_for_call("call-x").await;
-        assert_eq!(count, 0);
-    }
-
-    /// cancel_all_transfers_for_call cancels all non-terminal transfers for a call.
-    #[tokio::test]
-    async fn test_cancel_all_transfers_for_call_cancels_pending() {
-        let (ctrl, registry) = make_controller_with_registry();
-        let call_id = "call-cancel-all";
-        register_talking_call(&registry, call_id);
-
-        // Create two transfers for the same call
-        let _tx1 = ctrl
-            .initiate_blind_transfer(call_id.to_string(), "sip:t1@local".to_string())
-            .await
-            .expect("first initiate should succeed");
-        // Registry handle is consumed by first call, re-register for second
-        register_talking_call(&registry, call_id);
-        let _tx2 = ctrl
-            .initiate_blind_transfer(call_id.to_string(), "sip:t2@local".to_string())
-            .await
-            .ok(); // may fail if handle already moved
-
-        let count = ctrl.cancel_all_transfers_for_call(call_id).await;
-        assert!(count >= 1, "at least one transfer should be cancelled");
-    }
-
-    // ────────────────────────────────────────────────────────────────────────────
-    // cleanup_terminal_transactions tests
-    // ────────────────────────────────────────────────────────────────────────────
-
-    /// cleanup_terminal_transactions removes only completed/failed/cancelled entries.
-    #[tokio::test]
-    async fn test_cleanup_terminal_transactions() {
-        let (ctrl, registry) = make_controller_with_registry();
-        let call_id = "call-cleanup";
-        register_talking_call(&registry, call_id);
-
-        let tx = ctrl
-            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
-            .await
-            .expect("initiate_blind_transfer should succeed");
-
-        // Mark the transfer as completed via NOTIFY 200
-        ctrl.handle_notify(tx.transfer_id.clone(), 200).await;
-
-        // Count total transactions before cleanup (includes terminal ones)
-        let before_total = ctrl.transactions.len();
-        assert!(
-            before_total >= 1,
-            "should have at least one transaction before cleanup"
-        );
-
-        // Cleanup terminal transactions
-        let removed = ctrl.cleanup_terminal_transactions().await;
-        assert!(
-            removed >= 1,
-            "at least one terminal transaction should be removed"
-        );
-
-        // After cleanup, total count should be lower
-        let after_total = ctrl.transactions.len();
-        assert!(
-            after_total < before_total,
-            "total count should decrease after cleanup"
-        );
-    }
-
     #[test]
     fn test_transfer_transaction_new() {
         let tx = TransferTransaction::new(
@@ -1277,9 +1154,6 @@ mod tests {
 
         tx.set_sip_status(202);
         assert_eq!(tx.sip_status, Some(202));
-
-        tx.set_error("Test error".to_string());
-        assert_eq!(tx.error_message, Some("Test error".to_string()));
     }
 
     #[test]

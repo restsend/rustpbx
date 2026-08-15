@@ -1128,10 +1128,6 @@ impl RwiSession {
     pub fn release_call(&mut self, call_id: &str) -> bool {
         self.owned_calls.remove(call_id).is_some()
     }
-
-    pub fn list_owned_calls(&self) -> Vec<String> {
-        self.owned_calls.keys().cloned().collect()
-    }
 }
 
 #[cfg(test)]
@@ -1216,10 +1212,9 @@ mod tests {
         session.claim_call("call-001".to_string(), OwnershipMode::Control);
         session.claim_call("call-002".to_string(), OwnershipMode::Listen);
 
-        let calls = session.list_owned_calls();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.contains(&"call-001".to_string()));
-        assert!(calls.contains(&"call-002".to_string()));
+        assert!(session.owns_call("call-001"));
+        assert!(session.owns_call("call-002"));
+        assert!(!session.owns_call("call-003"));
     }
 
 }

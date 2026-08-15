@@ -49,15 +49,6 @@ impl CommandResult {
         }
     }
 
-    /// Create a successful result with structured data
-    pub fn success_with_data(data: serde_json::Value) -> Self {
-        Self {
-            success: true,
-            message: None,
-            affected_leg: None,
-            data: Some(data),
-        }
-    }
 }
 
 /// Context for command execution

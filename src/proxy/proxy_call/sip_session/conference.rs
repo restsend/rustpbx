@@ -141,8 +141,6 @@ impl SipSession {
         use rustrtc::media::track::sample_track;
 
         let is_callee = leg_id.0.ends_with("-callee") || leg_id.0 == "callee";
-        if !is_callee {
-            }
         let (peer, track_id) = if is_callee {
             (
                 self.callee_peer()

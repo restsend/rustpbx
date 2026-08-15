@@ -134,11 +134,12 @@ basic      = "LICENSE-KEY-YYYY-YYYY-YYYY"
 
 ## RWI (Real-time WebSocket Interface)
 
-Configuration for the RWI subsystem, which provides JSON-over-WebSocket call control. See [RWI Protocol](../rwi.md) for the full protocol reference.
+Configuration for the RWI subsystem, which provides JSON-over-WebSocket call
+control. RWI is enabled whenever a `[rwi]` section is present. See
+[RWI Protocol](../rwi.md) for the full protocol reference.
 
 ```toml
 [rwi]
-enabled = true
 max_connections = 2000
 max_calls_per_connection = 200
 orphan_hold_secs = 30
@@ -146,24 +147,8 @@ originate_rate_limit = 10
 
 # API tokens for RWI access
 [[rwi.tokens]]
-token = "your-rwi-token"
+token = "my-static-token"
 scopes = ["call", "session", "media", "record", "conference", "queue"]
-
-# Call contexts
-[[rwi.contexts]]
-name = "default"
-no_answer_timeout_secs = 30
-# no_answer_action = "transfer"
-# no_answer_transfer_target = "sip:voicemail@local"
-
-# Transfer behaviour
-[rwi.transfer]
-# refer_enabled = true
-# attended_enabled = true
-# three_pcc_fallback_enabled = true
-# refer_timeout_secs = 30
-# three_pcc_timeout_secs = 60
-# max_concurrent_transfers = 1000
 ```
 
 ## RWI Webhook (`[rwi_webhook]`)

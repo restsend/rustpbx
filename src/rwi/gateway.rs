@@ -71,8 +71,6 @@ struct EventCacheState {
 enum DispatchTarget<'a> {
     /// Deliver to the session that owns the routed `call_id`.
     Owner(&'a CallId),
-    /// Deliver to a single session directly (no cache / webhook / tap).
-    Session(&'a SessionId),
     /// Deliver to every session subscribed to `context`, optionally excluding
     /// one session.
     FanOut(&'a str, Option<&'a SessionId>),
@@ -276,17 +274,6 @@ impl RwiGateway {
         false
     }
 
-    pub fn get_call_owner(&self, call_id: &CallId) -> Option<SessionId> {
-        self.call_ownership.get(call_id).cloned()
-    }
-
-    pub fn session_owns_call(&self, session_id: &SessionId, call_id: &CallId) -> bool {
-        self.call_ownership
-            .get(call_id)
-            .map(|owner| owner == session_id)
-            .unwrap_or(false)
-    }
-
     /// Fan an event entry out to the RWI webhook handler (if configured) and
     /// the always-on event tap.
     fn fanout_webhook_tap(&self, entry: &EventCacheEntry) {
@@ -308,14 +295,10 @@ impl RwiGateway {
     ///
     /// Owner / FanOut targets cache the (raw) event for session resume, enrich
     /// it from the `CallMetaStore`, and forward one enriched entry to both the
-    /// webhook handler and the event tap. Session / Broadcast targets do not
-    /// cache — they are direct or global sends.
+    /// webhook handler and the event tap. Broadcast targets do not cache —
+    /// they are direct global sends.
     fn dispatch(&self, dispatch_call_id: &CallId, event: &RwiEvent, target: DispatchTarget) {
         match target {
-            DispatchTarget::Session(session_id) => {
-                let enriched = self.enrich_flat_event(event);
-                self.send_flat_to_session(session_id, &enriched);
-            }
             DispatchTarget::Broadcast => {
                 let enriched = self.enrich_flat_event(event);
                 let seq = self.next_sequence();
@@ -468,7 +451,7 @@ impl RwiGateway {
 
 
 
-    /// Get current sequence number
+    /// Current sequence number of the event cache.
     pub fn current_sequence(&self) -> u64 {
         let cache_state = self.event_cache.lock();
         cache_state.next_sequence
@@ -644,11 +627,6 @@ impl RwiGateway {
         };
         let flat = RwiEvent::from_spec(event, None);
         self.dispatch(&cid, &flat, DispatchTarget::FanOut(context, exclude));
-    }
-
-    pub fn send_to_session<E: RwiEventSpec>(&self, session_id: &SessionId, event: &E) {
-        let flat = RwiEvent::from_spec(event, None);
-        self.dispatch(&String::new(), &flat, DispatchTarget::Session(session_id));
     }
 }
 
@@ -853,7 +831,8 @@ mod tests {
     /// When the event already carries its own `caller` field (e.g. cc_ringing
     /// or call_incoming), enrichment must not overwrite it with the context value.
     #[tokio::test]
-    async fn test_broadcast_event_preserves_explicit_caller() {        let mut gw = RwiGateway::new();
+    async fn test_broadcast_event_preserves_explicit_caller() {
+        let mut gw = RwiGateway::new();
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);

@@ -1,17 +1,19 @@
 //! Conference Server integration tests
 //!
 //! Verifies the standalone MCU service (`ConferenceServer`) covering room
-//! lifecycle, participant + media bridge management, host role, isolation,
-//! concurrency, and end-to-end audio flow.
+//! lifecycle, participant management, host role, isolation, concurrency,
+//! and end-to-end audio flow through `ConferenceMediaBridge` (the same
+//! machinery production sessions use via `start_conference_media_bridge`).
 
 use std::sync::Arc;
 
 use rustpbx::call::domain::LegId;
-use rustpbx::call::runtime::conference_media_bridge::PcmAudioFrame;
-use rustpbx::call::runtime::{
-    ConferenceId, ConferenceManager, ConferenceServer, ParticipantRole,
-};
-use rustpbx::call::runtime::test_utils::{MockAudioReceiver, MockAudioSender};
+use rustpbx::call::runtime::conference_media_bridge::{ConferenceMediaBridge, PcmAudioFrame};
+use rustpbx::call::runtime::{ConferenceId, ConferenceManager, ConferenceServer, ParticipantRole};
+
+#[path = "../common/audio_mocks.rs"]
+mod audio_mocks;
+use audio_mocks::{MockAudioReceiver, MockAudioSender};
 
 fn test_server() -> (ConferenceServer, Arc<ConferenceManager>) {
     let manager = Arc::new(ConferenceManager::new());
@@ -23,7 +25,6 @@ fn test_server() -> (ConferenceServer, Arc<ConferenceManager>) {
 async fn test_server_construction() {
     let (server, manager) = test_server();
     assert_eq!(server.list_conferences().await.len(), 0);
-    assert_eq!(server.active_bridge_count(), 0);
     // The server and the caller share the SAME manager instance: a conference
     // created through the server is visible through the raw manager.
     server
@@ -81,24 +82,23 @@ async fn test_destroy_conference_idempotent() {
 
 #[tokio::test]
 async fn test_join_and_leave_with_media() {
-    let (server, _manager) = test_server();
+    let (server, manager) = test_server();
     let conf_id = ConferenceId::from("test-media-conf");
 
     server.create_conference(conf_id.clone(), None).await.unwrap();
 
+    // Bridge a leg via the production path (ConferenceMediaBridge directly).
     let leg_a = LegId::new("leg-a");
-    let sender_a = MockAudioSender::new();
-    let receiver_a = MockAudioReceiver::new(vec![
-        PcmAudioFrame::new(vec![1000i16; 160], 8000),
-        PcmAudioFrame::new(vec![2000i16; 160], 8000),
-    ]);
-
-    server
-        .join_conference_with_media(
+    let bridge = ConferenceMediaBridge::new(manager.clone());
+    let handle = bridge
+        .start_bridge_full_duplex(
             "test-media-conf",
             &leg_a,
-            sender_a.clone_with_shared(),
-            Box::new(receiver_a),
+            MockAudioSender::new().clone_with_shared(),
+            Box::new(MockAudioReceiver::new(vec![
+                PcmAudioFrame::new(vec![1000i16; 160], 8000),
+                PcmAudioFrame::new(vec![2000i16; 160], 8000),
+            ])),
             audio_codec::CodecType::PCMU,
         )
         .await
@@ -109,14 +109,11 @@ async fn test_join_and_leave_with_media() {
     assert_eq!(conf.participant_count(), 1);
     assert!(conf.participants.contains_key(&leg_a));
 
-    // Media bridge active
-    assert!(server.is_leg_bridged(&conf_id, &leg_a));
-    assert_eq!(server.active_bridge_count(), 1);
-
-    // Leave conference
+    // Stopping the session-owned handle + leaving removes the participant.
+    handle.stop();
     server.leave_conference("test-media-conf", &leg_a).await.unwrap();
-    assert!(!server.is_leg_bridged(&conf_id, &leg_a));
-    assert_eq!(server.active_bridge_count(), 0);
+    let conf = server.get_conference(&conf_id).await.unwrap();
+    assert!(!conf.participants.contains_key(&leg_a));
 
     server.destroy_conference(&conf_id).await.unwrap();
 }
@@ -129,29 +126,9 @@ async fn test_join_same_leg_twice_rejected() {
     server.create_conference(conf_id.clone(), None).await.unwrap();
 
     let leg = LegId::new("leg-1");
-    let sender = MockAudioSender::new();
-    let receiver = MockAudioReceiver::new(vec![PcmAudioFrame::new(vec![1i16; 160], 8000)]);
+    server.add_participant(&conf_id, leg.clone()).await.unwrap();
 
-    server
-        .join_conference_with_media(
-            "test-dup-leg",
-            &leg,
-            sender.clone_with_shared(),
-            Box::new(receiver),
-            audio_codec::CodecType::PCMU,
-        )
-        .await
-        .unwrap();
-
-    let result = server
-        .join_conference_with_media(
-            "test-dup-leg",
-            &leg,
-            sender.clone_with_shared(),
-            Box::new(MockAudioReceiver::new(vec![])),
-            audio_codec::CodecType::PCMU,
-        )
-        .await;
+    let result = server.add_participant(&conf_id, leg.clone()).await;
     assert!(result.is_err(), "Joining same leg twice should fail");
 
     server.destroy_conference(&conf_id).await.unwrap();
@@ -222,26 +199,9 @@ async fn test_cross_conference_isolation() {
     server.create_conference(conf2.clone(), None).await.unwrap();
 
     let leg = LegId::new("shared-leg");
-    server
-        .join_conference_with_media(
-            "iso-conf-1",
-            &leg,
-            MockAudioSender::new().clone_with_shared(),
-            Box::new(MockAudioReceiver::new(vec![PcmAudioFrame::new(vec![1i16; 160], 8000)])),
-            audio_codec::CodecType::PCMU,
-        )
-        .await
-        .unwrap();
+    server.add_participant(&conf1, leg.clone()).await.unwrap();
 
-    let denied = server
-        .join_conference_with_media(
-            "iso-conf-2",
-            &leg,
-            MockAudioSender::new().clone_with_shared(),
-            Box::new(MockAudioReceiver::new(vec![PcmAudioFrame::new(vec![1i16; 160], 8000)])),
-            audio_codec::CodecType::PCMU,
-        )
-        .await;
+    let denied = server.add_participant(&conf2, leg.clone()).await;
     assert!(denied.is_err(), "Leg should not join two conferences");
 
     server.destroy_conference(&conf1).await.unwrap();
@@ -250,21 +210,21 @@ async fn test_cross_conference_isolation() {
 
 #[tokio::test]
 async fn test_end_to_end_audio_flow() {
-    let (server, _manager) = test_server();
+    let (server, manager) = test_server();
     server.create_conference("flow-conf".into(), None).await.unwrap();
 
     // Leg A speaks: provides PCM frames to the mixer
     let sender_a = MockAudioSender::new();
-    let receiver_a = MockAudioReceiver::new(vec![
-        PcmAudioFrame::new(vec![1000i16; 160], 8000),
-        PcmAudioFrame::new(vec![1000i16; 160], 8000),
-    ]);
-    server
-        .join_conference_with_media(
+    let bridge = ConferenceMediaBridge::new(manager.clone());
+    let handle_a = bridge
+        .start_bridge_full_duplex(
             "flow-conf",
             &LegId::new("a"),
             sender_a.clone_with_shared(),
-            Box::new(receiver_a),
+            Box::new(MockAudioReceiver::new(vec![
+                PcmAudioFrame::new(vec![1000i16; 160], 8000),
+                PcmAudioFrame::new(vec![1000i16; 160], 8000),
+            ])),
             audio_codec::CodecType::PCMU,
         )
         .await
@@ -272,13 +232,12 @@ async fn test_end_to_end_audio_flow() {
 
     // Leg B: silent receiver (nothing to send), but its forward loop captures mixed audio
     let sender_b = MockAudioSender::new();
-    let receiver_b = MockAudioReceiver::new(vec![]);
-    server
-        .join_conference_with_media(
+    let handle_b = bridge
+        .start_bridge_full_duplex(
             "flow-conf",
             &LegId::new("b"),
             sender_b.clone_with_shared(),
-            Box::new(receiver_b),
+            Box::new(MockAudioReceiver::new(vec![])),
             audio_codec::CodecType::PCMU,
         )
         .await
@@ -306,43 +265,10 @@ async fn test_end_to_end_audio_flow() {
     let a_received = sender_a.get_samples().await;
     let _ = a_received; // silence from A's own output is acceptable (nothing mixed in)
 
+    handle_a.stop();
+    handle_b.stop();
     server
         .destroy_conference(&"flow-conf".into())
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn test_host_join_with_media_ex() {
-    let (server, _manager) = test_server();
-    let conf_id = ConferenceId::from("host-media-conf");
-    let host_leg = LegId::new("host-leg");
-
-    server
-        .create_conference_ex(conf_id.clone(), None, Some(host_leg.clone()), None)
-        .await
-        .unwrap();
-
-    let sender = MockAudioSender::new();
-    let receiver = MockAudioReceiver::new(vec![PcmAudioFrame::new(vec![1i16; 160], 8000)]);
-    server
-        .join_conference_with_media_ex(
-            "host-media-conf",
-            &host_leg,
-            ParticipantRole::Host,
-            sender.clone_with_shared(),
-            Box::new(receiver),
-            audio_codec::CodecType::PCMU,
-        )
-        .await
-        .unwrap();
-
-    let conf = server.get_conference(&conf_id).await.unwrap();
-    assert!(conf.is_host(&host_leg));
-    assert!(server.is_leg_bridged(&conf_id, &host_leg));
-
-    server
-        .destroy_conference(&conf_id)
         .await
         .unwrap();
 }

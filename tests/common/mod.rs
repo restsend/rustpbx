@@ -4,3 +4,4 @@ pub mod rtp_utils;
 pub mod cdr_capture;
 pub mod test_helpers;
 pub mod webhook_capture;
+pub mod audio_mocks;

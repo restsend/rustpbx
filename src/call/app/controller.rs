@@ -26,15 +26,6 @@ impl PlaybackToken {
     }
 }
 
-/// Outcome of [`CallController::wait_playback`].
-#[derive(Debug, Clone)]
-pub struct PlaybackOutcome {
-    /// `true` if playback was cut short (DTMF / stop) rather than EOF.
-    pub interrupted: bool,
-    /// DTMF digits received while waiting (empty unless a digit barged).
-    pub dtmf: String,
-}
-
 /// Details about a completed recording.
 #[derive(Debug, Clone)]
 pub struct RecordingInfo {
@@ -481,52 +472,6 @@ impl CallController {
         Ok(())
     }
 
-    /// Wait for a playback to finish (natural EOF or interruption).
-    ///
-    /// Resolves with the `AudioComplete` event whose `track_id` matches the
-    /// token returned by [`play_audio`](Self::play_audio). DTMF and hangup
-    /// events observed while waiting are returned so the app can act on them
-    /// (e.g. a barge digit during an IVR menu). Returns the number of digits
-    /// collected (may be zero) and whether the call is still alive.
-    ///
-    /// This is the app-side analogue of the media layer's `PlaybackHandle`:
-    /// instead of awaiting a oneshot inside the app, the completion is
-    /// delivered via [`ControllerEvent::AudioComplete`] and this helper turns
-    /// it into an awaitable future, cancelling cleanly on hangup.
-    pub async fn wait_playback(
-        &mut self,
-        token: &PlaybackToken,
-    ) -> anyhow::Result<PlaybackOutcome> {
-        let track_id = token.track_id.clone();
-        loop {
-            match self.wait_event().await {
-                Some(ControllerEvent::AudioComplete {
-                    track_id: completed,
-                    interrupted,
-                }) if completed == track_id => {
-                    return Ok(PlaybackOutcome {
-                        interrupted,
-                        dtmf: String::new(),
-                    });
-                }
-                Some(ControllerEvent::DtmfReceived(d)) => {
-                    return Ok(PlaybackOutcome {
-                        interrupted: true,
-                        dtmf: d,
-                    });
-                }
-                Some(ControllerEvent::Hangup(reason)) => {
-                    return Err(anyhow::anyhow!("call hung up during playback: {reason:?}"));
-                }
-                Some(ControllerEvent::Timeout(_))
-                | Some(ControllerEvent::RecordingComplete(_))
-                | Some(ControllerEvent::Custom(..))
-                | Some(ControllerEvent::AudioComplete { .. }) => continue,
-                None => return Err(anyhow::anyhow!("event channel closed during playback")),
-            }
-        }
-    }
-
     /// Place the caller (or a specific leg) on hold, optionally with hold music.
     pub async fn hold(
         &self,
@@ -631,19 +576,6 @@ impl CallController {
                 warn!("Failed to send LegRemove for {}: {}", leg_id, e);
             }
         }
-    }
-
-    /// Inject an AudioComplete event into the app event loop.
-    ///
-    /// Used internally when no audio file is available to play
-    /// (e.g., TTS text was requested but no TTS service is configured)
-    /// so the application can continue to the next step instead of
-    /// waiting indefinitely for an AudioComplete event.
-    pub fn signal_audio_complete(&self, track_id: String, interrupted: bool) {
-        self.session.send_app_event(ControllerEvent::AudioComplete {
-            track_id,
-            interrupted,
-        });
     }
 }
 

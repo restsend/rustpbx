@@ -1,27 +1,3 @@
-use std::sync::Arc;
-
-/// Callback invoked when a DTMF digit is detected from a leg.
-pub type DtmfHandler = Arc<dyn Fn(char) + Send + Sync + 'static>;
-
-/// Per-leg DTMF sink — which payload types carry telephone-events
-/// and where to forward detected digits.
-#[derive(Clone)]
-pub struct DtmfSink {
-    pub payload_types: Vec<u8>,
-    pub handler: DtmfHandler,
-}
-
-/// Maps a source telephone-event payload type to a target payload type,
-/// adjusting clock rate for the other side of the bridge (e.g. Opus 48kHz
-/// → PCMU 8kHz).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PayloadMapping {
-    pub source_pt: u8,
-    pub target_pt: u8,
-    pub source_clock_rate: u32,
-    pub target_clock_rate: u32,
-}
-
 /// Key used to deduplicate repeated telephone-event packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DtmfEventKey {

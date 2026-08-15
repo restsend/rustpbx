@@ -80,7 +80,6 @@ impl CodecInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedCodecs {
     pub audio: Vec<CodecInfo>,
-    pub video: Vec<CodecInfo>,
     pub dtmf: Vec<CodecInfo>,
 }
 
@@ -337,13 +336,6 @@ impl MediaNegotiator {
                 } else {
                     extracted.audio.push(codec);
                 }
-            }
-        }
-
-        // Extract video codecs
-        if let Some(section) = Self::parse_media_section(sdp_str, MediaKind::Video) {
-            for codec in Self::extract_ordered_codecs_from_section(&section) {
-                extracted.video.push(codec);
             }
         }
 

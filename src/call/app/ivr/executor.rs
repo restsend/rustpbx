@@ -46,8 +46,6 @@ pub struct StepIvrApp {
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     /// Name of the route that dispatched this call into the IVR.
     route_name: Option<String>,
-    /// Route-level configured headers.
-    route_headers: Option<HashMap<String, String>>,
     /// Passthrough data set by the external provider (echoed back each step).
     custom_data: Option<serde_json::Value>,
     /// Transparent extra JSON object from provider — stored and passed through in events.
@@ -126,7 +124,6 @@ impl StepIvrApp {
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
-            route_headers: None,
             custom_data: None,
             extra: None,
             step_prev_start_time: None,
@@ -166,7 +163,6 @@ impl StepIvrApp {
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
-            route_headers: None,
             custom_data: None,
             extra: None,
             step_prev_start_time: None,
@@ -237,12 +233,6 @@ impl StepIvrApp {
     /// Set the route name that dispatched this call into the IVR.
     pub fn with_route_name(mut self, name: Option<String>) -> Self {
         self.route_name = name;
-        self
-    }
-
-    /// Set the route-level configured headers.
-    pub fn with_route_headers(mut self, headers: Option<HashMap<String, String>>) -> Self {
-        self.route_headers = headers;
         self
     }
 
@@ -757,7 +747,6 @@ impl StepIvrApp {
             sip_headers: self.get_sip_headers(),
             event,
             route_name: self.route_name.clone(),
-            route_headers: self.route_headers.clone(),
             custom_data: self.custom_data.clone(),
             step_start_time: Some(
                 self.step_prev_start_time
@@ -1104,7 +1093,6 @@ impl CallApp for StepIvrApp {
             ivr_id: None,
             sip_headers: Some(headers),
             route_name: self.route_name.clone(),
-            route_headers: self.route_headers.clone(),
             custom_data: self.custom_data.clone(),
             transferred_from: self.transferred_from.clone(),
         };
@@ -4162,7 +4150,6 @@ mod tests {
             ivr_id: None,
             sip_headers: None,
             route_name: None,
-            route_headers: None,
             custom_data: None,
             transferred_from: None,
         };
@@ -4179,7 +4166,6 @@ mod tests {
             sip_headers: None,
             event: Some(ProviderEvent::SessionStart),
             route_name: None,
-            route_headers: None,
             custom_data: None,
             step_start_time: None,
             step_end_time: None,
@@ -4208,8 +4194,7 @@ mod tests {
                 sip_headers: None,
                 event: None,
                 route_name: None,
-                route_headers: None,
-                custom_data: None,
+                    custom_data: None,
                 step_start_time: None,
                 step_end_time: None,
                 step_duration_ms: None,

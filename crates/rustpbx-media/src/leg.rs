@@ -525,12 +525,6 @@ impl LegInner {
         self.apply_sdp(remote_offer, SdpType::Offer).await
     }
 
-    /// re-INVITE: apply a new remote offer, return the answer. Performs the
-    /// DTLS check + R1 sender sync; the PC and egress pipeline stay alive.
-    pub async fn reinvite(&self, remote_offer: &str) -> Result<String> {
-        self.answer(remote_offer).await
-    }
-
     async fn sync_negotiated_profile(&self, profile: &NegotiatedLegProfile) -> Result<()> {
         // Keep the destination audio and telephone-event payload types in sync
         // with the negotiated answer. The DTMF clock follows the audio clock.

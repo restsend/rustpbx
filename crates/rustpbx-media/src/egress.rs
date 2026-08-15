@@ -127,15 +127,6 @@ pub struct EgressCodec {
     pub comfort_noise_level_db: f32,
 }
 
-impl EgressCodec {
-    /// CNG defaults: on, at a low perceptible level.
-    pub fn with_comfort_noise(mut self, enabled: bool, level_db: f32) -> Self {
-        self.comfort_noise = enabled;
-        self.comfort_noise_level_db = level_db;
-        self
-    }
-}
-
 /// Per-leg egress pipeline.
 ///
 /// Create via [`EgressPipeline::start`] after obtaining a `SampleStreamSource`
@@ -201,13 +192,6 @@ impl EgressPipeline {
         self.cmd_tx
             .send(EgressCmd::SetSource(source))
             .await
-            .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
-    }
-
-    /// Non-blocking variant of [`Self::set_source`].
-    pub fn try_set_source(&self, source: EgressSource) -> Result<()> {
-        self.cmd_tx
-            .try_send(EgressCmd::SetSource(source))
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
 

@@ -39,8 +39,7 @@ pub struct MediaPathContext {
 /// # Implementation contract
 ///
 /// Implementors MUST register the participant in the mixer as part of
-/// `bridge_into` (e.g. via `ConferenceServer::join_conference_with_media` or
-/// `ConferenceManager::add_participant`). The default strategies rely on
+/// `bridge_into` (e.g. via `ConferenceManager::add_participant`). The default strategies rely on
 /// `get_conference_id_for_leg` returning the conference for idempotency
 /// checks — if the participant is not registered, the strategy will re-bridge
 /// the same leg on every routing change.

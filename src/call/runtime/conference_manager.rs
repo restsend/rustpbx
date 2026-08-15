@@ -87,7 +87,6 @@ pub struct ConferenceRoom {
     pub max_duration_secs: Option<u64>,
     pub created_at: std::time::Instant,
     pub max_participants: Option<usize>,
-    pub locked: bool,
 }
 
 impl ConferenceRoom {
@@ -99,7 +98,6 @@ impl ConferenceRoom {
             max_duration_secs: None,
             created_at: std::time::Instant::now(),
             max_participants,
-            locked: false,
         }
     }
 
@@ -190,16 +188,6 @@ impl ConferenceRoom {
     pub fn participant_ids(&self) -> Vec<LegId> {
         self.participants.keys().cloned().collect()
     }
-
-    /// Lock the conference (prevent new participants)
-    pub fn lock(&mut self) {
-        self.locked = true;
-    }
-
-    /// Unlock the conference
-    pub fn unlock(&mut self) {
-        self.locked = false;
-    }
 }
 
 /// Audio channels for a conference participant
@@ -240,14 +228,6 @@ impl ConferenceManager {
         }
     }
 
-    pub fn conference_count(&self) -> usize {
-        self.conferences.len()
-    }
-
-    pub fn leg_to_conference_count(&self) -> usize {
-        self.leg_to_conference.len()
-    }
-
     /// Diagnostic: current size of every internal map. Used by leak tests to
     /// assert that conference lifecycle leaves no residue behind.
     pub fn dashmap_sizes(&self) -> (usize, usize, usize, usize, usize) {
@@ -258,16 +238,6 @@ impl ConferenceManager {
             self.participant_channels.len(),
             self.participant_output_rxs.len(),
         )
-    }
-
-    /// Diagnostic: number of participant audio channels currently stored.
-    pub fn participant_channels_count(&self) -> usize {
-        self.participant_channels.len()
-    }
-
-    /// Diagnostic: number of participant output receivers currently stored.
-    pub fn participant_output_rxs_count(&self) -> usize {
-        self.participant_output_rxs.len()
     }
 
     /// Create a new conference with in-server audio mixing

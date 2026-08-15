@@ -156,10 +156,6 @@ impl MediaBridge {
         }
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
     pub fn leg(&self, side: LegSide) -> Option<Leg> {
         match side {
             LegSide::A => self.leg_a.clone(),
@@ -888,11 +884,6 @@ impl MediaBridge {
         Ok(handle)
     }
 
-    /// Whether a leg currently has an active Media playback.
-    pub fn is_playing(&self, side: LegSide) -> bool {
-        self.active_play.lock().contains(&side)
-    }
-
     /// Stop a running playback on a leg. Fires the handle's `done` with
     /// `interrupted: true`. No-op if the leg is not currently playing Media.
     pub async fn stop_play(&mut self, side: LegSide) -> Result<()> {
@@ -1594,9 +1585,6 @@ fn wire_rtcp_sender_forward(
         }
     });
 }
-
-// Re-export the profile type for callers that inspect legs.
-pub use crate::negotiate::NegotiatedLegProfile as LegProfile;
 
 #[cfg(test)]
 mod tests {

@@ -525,32 +525,6 @@ impl Recorder {
         Ok(())
     }
 
-    pub async fn write_dtmf(&mut self, leg: Leg, digit: char, duration_ms: u32) -> Result<()> {
-        let pcm = self.dtmf_gen.generate(digit, duration_ms);
-        debug!(
-            "Recording DTMF: leg={:?}, digit={}, duration={}ms, samples={}",
-            leg,
-            digit,
-            duration_ms,
-            pcm.len()
-        );
-
-        // Position sequentially — append after previous content
-        let ts = self.leg_end_ts(leg);
-
-        let encoded = if let Some(enc) = self.encoder.as_mut() {
-            Bytes::from(enc.encode(&pcm))
-        } else {
-            Bytes::from(audio_codec::samples_to_bytes(&pcm))
-        };
-
-        let end_ts = ts.saturating_add(self.block_span_samples(&encoded));
-        self.overlay_dtmf_range(leg, ts, end_ts, encoded);
-
-        self.flush().await?;
-        Ok(())
-    }
-
     pub async fn flush(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
 

@@ -250,12 +250,6 @@ impl ConferenceAudioMixer {
         );
     }
 
-    /// Clear all route gains (reset to default N-1 mixing).
-    pub async fn clear_route_gains(&self) {
-        self.route_gains.clear();
-        info!(conf_id = %self.conf_id, "Route gains cleared");
-    }
-
     /// Update audio routing for all participants
     /// Each participant hears all other participants (N-1 mixing)
     async fn update_routing(&self) -> Result<()> {

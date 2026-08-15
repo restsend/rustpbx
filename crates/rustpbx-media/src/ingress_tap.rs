@@ -44,13 +44,11 @@ pub enum PacketDirection {
     Egress,
 }
 
-/// A DTMF digit detected on a leg, tagged with its direction and the RTP
-/// timestamp at which it was observed.
+/// A DTMF digit detected on a leg, tagged with its direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtmfEvent {
     pub direction: PacketDirection,
     pub digit: char,
-    pub timestamp: u32,
 }
 
 /// Snapshot of the per-direction counters.
@@ -242,11 +240,7 @@ impl IngressTap {
                 .lock()
                 .observe(&packet.payload, packet.header.timestamp);
             if let Some(digit) = digit {
-                let event = DtmfEvent {
-                    direction,
-                    digit,
-                    timestamp: packet.header.timestamp,
-                };
+                let event = DtmfEvent { direction, digit };
                 // Broadcast (lagged subscribers dropped, never blocks).
                 let _ = self.dtmf_tx.send(event);
             }

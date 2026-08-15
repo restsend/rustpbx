@@ -37,7 +37,6 @@ pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
 pub use leg_id::LegId;
-pub use media_stream::TrackMap;
 pub use media_stream::{MediaStream, MediaStreamBuilder};
 pub use mixer::AudioMixer;
 pub use negotiate::{CodecInfo, MediaNegotiator};
@@ -64,14 +63,6 @@ impl AudioFrame {
         Self {
             samples,
             sample_rate,
-            timestamp: 0,
-        }
-    }
-
-    pub fn silence(sample_count: usize) -> Self {
-        Self {
-            samples: vec![0i16; sample_count],
-            sample_rate: 8000,
             timestamp: 0,
         }
     }

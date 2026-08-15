@@ -27,7 +27,6 @@ use crate::call::{
 };
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,47 +36,6 @@ use tracing::{debug, info, warn};
 // Queue Statistics (built-in)
 // ===================================================================
 
-/// Statistics for a queue.
-#[derive(Debug, Clone, Default)]
-pub struct QueueStats {
-    pub queue_id: String,
-    pub calls_offered: u64,
-    pub calls_answered: u64,
-    pub calls_abandoned: u64,
-    pub total_wait_secs: u64,
-    pub total_handle_secs: u64,
-    pub current_waiting: u32,
-    pub available_agents: u32,
-}
-
-impl QueueStats {
-    pub fn avg_wait_secs(&self) -> f64 {
-        if self.calls_answered > 0 {
-            self.total_wait_secs as f64 / self.calls_answered as f64
-        } else {
-            0.0
-        }
-    }
-
-    pub fn avg_handle_secs(&self) -> f64 {
-        if self.calls_answered > 0 {
-            self.total_handle_secs as f64 / self.calls_answered as f64
-        } else {
-            0.0
-        }
-    }
-
-    pub fn service_level(&self, _threshold_secs: u64) -> f64 {
-        // Simplified SLA calculation
-        // In production, track individual call wait times
-        if self.calls_offered > 0 {
-            let sla_calls = self.calls_answered; // Simplified
-            (sla_calls as f64 / self.calls_offered as f64) * 100.0
-        } else {
-            100.0
-        }
-    }
-}
 
 // ===================================================================
 // Queue Configuration Extensions
@@ -302,7 +260,6 @@ pub struct QueueApp {
     /// When the call entered the queue.
     enqueued_at: Option<Instant>,
     /// Queue statistics.
-    stats: Arc<DashMap<String, QueueStats>>,
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
@@ -346,7 +303,6 @@ impl QueueApp {
             agent_registry: None,
             call_id: String::new(),
             enqueued_at: None,
-            stats: Arc::new(DashMap::new()),
             pending_agents: Vec::new(),
             comfort_index: 0,
             last_comfort_played: None,
@@ -372,12 +328,6 @@ impl QueueApp {
     /// Set the call ID for tracking.
     pub fn with_call_id(mut self, call_id: String) -> Self {
         self.call_id = call_id;
-        self
-    }
-
-    /// Set queue statistics tracker.
-    pub fn with_stats(mut self, stats: Arc<DashMap<String, QueueStats>>) -> Self {
-        self.stats = stats;
         self
     }
 
@@ -427,18 +377,6 @@ impl QueueApp {
                 .notify_call_fallback(&self.call_id, &self.config.name, reason, action)
                 .await;
         }
-    }
-
-    /// Update queue statistics.
-    fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
-        let mut stat = self
-            .stats
-            .entry(queue_id.to_string())
-            .or_insert_with(|| QueueStats {
-                queue_id: queue_id.to_string(),
-                ..Default::default()
-            });
-        f(&mut stat);
     }
 
     /// Get the next action based on fallback configuration.
@@ -681,9 +619,6 @@ impl QueueApp {
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
-        self.update_stats(&queue_id, |stats| {
-            stats.calls_abandoned += 1;
-        });
         self.abandoned_recorded = true;
 
         info!(
@@ -726,9 +661,6 @@ impl QueueApp {
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
-        self.update_stats(&queue_id, |stats| {
-            stats.calls_abandoned += 1;
-        });
         self.abandoned_recorded = true;
 
         info!(
@@ -1102,12 +1034,6 @@ impl CallApp for QueueApp {
 
         ctx.set_queue_name(&queue_id).await;
 
-        // Record call offered
-        self.update_stats(&queue_id, |stats| {
-            stats.calls_offered += 1;
-            stats.current_waiting += 1;
-        });
-
         // Notify external systems that the call entered the queue.
         self.emit_rwi(&crate::rwi::event::QueueJoined {
             call_id: self.call_id.clone(),
@@ -1431,15 +1357,6 @@ impl CallApp for QueueApp {
                             }
                         }
 
-                        let wait_secs =
-                            self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-
-                        self.update_stats(&queue_id, |stats| {
-                            stats.calls_answered += 1;
-                            stats.total_wait_secs += wait_secs;
-                            stats.current_waiting = stats.current_waiting.saturating_sub(1);
-                        });
-
                         if let Some(ref registry) = self.agent_registry {
                             let agent_id = data
                                 .get("agent_id")
@@ -1674,11 +1591,6 @@ impl CallApp for QueueApp {
         );
         if !was_connected && !self.abandoned_recorded {
             let queue_id = self.config.name.clone();
-
-            self.update_stats(&queue_id, |stats| {
-                stats.calls_abandoned += 1;
-            });
-
             // Notify the skill-group dispatcher that the call was abandoned
             // (e.g. caller hung up while waiting).
             let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
@@ -1700,7 +1612,3 @@ impl CallApp for QueueApp {
     }
 }
 
-/// Build a QueueApp from a QueuePlan and QueueConfig.
-pub fn build_queue_app(plan: QueuePlan, config: QueueConfig) -> QueueApp {
-    QueueApp::new(plan, config)
-}

@@ -21,8 +21,6 @@ pub struct MemoryRegistry {
     agents: DashMap<String, AgentRecord>,
     /// Round-robin counter
     rr_counter: RwLock<u64>,
-    /// Event callbacks for state changes
-    event_handlers: RwLock<Vec<super::AgentEventHandler>>,
 }
 
 impl MemoryRegistry {
@@ -30,16 +28,9 @@ impl MemoryRegistry {
         Self {
             agents: DashMap::new(),
             rr_counter: RwLock::new(0),
-            event_handlers: RwLock::new(Vec::new()),
         }
     }
 
-    async fn notify_handlers(&self, record: &AgentRecord) {
-        let handlers = self.event_handlers.read().await;
-        for handler in handlers.iter() {
-            handler(record);
-        }
-    }
 }
 
 impl Default for MemoryRegistry {
@@ -80,7 +71,6 @@ impl AgentRegistry for MemoryRegistry {
         self.agents.insert(agent_id.clone(), record.clone());
         info!(agent_id = %agent_id, "Agent registered in memory");
 
-        self.notify_handlers(&record).await;
 
         Ok(())
     }
@@ -123,9 +113,7 @@ impl AgentRegistry for MemoryRegistry {
             "Presence updated in memory"
         );
 
-        let record = agent.clone();
         drop(agent);
-        self.notify_handlers(&record).await;
 
         Ok(())
     }
@@ -140,9 +128,7 @@ impl AgentRegistry for MemoryRegistry {
         agent.presence = PresenceState::Busy { call_id: None };
         agent.last_state_change = Instant::now();
 
-        let record = agent.clone();
         drop(agent);
-        self.notify_handlers(&record).await;
 
         Ok(())
     }
@@ -165,9 +151,7 @@ impl AgentRegistry for MemoryRegistry {
             agent.presence = PresenceState::Wrapup { call_id: None };
         }
 
-        let record = agent.clone();
         drop(agent);
-        self.notify_handlers(&record).await;
 
         Ok(())
     }

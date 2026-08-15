@@ -50,9 +50,6 @@ pub struct SessionContext {
     /// Name of the matched route that sent this call into the IVR.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_name: Option<String>,
-    /// Extra headers configured on the route (from routing rule `option.headers`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_headers: Option<HashMap<String, String>>,
     /// Arbitrary passthrough data set by the caller / external system.
     /// The provider receives this and can use it for correlation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,9 +75,6 @@ pub struct ProviderContext {
     /// Name of the matched route that sent this call into the IVR.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_name: Option<String>,
-    /// Extra headers configured on the route.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_headers: Option<HashMap<String, String>>,
     /// Passthrough data — the provider can set `custom_data` in its response
     /// and it will be echoed back in every subsequent ProviderContext.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,22 +243,6 @@ impl EndReason {
                 reason: SessionEndTag::Error,
                 detail: Some(msg.clone()),
             },
-        }
-    }
-}
-
-impl From<&str> for EndReason {
-    fn from(s: &str) -> Self {
-        match s {
-            "hangup" => EndReason::Hangup,
-            "normal" => EndReason::Normal,
-            "user_hangup" => EndReason::UserHangup,
-            "timeout" => EndReason::Timeout,
-            "transfer" => EndReason::Transfer(String::new()),
-            "transfer_to_queue" => EndReason::TransferToQueue(String::new()),
-            "transfer_to_ivr" => EndReason::TransferToIvr(String::new()),
-            "error" => EndReason::Error(String::new()),
-            other => EndReason::Error(other.to_string()),
         }
     }
 }
@@ -632,33 +610,4 @@ mod tests {
         assert!(!json.contains("detail"));
     }
 
-    #[test]
-    fn test_end_reason_from_str_all_variants() {
-        assert!(matches!(EndReason::from("normal"), EndReason::Normal));
-        assert!(matches!(EndReason::from("hangup"), EndReason::Hangup));
-        assert!(matches!(
-            EndReason::from("user_hangup"),
-            EndReason::UserHangup
-        ));
-        assert!(matches!(
-            EndReason::from("transfer"),
-            EndReason::Transfer(_)
-        ));
-        assert!(matches!(
-            EndReason::from("transfer_to_queue"),
-            EndReason::TransferToQueue(_)
-        ));
-        assert!(matches!(
-            EndReason::from("transfer_to_ivr"),
-            EndReason::TransferToIvr(_)
-        ));
-        assert!(matches!(EndReason::from("error"), EndReason::Error(_)));
-        assert!(matches!(EndReason::from("timeout"), EndReason::Timeout));
-    }
-
-    #[test]
-    fn test_end_reason_from_str_unknown_falls_back_to_error() {
-        let r = EndReason::from("something_weird");
-        assert!(matches!(r, EndReason::Error(ref e) if e == "something_weird"));
-    }
 }

@@ -1246,7 +1246,6 @@ enum ConstructMode<'a> {
         None
     }
 
-    /// Wait up to `retries * 20ms` for a `SampleStreamSource` from the given peer's tracks.
     /// Map a REFER status code to a human-readable reason string.
     pub(super) fn refer_reason_for_status(status: u16) -> Option<&'static str> {
         match status {

@@ -11,14 +11,6 @@ pub struct RwiTokenConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RwiContextConfig {
-    pub name: String,
-    pub no_answer_timeout_secs: Option<u32>,
-    pub no_answer_action: Option<String>,
-    pub no_answer_transfer_target: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RwiConfig {
     #[serde(default = "default_rwi_max_connections")]
     pub max_connections: usize,
@@ -30,8 +22,6 @@ pub struct RwiConfig {
     pub originate_rate_limit: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tokens: Vec<RwiTokenConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contexts: Vec<RwiContextConfig>,
 }
 
 impl Default for RwiConfig {
@@ -42,7 +32,6 @@ impl Default for RwiConfig {
             orphan_hold_secs: default_orphan_hold_secs(),
             originate_rate_limit: default_originate_rate_limit(),
             tokens: Vec::new(),
-            contexts: Vec::new(),
         }
     }
 }
@@ -77,7 +66,6 @@ pub struct RwiIdentity {
 
 pub struct RwiAuth {
     tokens: HashMap<String, RwiTokenConfig>,
-    contexts: HashMap<String, RwiContextConfig>,
 }
 
 impl RwiAuth {
@@ -88,13 +76,7 @@ impl RwiAuth {
             .map(|t| (t.token.clone(), t.clone()))
             .collect();
 
-        let contexts = config
-            .contexts
-            .iter()
-            .map(|c| (c.name.clone(), c.clone()))
-            .collect();
-
-        Self { tokens, contexts }
+        Self { tokens }
     }
 
     pub fn validate_token(&self, token: &str) -> Option<RwiIdentity> {
@@ -102,10 +84,6 @@ impl RwiAuth {
             token: t.token.clone(),
             scopes: t.scopes.clone(),
         })
-    }
-
-    pub fn get_context(&self, name: &str) -> Option<&RwiContextConfig> {
-        self.contexts.get(name)
     }
 }
 
@@ -144,20 +122,6 @@ mod tests {
                     scopes: vec!["call.control".to_string(), "supervisor.control".to_string()],
                 },
             ],
-            contexts: vec![
-                RwiContextConfig {
-                    name: "ctx1".to_string(),
-                    no_answer_timeout_secs: Some(10),
-                    no_answer_action: Some("hangup".to_string()),
-                    no_answer_transfer_target: None,
-                },
-                RwiContextConfig {
-                    name: "ctx2".to_string(),
-                    no_answer_timeout_secs: Some(30),
-                    no_answer_action: Some("transfer".to_string()),
-                    no_answer_transfer_target: Some("sip:voicemail@local".to_string()),
-                },
-            ],
         }
     }
 
@@ -183,19 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rwi_auth_get_context() {
-        let config = create_test_config();
-        let auth = RwiAuth::new(&config);
-
-        let ctx = auth.get_context("ctx1");
-        assert!(ctx.is_some());
-        assert_eq!(ctx.unwrap().name, "ctx1");
-
-        let ctx2 = auth.get_context("nonexistent");
-        assert!(ctx2.is_none());
-    }
-
-    #[test]
     fn test_rwi_config_defaults() {
         let config = RwiConfig::default();
         assert_eq!(config.max_connections, 2000);
@@ -203,6 +154,5 @@ mod tests {
         assert_eq!(config.orphan_hold_secs, 30);
         assert_eq!(config.originate_rate_limit, 10);
         assert!(config.tokens.is_empty());
-        assert!(config.contexts.is_empty());
     }
 }

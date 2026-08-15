@@ -171,7 +171,6 @@ pub struct AgentRecord {
     pub custom_data: HashMap<String, String>,
 }
 
-pub type AgentEventHandler = Box<dyn Fn(&AgentRecord) + Send + Sync>;
 
 impl AgentRecord {
     /// Check if agent has capacity for new call

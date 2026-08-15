@@ -47,7 +47,8 @@ mod media_path_strategy;
 mod memory_session_registry;
 mod session_runtime;
 pub mod session_registry;
-pub mod test_utils;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 #[cfg(test)]
 mod integration_tests;

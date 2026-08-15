@@ -47,15 +47,14 @@ pub struct EventCallContext {
     pub root: Option<RootCallInfo>,
 }
 
-/// Type alias for RWI event sender.
+/// Type alias for RWI event sender (used by the cc addon's agent event fanout).
 pub type RwiEventTx = tokio::sync::mpsc::UnboundedSender<RwiEvent>;
-/// Type alias for RWI event receiver.
-pub type RwiEventRx = tokio::sync::mpsc::UnboundedReceiver<RwiEvent>;
 
 pub use crate::rwi::event::RwiEvent;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CallMeta and CallMetaStore — legacy, kept for sipflow_upload backward compat
+// CallMeta and CallMetaStore — per-call metadata used by sipflow upload and
+// event enrichment.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Per-call metadata for enriching events at dispatch time.

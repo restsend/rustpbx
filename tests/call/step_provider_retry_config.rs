@@ -73,7 +73,6 @@ async fn step_provider_waits_for_configured_retry_delay() {
         sip_headers: None,
         event: Some(ProviderEvent::SessionStart),
         route_name: None,
-        route_headers: None,
         custom_data: None,
         step_start_time: None,
         step_end_time: None,

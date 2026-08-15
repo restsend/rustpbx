@@ -25,9 +25,6 @@ pub struct HttpRegistry {
     cache: DashMap<String, (AgentRecord, Instant)>,
     /// Round-robin counter
     rr_counter: RwLock<u64>,
-    /// Event callbacks for state changes
-    #[allow(dead_code)]
-    event_handlers: RwLock<Vec<super::AgentEventHandler>>,
 
     /// Cache TTL
     cache_ttl: Duration,
@@ -42,7 +39,6 @@ impl HttpRegistry {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             cache: DashMap::new(),
             rr_counter: RwLock::new(0),
-            event_handlers: RwLock::new(Vec::new()),
             cache_ttl: Duration::from_secs(30),
         }
     }
