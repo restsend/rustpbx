@@ -95,7 +95,7 @@ media_mode = "auto"               # "auto", "none", "bypass", "force_transcode"
                                   # - none: no media proxy (SDP passthrough, RTP direct)
                                   # - bypass: SDP rewrite only, RTP direct
                                   # - force_transcode: always bridge through PBX
-video_policy = "passthrough"      # "passthrough", "strip", "transcode"
+video_policy = "pass_through"      # "passthrough", "strip", "transcode"
 
 # Per-trunk IP override (for overlay networks like Tailscale/WireGuard)
 external_ip = "100.64.10.1"       # Override global rtp_config.external_ip

@@ -29,20 +29,19 @@ SIP / RTP data flow
 
 | Module | Path | Description |
 |--------|------|-------------|
-| `sipflow/mod.rs` | `src/sipflow/mod.rs` | Core types: `SipFlowItem`, `SipFlowMsgType`, `SipFlowMediaStats`, `SipFlowQuery` |
-| `sipflow/backend/mod.rs` | `src/sipflow/backend/mod.rs` | `SipFlowBackend` trait + `create_backend()` factory |
-| `sipflow/backend/local.rs` | `src/sipflow/backend/local.rs` | Local SQLite backend (background worker + StorageManager) |
-| `sipflow/backend/remote.rs` | `src/sipflow/backend/remote.rs` | Remote cluster backend (UDP + HTTP, jump consistent hash) |
-| `sipflow/storage.rs` | `src/sipflow/storage.rs` | SQLite + raw-file storage manager |
-| `sipflow/flowdb_backend.rs` | `src/sipflow/flowdb_backend.rs` | FlowDB backend implementation |
-| `sipflow/flowdb_codec.rs` | `src/sipflow/flowdb_codec.rs` | FlowDB key/value encoding |
-| `sipflow/protocol.rs` | `src/sipflow/protocol.rs` | Binary wire protocol for UDP transport |
-| `sipflow/wav_utils.rs` | `src/sipflow/wav_utils.rs` | RTP → WAV generation with codec transcoding |
-| `sipflow/rtp_stats.rs` | `src/sipflow/rtp_stats.rs` | RTP jitter/loss statistics |
-| `sipflow/sdp_utils.rs` | `src/sipflow/sdp_utils.rs` | SDP parsing helpers |
+| `sipflow/mod.rs` | `crates/rustpbx-sipflow/src/mod.rs` | Core types: `SipFlowItem`, `SipFlowMsgType`, `SipFlowMediaStats`, `SipFlowQuery` |
+| `sipflow/backend/mod.rs` | `crates/rustpbx-sipflow/src/backend/mod.rs` | `SipFlowBackend` trait + `create_backend()` factory |
+| `sipflow/backend/local.rs` | `crates/rustpbx-sipflow/src/backend/local.rs` | Local SQLite backend (background worker + StorageManager) |
+| `sipflow/backend/remote.rs` | `crates/rustpbx-sipflow/src/backend/remote.rs` | Remote cluster backend (UDP + HTTP, jump consistent hash) |
+| `sipflow/storage.rs` | `crates/rustpbx-sipflow/src/storage.rs` | SQLite + raw-file storage manager |
+| `sipflow/flowdb_backend.rs` | `crates/rustpbx-sipflow/src/flowdb_backend.rs` | FlowDB backend implementation |
+| `sipflow/flowdb_codec.rs` | `crates/rustpbx-sipflow/src/flowdb_codec.rs` | FlowDB key/value encoding |
+| `sipflow/protocol.rs` | `crates/rustpbx-sipflow/src/protocol.rs` | Binary wire protocol for UDP transport |
+| `sipflow/wav_utils.rs` | `crates/rustpbx-sipflow/src/wav_utils.rs` | RTP → WAV generation with codec transcoding |
+| `sipflow/rtp_stats.rs` | `crates/rustpbx-sipflow/src/rtp_stats.rs` | RTP jitter/loss statistics |
+| `sipflow/sdp_utils.rs` | `crates/rustpbx-sipflow/src/sdp_utils.rs` | SDP parsing helpers |
 | `bin/sipflow.rs` | `src/bin/sipflow.rs` | Standalone sipflow server binary |
-| `bin/sipflow-diag.rs` | `src/bin/sipflow-diag.rs` | Offline diagnostic CLI tool |
-| `sipflow/diag.rs` | `src/sipflow/diag.rs` | Shared diagnostic logic (CLI + HTTP `/diag` endpoint) |
+| `sipflow/diag.rs` | `crates/rustpbx-sipflow/src/diag.rs` | Shared diagnostic logic (CLI + HTTP `/diag` endpoint) |
 | `callrecord/sipflow.rs` | `src/callrecord/sipflow.rs` | SIP message inspector (MessageInspector) with batch writer + object pool |
 | `callrecord/sipflow_upload.rs` | `src/callrecord/sipflow_upload.rs` | S3/HTTP upload hooks |
 | `console/handlers/sipflow.rs` | `src/console/handlers/sipflow.rs` | Console REST API endpoints |
@@ -447,115 +446,3 @@ cargo run --release --bin sipflow -- \
 
 ---
 
-## sipflow-diag — Diagnostic CLI Tool
-
-The `sipflow-diag` binary is an offline diagnostic tool that queries stored
-SIP/RTP data by Call-ID, producing a comprehensive report similar to tcpdump
-but for SIP signaling and RTP media statistics.
-
-### Quick Start
-
-```bash
-# Full diagnostic for a specific date
-cargo run --release --bin sipflow-diag -- \
-    --call-id "BKhjaN9o9Uo1a2oyc73dIL@miuda.ai" \
-    --date 20260721
-
-# Scan all directories within a time window (default ±72h)
-cargo run --release --bin sipflow-diag -- \
-    --call-id "abc123" \
-    --dir /var/sipflow/data
-
-# Specify exact time range
-cargo run --release --bin sipflow-diag -- \
-    --call-id "abc123" \
-    --start 202607210900 --end 202607211800
-
-# Export SIP flow as JSONL + RTP audio as WAV
-cargo run --release --bin sipflow-diag -- \
-    --call-id "abc123" \
-    --date 20260721 \
-    --dump-jsonl --dump-wav
-
-# JSON output
-cargo run --release --bin sipflow-diag -- \
-    --call-id "abc123" --date 20260721 --json
-
-# Verbose mode (show full SIP payloads)
-cargo run --release --bin sipflow-diag -- \
-    --call-id "abc123" --date 20260721 --verbose
-```
-
-### CLI Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `-c`, `--call-id` | (required) | Call-ID to search for |
-| `-r`, `--dir` | `./config/sipflow` | SipFlow data root directory |
-| `-D`, `--date` | none | Limit to specific date `YYYYMMDD` |
-| `--start` | auto (`now - 72h`) | Start time (see format below) |
-| `--end` | auto (`now + 72h`) | End time (same formats as `--start`) |
-| `--window-hours` | `72` | Time window (±hours) when no `--date` or `--start/--end` given |
-| `--subdirs` | `auto` | Directory layout: `auto`, `none`, `daily`, `hourly` |
-| `--json` | false | Output as JSON |
-| `-v`, `--verbose` | false | Show full SIP message payloads |
-| `--dump-jsonl` | false | Export SIP flow as JSONL (`{callid}.jsonl`) |
-| `--jsonl-path` | none | JSONL output path (overrides default) |
-| `--dump-wav` | false | Export RTP audio as WAV (`{callid}.wav`) |
-| `--wav-path` | none | WAV output path (overrides default) |
-
-### Time Format Support
-
-`--start` and `--end` autodetect the following formats:
-
-| Format | Example | Description |
-|--------|---------|-------------|
-| `YYYYMMDD` | `20260721` | Midnight of that day |
-| `YYYYMMDDHH` | `2026072114` | Start of that hour |
-| `YYYYMMDDHH24MISS` | `20260721143000` | Exact second |
-| Unix seconds | `1721500000` | Seconds since epoch |
-| Unix microseconds | `1721500000000000` | Microseconds since epoch |
-| `@<unix-ts>` | `@1721500000` | Explicit timestamp (seconds or µs) |
-
-### Report Sections
-
-The tool produces a formatted terminal report with these sections:
-
-1. **Header** — Call-ID, data directory, engine(s), time range, duration
-2. **SIP Signaling** — Timestamped tcpdump-style flow with methods/status codes
-3. **RTP Media** — Comprehensive per-leg analysis:
-   - Total packets, loss, jitter summary
-   - SDP payload map (codec name → PT mapping)
-   - Per-leg: SSRC list with time ranges, payload type distribution
-   - Time distribution (10s buckets with ASCII bar chart)
-   - Inter-packet gap detection (>1s)
-   - RTP timestamp discontinuity analysis
-4. **Cross-Leg Summary** — Side-by-side per-bucket comparison
-
-### Diagnostic REST Endpoint
-
-When the `sipflow` server is running, the same diagnostic capabilities are
-available via HTTP:
-
-```bash
-curl "http://localhost:3001/diag?callid=abc123&start=20260721&end=20260722"
-```
-
-The response includes the same structured data as `--json` output, with
-`sip_flow` (array of SIP messages), `rtp_streams` (per-leg stats), and
-`rtp_detail` (full RTP analysis with buckets, gaps, and cross-leg table).
-
-### Export Files
-
-**JSONL** (`--dump-jsonl`): One JSON object per line, each containing the
-complete SIP message (full payload) plus metadata:
-
-```json
-{"timestamp":1784597075194229,"time":"2026-07-21 09:24:35.194229",
- "src_addr":"127.0.0.1:50236","dst_addr":"192.168.3.211:15060",
- "msg_type":"Sip","message":"INVITE sip:test99@localhost SIP/2.0\r\n..."}
-```
-
-**WAV** (`--dump-wav`): 16-bit PCM WAV file with automatic codec detection
-and transcoding (Opus → PCM, G722 → PCM, etc.). Both legs are mixed into a
-stereo track when available.

@@ -1,6 +1,6 @@
 # RWI Events 开发者参考
 
-> 代码来源：`src/rwi/proto.rs` ｜ 协议版本：`1.0`
+> 代码来源：`src/rwi/event.rs`（事件结构）与 `src/rwi/proto.rs`（EventCallContext / RecordingMetadata）｜ 协议版本：`1.0`
 
 ---
 
@@ -58,15 +58,11 @@ events = []
 
 ### WebSocket 事件
 
-```json
-{
-  /* 事件数据字段直接扁平化到顶层，无额外包裹 */
-}
-```
+事件字段直接扁平化到 JSON 顶层，并携带一个内嵌的 `event_type` 键标识事件类型：
 
-示例：
 ```json
 {
+  "event_type": "call_ringing",
   "call_id": "call-abc123",
   "caller_name": "330909",
   "callee_name": "9242000001",
@@ -74,7 +70,7 @@ events = []
 }
 ```
 
-> WebSocket 事件以事件字段直接作为 JSON 顶层键值，不含 `"rwi"` 或事件类型名称包裹。客户端通过连接时协商的订阅规则识别事件类型。
+> 不存在 `"rwi"` 或事件名包裹对象；客户端按 `event_type` 字段分发。
 
 ### Webhook 信封
 
@@ -116,8 +112,14 @@ events = []
 | `trunk` | Option\<String\> | SIP 中继名称 |
 | `app_id` | Option\<String\> | IVR 应用 ID |
 | `routing_target` | Option\<String\> | 当前路由目标 |
-| `agent_id` | Option\<String\> | 坐席 ID |
-| `agent_name` | Option\<String\> | 坐席名称 |
+| `root` | Option\<Object\> | 根呼叫标识（嵌套对象，见下） |
+
+**`root`（根呼叫）** — 标识当前呼叫的根（跨转接保持不变）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 根呼叫 ID |
+| `caller` / `callee` | Option\<String\> | 根呼叫的主 / 被叫 |
 
 **说明**：
 - `ani` vs `caller`：`ani` 是纯号码（用于业务匹配），`caller` 是完整 SIP URI
@@ -235,6 +237,18 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 }
 ```
 
+#### call_initiated
+
+分发：call_owner
+
+外呼发起（RWI `call.originate` / outbound dial）时发给会话所有者的第一个事件。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫唯一标识 |
+| `callee` | String | 目标 URI |
+| *+ctx* | | 扁平化上下文 |
+
 #### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
 
 分发：call_owner
@@ -275,6 +289,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `reason` | Option\<String\> | 挂机原因（见下表） |
+| `hangup_by` | Option\<String\> | 归一化发起方：`agent` / `caller` / `system` / `transfer` / `unknown`（与 `cc_hangup.hangup_by` 同词汇表；未涉及坐席的被叫挂机记为 `callee`） |
 | `sip_status` | Option\<u16\> | SIP 响应码 |
 | *+ctx* | | 扁平化上下文 |
 
@@ -472,26 +487,19 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `call_id` | String | 呼叫标识 |
 | `metadata` | RecordingMetadata | 录音元数据（见下表） |
 
-**RecordingMetadata 字段**：
+**RecordingMetadata 字段**（typed 字段 + `extra` 透传袋）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `filename` | String | 录音文件名（必填） |
-| `unique_id` | String | 录音 UUID（必填） |
-| `file_size` | u64 | 文件大小字节（必填） |
+| `filename` | String | 录音文件名 |
+| `file_size` | u64 | 文件大小（字节） |
 | `download_url` | Option\<String\> | 下载地址 |
-| `caller_name` | Option\<String\> | 主叫号码 |
-| `callee_name` | Option\<String\> | 被叫号码 |
-| `called_phone` | Option\<String\> | 实际被叫号码 |
-| `call_type` | String | 呼叫类型（必填） |
-| `agent_id` | Option\<String\> | 坐席 ID |
-| `agent_name` | Option\<String\> | 坐席名称 |
-| `call_start_time` | Option\<String\> | 通话开始时间 |
-| `call_end_time` | Option\<String\> | 通话结束时间 |
-| `upload_time` | Option\<String\> | 上传完成时间 |
-| `switch_flag` | Option\<String\> | 站点标识 |
-| `process_flag` | Option\<String\> | 处理进程标识（如 `ks_22_normal`） |
-| `root_call_id` | Option\<String\> | 根呼叫 ID |
+| `caller_name` / `callee_name` | Option\<String\> | 主 / 被叫号码 |
+| `call_type` | String | 呼叫类型 |
+| `call_start_time` / `call_end_time` / `upload_time` | Option\<String\> | 通话开始 / 结束 / 上传完成时间 |
+| *(其他任意键)* | String | `extra` 透传袋（`#[serde(flatten)]`）：addon 写入的扁平字符串键（如 `agent_id`、`queue_id`、`tenant_id`、`switch_flag`）原样透传，核心不命名 |
+
+> 注意：不存在 `unique_id` typed 字段；`agent_id` 等业务字段依赖 addon 是否写入 `extra`。
 
 ```json
 {
@@ -626,23 +634,6 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `call_result` | Option\<String\> | 通话结果 |
 | *+ctx* | | 扁平化上下文 |
 
-#### ivr_flow_transitioned
-
-分发：fan_out_to_context
-
-呼叫在 IVR 应用之间跳转。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `from_app_id` | String | 源应用 ID |
-| `to_app_id` | String | 目标应用 ID |
-| `from_node_id` | String | 源节点 ID |
-| `to_node_id` | String | 目标节点 ID |
-| `transition_reason` | String | 跳转原因（`menu_choice`、`transfer`、`overflow` 等） |
-| `transition_time` | String | 跳转时间 |
-| `next_routing_target` | Option\<String\> | 下一个路由目标 |
-| *+ctx* | | 扁平化上下文 |
 
 #### ivr_flow_completed
 
@@ -787,15 +778,6 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `queue_id` | String | 队列 ID |
 | *+ctx* | | 扁平化上下文 |
 
-#### queue_overflowed
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `original_queue_id` | String | 原队列 ID |
-| `overflow_queue_id` | String | 溢出目标队列 ID |
-| `reason` | String | 溢出原因 |
-| *+ctx* | | 扁平化上下文 |
 
 #### queue_voicemail_redirected
 
@@ -942,134 +924,22 @@ ACD 调度器无法为技能组提供坐席时触发。
 
 ---
 
-### 6.8 分机（DN）事件
+#### cc_ringing / cc_answered / cc_held / cc_unheld
 
-#### dn_state_changed
+CC 坐席呼叫生命周期事件（addon-cc）。`cc_ringing`：坐席话机振铃；
+`cc_answered`：坐席接听；`cc_held` / `cc_unheld`：坐席侧保持 / 恢复。
+载荷含 `call_id`、`agent_id`、`queue_id` 与扁平化上下文。
 
-分发：broadcast
+#### cc_hangup
 
-分机级别的细粒度信令事件。
+CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
+（`agent` / `caller` / `system` / `transfer` / `unknown`）、`talk_secs`。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `caller` | String | 分机号 / 主叫 |
-| `event_name` | String | 事件名称（见下表） |
-| `system_time` | String | 系统时间 |
-| `call_id` | Option\<String\> | 关联呼叫 ID |
-| `agent_id` | Option\<String\> | 坐席 ID |
-| `caller_name` | Option\<String\> | 主叫名称/号码 |
-| `callee_name` | Option\<String\> | 被叫名称/号码 |
-| `reason_code` | Option\<String\> | 原因码 |
-| `agent_work_mode` | Option\<String\> | 坐席工作模式 |
-| `releasing_party` | Option\<String\> | 释放方（`"1 Local"` / `"2 Remote"`） |
-| `vq_name` | Option\<String\> | 虚拟队列名 |
-| `routing_target` | Option\<String\> | 路由目标 |
-| `skill_group` | Option\<String\> | 技能组 |
-| `extra` | Option\<Map\<String, Value\>\> | 扩展字段（省略时不出现在 JSON 中） |
+#### skill_group_call_queued / skill_group_call_abandoned / skill_group_service_unavailable
 
-**event_name 枚举值**：
+技能组排队事件：呼叫进入 / 放弃技能组排队；无可用坐席。
+载荷含 `call_id`、`skill_group_id`、`waiting_count` 等。
 
-| event_name | 说明 | 触发场景 |
-|------------|------|----------|
-| `REGISTERED` | 分机注册 | SIP REGISTER 成功 |
-| `DIALING` | 外呼拨号 | 坐席外呼或手工拨号 |
-| `RINGING` | 振铃 | 坐席侧振铃 |
-| `ESTABLISHED` | 接通 | 通话建立，坐席接起电话 |
-| `RELEASED` | 释放 | 挂机或转接成功后 |
-| `ABANDONED` | 挂断 | 振铃阶段用户放弃 |
-| `HELD` | 保持 | 坐席保持，用户听音乐 |
-| `RETRIEVED` | 取回 | 将 held 的用户取回 |
-| `PARTYCHANGED` | 多方通话状态变更 | 多方通话状态变化 |
-| `PARTYADDED` | 多方通话新增 | 多方通话新增一方 |
-| `PARTYDELETED` | 多方通话删除 | 多方通话减少一方 |
-| `AGENTLOGIN` | 坐席登录 | 坐席从离线变为在线（CC addon） |
-| `AGENTLOGOUT` | 坐席登出 | 坐席从在线变为离线（CC addon） |
-| `AGENTREADY` | 坐席就绪 | 坐席进入空闲状态（CC addon） |
-| `AGENTNOTREADY` | 坐席未就绪 | 坐席进入忙碌/振铃/话后处理等状态（CC addon） |
-| `ONHOOK` | 摘机 | 软电话摘机 |
-
-> **注意**：使用 `event_name` 做事件路由和匹配。
-
-```json
-{
-  "rwi": "1.0",
-  "dn_state_changed": {
-    "caller": "80001",
-    "event_name": "ESTABLISHED",
-    "system_time": "2026-05-14T17:54:49.003Z",
-    "call_id": "call-abc",
-    "agent_id": "10001",
-    "caller_name": "19534519769",
-    "callee_name": "39989",
-    "extra": {
-      "source": "KS",
-      "kz_conn_id": "kc-12345",
-      "user_data": { "kz_target": "39299", "kz_flowname": "CTC400Customer" }
-    }
-  }
-}
-```
-
-#### dn_registered / dn_unregistered
-
-分发：broadcast
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `caller` | String | 分机号 |
-| `agent_id` | Option\<String\> | 坐席 ID |
-| `register_time` / `unregister_time` | String | 注册/注销时间 |
-
----
-
-### 6.9 呼叫元数据事件
-
-#### call_metadata_updated
-
-呼叫建立后元数据更新时触发。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `metadata` | CallMetadata | 元数据（见下表） |
-
-**CallMetadata 字段**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `root_call_id` | Option\<String\> | 根呼叫 ID |
-| `caller_name` | Option\<String\> | 主叫号码 |
-| `callee_name` | Option\<String\> | 被叫号码 |
-| `called_phone` | Option\<String\> | 实际被叫号码 |
-| `dial_direction` | Option\<String\> | 呼叫方向 |
-| `uuid` | Option\<String\> | 全局 UUID |
-| `routing_path` | Option\<Vec\<String\>\> | 路由路径 |
-| `app_id` | Option\<String\> | IVR 应用 ID |
-| `routing_target` | Option\<String\> | 路由目标 |
-| `switch_name` | Option\<String\> | 交换机名 |
-
-```json
-{
-  "rwi": "1.0",
-  "call_metadata_updated": {
-    "call_id": "call-abc",
-    "metadata": {
-      "root_call_id": "call-root-42",
-      "caller_name": "330909",
-      "callee_name": "9242000001",
-      "called_phone": "018659727661",
-      "dial_direction": "inbound",
-      "uuid": "uuid-abc-123",
-      "routing_path": ["menu:root", "queue:level1"],
-      "app_id": "ivr-support",
-      "routing_target": "queue:support",
-      "switch_name": "SIP_Switch_KS"
-    }
-  }
-}
-```
-
----
 
 ### 6.10 会议事件
 
@@ -1168,41 +1038,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 
 ---
 
-### 6.12 并行外呼事件
-
-#### parallel_originate_started
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `operation_id` | String | 操作 ID |
-| `leg_count` | u32 | 并发 leg 数量 |
-
-#### parallel_originate_leg_ringing / parallel_originate_winner / parallel_originate_leg_cancelled
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `operation_id` | String | 操作 ID |
-| `call_id` | String | Leg 呼叫 ID |
-| `destination` | String | 拨打目标 |
-| `reason` | String | `leg_cancelled` 专用：取消原因 |
-| *+ctx* | | 扁平化上下文 |
-
-#### parallel_originate_completed
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `operation_id` | String | 操作 ID |
-| `winning_call_id` | String | 中选呼叫 ID |
-
-#### parallel_originate_failed
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `operation_id` | String | 操作 ID |
-| `reason` | String | 失败原因 |
-
----
-
 ### 6.13 SIP 信令事件
 
 #### sip_message_received / sip_notify_received
@@ -1242,6 +1077,7 @@ ACD 调度器无法为技能组提供坐席时触发。
 | 事件类型 | 分发 | call_id | 上下文 |
 |----------|------|---------|--------|
 | `call_incoming` | fan_out | ✅ | 自有字段 |
+| `call_initiated` | owner | ✅ | 外呼已发起 |
 | `call_ringing` | owner | ✅ | +ctx |
 | `call_early_media` | owner | ✅ | +ctx |
 | `call_answered` | owner | ✅ | +ctx |
@@ -1256,7 +1092,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `media_hold_started` | owner | ✅ | +ctx |
 | `media_hold_stopped` | owner | ✅ | +ctx |
 | `media_ringback_passthrough_started` | owner | ✅ | — |
-| `media_ringback_passthrough_stopped` | owner | ✅ | — |
 | `media_play_started` | owner | ✅ | +ctx |
 | `media_play_finished` | owner | ✅ | +ctx |
 | `record_started` | owner | ✅ | +ctx |
@@ -1274,7 +1109,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `dtmf_collection_timeout` | owner | ✅ | +ctx |
 | `ivr_node_entered` | fan_out | ✅ | +ctx |
 | `ivr_node_exited` | fan_out | ✅ | +ctx |
-| `ivr_flow_transitioned` | fan_out | ✅ | +ctx |
 | `ivr_flow_completed` | fan_out | ✅ | +ctx |
 | `ivr_step_trace` | fan_out | ✅ | — |
 | `queue_joined` | owner/broadcast | ✅ | +ctx |
@@ -1283,8 +1117,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `queue_agent_connected` | owner | ✅ | +ctx |
 | `queue_left` | broadcast | ✅ | +ctx |
 | `queue_wait_timeout` | owner | ✅ | +ctx |
-| `queue_overflowed` | owner | ✅ | +ctx |
-| `queue_voicemail_redirected` | owner | ✅ | +ctx |
 | `queue_candidates_found` | owner | ✅ | +ctx |
 | `queue_agent_ringing` | owner | ✅ | +ctx |
 | `queue_agent_no_answer` | owner | ✅ | +ctx |
@@ -1295,10 +1127,6 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `skill_group_agent_assigned` | broadcast | ✅ | — |
 | `skill_group_no_agent` | broadcast | ✅ | — |
 | `agent_state_changed` | broadcast | 可选 | — |
-| `dn_state_changed` | broadcast | 可选 | — |
-| `dn_registered` | broadcast | — | — |
-| `dn_unregistered` | broadcast | — | — |
-| `call_metadata_updated` | owner | ✅ | — |
 | `conference_created` | broadcast | — | — |
 | `conference_member_joined` | broadcast | ✅ | +ctx |
 | `conference_member_left` | broadcast | ✅ | +ctx |
@@ -1306,10 +1134,7 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `conference_member_unmuted` | broadcast | ✅ | +ctx |
 | `conference_destroyed` | broadcast | — | — |
 | `conference_ended_by_host` | broadcast | — | +ctx |
-| `conference_auto_ended` | broadcast | — | +ctx |
 | `conference_error` | broadcast | — | — |
-| `conference_consult_dialing` | owner | ✅ | +ctx |
-| `conference_consult_connected` | owner | ✅ | +ctx |
 | `conference_merge_requested` | fan_out | ✅ | +ctx |
 | `conference_merged` | fan_out | ✅ | +ctx |
 | `conference_merge_failed` | fan_out | ✅ | +ctx |
@@ -1322,16 +1147,8 @@ ACD 调度器无法为技能组提供坐席时触发。
 | `supervisor_barge_started` | owner | — | — |
 | `supervisor_takeover_started` | owner | — | — |
 | `supervisor_mode_stopped` | owner | — | — |
-| `parallel_originate_started` | owner | — | — |
-| `parallel_originate_leg_ringing` | owner | ✅ | +ctx |
-| `parallel_originate_winner` | owner | ✅ | +ctx |
-| `parallel_originate_leg_cancelled` | owner | ✅ | +ctx |
-| `parallel_originate_completed` | owner | ✅ | — |
-| `parallel_originate_failed` | owner | — | — |
 | `sip_message_received` | owner | ✅ | +ctx |
 | `sip_notify_received` | owner | ✅ | +ctx |
-| `call_ownership_changed` | owner | ✅ | +ctx |
-| `session_resumed` | owner | — | — |
 
 ---
 
@@ -1354,7 +1171,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{event_type}] call_id={call_id}")
 
         if event_type == "recording_metadata_available":
-            meta = body["event"]["recording_metadata_available"]["metadata"]
+            meta = body["event"]  # 与 WS 事件相同的扁平负载
             print(f"  download: {meta['download_url']}")
             print(f"  file_size: {meta['file_size']}")
 
@@ -1427,4 +1244,4 @@ asyncio.run(main())
 
 **文档版本**：v1.0  
 **最后更新**：2026-06-23  
-**代码来源**：`src/rwi/proto.rs`
+**代码来源**：`src/rwi/event.rs`

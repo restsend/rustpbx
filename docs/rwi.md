@@ -170,6 +170,7 @@ Some commands support aliases for convenience:
 | `session.list_calls` | List calls owned by this session |
 | `session.attach_call` | Attach to existing call (supervisor mode) |
 | `session.detach_call` | Release call ownership or supervision |
+| `session.resume` | Resume the event stream from a sequence number |
 
 **Subscribe example:**
 
@@ -195,12 +196,20 @@ Some commands support aliases for convenience:
 | `call.bridge` | Bridge two calls |
 | `call.unbridge` | Unbridge call |
 | `call.transfer` | Transfer call (blind) |
+| `call.transfer.replace` | Transfer by replacing the target dialog (RFC 3891 Replaces) |
 | `call.transfer.attended` | Attended transfer (consult first) |
 | `call.transfer.complete` | Complete attended transfer |
 | `call.transfer.cancel` | Cancel attended transfer |
 | `call.hold` | Hold call (with optional music) |
 | `call.unhold` | Unhold call |
 | `call.set_ringback_source` | Set ringback source |
+| `call.set_var` / `call.get_var` | Set / read a call variable |
+| `call.send_dtmf` | Send DTMF digits to the remote party |
+| `dtmf.collect` | Collect a multi-digit DTMF string |
+| `call.leg_add` / `call.leg_remove` | Dynamically add / remove a call leg |
+| `call.app_start` / `call.app_stop` | Start / stop a call application on the session |
+| `call.resume` | Resume receiving events for a call after re-attach |
+| `app.chain` | Chain into another call application |
 
 **Originate call:**
 
@@ -216,27 +225,6 @@ Some commands support aliases for convenience:
     "extra_headers": {
       "X-Campaign-ID": "camp_001"
     }
-  }
-}
-```
-
-**Originate with hold music:**
-
-```json
-{
-  "action": "call.originate",
-  "action_id": "req-002",
-  "params": {
-    "call_id": "leg_b",
-    "destination": "sip:alice@local",
-    "caller_id": "4000",
-    "timeout_secs": 45,
-    "hold_music": {
-      "type": "file",
-      "uri": "sounds/hold.wav",
-      "looped": true
-    },
-    "hold_music_target": "leg_a"
   }
 }
 ```
@@ -334,7 +322,6 @@ returns if the bridge disconnects).
 | `record.pause` | Pause recording |
 | `record.resume` | Resume recording |
 | `record.stop` | Stop recording |
-| `record.mask_segment` | Mask recording segment (PCI compliance) |
 
 **Start recording:**
 
@@ -464,6 +451,8 @@ Valid `mode` values: `mixed`, `separate_legs`
 | `conference.mute` | Mute participant |
 | `conference.unmute` | Unmute participant |
 | `conference.destroy` | Destroy conference |
+| `conference.end` | End conference by host (kicks all participants) |
+| `conference.merge` | Merge a consultation leg into a conference |
 | `conference.seat_replace` | Replace one participant with another atomically |
 
 **Create conference:**
@@ -541,7 +530,6 @@ Valid `mode` values: `mixed`, `separate_legs`
 | `media.hold.started` | Hold music started |
 | `media.hold.stopped` | Hold music stopped |
 | `media.ringback.passthrough.started` | 183 early media being forwarded to target leg |
-| `media.ringback.passthrough.stopped` | Early media passthrough ended |
 | `media.play.started` | Playback started |
 | `media.play.finished` | Playback finished |
 
@@ -554,7 +542,6 @@ Valid `mode` values: `mixed`, `separate_legs`
 | `record.resumed` | Recording resumed |
 | `record.stopped` | Recording stopped |
 | `record.failed` | Recording failed |
-| `record.segment_masked` | Segment masked |
 
 ### 6.5 Queue Events
 
@@ -575,7 +562,7 @@ Valid `mode` values: `mixed`, `separate_legs`
 | `supervisor.whisper.started` | Whisper started |
 | `supervisor.barge.started` | Barge started |
 | `supervisor.mode.stopped` | Supervisor mode stopped |
-| `supervisor.takeover.completed` | Takeover completed |
+| `supervisor.takeover.started` | Supervisor took over the agent leg |
 
 ### 6.7 SIP Events
 
@@ -681,7 +668,6 @@ Calls originated via `call.originate` are owned by the originating client immedi
 
 ```toml
 [rwi]
-enabled = true
 max_connections = 2000
 max_calls_per_connection = 200
 orphan_hold_secs = 30
@@ -749,25 +735,26 @@ no_answer_transfer_target = "sip:voicemail@local"
 | **Supervisor** | ⚠️ Partial | Commands implemented, **actual audio mixing TODO** |
 | **Conference** | ⚠️ Partial | Create/add/remove/destroy working, **mute/unmute in mixer TODO** |
 | **Media Stream/Inject** | ➖ Superseded | Commands removed — use `call.transfer` → `voip_bridge:` for bidirectional PCM |
-| **SIP Messages** | 🔧 Stub | Event stubs only, **real SIP sending TODO** |
+| **SIP Messages** | ✅ Complete | `sip.message` / `sip.notify` / `sip.options_ping` construct and send real SIP requests |
 
 ### Known Limitations
 
-1. **Parallel Dialing**: `call.originate` with multiple targets currently dials sequentially, not in parallel with race.
+1. **Track Muting**: track muting is exposed through the Console REST API (`mute` / `unmute` actions on `/api/calls/{id}/command`), not through the RWI WebSocket.
 
-2. **Track Muting**: `MuteTrack` / `UnmuteTrack` commands are accepted but actual media track muting is not yet implemented.
+2. **Conference Muting**: `conference.mute` / `conference.unmute` emit events but do not actually mute audio in the mixer.
 
-3. **Conference Muting**: `conference.mute` / `conference.unmute` emit events but do not actually mute audio in the mixer.
+3. **PCM Stream**: `media.stream_start` / `media.inject_start` were removed. Real-time bidirectional PCM is provided by `call.transfer` to a `voip_bridge:` / `bridge:` WebSocket endpoint (works for inbound and outbound calls).
 
-4. **PCM Stream**: `media.stream_start` / `media.inject_start` were removed. Real-time bidirectional PCM is provided by `call.transfer` to a `voip_bridge:` / `bridge:` WebSocket endpoint (works for inbound and outbound calls).
-
-5. **SIP MESSAGE/NOTIFY**: `sip.message` / `sip.notify` accept commands and emit events, but do not actually send SIP messages.
-
-6. **SDP Renegotiation**: Hold/reinvite SDP renegotiation is TODO.
+4. **SDP Renegotiation**: Hold/reinvite SDP renegotiation is TODO.
 
 ---
 
-## 12. Smart Routing and Rule Engine
+## 12. Smart Routing and Rule Engine (DESIGN PROPOSAL — NOT IMPLEMENTED)
+
+> **Status**: the `[rwi.smart_routing]` / `[rwi.local_rules]` /
+> `[rwi.sip_header_passthrough]` configuration described in this chapter is a
+> design proposal. None of it is parsed or executed by the current code —
+> these TOML sections are silently ignored. Do not rely on it in production.
 
 RWI supports intelligent in-dialog message routing and local rule execution for high-reliability call center scenarios.
 
@@ -882,29 +869,9 @@ when_rwi_disconnected = "execute_rules"  # passthrough, execute_rules, auto_hang
 rules = ["maintain_call", "log_cdr"]
 ```
 
-### 12.6 RWI Subscription Levels
-
-Clients can subscribe at different levels:
-
-| Level | Events | Use Case |
-|-------|--------|----------|
-| `events_only` | call.incoming, call.hangup | Monitoring |
-| `control` | + control commands | Normal agent |
-| `full_control` | + in-dialog messages | Advanced control |
-
-```json
-{
-  "action": "session.subscribe",
-  "params": {
-    "contexts": ["support_queue"],
-    "level": "full_control"
-  }
-}
-```
-
 ## 13. Limitations and Notes
 
-1. **SIP header passthrough**: `sip_headers` in `call.incoming` is read-only and only contains headers explicitly whitelisted in `[rwi.sip_header_passthrough]`.
+1. **SIP header passthrough**: `sip_headers` in `call.incoming` is read-only; the `[rwi.sip_header_passthrough]` whitelist described in the design chapter does not exist — the INVITE's headers are forwarded as captured.
 
 2. **PCM stream**: Provided via `call.transfer` → `voip_bridge:` WebSocket endpoint (bidirectional PCM16 binary frames); the old `media.stream_start` / `media.inject_start` commands are removed.
 

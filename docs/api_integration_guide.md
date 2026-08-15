@@ -68,7 +68,7 @@ RustPBX interacts with external systems in two ways:
   "strategy": "parallel",         // parallel (Ring All) | sequential (Failover)
   "record": true,                 // Enable recording for this call
   "timeout": 30,                  // Ring timeout in seconds
-  "media_proxy": "auto",          // auto | always | none | nat
+  "media_proxy": "auto",          // all | auto | nat | none | bypass
   "headers": {                    // Inject custom SIP headers into the INVITE sent to B
     "X-Call-Reason": "support-ticket-123"
   }
@@ -207,16 +207,31 @@ Push call details immediately after a call ends. Recording media upload is confi
 ## 🔌 2. Inbound REST API (You → RustPBX)
 
 **Base URL**: `http://<rustpbx-ip>:8080/console`  
-**Authentication**: Session cookie (login via `/console/login`) or API Token (future).
+**Authentication**: Session cookie (login via the console UI) or a static
+API token:
+
+```toml
+[console]
+api_tokens = [
+  { token = "my-api-token", scopes = ["calls", "records", "routing"] }
+]
+```
+
+```http
+Authorization: Bearer my-api-token
+```
 
 ### 2.1 Active Call Control
 Manage calls that are currently in progress.
 
 **List Active Calls**:
-`GET /console/calls/active`
+REST endpoints are mounted under the console `api_prefix`
+(default `/api`, configured via `[console].api_prefix`).
+
+`GET {api_prefix}/calls/active`
 
 **Control a Call**:
-`POST /console/calls/active/{call_id}/commands`
+`POST {api_prefix}/calls/active/{call_id}/commands`
 
 **Payloads**:
 1. **Hangup**:
@@ -258,12 +273,12 @@ Full protocol, config and examples: [Live Transcript SSE API](live_transcript_ap
 
 | Resource | Endpoint | Methods | Description |
 | :--- | :--- | :--- | :--- |
-| **Extensions** | `/console/extensions` | `GET`, `POST`, `PUT`, `DELETE` | Manage SIP users |
-| **Trunks** | `/console/sip-trunk` | `GET`, `POST`, `PUT`, `DELETE` | Manage upstream carriers |
-| **Routes** | `/console/routing` | `GET`, `POST`, `PUT`, `DELETE` | Manage dial plan rules |
-| **CDRs** | `/console/call-records` | `GET`, `POST` (Search) | Query history |
-| **Recording** | `/console/call-records/{id}/recording` | `GET` | Stream audio file |
-| **SIP Flow** | `/console/call-records/{id}/sip-flow` | `GET` | Get PCAP-like ladder diagram JSON |
+| **Extensions** | `{api_prefix}/extensions` | `GET`, `POST`, `PUT`, `DELETE` | Manage SIP users |
+| **Trunks** | `{api_prefix}/sip-trunk` | `GET`, `POST`, `PUT`, `DELETE` | Manage upstream carriers |
+| **Routes** | `{api_prefix}/routing` | `GET`, `POST`, `PUT`, `DELETE` | Manage dial plan rules |
+| **CDRs** | `{api_prefix}/call-records` | `GET`, `POST` (Search) | Query history |
+| **Recording** | `{api_prefix}/call-records/{id}/recording` | `GET` | Stream audio file |
+| **SIP Flow** | `{api_prefix}/call-records/{id}/sip-flow` | `GET` | Get PCAP-like ladder diagram JSON |
 
 ### 2.3 AMI (Admin Interface)
 Low-level system operations. Protected by IP whitelist (`[ami].allows` in config).
@@ -355,3 +370,9 @@ auto_start = true
 ```
 
 All calls are recorded locally to `./config/recorders/`, then asynchronously uploaded via `[callrecord]` S3 config.
+
+## Outbound Dial (SSE)
+
+`POST {ami_path}/outbound/dial` originates a call and streams every RWI
+event for it over one SSE connection. Full request/response contract and
+the `[outbound]` config: see [Outbound Dial SSE API](outbound_dial_api.md).

@@ -52,7 +52,8 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
 | SIP Proxy | `udp://localhost:5060` |
 | Register SIP phone as | `1001` / `password` |
 
-> **Commerce image** (includes Wholesale + all plugins): `docker pull docker.cnb.cool/miuda.ai/rustpbx:latest`
+> **Commerce image** (Wholesale + all commercial plugins, built with the
+> `wholesale` / `commerce` feature sets — enable per deployment): `docker pull docker.cnb.cool/miuda.ai/rustpbx:latest`
 
 ---
 

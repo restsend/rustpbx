@@ -100,10 +100,17 @@ addons = ["wholesale"]
 
 ## Cluster Configuration
 
-Multi-node clustering for high availability.
+Multi-node clustering for high availability. Each node lists **every**
+node (including itself — self-resolution matches the local listener
+against this list).
 
 ```toml
 [cluster]
+session_registry_backend = "db"   # "db" (default; shared PostgreSQL/MySQL),
+                                   # "memory", or "noop"/"disabled"
+session_registry_ttl_secs = 3600      # crashed-node reclaim window
+session_registry_heartbeat_secs = 30  # per-node batch refresh interval
+
 [[cluster.peers]]
 addr = "10.0.0.1"
 sip_port = 5060
@@ -114,6 +121,13 @@ addr = "10.0.0.2"
 sip_port = 5060
 ami_port = 8080
 ```
+
+The session registry answers "which node owns call X". Every session
+registers its owning node at birth (RAII unregister on hangup); console
+and cc REST call commands consult it to forward control requests to the
+node hosting the session, with a fan-out to all peers as the fallback.
+`GET {ami_path}/cluster/session_owner/{call_id}` resolves a call's owner
+(commerce builds).
 
 ## Commercial Licenses
 

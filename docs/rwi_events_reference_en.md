@@ -1,6 +1,6 @@
 # RWI Events Developer Reference
 
-> Source code: `src/rwi/proto.rs` | Protocol version: `1.0`
+> Source code: `src/rwi/event.rs` (event structs) and `src/rwi/proto.rs` (EventCallContext / RecordingMetadata) | Protocol version: `1.0`
 
 ---
 
@@ -66,15 +66,12 @@ events = []
 
 ### WebSocket Event
 
-```json
-{
-  /* Event fields are flattened directly at the top level, no extra wrapping */
-}
-```
+Event fields are flattened directly as top-level JSON keys, with an
+embedded `event_type` key identifying the event:
 
-Example:
 ```json
 {
+  "event_type": "call_ringing",
   "call_id": "call-abc123",
   "caller_name": "330909",
   "callee_name": "9242000001",
@@ -82,7 +79,8 @@ Example:
 }
 ```
 
-> WebSocket events are sent with the event fields directly as top-level JSON keys, without a `"rwi"` or event-type-name wrapper. Clients identify events through the subscription rules negotiated at connection time.
+> There is no `"rwi"` or event-name wrapper object; clients dispatch on the
+> `event_type` field.
 
 ### Webhook Envelope
 
@@ -250,6 +248,19 @@ New call enters the system. First event in any call flow.
   }
 }
 ```
+
+#### call_initiated
+
+Delivery: call_owner
+
+First event sent to the session owner when an outbound call is initiated
+(RWI `call.originate` / outbound dial).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `callee` | String | Destination URI |
+| *+ctx* | | Flattened context |
 
 #### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
 
@@ -539,26 +550,20 @@ Triggered when the recording file upload completes, containing full metadata.
 | `call_id` | String | Call identifier |
 | `metadata` | RecordingMetadata | Recording metadata (see below) |
 
-**RecordingMetadata fields**:
+**RecordingMetadata fields** (typed fields + `extra` pass-through bag):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `filename` | String | Recording filename (required) |
-| `unique_id` | String | Recording UUID (required) |
-| `file_size` | u64 | File size in bytes (required) |
+| `filename` | String | Recording filename |
+| `file_size` | u64 | File size in bytes |
 | `download_url` | Option\<String\> | Download URL |
-| `caller_name` | Option\<String\> | Calling party number |
-| `callee_name` | Option\<String\> | Dialed number |
-| `called_phone` | Option\<String\> | Actual called number |
-| `call_type` | String | Call type (required) |
-| `agent_id` | Option\<String\> | Agent ID |
-| `agent_name` | Option\<String\> | Agent name |
-| `call_start_time` | Option\<String\> | Call start timestamp |
-| `call_end_time` | Option\<String\> | Call end timestamp |
-| `upload_time` | Option\<String\> | Upload completion timestamp |
-| `switch_flag` | Option\<String\> | Site identifier |
-| `process_flag` | Option\<String\> | Process identifier (e.g., `ks_22_normal`) |
-| `root_call_id` | Option\<String\> | Root call ID |
+| `caller_name` / `callee_name` | Option\<String\> | Caller / callee numbers |
+| `call_type` | String | Call type |
+| `call_start_time` / `call_end_time` / `upload_time` | Option\<String\> | Call start / end / upload time |
+| *(any other key)* | String | `extra` pass-through bag (`#[serde(flatten)]`): flat string keys written by addons (`agent_id`, `queue_id`, `tenant_id`, `switch_flag`, ...) are forwarded verbatim; the core does not name them |
+
+> Note: there is no typed `unique_id` field; business fields like `agent_id`
+> depend on the addon writing them into `extra`.
 
 > `agent_id` / `agent_name` are populated from the session extensions when the
 > call was routed to a CC agent (`agent_id` is the canonical agent id resolved
@@ -657,23 +662,6 @@ Call exits an IVR node.
 | `call_result` | Option\<String\> | Call result |
 | *+ctx* | | Flat context fields |
 
-#### ivr_flow_transitioned
-
-Dispatch: fan_out_to_context
-
-Call transitions between IVR applications.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `from_app_id` | String | Source application ID |
-| `to_app_id` | String | Target application ID |
-| `from_node_id` | String | Source node ID |
-| `to_node_id` | String | Target node ID |
-| `transition_reason` | String | Transition reason (`menu_choice`, `transfer`, `overflow`, etc.) |
-| `transition_time` | String | Transition timestamp |
-| `next_routing_target` | Option\<String\> | Next routing target |
-| *+ctx* | | Flat context fields |
 
 #### ivr_flow_completed
 
@@ -820,15 +808,6 @@ Dispatch: call_owner / broadcast
 | `queue_id` | String | Queue ID |
 | *+ctx* | | Flat context fields |
 
-#### queue_overflowed
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `original_queue_id` | String | Original queue ID |
-| `overflow_queue_id` | String | Overflow target queue ID |
-| `reason` | String | Overflow reason |
-| *+ctx* | | Flat context fields |
 
 #### queue_voicemail_redirected
 
@@ -1033,135 +1012,6 @@ Agent state machine transition.
 
 ---
 
-### 6.8 DN (Directory Number) Events
-
-#### dn_state_changed
-
-Dispatch: broadcast
-
-Granular extension-level signaling events.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `caller` | String | Extension / caller |
-| `event_name` | String | Event name (see table below) |
-| `system_time` | String | System timestamp |
-| `call_id` | Option\<String\> | Associated call ID |
-| `agent_id` | Option\<String\> | Agent ID |
-| `caller_name` | Option\<String\> | Calling party name/number |
-| `callee_name` | Option\<String\> | Called party name/number |
-| `reason_code` | Option\<String\> | Reason code |
-| `agent_work_mode` | Option\<String\> | Agent work mode |
-| `releasing_party` | Option\<String\> | Releasing party (`"1 Local"` / `"2 Remote"`) |
-| `vq_name` | Option\<String\> | Virtual queue name |
-| `routing_target` | Option\<String\> | Routing target |
-| `skill_group` | Option\<String\> | Skill group |
-| `extra` | Option\<Map\<String, Value\>\> | Extension fields (omitted when absent) |
-
-**event_name values**:
-
-| event_name | Description | Trigger |
-|------------|-------------|---------|
-| `REGISTERED` | Extension registered | SIP REGISTER success |
-| `DIALING` | Outbound dialing | Agent outbound or manual dial |
-| `RINGING` | Ringing | Agent-side ringing |
-| `ESTABLISHED` | Call established | Call answered |
-| `RELEASED` | Released | Hangup or transfer completed |
-| `ABANDONED` | Abandoned | Caller abandoned during ringing |
-| `HELD` | Held | Agent held, user hears music |
-| `RETRIEVED` | Retrieved from hold | Held party retrieved |
-| `PARTYCHANGED` | Multi-party state changed | Conference state changed |
-| `PARTYADDED` | Multi-party added | Party added to conference |
-| `PARTYDELETED` | Multi-party removed | Party removed from conference |
-| `AGENTLOGIN` | Agent login | Agent went from offline to online (CC addon) |
-| `AGENTLOGOUT` | Agent logout | Agent went from online to offline (CC addon) |
-| `AGENTREADY` | Agent ready | Agent entered idle state (CC addon) |
-| `AGENTNOTREADY` | Agent not ready | Agent entered busy/ringing/wrapup etc. (CC addon) |
-| `ONHOOK` | On hook | Phone on hook |
-
-> **Note**: Use `event_name` for event routing and matching.
-
-```json
-{
-  "rwi": "1.0",
-  "dn_state_changed": {
-    "caller": "80001",
-    "event_name": "ESTABLISHED",
-    "system_time": "2026-05-14T17:54:49.003Z",
-    "call_id": "call-abc",
-    "agent_id": "10001",
-    "caller_name": "19534519769",
-    "callee_name": "39989",
-    "extra": {
-      "source": "KS",
-      "kz_conn_id": "kc-12345",
-      "user_data": { "kz_target": "39299", "kz_flowname": "CTC400Customer" }
-    }
-  }
-}
-```
-
-#### dn_registered / dn_unregistered
-
-Dispatch: broadcast
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `caller` | String | Extension number |
-| `agent_id` | Option\<String\> | Agent ID |
-| `register_time` / `unregister_time` | String | Registration/unregistration timestamp |
-
----
-
-### 6.9 Call Metadata Events
-
-#### call_metadata_updated
-
-Triggered when call metadata is updated after initial `call_incoming`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `metadata` | CallMetadata | Metadata (see below) |
-
-**CallMetadata fields**:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `root_call_id` | Option\<String\> | Root call ID |
-| `caller_name` | Option\<String\> | Calling party number |
-| `callee_name` | Option\<String\> | Dialed number |
-| `called_phone` | Option\<String\> | Actual called number |
-| `dial_direction` | Option\<String\> | Call direction |
-| `uuid` | Option\<String\> | Global UUID |
-| `routing_path` | Option\<Vec\<String\>\> | Routing path |
-| `app_id` | Option\<String\> | IVR application ID |
-| `routing_target` | Option\<String\> | Routing target |
-| `switch_name` | Option\<String\> | Switch name |
-
-```json
-{
-  "rwi": "1.0",
-  "call_metadata_updated": {
-    "call_id": "call-abc",
-    "metadata": {
-      "root_call_id": "call-root-42",
-      "caller_name": "330909",
-      "callee_name": "9242000001",
-      "called_phone": "018659727661",
-      "dial_direction": "inbound",
-      "uuid": "uuid-abc-123",
-      "routing_path": ["menu:root", "queue:level1"],
-      "app_id": "ivr-support",
-      "routing_target": "queue:support",
-      "switch_name": "SIP_Switch_KS"
-    }
-  }
-}
-```
-
----
-
 ### 6.10 Conference Events
 
 #### conference_created / conference_destroyed
@@ -1259,41 +1109,6 @@ Dispatch: broadcast
 
 ---
 
-### 6.12 Parallel Originate Events
-
-#### parallel_originate_started
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `operation_id` | String | Operation ID |
-| `leg_count` | u32 | Number of parallel legs |
-
-#### parallel_originate_leg_ringing / parallel_originate_winner / parallel_originate_leg_cancelled
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `operation_id` | String | Operation ID |
-| `call_id` | String | Leg call ID |
-| `destination` | String | Dialed destination |
-| `reason` | String | `leg_cancelled` only: cancellation reason |
-| *+ctx* | | Flat context fields |
-
-#### parallel_originate_completed
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `operation_id` | String | Operation ID |
-| `winning_call_id` | String | Winning call ID |
-
-#### parallel_originate_failed
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `operation_id` | String | Operation ID |
-| `reason` | String | Failure reason |
-
----
-
 ### 6.13 SIP Signaling Events
 
 #### sip_message_received / sip_notify_received
@@ -1333,6 +1148,7 @@ Dispatch: broadcast
 | Event Type | Dispatch | call_id | Context |
 |------------|----------|---------|---------|
 | `call_incoming` | fan_out | yes | own fields |
+| `call_initiated` | owner | ✅ | Outbound call initiated |
 | `call_ringing` | owner | yes | +ctx |
 | `call_early_media` | owner | yes | +ctx |
 | `call_answered` | owner | yes | +ctx |
@@ -1347,7 +1163,6 @@ Dispatch: broadcast
 | `media_hold_started` | owner | yes | +ctx |
 | `media_hold_stopped` | owner | yes | +ctx |
 | `media_ringback_passthrough_started` | owner | yes | — |
-| `media_ringback_passthrough_stopped` | owner | yes | — |
 | `media_play_started` | owner | yes | +ctx |
 | `media_play_finished` | owner | yes | +ctx |
 | `record_started` | owner | yes | +ctx |
@@ -1361,7 +1176,6 @@ Dispatch: broadcast
 | `dtmf_collection_timeout` | owner | yes | +ctx |
 | `ivr_node_entered` | fan_out | yes | +ctx |
 | `ivr_node_exited` | fan_out | yes | +ctx |
-| `ivr_flow_transitioned` | fan_out | yes | +ctx |
 | `ivr_flow_completed` | fan_out | yes | +ctx |
 | `ivr_step_trace` | fan_out | yes | — |
 | `queue_joined` | owner/broadcast | yes | +ctx |
@@ -1370,8 +1184,6 @@ Dispatch: broadcast
 | `queue_agent_connected` | owner | yes | +ctx |
 | `queue_left` | broadcast | yes | +ctx |
 | `queue_wait_timeout` | owner | yes | +ctx |
-| `queue_overflowed` | owner | yes | +ctx |
-| `queue_voicemail_redirected` | owner | yes | +ctx |
 | `queue_candidates_found` | owner | yes | +ctx |
 | `queue_agent_ringing` | owner | yes | +ctx |
 | `queue_agent_no_answer` | owner | yes | +ctx |
@@ -1390,10 +1202,6 @@ Dispatch: broadcast
 | `cc_hangup` | broadcast | yes | +ctx |
 | `cc_held` | broadcast | yes | +ctx |
 | `cc_unheld` | broadcast | yes | +ctx |
-| `dn_state_changed` | broadcast | optional | — |
-| `dn_registered` | broadcast | — | — |
-| `dn_unregistered` | broadcast | — | — |
-| `call_metadata_updated` | owner | yes | — |
 | `conference_created` | broadcast | — | — |
 | `conference_member_joined` | broadcast | yes | +ctx |
 | `conference_member_left` | broadcast | yes | +ctx |
@@ -1401,10 +1209,7 @@ Dispatch: broadcast
 | `conference_member_unmuted` | broadcast | yes | +ctx |
 | `conference_destroyed` | broadcast | — | — |
 | `conference_ended_by_host` | broadcast | — | +ctx |
-| `conference_auto_ended` | broadcast | — | +ctx |
 | `conference_error` | broadcast | — | — |
-| `conference_consult_dialing` | owner | yes | +ctx |
-| `conference_consult_connected` | owner | yes | +ctx |
 | `conference_merge_requested` | fan_out | yes | +ctx |
 | `conference_merged` | fan_out | yes | +ctx |
 | `conference_merge_failed` | fan_out | yes | +ctx |
@@ -1417,16 +1222,8 @@ Dispatch: broadcast
 | `supervisor_barge_started` | owner | — | — |
 | `supervisor_takeover_started` | owner | — | — |
 | `supervisor_mode_stopped` | owner | — | — |
-| `parallel_originate_started` | owner | — | — |
-| `parallel_originate_leg_ringing` | owner | yes | +ctx |
-| `parallel_originate_winner` | owner | yes | +ctx |
-| `parallel_originate_leg_cancelled` | owner | yes | +ctx |
-| `parallel_originate_completed` | owner | yes | — |
-| `parallel_originate_failed` | owner | — | — |
 | `sip_message_received` | owner | yes | +ctx |
 | `sip_notify_received` | owner | yes | +ctx |
-| `call_ownership_changed` | owner | yes | +ctx |
-| `session_resumed` | owner | — | — |
 
 ---
 
@@ -1449,7 +1246,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{event_type}] call_id={call_id}")
 
         if event_type == "recording_metadata_available":
-            meta = body["event"]["recording_metadata_available"]["metadata"]
+            meta = body["event"]  # same flat payload as the WS event
             print(f"  download: {meta['download_url']}")
             print(f"  file_size: {meta['file_size']}")
 
@@ -1547,4 +1344,4 @@ These structs are used as nested references and are not emitted as standalone ev
 
 **Document version**: v1.0  
 **Last updated**: 2026-06-23  
-**Source code**: `src/rwi/proto.rs`
+**Source code**: `src/rwi/event.rs`

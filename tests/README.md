@@ -10,11 +10,18 @@ cargo test --test call -- ringback_mode   # single test from the call suite
 cargo test --test rwi  -- --nocapture      # RWI suite, full output
 ```
 
-- Test binaries are consolidated into `tests/call.rs` and `tests/rwi.rs` (one link each)
-  plus `tests/cc_openapi_contract_test.rs`. Each binary runs its tests in parallel threads.
+- Test binaries (each aggregates its same-named subdirectory via `#[path]`):
+  `call.rs` (tests/call/), `rwi.rs` (tests/rwi/), `cc_e2e.rs` (tests/cc_e2e/),
+  `ivr_e2e.rs` (tests/ivr_e2e/), `proxy_e2e.rs` (tests/proxy_e2e/),
+  `proxy_flow.rs` (tests/proxy_flow/), `proxy_routing.rs` (tests/proxy_routing/),
+  `proxy_rwi.rs` (tests/proxy_rwi/), `proxy_session.rs` (tests/proxy_session/),
+  `proxy_trunk_b2bua.rs` (tests/proxy_trunk_b2bua/), `queue_e2e.rs`
+  (tests/queue_e2e/), `wholesale.rs` (tests/wholesale/) plus
+  `cc_openapi_contract_test.rs`. Each binary runs its tests in parallel threads.
 - Feature-gated tests are skipped by a bare `cargo test`:
-  - `cc_openapi_contract_test.rs` → requires `addon-cc`
+  - `cc_openapi_contract_test.rs` / `cc_e2e.rs` → require `addon-cc`
   - `tests/call/trunk_health_e2e.rs` → requires `addon-sbc`
+  - `wholesale.rs` → requires `addon-wholesale`
   Use `cargo test-dev` (`--features addon-cc,addon-sbc`) or `cargo test-all`
   (`--features commerce,wholesale,contact-center,addon-sbc`) for the full local suite.
 - Ports are randomized via `portpicker` (`tests/helpers/test_server.rs`), so tests can
