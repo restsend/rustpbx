@@ -58,6 +58,80 @@ pub struct TestUa {
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real WebRTC PeerConnection used when `config.webrtc` is set.
     webrtc_pc: Option<Arc<rustrtc::PeerConnection>>,
+    /// Inbound RTP collector (plaintext, post-SRTP-unprotect) for the
+    /// WebRTC PeerConnection. Attached via [`TestUa::attach_webrtc_rx_tap`].
+    webrtc_rx: Option<Arc<WebRtcRxTap>>,
+}
+
+/// One inbound RTP packet observed on a WebRTC PeerConnection after SRTP
+/// unprotect — i.e. exactly what the remote peer's plaintext payload was.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ObservedRtp {
+    pub payload_type: u8,
+    pub marker: bool,
+    pub sequence_number: u16,
+    pub timestamp: u32,
+    pub ssrc: u32,
+    pub payload: Vec<u8>,
+}
+
+/// [`rustrtc::RtpObserver`] implementation that records inbound (decrypted)
+/// RTP packets so tests can assert on media content delivered over DTLS-SRTP.
+#[allow(dead_code)]
+pub struct WebRtcRxTap {
+    packets: std::sync::Mutex<Vec<ObservedRtp>>,
+    egress_packets: std::sync::atomic::AtomicU64,
+    capacity: usize,
+}
+
+#[allow(dead_code)]
+impl WebRtcRxTap {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            packets: std::sync::Mutex::new(Vec::new()),
+            egress_packets: std::sync::atomic::AtomicU64::new(0),
+            capacity,
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<ObservedRtp> {
+        self.packets.lock().unwrap().clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Count of outbound RTP packets observed before SRTP protect.
+    pub fn egress_count(&self) -> u64 {
+        self.egress_packets.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl rustrtc::peer_connection::RtpObserver for WebRtcRxTap {
+    fn on_ingress(&self, packet: &rustrtc::rtp::RtpPacket, _src_addr: SocketAddr) {
+        let mut buf = self.packets.lock().unwrap();
+        if buf.len() < self.capacity {
+            buf.push(ObservedRtp {
+                payload_type: packet.header.payload_type,
+                marker: packet.header.marker,
+                sequence_number: packet.header.sequence_number,
+                timestamp: packet.header.timestamp,
+                ssrc: packet.header.ssrc,
+                payload: packet.payload.to_vec(),
+            });
+        }
+    }
+
+    fn on_egress(&self, _packet: &rustrtc::rtp::RtpPacket, _dst_addr: SocketAddr) {
+        self.egress_packets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,8 +157,31 @@ pub enum TestUaEvent {
 
 impl TestUa {
     pub fn new(config: TestUaConfig) -> Self {
+        Self::new_inner(config, None)
+    }
+
+    /// Create a WebRTC UA whose PeerConnection advertises only `audio_caps`
+    /// in its offer (e.g. PCMU-only to exercise the same-codec fastpath, or
+    /// Opus-only to force transcoding toward a PCMU callee).
+    pub fn new_webrtc_with_caps(
+        config: TestUaConfig,
+        audio_caps: Vec<rustrtc::config::AudioCapability>,
+    ) -> Self {
+        Self::new_inner(config, Some(audio_caps))
+    }
+
+    fn new_inner(
+        config: TestUaConfig,
+        webrtc_audio_caps: Option<Vec<rustrtc::config::AudioCapability>>,
+    ) -> Self {
         let webrtc_pc = if config.webrtc {
-            let pc = rustrtc::PeerConnection::new(rustrtc::RtcConfiguration::default());
+            let mut rtc_config = rustrtc::RtcConfiguration::default();
+            if let Some(caps) = webrtc_audio_caps {
+                let mut media_caps = rustrtc::MediaCapabilities::default();
+                media_caps.audio = caps;
+                rtc_config.media_capabilities = Some(media_caps);
+            }
+            let pc = rustrtc::PeerConnection::new(rtc_config);
             // Add an audio transceiver so create_offer produces an m=audio line.
             pc.add_transceiver(
                 rustrtc::MediaKind::Audio,
@@ -94,6 +191,9 @@ impl TestUa {
         } else {
             None
         };
+        let webrtc_rx = webrtc_pc
+            .as_ref()
+            .map(|_| Arc::new(WebRtcRxTap::new(4096)));
         Self {
             config,
             cancel_token: CancellationToken::new(),
@@ -105,6 +205,7 @@ impl TestUa {
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
+            webrtc_rx,
         }
     }
 
@@ -284,10 +385,15 @@ impl TestUa {
                 .await
                 .map_err(|e| anyhow!("create_offer failed: {}", e))?;
             pc.wait_for_gathering_complete().await;
-            let offer = pc
+            let mut offer = pc
                 .create_offer()
                 .await
                 .map_err(|e| anyhow!("create_offer (gathered) failed: {}", e))?;
+            offer.sdp_type = rustrtc::SdpType::Offer;
+            // Set the local description so the PC enters have-local-offer and
+            // can later apply the remote answer (ICE + DTLS role negotiation).
+            pc.set_local_description(offer.clone())
+                .map_err(|e| anyhow!("set_local_description(offer) failed: {}", e))?;
             (
                 Some("application/sdp".to_string()),
                 Some(offer.to_sdp_string().into_bytes()),
@@ -325,7 +431,9 @@ impl TestUa {
                     let desc =
                         rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &answer_sdp)
                             .map_err(|e| anyhow!("parse answer SDP failed: {}", e))?;
-                    let _ = pc.set_remote_description(desc).await;
+                    pc.set_remote_description(desc)
+                        .await
+                        .map_err(|e| anyhow!("set_remote_description(answer) failed: {}", e))?;
                 }
                 let mut sdps = self.negotiated_answer_sdps.lock().await;
                 sdps.insert(dialog.id(), answer_sdp);
@@ -340,6 +448,112 @@ impl TestUa {
     pub async fn get_negotiated_answer_sdp(&self, dialog_id: &DialogId) -> Option<String> {
         let sdps = self.negotiated_answer_sdps.lock().await;
         sdps.get(dialog_id).cloned()
+    }
+
+    /// Access the real WebRTC PeerConnection (when this is a webrtc UA).
+    #[allow(dead_code)]
+    pub fn webrtc_pc(&self) -> Option<Arc<rustrtc::PeerConnection>> {
+        self.webrtc_pc.clone()
+    }
+
+    /// Wait until ICE + DTLS are connected, i.e. SRTP keying material is
+    /// ready on both sides. Fails after `timeout`.
+    #[allow(dead_code)]
+    pub async fn wait_webrtc_connected(&self, timeout: std::time::Duration) -> Result<()> {
+        let pc = self
+            .webrtc_pc
+            .as_ref()
+            .ok_or_else(|| anyhow!("not a webrtc UA"))?;
+        tokio::time::timeout(timeout, pc.wait_for_connected())
+            .await
+            .map_err(|_| anyhow!("webrtc ICE/DTLS not connected within {:?}", timeout))?
+            .map_err(|e| anyhow!("webrtc connection failed: {:?}", e))
+    }
+
+    /// Attach the inbound RTP tap to the PeerConnection. Must be called after
+    /// the RTP transport exists (ICE pair selected); waits for it internally.
+    /// The tap observes plaintext packets AFTER SRTP unprotect.
+    #[allow(dead_code)]
+    pub async fn attach_webrtc_rx_tap(&self) -> Result<()> {
+        let pc = self
+            .webrtc_pc
+            .as_ref()
+            .ok_or_else(|| anyhow!("not a webrtc UA"))?;
+        let tap = self
+            .webrtc_rx
+            .clone()
+            .ok_or_else(|| anyhow!("webrtc rx tap missing"))?;
+        pc.wait_for_rtp_transport_ready(std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow!("webrtc RTP transport not ready: {:?}", e))?;
+        pc.add_observer(tap);
+        Ok(())
+    }
+
+    /// Snapshot of inbound (SRTP-decrypted) RTP packets observed so far.
+    #[allow(dead_code)]
+    pub fn webrtc_rx_packets(&self) -> Vec<ObservedRtp> {
+        self.webrtc_rx
+            .as_ref()
+            .map(|tap| tap.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// Cumulative count of inbound RTP packets accepted (SRTP-authenticated)
+    /// by the PeerConnection transport, regardless of the tap.
+    #[allow(dead_code)]
+    pub fn webrtc_received_rtp_packets(&self) -> u64 {
+        self.webrtc_pc
+            .as_ref()
+            .map(|pc| pc.received_rtp_packets())
+            .unwrap_or(0)
+    }
+
+    /// Count of outbound RTP packets observed before SRTP protect.
+    #[allow(dead_code)]
+    pub fn webrtc_egress_packet_count(&self) -> u64 {
+        self.webrtc_rx
+            .as_ref()
+            .map(|tap| tap.egress_count())
+            .unwrap_or(0)
+    }
+
+    /// Sender SSRC of this UA's audio transceiver (as announced in SDP when
+    /// a track exists), or a deterministic fallback for raw injection.
+    #[allow(dead_code)]
+    pub fn webrtc_sender_ssrc(&self) -> u32 {
+        self.webrtc_pc
+            .as_ref()
+            .and_then(|pc| {
+                pc.get_transceivers()
+                    .into_iter()
+                    .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+                    .and_then(|t| t.sender_ssrc())
+            })
+            .unwrap_or(0x5A5A5A5A)
+    }
+
+    /// Send a plaintext RTP packet on the WebRTC leg; rustrtc SRTP-protects
+    /// it before it hits the wire.
+    #[allow(dead_code)]
+    pub async fn send_webrtc_rtp(
+        &self,
+        payload_type: u8,
+        sequence_number: u16,
+        timestamp: u32,
+        ssrc: u32,
+        marker: bool,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let pc = self
+            .webrtc_pc
+            .as_ref()
+            .ok_or_else(|| anyhow!("not a webrtc UA"))?;
+        let mut header = rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
+        header.marker = marker;
+        pc.send_raw_rtp(rustrtc::rtp::RtpPacket::new(header, payload))
+            .await
+            .map_err(|e| anyhow!("send_raw_rtp failed: {:?}", e))
     }
 
     /// Set answer SDP for a dialog, used for re-INVITE responses.
@@ -702,12 +916,26 @@ impl TestUa {
                             "TestUa: Received Early state ({}) for {}",
                             resp.status_code, id
                         );
+                        // Mirror JsSIP/browser behaviour: apply a 1xx body as a
+                        // PRANSWER on the WebRTC PeerConnection so ICE/DTLS (and
+                        // early-media transmission) start before the 200 OK.
+                        if !resp.body().is_empty() {
+                            if let Some(pc) = self.webrtc_pc.as_ref() {
+                                let body = String::from_utf8_lossy(resp.body()).to_string();
+                                if let Ok(desc) =
+                                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Pranswer, &body)
+                                {
+                                    let _ = pc.set_remote_description(desc).await;
+                                }
+                            }
+                            events.push(TestUaEvent::EarlyMedia(id.clone()));
+                        }
                         match resp.status_code {
                             rsipstack::sip::StatusCode::Ringing => {
-                                events.push(TestUaEvent::CallRinging(id.clone()));
-                                if !resp.body().is_empty() {
-                                    events.push(TestUaEvent::EarlyMedia(id));
-                                }
+                                events.push(TestUaEvent::CallRinging(id));
+                            }
+                            rsipstack::sip::StatusCode::SessionProgress => {
+                                events.push(TestUaEvent::CallRinging(id));
                             }
                             _ => {
                                 // Get SDP from stored received offers
@@ -2371,8 +2599,22 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
     }
 
     /// Test WebRTC to RTP media proxy conversion
-    #[tokio::test]
-    async fn test_webrtc_rtp_media_proxy() {
+    #[test]
+    fn test_webrtc_rtp_media_proxy() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_stack_size(32 * 1024 * 1024)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            tokio::spawn(async { test_webrtc_rtp_media_proxy_impl().await })
+                .await
+                .expect("test task panicked");
+        });
+    }
+
+    async fn test_webrtc_rtp_media_proxy_impl() {
         for mode in [MediaProxyMode::Auto, MediaProxyMode::All] {
             println!(
                 "Testing WebRTC/RTP conversion with MediaProxyMode::{:?}",
@@ -2768,8 +3010,25 @@ a=rtpmap:0 PCMU/8000"#;
     /// Real WebRTC (DTLS-SRTP) caller through the media proxy to an RTP callee.
     /// Alice's PeerConnection generates a genuine WebRTC offer over SIP; the
     /// proxy negotiates it on its WebRTC leg and bridges to Bob (RTP).
-    #[tokio::test]
-    async fn test_webrtc_rtp_real_media_proxy() {
+    /// Runs on a big-stack worker thread: the real-DTLS WebRTC call drives the
+    /// full SIP session + media-leg future chain, whose debug-build frame
+    /// chain exceeds the default tokio thread stack.
+    #[test]
+    fn test_webrtc_rtp_real_media_proxy() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_stack_size(32 * 1024 * 1024)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            tokio::spawn(async { test_webrtc_rtp_real_media_proxy_impl().await })
+                .await
+                .expect("test task panicked");
+        });
+    }
+
+    async fn test_webrtc_rtp_real_media_proxy_impl() {
         let _ = tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
             .try_init();

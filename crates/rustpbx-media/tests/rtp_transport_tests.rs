@@ -77,6 +77,7 @@ impl TestPeer {
             let (vtx, vtrack, _) = sample_track(rustrtc::media::MediaKind::Video, 100);
             let vparams = rustrtc::RtpCodecParameters {
                 payload_type: first.payload_type,
+                name: first.codec_name.clone(),
                 clock_rate: first.clock_rate,
                 channels: 0,
             };
@@ -1637,11 +1638,13 @@ async fn ivr_playback_is_recorded_as_a_leg_egress() {
 /// codec.
 #[tokio::test]
 async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
-    let mut h = TestMediaHarness::create(
+    let (recorder, mut rx) = recorder_capture("reinvite-pt");
+    let mut h = TestMediaHarness::create_with_recorder(
         TransportMode::Rtp,
         CodecType::PCMU,
         TransportMode::Rtp,
         CodecType::PCMU,
+        recorder,
     )
     .await;
     h.mb.accept(LegSide::A).await;
@@ -1688,10 +1691,6 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
 
     // Locally-generated playback must be encoded with the NEW codec (PCMA) —
     // observed as PT 8 on the wire, not stale PCMU (PT 0).
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let rec = SipflowRecorder::new(tx);
-    h.mb.set_recorder_for(LegSide::A, rec);
-
     let _handle = h
         .mb
         .play(LegSide::A, Box::new(TestBeep::new(8000)), true)
