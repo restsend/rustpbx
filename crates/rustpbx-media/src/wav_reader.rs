@@ -1101,7 +1101,7 @@ mod tests {
     #[test]
     fn test_pcmu_large() {
         let pcm: Vec<i16> = (0..8000)
-            .map(|i| ((i as f32 * 2.0 * 3.14159 / 8000.0).sin() * 16000.0) as i16)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI / 8000.0).sin() * 16000.0) as i16)
             .collect();
         let mut encoder = audio_codec::create_encoder(CodecType::PCMU);
         let encoded: Vec<u8> = encoder.encode(&pcm);
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn test_pcma_large() {
         let pcm: Vec<i16> = (0..8000)
-            .map(|i| ((i as f32 * 2.0 * 3.14159 / 8000.0).sin() * 16000.0) as i16)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI / 8000.0).sin() * 16000.0) as i16)
             .collect();
         let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
         let encoded: Vec<u8> = encoder.encode(&pcm);
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn test_roundtrip_pcmu() {
         let original: Vec<i16> = (0..800)
-            .map(|i| ((i as f32 * 2.0 * 3.14159 / 200.0).sin() * 10000.0) as i16)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI / 200.0).sin() * 10000.0) as i16)
             .collect();
         let mut encoder = audio_codec::create_encoder(CodecType::PCMU);
         let encoded: Vec<u8> = encoder.encode(&original);
@@ -1289,7 +1289,7 @@ mod tests {
     #[test]
     fn test_roundtrip_pcma() {
         let original: Vec<i16> = (0..800)
-            .map(|i| ((i as f32 * 2.0 * 3.14159 / 200.0).sin() * 10000.0) as i16)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI / 200.0).sin() * 10000.0) as i16)
             .collect();
         let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
         let encoded: Vec<u8> = encoder.encode(&original);
