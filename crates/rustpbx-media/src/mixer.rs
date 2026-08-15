@@ -1,18 +1,12 @@
 /// Simple PCM frame mixer — pure audio mixing, no signaling dependencies.
-pub struct AudioMixer {
-    _sample_rate: u32,
-    _channels: u16,
-}
+pub struct AudioMixer;
 
 impl AudioMixer {
-    pub fn new(sample_rate: u32, channels: u16) -> Self {
-        Self {
-            _sample_rate: sample_rate,
-            _channels: channels,
-        }
+    pub fn mix_frames(&self, frames: Vec<Vec<i16>>, gains: &[f32]) -> Vec<i16> {
+        Self::mix(frames, gains)
     }
 
-    pub fn mix_frames(&self, frames: Vec<Vec<i16>>, gains: &[f32]) -> Vec<i16> {
+    pub fn mix(frames: Vec<Vec<i16>>, gains: &[f32]) -> Vec<i16> {
         if frames.is_empty() || gains.len() != frames.len() {
             return vec![];
         }
@@ -40,13 +34,11 @@ mod tests {
 
     #[test]
     fn test_audio_mixer_basic() {
-        let mixer = AudioMixer::new(8000, 1);
-
         let frame1 = vec![1000i16; 160];
         let frame2 = vec![500i16; 160];
         let gains = [1.0, 1.0];
 
-        let result = mixer.mix_frames(vec![frame1, frame2], &gains);
+        let result = AudioMixer::mix(vec![frame1, frame2], &gains);
 
         assert_eq!(result.len(), 160);
         assert!(result.iter().all(|&s| s > 1000));
@@ -54,34 +46,28 @@ mod tests {
 
     #[test]
     fn test_audio_mixer_with_gain() {
-        let mixer = AudioMixer::new(8000, 1);
-
         let frame1 = vec![1000i16; 160];
         let frame2 = vec![1000i16; 160];
         let gains = [1.0, 0.5];
 
-        let result = mixer.mix_frames(vec![frame1, frame2], &gains);
+        let result = AudioMixer::mix(vec![frame1, frame2], &gains);
 
         assert_eq!(result.len(), 160);
     }
 
     #[test]
     fn test_audio_mixer_empty() {
-        let mixer = AudioMixer::new(8000, 1);
-
-        let result = mixer.mix_frames(vec![], &[]);
+        let result = AudioMixer::mix(vec![], &[]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_audio_mixer_mix_frames_with_zero_gain() {
-        let mixer = AudioMixer::new(8000, 1);
-
         let frame1 = vec![1000i16; 160];
         let frame2 = vec![1000i16; 160];
         let gains = [1.0, 0.0];
 
-        let result = mixer.mix_frames(vec![frame1, frame2], &gains);
+        let result = AudioMixer::mix(vec![frame1, frame2], &gains);
 
         assert_eq!(result.len(), 160);
         assert!(result.iter().all(|&s| (900..=1100).contains(&s)));
@@ -89,14 +75,12 @@ mod tests {
 
     #[test]
     fn test_audio_mixer_mix_multiple_frames() {
-        let mixer = AudioMixer::new(8000, 1);
-
         let frame1 = vec![100i16; 160];
         let frame2 = vec![100i16; 160];
         let frame3 = vec![100i16; 160];
         let gains = [1.0, 1.0, 1.0];
 
-        let result = mixer.mix_frames(vec![frame1, frame2, frame3], &gains);
+        let result = AudioMixer::mix(vec![frame1, frame2, frame3], &gains);
 
         assert_eq!(result.len(), 160);
         assert!(result.iter().all(|&s| (250..=350).contains(&s)));
@@ -104,13 +88,11 @@ mod tests {
 
     #[test]
     fn test_audio_mixer_saturation_handling() {
-        let mixer = AudioMixer::new(8000, 1);
-
         let frame1 = vec![30000i16; 160];
         let frame2 = vec![30000i16; 160];
         let gains = [1.0, 1.0];
 
-        let result = mixer.mix_frames(vec![frame1, frame2], &gains);
+        let result = AudioMixer::mix(vec![frame1, frame2], &gains);
 
         assert_eq!(result.len(), 160);
         assert!(result.iter().all(|&s| s == i16::MAX));

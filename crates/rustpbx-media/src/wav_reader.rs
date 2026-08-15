@@ -1169,19 +1169,12 @@ mod tests {
             .collect();
         let encoded: Vec<u8> = encoder.encode(&pcm);
 
-        eprintln!(
-            "G722 encoded {} bytes from {} samples",
-            encoded.len(),
-            pcm.len()
-        );
-
         let wav = WavBuilder::new(FORMAT_G722, 8000, 1, 8)
             .data(&encoded)
             .build();
         let mut reader = WavReader::new(Cursor::new(wav)).expect("open");
 
         let read: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
-        eprintln!("G722 decoded {} samples", read.len());
 
         assert!(read.len() > 0);
         assert!(read.iter().any(|&s| s != 0));

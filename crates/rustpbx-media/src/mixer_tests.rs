@@ -2,7 +2,7 @@ use crate::mixer::AudioMixer;
 
 #[test]
 fn test_mixing_with_different_gains() {
-    let mixer = AudioMixer::new(8000, 1);
+    let mixer = AudioMixer;
 
     let frame1 = vec![1000i16; 160];
     let frame2 = vec![1000i16; 160];
@@ -18,7 +18,7 @@ fn test_mixing_with_different_gains() {
 
 #[test]
 fn test_mixer_saturation_at_boundary() {
-    let mixer = AudioMixer::new(8000, 1);
+    let mixer = AudioMixer;
 
     let frame1 = vec![i16::MAX; 160];
     let frame2 = vec![i16::MAX; 160];
@@ -31,7 +31,7 @@ fn test_mixer_saturation_at_boundary() {
 
 #[test]
 fn test_mixer_negative_samples() {
-    let mixer = AudioMixer::new(8000, 1);
+    let mixer = AudioMixer;
 
     let frame1 = vec![-1000i16; 160];
     let frame2 = vec![-500i16; 160];
@@ -43,7 +43,7 @@ fn test_mixer_negative_samples() {
 
 #[test]
 fn test_gain_application_in_mixer() {
-    let mixer = AudioMixer::new(8000, 1);
+    let mixer = AudioMixer;
 
     let frame = vec![1000i16; 160];
 

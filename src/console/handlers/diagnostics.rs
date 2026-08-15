@@ -1220,11 +1220,11 @@ async fn route_evaluate(
     let caller_input = normalize_optional_string(&payload.caller).unwrap_or(default_caller_value);
     let request_uri_input = normalize_optional_string(&payload.request_uri);
 
-    let caller_uri_str = build_sip_uri(&caller_input, &default_host);
-    let callee_uri_str = build_sip_uri(callee_input, &default_host);
+    let caller_uri_str = crate::call::build_sip_uri(&caller_input, &default_host);
+    let callee_uri_str = crate::call::build_sip_uri(callee_input, &default_host);
     let request_uri_str = request_uri_input
         .as_deref()
-        .map(|value| build_sip_uri(value, &default_host))
+        .map(|value| crate::call::build_sip_uri(value, &default_host))
         .unwrap_or_else(|| callee_uri_str.clone());
 
     let caller_uri: rsipstack::sip::Uri = match caller_uri_str.try_into() {
@@ -1846,25 +1846,6 @@ fn default_caller_for(direction: &DialDirection, default_host: &str) -> String {
         DialDirection::Inbound => format!("incoming@{}", default_host),
         DialDirection::Internal => format!("diagnostics@{}", default_host),
         DialDirection::Outbound => format!("diagnostics@{}", default_host),
-    }
-}
-
-fn build_sip_uri(value: &str, default_host: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return format!("sip:anonymous@{}", default_host);
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("sip:") {
-        if rest.contains('@') {
-            format!("sip:{}", rest)
-        } else {
-            format!("sip:{}@{}", rest, default_host)
-        }
-    } else if trimmed.contains('@') {
-        format!("sip:{}", trimmed)
-    } else {
-        format!("sip:{}@{}", trimmed, default_host)
     }
 }
 

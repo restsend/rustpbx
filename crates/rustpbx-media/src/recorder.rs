@@ -47,7 +47,7 @@ struct DtmfEventState {
     duration_samples: u32,
 }
 
-pub struct Recorder {
+pub(crate) struct Recorder {
     pub path: String,
     pub codec: CodecType,
     written_bytes: u32,
@@ -526,26 +526,31 @@ impl Recorder {
     }
 
     pub async fn flush(&mut self) -> Result<()> {
+        self.flush_impl(false).await
+    }
+
+    pub async fn finalize(&mut self) -> Result<()> {
+        // Final flush: use max to flush ALL remaining data from both legs.
+        self.flush_impl(true).await?;
+        self.writer.finalize().await?;
+        Ok(())
+    }
+
+    /// Duration of media written to the recording, excluding paused time.
+    pub fn duration_secs(&self) -> f64 {
+        if self.sample_rate == 0 {
+            return 0.0;
+        }
+        self.written_samples as f64 / self.sample_rate as f64
+    }
+
+    /// Shared flush path. `final_flush = true` ignores the slow-leg pacing and
+    /// the 10 s cap and drains everything remaining (used by `finalize`).
+    async fn flush_impl(&mut self, final_flush: bool) -> Result<()> {
         self.last_flush = Instant::now();
 
-        let max_ts_a = self
-            .buffer_a
-            .last_key_value()
-            .map(|(k, v)| {
-                let (_, bytes_per_block) = self.block_info();
-                let samples_per_block = self.samples_per_block();
-                k + (v.len() / bytes_per_block) as u32 * samples_per_block
-            })
-            .unwrap_or(0);
-        let max_ts_b = self
-            .buffer_b
-            .last_key_value()
-            .map(|(k, v)| {
-                let (_, bytes_per_block) = self.block_info();
-                let samples_per_block = self.samples_per_block();
-                k + (v.len() / bytes_per_block) as u32 * samples_per_block
-            })
-            .unwrap_or(0);
+        let max_ts_a = self.leg_max_ts(Leg::A);
+        let max_ts_b = self.leg_max_ts(Leg::B);
         // Flush strategy — prevents silence gaps on the slower leg.
         //
         // When both legs are active, flush only up to min(a, b) to avoid
@@ -557,7 +562,9 @@ impl Recorder {
         // Safety-valve: if the leading leg has >2 s of buffered data the
         // stalled leg is likely permanently done — force-flush to keep
         // memory bounded.
-        let flush_target = if !self.leg_a_started || !self.leg_b_started {
+        let flush_target = if final_flush {
+            max_ts_a.max(max_ts_b)
+        } else if !self.leg_a_started || !self.leg_b_started {
             max_ts_a.max(max_ts_b)
         } else if max_ts_a > self.next_flush_ts && max_ts_b > self.next_flush_ts {
             max_ts_a.min(max_ts_b)
@@ -578,14 +585,15 @@ impl Recorder {
 
         let mut flush_len = flush_target - self.next_flush_ts;
 
-        // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
-        let max_flush_samples = self.sample_rate * 10;
-        if flush_len > max_flush_samples {
-            flush_len = max_flush_samples;
+        if !final_flush {
+            // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
+            let max_flush_samples = self.sample_rate * 10;
+            if flush_len > max_flush_samples {
+                flush_len = max_flush_samples;
+            }
+            let (samples_per_block, _) = self.block_info();
+            flush_len = (flush_len / samples_per_block) * samples_per_block;
         }
-
-        let (samples_per_block, _) = self.block_info();
-        flush_len = (flush_len / samples_per_block) * samples_per_block;
 
         if flush_len == 0 {
             return Ok(());
@@ -596,85 +604,50 @@ impl Recorder {
 
         self.next_flush_ts += flush_len;
 
-        let output = if self.channels == 1 {
+        let output = self.assemble_output(&data_a, &data_b)?;
+
+        self.writer.write_packet(&output).await?;
+        self.written_bytes += output.len() as u32;
+        self.written_samples += flush_len as u64;
+
+        Ok(())
+    }
+
+    /// End-of-buffer timestamp (in samples) for a leg's pending data.
+    fn leg_max_ts(&self, leg: Leg) -> u32 {
+        self.leg_buffer(leg)
+            .last_key_value()
+            .map(|(k, v)| {
+                let (_, bytes_per_block) = self.block_info();
+                let samples_per_block = self.samples_per_block();
+                k + (v.len() / bytes_per_block) as u32 * samples_per_block
+            })
+            .unwrap_or(0)
+    }
+
+    /// Combine per-leg data into the recording output: mono mix (or
+    /// caller-only) / stereo interleave (with optional leg swap).
+    fn assemble_output(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
+        if self.channels == 1 {
             if self.mono_caller_only {
                 // Voicemail / single-party capture: caller ingress only, at
                 // full amplitude (the egress leg is silence, so mixing would
                 // halve the level).
-                data_a
+                Ok(data_a.to_vec())
             } else {
                 // Mono: mix both legs
-                self.mix(&data_a, &data_b)?
+                self.mix(data_a, data_b)
             }
         } else {
             // Stereo: interleave both legs.
             // Default: Leg A (caller) → left, Leg B (callee) → right.
             // stereo_swap: callee → left, caller → right.
             if self.stereo_swap {
-                self.interleave(&data_b, &data_a)?
+                self.interleave(data_b, data_a)
             } else {
-                self.interleave(&data_a, &data_b)?
+                self.interleave(data_a, data_b)
             }
-        };
-
-        self.writer.write_packet(&output).await?;
-        self.written_bytes += output.len() as u32;
-        self.written_samples += flush_len as u64;
-
-        Ok(())
-    }
-
-    pub async fn finalize(&mut self) -> Result<()> {
-        // Final flush: use max to flush ALL remaining data from both legs.
-        self.flush_final().await?;
-        self.writer.finalize().await?;
-        Ok(())
-    }
-
-    /// Duration of media written to the recording, excluding paused time.
-    pub fn duration_secs(&self) -> f64 {
-        if self.sample_rate == 0 {
-            return 0.0;
         }
-        self.written_samples as f64 / self.sample_rate as f64
-    }
-
-    /// Flush everything remaining — used by finalize() to write trailing data.
-    async fn flush_final(&mut self) -> Result<()> {
-        self.last_flush = Instant::now();
-        let max_ts_a = self
-            .buffer_a
-            .last_key_value()
-            .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
-            .unwrap_or(0);
-        let max_ts_b = self
-            .buffer_b
-            .last_key_value()
-            .map(|(k, v)| k + (v.len() / self.block_info().1) as u32 * self.samples_per_block())
-            .unwrap_or(0);
-        let max_available_ts = max_ts_a.max(max_ts_b);
-        if max_available_ts <= self.next_flush_ts {
-            return Ok(());
-        }
-        let flush_len = max_available_ts - self.next_flush_ts;
-        let data_a = self.get_leg_data(Leg::A, flush_len)?;
-        let data_b = self.get_leg_data(Leg::B, flush_len)?;
-        self.next_flush_ts += flush_len;
-        let output = if self.channels == 1 {
-            if self.mono_caller_only {
-                data_a
-            } else {
-                self.mix(&data_a, &data_b)?
-            }
-        } else if self.stereo_swap {
-            self.interleave(&data_b, &data_a)?
-        } else {
-            self.interleave(&data_a, &data_b)?
-        };
-        self.writer.write_packet(&output).await?;
-        self.written_bytes += output.len() as u32;
-        self.written_samples += flush_len as u64;
-        Ok(())
     }
 
     fn block_info(&self) -> (u32, usize) {

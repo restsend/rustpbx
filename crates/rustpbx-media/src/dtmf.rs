@@ -13,7 +13,7 @@ struct DtmfEventKey {
 /// (e.g. from a retransmission or from both the recorder tap and the
 /// forwarding path) do not produce duplicate digits.
 #[derive(Debug, Default)]
-pub struct DtmfDetector {
+pub(crate) struct DtmfDetector {
     last_event: Option<DtmfEventKey>,
 }
 

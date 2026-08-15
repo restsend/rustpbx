@@ -4,7 +4,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-pub struct CodecWavWriter {
+pub(crate) struct CodecWavWriter {
     file: File,
     sample_rate: u32,
     channels: u16,

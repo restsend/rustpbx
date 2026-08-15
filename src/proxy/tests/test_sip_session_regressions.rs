@@ -1354,7 +1354,7 @@ async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaB
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await

@@ -414,16 +414,16 @@ impl LegInner {
         self.negotiated.lock().clone()
     }
 
-    pub fn stats(&self) -> TapStats {
+    pub(crate) fn stats(&self) -> TapStats {
         self.tap.stats()
     }
 
     /// RTCP-derived quality (jitter / RTT / fraction lost) for this leg.
-    pub fn rtcp_stats(&self) -> Arc<LegRtcpStats> {
+    pub(crate) fn rtcp_stats(&self) -> Arc<LegRtcpStats> {
         Arc::clone(&self.rtcp_stats)
     }
 
-    pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
+    pub(crate) fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
         self.tap.subscribe_dtmf()
     }
 
@@ -442,7 +442,7 @@ impl LegInner {
 
     /// Create an offer SDP (as UAC). `prefer` reorders the codec preference
     /// (use the peer leg's codecs to maximize same-codec relay).
-    pub async fn create_offer(&self, _prefer: Vec<CodecType>) -> Result<String> {
+    pub async fn create_offer(&self) -> Result<String> {
         // rustrtc gathering pattern: first create_offer primes ICE gathering,
         // wait for candidates, then the second call includes them in the SDP.
         // RTP mode returns instantly; WebRTC/SRTP need the wait.
@@ -594,7 +594,7 @@ impl LegInner {
 
     /// Whether the leg's egress source is the fast-path relay (vs the paced
     /// egress pipeline: silence / media / transcode).
-    pub fn egress_is_relay(&self) -> bool {
+    pub(crate) fn egress_is_relay(&self) -> bool {
         self.was_relay.load(Ordering::SeqCst)
     }
 
@@ -823,6 +823,8 @@ impl LegInner {
     }
 
     /// Stop the leg: cancel the egress pipeline and close the PeerConnection.
+    /// Synchronous — safe to call from `Drop` (rustrtc close path has no
+    /// tokio::spawn).
     pub fn stop(&self) {
         self.egress.stop();
         if let Some(handle) = self.observer_task.lock().take() {
@@ -847,23 +849,7 @@ impl LegInner {
 
 impl Drop for LegInner {
     fn drop(&mut self) {
-        // Egress cancellation + PC close are fully synchronous (rustrtc close
-        // path has no tokio::spawn), so this never panics during teardown.
-        self.egress.stop();
-        if let Some(handle) = self.observer_task.get_mut().take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.relay_arm_task.get_mut().take() {
-            handle.abort();
-        }
-        for handle in self.rtcp_listener_tasks.get_mut().drain(..) {
-            handle.abort();
-        }
-        // Break the cross-leg rewrite-bridge Arc cycle before close (see
-        // `LegInner::stop`); otherwise the two RtpTransports keep each other
-        // alive and the PeerConnections leak.
-        self.pc.clear_rtp_rewrite_bridge();
-        self.pc.close();
+        self.stop();
     }
 }
 
@@ -1060,7 +1046,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
         let a = LegInner::new("a", &cfg, None).expect("webrtc leg");
-        let offer = a.create_offer(vec![]).await.expect("create_offer");
+        let offer = a.create_offer().await.expect("create_offer");
         assert!(
             offer.contains("a=fingerprint"),
             "offer lacks DTLS fingerprint:\n{}",
@@ -1109,7 +1095,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
         let leg = LegInner::new("video", &cfg, None).expect("video leg");
-        let offer = leg.create_offer(vec![]).await.expect("create_offer");
+        let offer = leg.create_offer().await.expect("create_offer");
 
         assert!(
             offer.contains("m=video"),
@@ -1298,7 +1284,7 @@ mod p24_uac_test {
         // a codec it offered. This mirrors RWI originate's callee leg.
         let cfg = LegConfig::rtp_pcmu();
         let leg = LegInner::new("uac", &cfg, None).unwrap();
-        let offer = leg.create_offer(vec![]).await.expect("offer");
+        let offer = leg.create_offer().await.expect("offer");
         assert!(!offer.is_empty());
 
         // Build a PCMU answer like the remote peer would produce.

@@ -6,9 +6,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use rustpbx_media::mixer::AudioMixer;
 
 fn bench_mixer(c: &mut Criterion) {
-    let mixer = AudioMixer::new(8000, 1);
+    let mixer = AudioMixer;
     // 20 ms of 16-bit PCM at 8 kHz.
-    let frame: Vec<i16> = (0..160).map(|i| ((i as i16 * 7) % 10000)).collect();
+    let frame: Vec<i16> = (0..160).map(|i| (i as i16 * 7) % 10000).collect();
 
     let mut g = c.benchmark_group("mix_20ms");
     for participants in [2usize, 4, 8, 16] {

@@ -17,32 +17,14 @@ pub struct RtcTrack {
 }
 
 impl RtcTrack {
+    /// Audio-only track (delegates to [`Self::new_with_video`] with no video
+    /// capabilities; the codec `name` is populated the same way).
     pub fn new(
         track_id: String,
         config: RtcConfiguration,
         rtp_map: Vec<negotiate::CodecInfo>,
     ) -> Self {
-        let _handle = tokio::runtime::Handle::try_current();
-        let _guard = _handle.as_ref().ok().map(|h| h.enter());
-        let pc = PeerConnection::new(config);
-
-        let (tx, track, _) =
-            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
-        let mut params = RtpCodecParameters::default();
-        if let Some(info) = rtp_map.first() {
-            params.payload_type = info.payload_type;
-            params.clock_rate = info.clock_rate;
-            params.channels = info.channels as u8;
-        }
-        let _ = pc.add_track(track, params);
-        drop(_guard);
-
-        Self {
-            track_id,
-            pc,
-            muted: std::sync::atomic::AtomicBool::new(false),
-            sender: Some(tx),
-        }
+        Self::new_with_video(track_id, config, rtp_map, Vec::new())
     }
 
     pub fn new_with_video(

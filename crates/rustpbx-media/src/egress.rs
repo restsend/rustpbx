@@ -111,7 +111,7 @@ pub enum EgressSource {
 
 /// Configuration for the encoding side of the pipeline.
 #[derive(Debug, Clone, Copy)]
-pub struct EgressCodec {
+pub(crate) struct EgressCodec {
     pub codec: CodecType,
     pub payload_type: u8,
     pub clock_rate: u32,
@@ -132,7 +132,7 @@ pub struct EgressCodec {
 /// Create via [`EgressPipeline::start`] after obtaining a `SampleStreamSource`
 /// (from `rustrtc::media::track::sample_track`, with the track added to the
 /// PeerConnection). Stop by dropping the pipeline or calling [`Self::stop`].
-pub struct EgressPipeline {
+pub(crate) struct EgressPipeline {
     cmd_tx: mpsc::Sender<EgressCmd>,
     cancel: CancellationToken,
 }

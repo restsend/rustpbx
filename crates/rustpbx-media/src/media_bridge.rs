@@ -557,29 +557,12 @@ impl MediaBridge {
             }
 
             // ── A→B rules: audio catch-all + DTMF + video ──
-            let b_audio_mid_fields = b_audio_mid
-                .as_ref()
-                .map(|m| (m.0, Some(m.1.to_string())))
-                .map(|(id, mid)| (Some(id), mid))
-                .unwrap_or((None, None));
-            let mut rules_a_to_b = vec![RtpRewriteRule {
-                match_payload_type: None,
-                fixed_out_ssrc: Some(b_relay_ssrc),
-                ssrc_offset: 0,
-                out_payload_type: (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
-                sdes_mid_extension_id: b_audio_mid_fields.0,
-                sdes_mid: b_audio_mid_fields.1.clone(),
-            }];
-            if let Some((a_pt, b_pt)) = dtmf_a_to_b {
-                rules_a_to_b.push(RtpRewriteRule {
-                    match_payload_type: Some(a_pt),
-                    fixed_out_ssrc: Some(b_relay_ssrc),
-                    ssrc_offset: 0,
-                    out_payload_type: Some(b_pt),
-                    sdes_mid_extension_id: b_audio_mid_fields.0,
-                    sdes_mid: b_audio_mid_fields.1.clone(),
-                });
-            }
+            let mut rules_a_to_b = audio_relay_rules(
+                b_relay_ssrc,
+                (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
+                dtmf_a_to_b,
+                &b_audio_mid,
+            );
             let (video_a_to_b, video_b_to_a) = video_relay_rules(
                 &pa.video,
                 &pb.video,
@@ -595,29 +578,12 @@ impl MediaBridge {
             rules_a_to_b.extend(video_a_to_b);
 
             // ── B→A rules (mirror) ──
-            let a_audio_mid_fields = a_audio_mid
-                .as_ref()
-                .map(|m| (m.0, Some(m.1.to_string())))
-                .map(|(id, mid)| (Some(id), mid))
-                .unwrap_or((None, None));
-            let mut rules_b_to_a = vec![RtpRewriteRule {
-                match_payload_type: None,
-                fixed_out_ssrc: Some(a_relay_ssrc),
-                ssrc_offset: 0,
-                out_payload_type: (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
-                sdes_mid_extension_id: a_audio_mid_fields.0,
-                sdes_mid: a_audio_mid_fields.1.clone(),
-            }];
-            if let Some((a_pt, b_pt)) = dtmf_b_to_a {
-                rules_b_to_a.push(RtpRewriteRule {
-                    match_payload_type: Some(b_pt),
-                    fixed_out_ssrc: Some(a_relay_ssrc),
-                    ssrc_offset: 0,
-                    out_payload_type: Some(a_pt),
-                    sdes_mid_extension_id: a_audio_mid_fields.0,
-                    sdes_mid: a_audio_mid_fields.1.clone(),
-                });
-            }
+            let mut rules_b_to_a = audio_relay_rules(
+                a_relay_ssrc,
+                (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
+                dtmf_b_to_a,
+                &a_audio_mid,
+            );
             rules_b_to_a.extend(video_b_to_a);
 
             let options_a_to_b = RtpRewriteBridgeOptions {
@@ -929,9 +895,9 @@ impl MediaBridge {
         self.hold(side, Some(Box::new(source))).await
     }
 
-    /// Resume a leg from hold / play: re-activate the route (auto-selects
+    /// Resume from hold / play: re-activate the route (auto-selects
     /// fast-path or transcode). Clears any active-play markers for both legs.
-    pub async fn resume(&mut self, _side: LegSide) -> Result<()> {
+    pub async fn resume(&mut self) -> Result<()> {
         self.active_play.lock().clear();
         self.bridge().await
     }
@@ -1337,6 +1303,42 @@ fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sy
         .and_then(|s| s.sdes_mid())
 }
 
+/// Rewrite rules for one direction of audio relay: the audio catch-all rule
+/// (rewrites every packet to the destination leg's relay SSRC, remapping the
+/// payload type when the legs differ) plus, when the two legs negotiated
+/// different telephone-event payload types, a DTMF remap rule. Both stamp the
+/// destination leg's audio MID for browser attribution.
+fn audio_relay_rules(
+    out_ssrc: u32,
+    out_pt: Option<u8>,
+    dtmf_map: Option<(u8, u8)>,
+    mid: &Option<(u8, std::sync::Arc<str>)>,
+) -> Vec<RtpRewriteRule> {
+    let (mid_id, mid_val) = mid
+        .as_ref()
+        .map(|m| (Some(m.0), Some(m.1.to_string())))
+        .unwrap_or((None, None));
+    let mut rules = vec![RtpRewriteRule {
+        match_payload_type: None,
+        fixed_out_ssrc: Some(out_ssrc),
+        ssrc_offset: 0,
+        out_payload_type: out_pt,
+        sdes_mid_extension_id: mid_id,
+        sdes_mid: mid_val.clone(),
+    }];
+    if let Some((src_pt, dst_pt)) = dtmf_map {
+        rules.push(RtpRewriteRule {
+            match_payload_type: Some(src_pt),
+            fixed_out_ssrc: Some(out_ssrc),
+            ssrc_offset: 0,
+            out_payload_type: Some(dst_pt),
+            sdes_mid_extension_id: mid_id,
+            sdes_mid: mid_val,
+        });
+    }
+    rules
+}
+
 /// Build the video payload-type rewrite rules for the fast-path relay.
 ///
 /// The relay must match **every** video payload type a leg may actually send,
@@ -1664,7 +1666,7 @@ mod tests {
         let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
         let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
-        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
             .apply_sdp(&a_offer, SdpType::Offer)
             .await
@@ -1725,7 +1727,7 @@ mod tests {
         let a = LegInner::new("a", &cfg, None).unwrap();
         let b = LegInner::new("b", &cfg, None).unwrap();
 
-        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
             .apply_sdp(&a_offer, SdpType::Offer)
             .await
@@ -1780,7 +1782,7 @@ mod tests {
         let a = LegInner::new("a", &cfg, None).unwrap();
         let b = LegInner::new("b", &cfg, None).unwrap();
 
-        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
             .apply_sdp(&a_offer, SdpType::Offer)
             .await
@@ -1832,7 +1834,7 @@ mod tests {
 
         let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
         let a2 = LegInner::new("a2", &webrtc_cfg, None).unwrap();
-        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a_offer = a.create_offer().await.expect("a offer");
         let a2_answer = a2
             .apply_sdp(&a_offer, SdpType::Offer)
             .await
@@ -1843,7 +1845,7 @@ mod tests {
 
         let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
         let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu(), None).unwrap();
-        let b_offer = b.create_offer(vec![]).await.expect("b offer");
+        let b_offer = b.create_offer().await.expect("b offer");
         let b2_answer = b2
             .apply_sdp(&b_offer, SdpType::Offer)
             .await
@@ -1940,7 +1942,7 @@ mod tests {
 
         // Leg B: RTP/opus — negotiated, transport ready.
         let b2 = LegInner::new("b2", &rtp_opus_cfg, None).unwrap();
-        let b_offer = b2.create_offer(vec![]).await.expect("b2 offer");
+        let b_offer = b2.create_offer().await.expect("b2 offer");
         let b = LegInner::new("b", &rtp_opus_cfg, None).unwrap();
         b.apply_sdp(&b_offer, SdpType::Offer)
             .await
@@ -2034,7 +2036,7 @@ mod tests {
         let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
         let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
-        let a_offer = a.create_offer(vec![]).await.expect("a offer");
+        let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
             .apply_sdp(&a_offer, SdpType::Offer)
             .await

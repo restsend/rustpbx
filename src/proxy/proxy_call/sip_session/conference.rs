@@ -4,7 +4,6 @@ use crate::proxy::proxy_call::media_peer::MediaPeer;
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl SipSession {
@@ -201,59 +200,18 @@ impl SipSession {
             // Legacy output: add a sample track to the independent peer PC.
             let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
 
-            let mut pc = None;
-            for attempt in 0..150 {
-                let tracks = peer.get_tracks().await;
-                for t in &tracks {
-                    let guard = t.lock().await;
-                    if guard.id() == track_id {
-                        if let Some(found_pc) = guard.get_peer_connection().await {
-                            pc = Some(found_pc);
-                            break;
-                        }
-                    }
-                }
-                if pc.is_some() {
-                    break;
-                }
-                for t in &tracks {
-                    let guard = t.lock().await;
-                    if let Some(found_pc) = guard.get_peer_connection().await {
-                        pc = Some(found_pc);
-                        break;
-                    }
-                }
-                if pc.is_some() {
-                    break;
-                }
-                if attempt % 25 == 0 {
-                    let track_ids: Vec<_> = {
-                        let mut ids = Vec::new();
-                        for t in &tracks {
-                            ids.push(t.lock().await.id().to_string());
-                        }
-                        ids
-                    };
-                    tracing::debug!(
-                        session_id = %self.id,
-                        leg_id = %leg_id,
-                        wanted_track_id = %track_id,
-                        available_tracks = ?track_ids,
-                        attempt = attempt,
-                        "Waiting for peer connection on conference media bridge"
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-
-            let pc = pc.ok_or_else(|| {
-                anyhow!(
-                    "No peer connection found for conference audio injection (leg={}, track={}, session={})",
-                    leg_id,
-                    track_id,
-                    self.id
-                )
-            })?;
+            // Prefer the wanted track's PC, fall back to any track's PC
+            // (see wait_for_peer_connection).
+            let pc = Self::wait_for_peer_connection(&peer, 150, Some(track_id))
+                .await
+                .ok_or_else(|| {
+                    anyhow!(
+                        "No peer connection found for conference audio injection (leg={}, track={}, session={})",
+                        leg_id,
+                        track_id,
+                        self.id
+                    )
+                })?;
 
             let params = RtpCodecParameters {
                 payload_type: 0,
@@ -287,7 +245,7 @@ impl SipSession {
                 let Some(caller_peer) = self.caller_peer().cloned() else {
                     return Err(anyhow!("No caller peer for conference input"));
                 };
-                let pc = Self::wait_for_peer_connection(&caller_peer, 100)
+                let pc = Self::wait_for_peer_connection(&caller_peer, 100, None)
                     .await
                     .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
                 self.build_audio_receiver(pc)
@@ -356,7 +314,7 @@ impl SipSession {
         peer: &Arc<dyn MediaPeer>,
         fallback_pc: Option<rustrtc::PeerConnection>,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        let pc = Self::wait_for_peer_connection(peer, 150)
+        let pc = Self::wait_for_peer_connection(peer, 150, None)
             .await
             .or(fallback_pc)
             .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;

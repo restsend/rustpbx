@@ -179,7 +179,10 @@ impl RtpTrackBuilder {
             sdp_compatibility,
             cname: self.cname,
             buffer_drop_strategy: BufferDropStrategy::DropOldest,
-            rtp_buffer_capacity: 500,
+            // 500 reserved ~95KB per leg that is almost never reached; 100
+            // (the rustrtc default) matches build_rtc_config in leg.rs and
+            // cuts per-leg reserved memory (~150MB across 1600 legs).
+            rtp_buffer_capacity: 100,
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
             ..Default::default()
         };

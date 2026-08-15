@@ -1228,13 +1228,26 @@ enum ConstructMode<'a> {
         Ok(Box::new(PeerConnectionAudioReceiver::new(pc, decoder)))
     }
 
-    /// Wait up to `retries * 20ms` for a `PeerConnection` from the given peer's tracks.
+    /// Wait up to `retries * 20ms` for a `PeerConnection` from the given
+    /// peer's tracks. When `prefer_track_id` is set, that track's PC wins;
+    /// otherwise (or once it has none) any track's PC is returned.
     pub(super) async fn wait_for_peer_connection(
         peer: &Arc<dyn MediaPeer>,
         retries: usize,
+        prefer_track_id: Option<&str>,
     ) -> Option<rustrtc::PeerConnection> {
         for _ in 0..retries {
             let tracks = peer.get_tracks().await;
+            if let Some(wanted) = prefer_track_id {
+                for t in &tracks {
+                    let guard = t.lock().await;
+                    if guard.id() == wanted {
+                        if let Some(pc) = guard.get_peer_connection().await {
+                            return Some(pc);
+                        }
+                    }
+                }
+            }
             for t in &tracks {
                 let guard = t.lock().await;
                 if let Some(pc) = guard.get_peer_connection().await {
@@ -2366,7 +2379,7 @@ enum ConstructMode<'a> {
                     // the answer's codecs so set_remote_description(answer) has
                     // a matching local offer and the negotiated profile lands.
                     if leg.negotiated().is_none() {
-                        if let Ok(offer) = leg.create_offer(vec![]).await {
+                        if let Ok(offer) = leg.create_offer().await {
                             debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for callee MediaBridge leg");
                         } else {
                             warn!(session_id = %self.id, "Failed to generate UAC offer for callee leg");
@@ -2501,7 +2514,7 @@ enum ConstructMode<'a> {
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
                     if leg.negotiated().is_none() {
-                        if let Ok(offer) = leg.create_offer(vec![]).await {
+                        if let Ok(offer) = leg.create_offer().await {
                             debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for caller MediaBridge leg");
                         }
                     }
@@ -2556,7 +2569,7 @@ enum ConstructMode<'a> {
         if let Some(mb) = self.bridge_mut() {
             if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
                 if leg.negotiated().is_none() {
-                    if let Ok(offer) = leg.create_offer(vec![]).await {
+                    if let Ok(offer) = leg.create_offer().await {
                         info!(session_id = %session_id2, offer_len = offer.len(), "Created B leg offer for originate MediaBridge");
                     }
                 }
@@ -5525,7 +5538,7 @@ enum ConstructMode<'a> {
                         None,
                     ) {
                         Ok(leg) => {
-                            if let Ok(offer) = leg.create_offer(vec![]).await {
+                            if let Ok(offer) = leg.create_offer().await {
                                 if let Some(mb) = self.bridge_mut() {
                                     mb.replace_leg(crate::media::media_bridge::LegSide::B, leg)
                                         .await;
@@ -6176,7 +6189,7 @@ enum ConstructMode<'a> {
 
             let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
             let leg = crate::media::leg::LegInner::new(callee_label, &cfg, None)?;
-            let mut sdp = leg.create_offer(vec![]).await?;
+            let mut sdp = leg.create_offer().await?;
             mb.replace_leg(crate::media::media_bridge::LegSide::B, leg)
                 .await;
 
@@ -6918,7 +6931,7 @@ enum ConstructMode<'a> {
         info!(session_id = %self.id, %leg_key, "Propagating unhold");
         self.update_leg_state(&LegId::from(leg_key), LegState::Connected);
         if let Some(mb) = self.bridge_mut() {
-            mb.resume(side).await?;
+            mb.resume().await?;
             mb.resume_rtp_timeout(side);
         } else {
             let unhold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), false)?;
@@ -8528,7 +8541,7 @@ impl SipSession {
 
             CallCommand::ResumeMedia => {
                 if let Some(mb) = self.bridge_mut() {
-                    if let Err(e) = mb.resume(crate::media::media_bridge::LegSide::A).await {
+                    if let Err(e) = mb.resume().await {
                         warn!(session_id = %self.id, error = %e, "Failed to resume media route after playback");
                         CommandResult::failure(e.to_string())
                     } else {
@@ -10736,7 +10749,7 @@ impl SipSession {
             crate::media::media_bridge::LegSide::A
         };
         if let Some(mb) = self.bridge_mut() {
-            mb.resume(side).await?;
+            mb.resume().await?;
             mb.resume_rtp_timeout(side);
         }
 

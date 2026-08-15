@@ -18,7 +18,7 @@ pub use crate::AudioFrame;
 
 /// Conference participant audio interface
 #[derive(Debug)]
-pub struct ConferenceParticipantAudio {
+pub(crate) struct ConferenceParticipantAudio {
     /// Participant ID (LegId)
     pub leg_id: LegId,
     /// Input channel from participant (decoded PCM)
@@ -82,40 +82,6 @@ pub(crate) struct MixingLoopContext {
     frame_size: usize,
     sample_rate: u32,
     route_gains: Arc<DashMap<(LegId, LegId), f32>>,
-}
-
-pub(crate) struct MixingLoopContextBuilder {
-    inner: MixingLoopContext,
-}
-
-impl MixingLoopContextBuilder {
-    pub fn new(
-        conf_id: String,
-        participants: Arc<DashMap<LegId, ConferenceParticipantAudio>>,
-        cancel_token: CancellationToken,
-        frame_size: usize,
-        sample_rate: u32,
-    ) -> Self {
-        Self {
-            inner: MixingLoopContext {
-                conf_id,
-                participants,
-                cancel_token,
-                frame_size,
-                sample_rate,
-                route_gains: Arc::new(DashMap::new()),
-            },
-        }
-    }
-
-    pub fn with_route_gains(mut self, gains: Arc<DashMap<(LegId, LegId), f32>>) -> Self {
-        self.inner.route_gains = gains;
-        self
-    }
-
-    pub fn build(self) -> MixingLoopContext {
-        self.inner
-    }
 }
 
 impl ConferenceAudioMixer {
@@ -270,15 +236,14 @@ impl ConferenceAudioMixer {
 
     /// Start the conference mixing
     pub fn start(&self) {
-        let ctx = MixingLoopContextBuilder::new(
-            self.conf_id.clone(),
-            self.participants.clone(),
-            self.cancel_token.clone(),
-            self.frame_size,
-            self.sample_rate,
-        )
-        .with_route_gains(self.route_gains.clone())
-        .build();
+        let ctx = MixingLoopContext {
+            conf_id: self.conf_id.clone(),
+            participants: self.participants.clone(),
+            cancel_token: self.cancel_token.clone(),
+            frame_size: self.frame_size,
+            sample_rate: self.sample_rate,
+            route_gains: self.route_gains.clone(),
+        };
         let task = tokio::spawn(async move {
             Self::mixing_loop(ctx).await;
         });
@@ -324,8 +289,6 @@ impl ConferenceAudioMixer {
             interval_ms = interval_ms,
             "Conference mixing loop started"
         );
-
-        let audio_mixer = AudioMixer::new(ctx.sample_rate, 1);
 
         loop {
             tokio::select! {
@@ -381,7 +344,7 @@ impl ConferenceAudioMixer {
                                     }
                                     normalized_frames.push(frame);
                                 }
-                                let mixed_samples = audio_mixer.mix_frames(normalized_frames, &gains);
+                                let mixed_samples = AudioMixer::mix(normalized_frames, &gains);
 
                                 let output_frame = AudioFrame::new(mixed_samples, ctx.sample_rate);
 

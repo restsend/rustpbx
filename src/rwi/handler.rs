@@ -333,11 +333,18 @@ async fn handle_text_message(
         ) = result
     {
         let mut gw = gateway.write();
-        let _ = gw.claim_call_ownership(
+        if let Err(e) = gw.claim_call_ownership(
             &session_id.to_string(),
             cid.clone(),
             crate::rwi::session::OwnershipMode::Control,
-        );
+        ) {
+            tracing::warn!(
+                call_id = %cid,
+                session_id = %session_id,
+                error = ?e,
+                "originate succeeded but call ownership claim failed"
+            );
+        }
     }
 
     let outcome = match &result {

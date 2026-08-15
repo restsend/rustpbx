@@ -53,7 +53,7 @@ pub struct DtmfEvent {
 
 /// Snapshot of the per-direction counters.
 #[derive(Debug, Clone, Default)]
-pub struct TapStats {
+pub(crate) struct TapStats {
     pub ingress_packets: u64,
     pub ingress_bytes: u64,
     pub egress_packets: u64,
@@ -163,12 +163,12 @@ impl IngressTap {
     }
 
     /// Subscribe to deduplicated ingress DTMF events.
-    pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
+    pub(crate) fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
         self.dtmf_tx.subscribe()
     }
 
     /// Snapshot the per-direction counters.
-    pub fn stats(&self) -> TapStats {
+    pub(crate) fn stats(&self) -> TapStats {
         TapStats {
             ingress_packets: self.ingress_packets.load(Ordering::Relaxed),
             ingress_bytes: self.ingress_bytes.load(Ordering::Relaxed),

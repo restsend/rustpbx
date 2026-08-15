@@ -94,7 +94,7 @@ async fn two_rtp_legs_negotiate_via_sdp() {
     let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
 
     // a offers, b answers.
-    let offer = a.create_offer(vec![]).await.expect("offer");
+    let offer = a.create_offer().await.expect("offer");
     assert!(offer.contains("RTP/AVP"), "RTP leg offer must be RTP/AVP");
     let answer = b.answer(&offer).await.expect("answer");
     // a applies the answer.
@@ -123,7 +123,7 @@ async fn bridge_records_symmetric_routes() {
     // SDP exchange so both legs have negotiated audio profiles.
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.unwrap();
+    let offer = la.create_offer().await.unwrap();
     let answer = lb.answer(&offer).await.unwrap();
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -315,7 +315,7 @@ async fn play_file_fires_on_end() {
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -351,7 +351,7 @@ async fn mediabridge_hold_resume_preserves_route() {
 
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.unwrap();
+    let offer = la.create_offer().await.unwrap();
     let answer = lb.answer(&offer).await.unwrap();
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -366,7 +366,7 @@ async fn mediabridge_hold_resume_preserves_route() {
     assert!(!mb.is_bridged(), "hold must break the route");
 
     // Resume 'a' → route re-armed.
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     assert!(mb.is_bridged(), "resume must re-arm the route");
 
     mb.close();
@@ -389,7 +389,7 @@ async fn hold_with_music_loops() {
     // Let a few ticks pass — no panic means the looping source worked.
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-    mb.resume(LegSide::A).await.expect("resume");
+    mb.resume().await.expect("resume");
     mb.close();
 }
 
@@ -404,7 +404,7 @@ async fn mediabridge_hold_file_plays_loop() {
     mb.hold_file(LegSide::A, wav).await.expect("hold_file");
 
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    mb.resume(LegSide::A).await.expect("resume");
+    mb.resume().await.expect("resume");
     mb.close();
 }
 
@@ -436,7 +436,7 @@ async fn file_recorder_writes_wav() {
     mb.replace_leg(LegSide::B, b).await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -804,7 +804,7 @@ async fn relay_full_lifecycle_with_accept_gate() {
     let lb = mb.leg(LegSide::B).unwrap();
 
     // 1. SDP exchange so both legs have negotiated audio profiles.
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -832,7 +832,7 @@ async fn relay_full_lifecycle_with_accept_gate() {
     assert!(!mb.is_bridged());
 
     // 7. Resume 'a' → relay re-armed.
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     assert!(mb.is_bridged());
 
     // 8. Unbridge → relay torn down.
@@ -854,7 +854,7 @@ async fn play_file_during_bridge_then_resume() {
     let lb = mb.leg(LegSide::B).unwrap();
 
     // SDP + bridge + accept both.
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -871,7 +871,7 @@ async fn play_file_during_bridge_then_resume() {
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
     // Resume — relay re-arms.
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     assert!(mb.is_bridged());
     mb.unbridge().await.unwrap();
     mb.close();
@@ -888,7 +888,7 @@ async fn multi_cycle_bridge_play_hold_resume_unbridge() {
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
 
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -901,14 +901,14 @@ async fn multi_cycle_bridge_play_hold_resume_unbridge() {
     let wav1 = tempfile_wav_silence(8000, 1, 160);
     mb.play_file(LegSide::A, wav1, false).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     mb.unbridge().await.unwrap();
 
     // Cycle 2: re-bridge → hold → resume → unbridge.
     mb.bridge().await.unwrap();
     mb.hold(LegSide::A, None).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     mb.unbridge().await.unwrap();
 
     // Cycle 3: bridge → hold_file → resume → unbridge → play → mute.
@@ -916,7 +916,7 @@ async fn multi_cycle_bridge_play_hold_resume_unbridge() {
     let wav2 = tempfile_wav_silence(8000, 1, 160);
     mb.hold_file(LegSide::A, wav2).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    mb.resume(LegSide::A).await.unwrap();
+    mb.resume().await.unwrap();
     mb.unbridge().await.unwrap();
     let wav3 = tempfile_wav_silence(8000, 1, 80);
     mb.play_file(LegSide::A, wav3, false).await.unwrap();
@@ -942,7 +942,7 @@ async fn play_file_handle_completes_on_natural_eof() {
     .await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -983,7 +983,7 @@ async fn stop_play_interrupts_handle() {
     .await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -1024,7 +1024,7 @@ async fn loop_playback_does_not_resolve_until_stopped() {
     .await;
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.expect("offer");
+    let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -1074,7 +1074,7 @@ async fn replace_leg_releases_replaced_leg_and_rtcp_tasks() {
     // SDP exchange + accept both → fast-path relay, RTCP forwarders spawned.
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.unwrap();
+    let offer = la.create_offer().await.unwrap();
     let answer = lb.answer(&offer).await.unwrap();
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
@@ -1131,7 +1131,7 @@ async fn unbridge_bridge_cycles_do_not_accumulate_rtcp_tasks() {
 
     let la = mb.leg(LegSide::A).unwrap();
     let lb = mb.leg(LegSide::B).unwrap();
-    let offer = la.create_offer(vec![]).await.unwrap();
+    let offer = la.create_offer().await.unwrap();
     let answer = lb.answer(&offer).await.unwrap();
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await

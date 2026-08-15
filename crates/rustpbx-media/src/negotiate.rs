@@ -1022,8 +1022,6 @@ mod tests {
             .unwrap();
         let rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
 
-        println!("RTP MAP: {:?}", rtp_map);
-
         // Should find PCMU (0) and PCMA (8) even without rtpmap
         assert!(
             rtp_map
