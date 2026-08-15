@@ -191,3 +191,60 @@ impl RtpTrackBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Track;
+use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
+
+    /// CSV 功能清单 L41/L42: the built WebRTC track must switch
+    /// `ice_transport_policy` to `Relay` when a `turn:`/`turns:` server is
+    /// configured, and stay `All` when only STUN (or nothing) is available.
+    /// RTP-mode tracks never apply the relay policy.
+    async fn policy_of(mode: TransportMode, urls: &[&str]) -> IceTransportPolicy {
+        let track = RtpTrackBuilder::new("policy-probe".into())
+            .with_mode(mode)
+            .with_ice_servers(vec![IceServer::new(
+                urls.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )])
+            .build();
+        let pc = track
+            .get_peer_connection()
+            .await
+            .expect("peer connection");
+        pc.config().ice_transport_policy.clone()
+    }
+
+    #[tokio::test]
+    async fn webrtc_with_turn_switches_policy_to_relay() {
+        assert_eq!(
+            policy_of(TransportMode::WebRtc, &["turn:turn.example.com:3478"]).await,
+            IceTransportPolicy::Relay
+        );
+    }
+
+    #[tokio::test]
+    async fn webrtc_with_turns_switches_policy_to_relay() {
+        assert_eq!(
+            policy_of(TransportMode::WebRtc, &["turns:turn.example.com:5349"]).await,
+            IceTransportPolicy::Relay
+        );
+    }
+
+    #[tokio::test]
+    async fn webrtc_with_stun_only_keeps_policy_all() {
+        assert_eq!(
+            policy_of(TransportMode::WebRtc, &["stun:stun.example.com:19302"]).await,
+            IceTransportPolicy::All
+        );
+    }
+
+    #[tokio::test]
+    async fn rtp_mode_with_turn_never_applies_relay_policy() {
+        assert_eq!(
+            policy_of(TransportMode::Rtp, &["turn:turn.example.com:3478"]).await,
+            IceTransportPolicy::All
+        );
+    }
+}
