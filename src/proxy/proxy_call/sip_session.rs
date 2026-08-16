@@ -1496,9 +1496,9 @@ enum ConstructMode<'a> {
     }
 
     /// Construct a SipSession in **UAC / outbound mode** (no inbound caller
-    /// dialog). Used by RWI originate: the caller (A leg) is virtual (media
-    /// anchored on the MediaBridge, no real SIP peer) and the callee (B leg)
-    /// is a real outbound INVITE that is sent later and attached on answer.
+    /// dialog). Used by RWI originate: the caller (A leg) starts as a virtual
+    /// media anchor, then the first answered outbound INVITE is attached to it.
+    /// Dialogs added later through call.leg_add use the callee state channel.
     #[allow(clippy::too_many_arguments)]
     pub fn new_uac(
         server: SipServerRef,
@@ -2313,20 +2313,23 @@ enum ConstructMode<'a> {
     /// Run loop for a **UAC / outbound** session (RWI originate).
     ///
     /// Unlike `process`, this skips the inbound setup phase (no ringback,
-    /// no early-media 183, no dialplan execution) — the callee INVITE is
-    /// sent by the caller and the resulting `ClientInviteDialog` is attached
-    /// via [`attach_callee_dialog`]. This loop only drives:
-    ///   * callee dialog state events (`callee_state_rx`)
+    /// no early-media 183, no dialplan execution). The first outbound
+    /// `ClientInviteDialog` is attached via [`attach_caller_dialog`]. This
+    /// loop drives:
+    ///   * first INVITE / caller dialog state events (`caller_state_rx`)
+    ///   * call.leg_add dialog state events (`callee_state_rx`)
     ///   * command processing (`cmd_rx`)
     ///   * session-timer refresh / max-duration / hangup drain
     pub async fn process_uac(
         &mut self,
+        caller_state_rx: mpsc::UnboundedReceiver<DialogState>,
         callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
         cmd_rx: mpsc::Receiver<CallCommand>,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
 
-        self.run_main_loop(None, callee_state_rx, cmd_rx).await?;
+        self.run_main_loop(Some(caller_state_rx), callee_state_rx, cmd_rx)
+            .await?;
 
         self.cleanup().await;
         let _ = _cancel_guard;
@@ -2514,14 +2517,11 @@ enum ConstructMode<'a> {
             }
         }
 
-        // The originate (UAC) path never feeds the caller dialog's state
-        // channel into the main loop (process_uac passes state_rx = None), so
-        // the normal DialogState::Confirmed → Connected transition in
-        // handle_dialog_state never fires. The caller dialog is, by
-        // construction, already answered at this point (we're attaching the
-        // 200 OK dialog), so transition the caller leg to Connected here.
-        // Without this, any later transfer / voip_bridge on the caller leg
-        // fails with "Cannot transfer leg caller: invalid state Initializing".
+        // The caller dialog is already answered when it is attached. Its
+        // Confirmed state may have been consumed by the originate setup loop
+        // or may still be queued for process_uac, so mark it Connected here;
+        // handling a queued Confirmed state again is idempotent. Subsequent
+        // re-INVITE/BYE states are handled by the normal caller-state branch.
         self.update_leg_state(&LegId::from("caller"), LegState::Connected);
         info!(session_id = %self.id, "UAC caller leg marked Connected after attaching caller dialog");
     }
@@ -11733,6 +11733,73 @@ mod tests {
         drop(tx);
 
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_uac_handles_first_invite_termination_as_caller_state() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+        let (server, _) = create_test_server().await;
+        let original_request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "rwi",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let context = CallContext {
+            session_id: "rwi-uac-caller-state".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "rwi-uac-caller-state".to_string(),
+                original_request,
+                DialDirection::Outbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:rwi@rustpbx.com".to_string(),
+            original_callee: "sip:target@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, cmd_rx) = SipSession::new_uac(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            false,
+            Arc::new(MockMediaPeer::new()),
+            Arc::new(MockMediaPeer::new()),
+        );
+        let (caller_tx, caller_rx) = mpsc::unbounded_channel();
+        let (_callee_tx, callee_rx) = mpsc::unbounded_channel();
+        let dialog_id = DialogId {
+            call_id: "rwi-first-invite".into(),
+            local_tag: "local".into(),
+            remote_tag: "remote".into(),
+        };
+
+        caller_tx
+            .send(DialogState::Terminated(
+                dialog_id,
+                TerminatedReason::UasBye,
+            ))
+            .expect("caller state receiver must be open");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            session.process_uac(caller_rx, callee_rx, cmd_rx),
+        )
+        .await
+        .expect("caller BYE must stop the UAC session")
+        .expect("UAC session should shut down cleanly");
+
+        assert!(matches!(
+            session.meta.hangup_reason,
+            Some(CallRecordHangupReason::ByCallee)
+        ));
     }
 
     #[tokio::test]
