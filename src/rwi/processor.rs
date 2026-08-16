@@ -822,34 +822,12 @@ impl RwiCommandProcessor {
         }
 
         let media = server.default_media_config();
-        let external_ip = media
-            .external_ip
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
 
-        let media_track =
-            crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
-                .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_enable_latching(media.enable_latching)
-                .with_probation_max_packets(media.probation_max_packets)
-                .with_external_ip(external_ip.clone())
-                .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
-            media_track.with_bind_ip(bind_ip)
-        } else {
-            media_track
-        };
-        let media_track =
-            if let (Some(start), Some(end)) = (media.rtp_start_port, media.rtp_end_port) {
-                media_track.with_rtp_range(start, end)
-            } else {
-                media_track
-            };
         // If routing out a named carrier trunk, respect the trunk's codec configuration.
         // When no codecs are configured on the trunk, use the default full set (the
         // conference bridge now sends whatever codec was negotiated, so there is no
         // need to restrict to PCMU-only).
-        let media_track = if let Some(trunk_name) = req
+        let originate_codec_types = if let Some(trunk_name) = req
             .trunk
             .as_deref()
             .map(str::trim)
@@ -863,42 +841,23 @@ impl RwiCommandProcessor {
                         .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
                         .collect();
                     if !codecs.is_empty() {
-                        media_track.with_codec_preference(codecs)
+                        codecs
                     } else {
-                        media_track
+                        crate::media::MediaNegotiator::default_rtp_codecs()
                     }
                 } else {
-                    media_track
+                    crate::media::MediaNegotiator::default_rtp_codecs()
                 }
             } else {
-                media_track
+                crate::media::MediaNegotiator::default_rtp_codecs()
             }
         } else {
-            media_track
-        }
-        .build();
-
-        tracing::info!(call_id = %req.call_id, external_ip = %external_ip, "Created media track for originate");
-
-        let sdp_offer = match media_track.local_description().await {
-            Ok(sdp) => {
-                tracing::info!(call_id = %req.call_id, sdp_len = %sdp.len(), "Generated SDP offer");
-                if sdp.is_empty() {
-                    return Err(CommandError::CommandFailed("SDP offer is empty".into()));
-                }
-
-                let preview: String = sdp.lines().take(5).collect::<Vec<_>>().join("\n");
-                tracing::debug!(call_id = %req.call_id, "SDP preview:\n{}", preview);
-                sdp
-            }
-            Err(e) => {
-                tracing::error!(call_id = %req.call_id, error = %e, "Failed to generate SDP offer");
-                return Err(CommandError::CommandFailed(format!(
-                    "failed to create SDP offer: {}",
-                    e
-                )));
-            }
+            crate::media::MediaNegotiator::default_rtp_codecs()
         };
+        let originate_codecs: Vec<crate::media::CodecInfo> = originate_codec_types
+            .into_iter()
+            .map(crate::media::MediaNegotiator::codec_info_for_type)
+            .collect();
 
         let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
@@ -912,7 +871,9 @@ impl RwiCommandProcessor {
                 .default_contact_uri()
                 .unwrap_or_else(|| caller_uri.clone()),
             content_type: Some("application/sdp".to_string()),
-            offer: Some(sdp_offer.clone().into_bytes()),
+            // The offer is generated below from the session's real
+            // MediaBridge A leg after the session has been constructed.
+            offer: None,
             destination: None,
             credential: None,
             headers: Some(headers),
@@ -1114,18 +1075,14 @@ impl RwiCommandProcessor {
                 }
             };
 
-            let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut invitation = dialog_layer
-                .do_invite(invite_option, caller_state_tx)
-                .boxed();
-
-            // Build the media peers (caller = virtual A leg, callee = B leg).
+            // These peers are logical registry anchors. The first outbound
+            // SIP/RTP connection is owned by MediaBridge A below; no duplicate
+            // RtcTrack is attached to either peer.
             let caller_media_builder = crate::media::MediaStreamBuilder::new()
                 .with_id(format!("{}-caller", call_id))
                 .with_cancel_token(cancel_token.clone());
             let caller_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
                 Arc::new(caller_media_builder.build());
-            caller_peer.update_track(media_track, None).await;
 
             let callee_media_builder = crate::media::MediaStreamBuilder::new()
                 .with_id(format!("{}-callee", call_id))
@@ -1211,16 +1168,34 @@ impl RwiCommandProcessor {
                 callee_peer.clone(),
             );
 
-            // Store the local SDP offer generated for the caller's media track
-            // so later SDP negotiation (re-INVITE/hold) has a baseline.
+            // Build the real A leg first and send its exact local description
+            // in the INVITE. The answer will be applied back to this same leg.
+            let sdp_offer = match session
+                .prepare_originate_caller_leg(originate_codecs)
+                .await
             {
-                let tracks = caller_peer.get_tracks().await;
-                if let Some(first_track) = tracks.first() {
-                    if let Ok(local_sdp) = first_track.local_description().await {
-                        session.media.caller_offer = Some(local_sdp);
-                    }
+                Ok(offer) => offer,
+                Err(e) => {
+                    tracing::warn!(call_id = %call_id, error = %e, "failed to prepare originate media");
+                    let gw = gateway.read();
+                    gw.send_to_owner(&crate::rwi::CallHangup {
+                        call_id: call_id.clone(),
+                        reason: Some(format!("media_setup_failed: {}", e)),
+                        hangup_by: None,
+                        sip_status: None,
+                    });
+                    cancel_token.cancel();
+                    cleanup();
+                    return;
                 }
-            }
+            };
+            invite_option.offer = Some(sdp_offer.into_bytes());
+
+            let (caller_state_tx, mut caller_state_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let mut invitation = dialog_layer
+                .do_invite(invite_option, caller_state_tx)
+                .boxed();
 
             let entry = ActiveProxyCallEntry {
                 session_id: call_id.clone(),
@@ -1304,29 +1279,29 @@ impl RwiCommandProcessor {
                         }
                     };
 
-                    // Apply the first INVITE's SDP answer to the caller track (A leg).
-                    if let Some(answer) = sdp_answer.as_ref() {
-                        let tracks = caller_peer.get_tracks().await;
-                        if let Some(first_track) = tracks.first() {
-                            let _ = first_track
-                                .set_remote_description(answer, rustrtc::SdpType::Answer)
-                                .await;
+                    // Attach the answered first INVITE as the primary caller
+                    // (MediaBridge A). Its SDP answer is applied to the exact
+                    // leg whose offer was sent above. B remains empty until a
+                    // genuine second endpoint is added through call.leg_add.
+                    if let Err(e) = session.attach_caller_dialog(dialog, sdp_answer).await {
+                        tracing::warn!(call_id = %call_id, error = %e, "failed to complete originate media negotiation");
+                        {
+                            let gw = gateway.read();
+                            gw.send_to_owner(&crate::rwi::CallHangup {
+                                call_id: call_id.clone(),
+                                reason: Some(format!("media_setup_failed: {}", e)),
+                                hangup_by: None,
+                                sip_status: Some(resp.status_code().code()),
+                            });
                         }
+                        cancel_token.cancel();
+                        registry.remove(&call_id);
+                        cleanup();
+                        return;
                     }
 
-                    // Attach the answered first INVITE as the primary caller
-                    // (A leg, MediaBridge A side) before starting the loop.
-                    let callee_sdp_for_b_leg = sdp_answer.clone();
-                    session.attach_caller_dialog(dialog, sdp_answer).await;
-
-                    // Also create the callee (B leg) in the MediaBridge so
-                    // media_play(leg_id="callee"), hold, and comfort-noise
-                    // can target it.
-                    session
-                        .ensure_originate_callee_leg(callee_sdp_for_b_leg.as_deref())
-                        .await;
-
-                    // Spawn the UAC command loop now that the callee is attached.
+                    // Spawn the UAC command loop now that the caller/A dialog
+                    // and its one real media connection are attached.
                     let session_cancel = cancel_token.clone();
                     let session_call_id = call_id.clone();
                     crate::utils::spawn(async move {

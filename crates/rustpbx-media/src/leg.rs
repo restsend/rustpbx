@@ -869,11 +869,17 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
             rustrtc::config::SdpCompatibilityMode::LegacySip
         }
     };
+    let (rtp_start_port, rtp_end_port) = cfg
+        .rtp_port_range
+        .map(|(start, end)| (Some(start), Some(end)))
+        .unwrap_or((None, None));
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
+        rtp_start_port,
+        rtp_end_port,
         external_ip: cfg.external_ip.clone(),
-        rtp_start_port: cfg.rtp_port_range.map(|(start, _)| start),
-        rtp_end_port: cfg.rtp_port_range.map(|(_, end)| end),
+        bind_ip: cfg.bind_ip.clone(),
+        cname: cfg.cname.clone(),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
         // Plain SIP/RTP peers (and SDES-SRTP trunks) do not understand BUNDLE:
         // they expect one distinct UDP port per m-line, no `a=rtcp-mux` and no
@@ -967,6 +973,24 @@ fn sender_ssrc(pc: &PeerConnection) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn leg_config_network_settings_reach_rtc_configuration() {
+        let mut cfg = LegConfig::rtp_pcmu();
+        cfg.rtp_port_range = Some((46000, 46002));
+        cfg.external_ip = Some("203.0.113.10".to_string());
+        cfg.bind_ip = Some("127.0.0.1".to_string());
+        cfg.cname = Some("configured-cname".to_string());
+
+        let leg = LegInner::new("configured-leg", &cfg, None).expect("configured RTP leg");
+        let rtc = leg.pc().config();
+        assert_eq!(rtc.rtp_start_port, Some(46000));
+        assert_eq!(rtc.rtp_end_port, Some(46002));
+        assert_eq!(rtc.external_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(rtc.bind_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(rtc.cname.as_deref(), Some("configured-cname"));
+        leg.stop();
+    }
 
     #[test]
     fn detect_transport_picks_rtp_vs_webrtc() {

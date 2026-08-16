@@ -288,9 +288,9 @@ pub struct SipSession {
     pub snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
 
     pub server: SipServerRef,
-    /// The primary caller dialog (A leg). `None` in UAC/outbound mode
-    /// (e.g. RWI originate) where the caller leg is virtual until the first
-    /// outbound INVITE is attached via `attach_caller_dialog`.
+    /// The primary caller dialog (A leg). `None` while a UAC/outbound session
+    /// (for example RWI originate) prepares and sends its first INVITE, then
+    /// populated when that answered dialog is attached.
     pub caller_dialog: Option<InviteDialog>,
     pub callee_dialogs: Arc<DashMap<DialogId, ()>>,
 
@@ -1029,18 +1029,33 @@ impl SipSession {
         codecs: Vec<crate::media::negotiate::CodecInfo>,
         video_codecs: Vec<rustrtc::config::VideoCapability>,
     ) -> crate::media::leg::LegConfig {
+        let is_webrtc = transport == rustrtc::TransportMode::WebRtc;
+        let rtp_port_range = if is_webrtc {
+            self.context
+                .dialplan
+                .media
+                .webrtc_port_start
+                .zip(self.context.dialplan.media.webrtc_port_end)
+        } else {
+            self.context
+                .dialplan
+                .media
+                .rtp_start_port
+                .zip(self.context.dialplan.media.rtp_end_port)
+        };
         crate::media::leg::LegConfig {
             transport,
             codecs,
             video_codecs,
-            rtp_port_range: self
-                .context
-                .dialplan
-                .media
-                .rtp_start_port
-                .zip(self.context.dialplan.media.rtp_end_port),
+            rtp_port_range,
             external_ip: self.context.dialplan.media.external_ip.clone(),
-            bind_ip: self.context.dialplan.media.bind_ip.clone(),
+            // WebRTC must gather host candidates across interfaces. A fixed
+            // SIP/RTP bind address is only appropriate for RTP/SDES legs.
+            bind_ip: if is_webrtc {
+                None
+            } else {
+                self.context.dialplan.media.bind_ip.clone()
+            },
             cname: Some(self.server.rtc_cname.clone()),
             comfort_noise: self.context.dialplan.media.comfort_noise,
             comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
@@ -1564,9 +1579,9 @@ impl SipSession {
     }
 
     /// Construct a SipSession in **UAC / outbound mode** (no inbound caller
-    /// dialog). Used by RWI originate: the caller (A leg) starts as a virtual
-    /// media anchor, then the first answered outbound INVITE is attached to it.
-    /// Dialogs added later through call.leg_add use the callee state channel.
+    /// dialog). RWI originate prepares MediaBridge A after construction, uses
+    /// its SDP for the first outbound INVITE, and attaches the answered dialog
+    /// to that same leg. Later call.leg_add dialogs use the callee state channel.
     #[allow(clippy::too_many_arguments)]
     pub fn new_uac(
         server: SipServerRef,
@@ -2564,72 +2579,97 @@ impl SipSession {
         Ok(())
     }
 
+    /// Create the one real media connection used by an RWI-originated call.
+    /// Its offer is sent in the first outbound INVITE and the resulting answer
+    /// must be applied back to this same A leg.
+    pub async fn prepare_originate_caller_leg(
+        &mut self,
+        codecs: Vec<crate::media::CodecInfo>,
+    ) -> Result<String> {
+        if codecs.is_empty() {
+            return Err(anyhow!("No codecs configured for originate caller leg"));
+        }
+        let has_a = self
+            .bridge()
+            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::A))
+            .is_some();
+        if has_a {
+            return Err(anyhow!("Originate caller MediaBridge A leg already exists"));
+        }
+
+        let cfg = self.build_leg_config(rustrtc::TransportMode::Rtp, codecs, Vec::new());
+        let recorder_sender = self.setup_recording_capture()?;
+        let leg_label = format!("{}-caller", self.id.0);
+        let mb = self
+            .bridge_mut()
+            .ok_or_else(|| anyhow!("No MediaBridge for originate caller leg"))?;
+        let leg = crate::media::leg::LegInner::new(leg_label, &cfg, recorder_sender)?;
+        let offer = leg.create_offer().await?;
+        if offer.is_empty() {
+            return Err(anyhow!("Originate caller SDP offer is empty"));
+        }
+        mb.replace_leg(crate::media::media_bridge::LegSide::A, leg)
+            .await;
+        self.media.caller_offer = Some(offer.clone());
+        Ok(offer)
+    }
+
     /// Attach the primary caller (A leg) dialog to the session. Used in UAC
-    /// mode (RWI originate) after the first outbound INVITE is answered: the
-    /// virtual caller anchor becomes a real SIP peer on MediaBridge A side.
-    /// Accepts any `InviteDialog` (Server or Client role).
-    pub async fn attach_caller_dialog(&mut self, dialog: InviteDialog, caller_sdp: Option<String>) {
+    /// mode (RWI originate) after the first outbound INVITE is answered.
+    /// MediaBridge A must already exist and must be the source of that INVITE's
+    /// offer; this method never creates a replacement or fallback media leg.
+    pub async fn attach_caller_dialog(
+        &mut self,
+        dialog: InviteDialog,
+        caller_sdp: Option<String>,
+    ) -> Result<()> {
         let dialog_id = dialog.id();
         info!(session_id = %self.id, %dialog_id, "Attaching caller dialog to session");
+
+        let Some(answer) = caller_sdp.as_deref() else {
+            let _ = dialog.hangup().await;
+            return Err(anyhow!("Answered originate INVITE has no SDP answer"));
+        };
+        let Some(leg) = self
+            .bridge()
+            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::A))
+        else {
+            let _ = dialog.hangup().await;
+            return Err(anyhow!("Originate caller MediaBridge A leg is missing"));
+        };
+        if leg.negotiated().is_some() {
+            let _ = dialog.hangup().await;
+            return Err(anyhow!(
+                "Originate caller MediaBridge A leg is already negotiated"
+            ));
+        }
+        if let Err(e) = leg.apply_sdp(answer, rustrtc::SdpType::Answer).await {
+            // The SIP dialog is already confirmed. If media negotiation cannot
+            // complete, terminate it here rather than relying on Drop (which
+            // cannot await a BYE transaction).
+            let _ = dialog.hangup().await;
+            return Err(e);
+        }
+        let Some(mb) = self.bridge_mut() else {
+            let _ = dialog.hangup().await;
+            return Err(anyhow!("No MediaBridge for originate caller leg"));
+        };
+        mb.accept(crate::media::media_bridge::LegSide::A).await;
 
         self.caller_dialog = Some(dialog.clone());
         let caller_id = LegId::from("caller");
         let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
-        // Create the A leg from the internal caller's offer (NOT the callee's
-        // answer). In the originate (UAC) path, caller_offer was set from the
-        // RtpTrackBuilder's local SDP before the INVITE was sent. Using it
-        // here ensures LegSide::A represents the internal/PBX side, while
-        // LegSide::B (created by ensure_originate_callee_leg) represents the
-        // external SIP callee.
-        let mut caller_media_ready = false;
-        if self.media.bridge.is_some() && self.media.caller_offer.is_some() {
-            if let Err(e) = self.ensure_caller_leg().await {
-                warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge A leg");
-            } else {
-                caller_media_ready = true;
-            }
-        } else if let Some(sdp) = caller_sdp {
-            // Fallback: no caller_offer available — apply callee SDP directly
-            // (legacy behavior for non-originate paths).
-            if let Err(e) = self
-                .ensure_media_leg(
-                    crate::media::media_bridge::LegSide::A,
-                    &sdp,
-                    rustrtc::TransportMode::Rtp,
-                )
-                .await
-            {
-                warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge leg");
-                return;
-            }
-            if let Some(mb) = self.bridge_mut() {
-                if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
-                    if leg.negotiated().is_none() {
-                        if let Ok(offer) = leg.create_offer().await {
-                            debug!(session_id = %self.id, offer_len = offer.len(), "Generated UAC local offer for caller MediaBridge leg");
-                        }
-                    }
-                    if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
-                        warn!(session_id = %self.id, error = %e, "Failed to apply caller SDP to MediaBridge A leg");
-                    } else {
-                        caller_media_ready = true;
-                    }
-                }
-            }
-        }
         let auto_start_on_answer = {
             let recording = &self.context.dialplan.recording;
             recording.enabled && recording.auto_start
         };
-        if caller_media_ready
-            && auto_start_on_answer
+        if auto_start_on_answer
             && let Err(error) = self.set_auto_recorder().await
         {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
-
         // The caller dialog is already answered when it is attached. Its
         // Confirmed state may have been consumed by the originate setup loop
         // or may still be queued for process_uac, so mark it Connected here;
@@ -2637,63 +2677,7 @@ impl SipSession {
         // re-INVITE/BYE states are handled by the normal caller-state branch.
         self.update_leg_state(&LegId::from("caller"), LegState::Connected);
         info!(session_id = %self.id, "UAC caller leg marked Connected after attaching caller dialog");
-    }
-
-    /// Ensure the callee (B leg) exists in the MediaBridge for the originate
-    /// (UAC) path. In this path, the INVITE SDP was generated by RtpTrackBuilder,
-    /// so the B leg is never created by the normal dialplan flow.
-    pub async fn ensure_originate_callee_leg(&mut self, callee_sdp: Option<&str>) {
-        let Some(sdp) = callee_sdp else { return };
-        if self.media.bridge.is_none() {
-            return;
-        }
-        let session_id = self.context.session_id.clone();
-        let has_b = self
-            .bridge()
-            .and_then(|mb| mb.leg(crate::media::media_bridge::LegSide::B))
-            .is_some();
-        if has_b {
-            return;
-        }
-        let transport = if Self::sdp_transport_mode(sdp) == rustrtc::TransportMode::WebRtc {
-            rustrtc::TransportMode::WebRtc
-        } else {
-            rustrtc::TransportMode::Rtp
-        };
-        if let Err(e) = self
-            .ensure_media_leg(crate::media::media_bridge::LegSide::B, sdp, transport)
-            .await
-        {
-            warn!(session_id = %session_id, error = %e, "Failed to create B leg for originate");
-            return;
-        }
-        let session_id2 = self.context.session_id.clone();
-        if let Some(mb) = self.bridge_mut() {
-            if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
-                if leg.negotiated().is_none() {
-                    if let Ok(offer) = leg.create_offer().await {
-                        info!(session_id = %session_id2, offer_len = offer.len(), "Created B leg offer for originate MediaBridge");
-                    }
-                }
-                if let Err(e) = leg.apply_sdp(sdp, rustrtc::SdpType::Answer).await {
-                    warn!(session_id = %session_id2, error = %e, "Failed to apply callee SDP to B leg");
-                }
-            }
-            // Activate the bridge relay: accept both legs so the bridge
-            // can start forwarding RTP between A and B.
-            mb.accept(crate::media::media_bridge::LegSide::B).await;
-            mb.accept(crate::media::media_bridge::LegSide::A).await;
-            info!(session_id = %session_id2, "Originated MediaBridge legs accepted (A+B)");
-        }
-
-        // The outbound INVITE's confirmed state is delivered as a *caller*
-        // dialog state on the UAC path (attach_caller_dialog marks "caller"
-        // Connected), so the legs-registry "callee" leg — which carries the
-        // real media bridge B side for this originate call — would otherwise
-        // stay Initializing forever. Mark it Connected so call control on the
-        // callee leg (e.g. blind transfer, CSV L60 POST /cc/calls/{id}/transfer)
-        // is valid once the originate call has been answered.
-        self.update_leg_state(&LegId::from("callee"), LegState::Connected);
+        Ok(())
     }
 
     fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
@@ -5650,22 +5634,7 @@ impl SipSession {
                     } else {
                         Vec::new()
                     };
-                    let cfg = crate::media::leg::LegConfig {
-                        transport: callee_mode,
-                        codecs,
-                        video_codecs,
-                        rtp_port_range: self
-                            .context
-                            .dialplan
-                            .media
-                            .rtp_start_port
-                            .zip(self.context.dialplan.media.rtp_end_port),
-                        external_ip: self.context.dialplan.media.external_ip.clone(),
-                        bind_ip: self.context.dialplan.media.bind_ip.clone(),
-                        cname: Some(self.server.rtc_cname.clone()),
-                        comfort_noise: self.context.dialplan.media.comfort_noise,
-                        comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
-                    };
+                    let cfg = self.build_leg_config(callee_mode, codecs, video_codecs);
                     match crate::media::leg::LegInner::new(
                         format!("{}-callee", self.id.0),
                         &cfg,
@@ -12023,6 +11992,109 @@ mod tests {
             session.meta.hangup_reason,
             Some(CallRecordHangupReason::ByCallee)
         ));
+    }
+
+    #[tokio::test]
+    async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::media::leg::{LegConfig, LegInner};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+        let (server, _) = create_test_server().await;
+        let original_request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "rwi",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let mut dialplan = Dialplan::new(
+            "rwi-prepared-caller-leg".to_string(),
+            original_request,
+            DialDirection::Outbound,
+        );
+        dialplan.media.rtp_start_port = Some(39000);
+        dialplan.media.rtp_end_port = Some(39010);
+        let context = CallContext {
+            session_id: "rwi-prepared-caller-leg".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:rwi@rustpbx.com".to_string(),
+            original_callee: "sip:target@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, _cmd_rx) = SipSession::new_uac(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            true,
+            Arc::new(MockMediaPeer::new()),
+            Arc::new(MockMediaPeer::new()),
+        );
+        let codecs = vec![MediaNegotiator::codec_info_for_type(CodecType::PCMU)];
+
+        let offer = session
+            .prepare_originate_caller_leg(codecs)
+            .await
+            .expect("originate A leg must create the INVITE offer");
+        let offered_port = extract_audio_port(&offer).expect("offer audio port");
+        assert!(
+            (39000..=39010).contains(&offered_port),
+            "originate offer port {offered_port} must honor the configured RTP range"
+        );
+        let caller_leg_before = session
+            .bridge()
+            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+            .expect("prepared caller A leg");
+        assert!(
+            session
+                .bridge()
+                .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::B))
+                .is_none(),
+            "one-target originate must not synthesize a B leg"
+        );
+
+        let remote = LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None)
+            .expect("remote RTP leg");
+        let answer = remote.answer(&offer).await.expect("remote SDP answer");
+        let caller_leg = session
+            .bridge()
+            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+            .expect("prepared caller A leg");
+        caller_leg
+            .apply_sdp(&answer, rustrtc::SdpType::Answer)
+            .await
+            .expect("answer must apply to prepared A leg");
+        session
+            .bridge_mut()
+            .expect("originate MediaBridge")
+            .accept(crate::media::media_bridge::LegSide::A)
+            .await;
+
+        let caller_leg_after = session
+            .bridge()
+            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+            .expect("completed caller A leg");
+        assert!(
+            Arc::ptr_eq(&caller_leg_before, &caller_leg_after),
+            "answer must not replace the PeerConnection that generated the offer"
+        );
+        assert!(caller_leg_after.negotiated().is_some());
+        assert!(!caller_leg_after.is_gated());
+        assert!(
+            session
+                .bridge()
+                .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::B))
+                .is_none(),
+            "answering the first target must still leave B empty"
+        );
+
+        remote.stop();
     }
 
     #[tokio::test]
