@@ -253,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn slow_consumer_does_not_close_stream() {
         let (frame_tx, mut rx) = mpsc::channel::<PcmFrame>(2);
-        let (pkt_tx, pkt_rx) = mpsc::channel::<RtpPacket>(64);
+        let (_pkt_tx, pkt_rx) = mpsc::channel::<RtpPacket>(64);
         let cancel = CancellationToken::new();
         let codec = CodecType::PCMU;
         let sr = codec.samplerate();

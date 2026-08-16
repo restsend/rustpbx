@@ -44,7 +44,7 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let v = it.next();
-        let mut val = || v.clone().unwrap_or_default();
+        let val = || v.clone().unwrap_or_default();
         match k.as_str() {
             "--target" => a.target = val().parse().expect("--target ADDR:PORT"),
             "--pps" => a.pps = val().parse().expect("--pps N"),
@@ -113,7 +113,15 @@ struct Frame {
     ts_offset: usize,
 }
 
-fn build_frame(msg_type: MsgType, src: (IpAddr, u16), dst: (IpAddr, u16), call_id: &str, leg: Option<i32>, payload: Vec<u8>, client_id: u32) -> Frame {
+fn build_frame(
+    msg_type: MsgType,
+    src: (IpAddr, u16),
+    dst: (IpAddr, u16),
+    call_id: &str,
+    leg: Option<i32>,
+    payload: Vec<u8>,
+    client_id: u32,
+) -> Frame {
     let packet = Packet {
         msg_type,
         src,
@@ -148,14 +156,38 @@ fn main() {
     let mut frames: Vec<Frame> = Vec::with_capacity(args.calls * 2);
     for i in 0..args.calls {
         let call_id = format!("call-{i:06}");
-        frames.push(build_frame(MsgType::Rtp, media_a, dst, &call_id, Some(0), audio.clone(), args.client_id));
-        frames.push(build_frame(MsgType::Rtp, media_b, dst, &call_id, Some(1), audio.clone(), args.client_id));
+        frames.push(build_frame(
+            MsgType::Rtp,
+            media_a,
+            dst,
+            &call_id,
+            Some(0),
+            audio.clone(),
+            args.client_id,
+        ));
+        frames.push(build_frame(
+            MsgType::Rtp,
+            media_b,
+            dst,
+            &call_id,
+            Some(1),
+            audio.clone(),
+            args.client_id,
+        ));
     }
     let mut sip_frames: Vec<Frame> = Vec::with_capacity(64);
     for i in 0..64 {
         let call_id = format!("call-{:06}", (i * 37) % args.calls);
         let sip = make_sip_payload(&call_id);
-        sip_frames.push(build_frame(MsgType::Sip, src_a, dst, &call_id, None, sip, args.client_id));
+        sip_frames.push(build_frame(
+            MsgType::Sip,
+            src_a,
+            dst,
+            &call_id,
+            None,
+            sip,
+            args.client_id,
+        ));
     }
 
     let start_wall = Instant::now();

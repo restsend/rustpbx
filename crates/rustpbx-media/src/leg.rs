@@ -31,7 +31,7 @@ use rustrtc::{
     rtp::{RtpHeader, RtpPacket},
 };
 use tokio::sync::{broadcast, oneshot};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
 use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
@@ -650,7 +650,7 @@ impl LegInner {
                             .await;
                         match result {
                             Ok(Ok(())) => {}
-                            Ok(Err(e)) => {
+                            Ok(Err(_)) => {
                                 if let Some(cb) = on_arm_failed.as_ref() {
                                     cb();
                                 }
