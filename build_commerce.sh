@@ -7,7 +7,7 @@ set -euo pipefail
 # Usage:
 #   ./build_cn.sh                    # use defaults
 #   GA_ID=G-XXXXXXXXXX ./build_cn.sh # override GA tracking ID
-#   TAG=v0.4.13 ./build_cn.sh        # custom image tag
+#   TAG=v0.5.0-rc.1 ./build_cn.sh  # custom image tag
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)"
