@@ -2632,6 +2632,15 @@ impl SipSession {
             mb.accept(crate::media::media_bridge::LegSide::A).await;
             info!(session_id = %session_id2, "Originated MediaBridge legs accepted (A+B)");
         }
+
+        // The outbound INVITE's confirmed state is delivered as a *caller*
+        // dialog state on the UAC path (attach_caller_dialog marks "caller"
+        // Connected), so the legs-registry "callee" leg — which carries the
+        // real media bridge B side for this originate call — would otherwise
+        // stay Initializing forever. Mark it Connected so call control on the
+        // callee leg (e.g. blind transfer, CSV L60 POST /cc/calls/{id}/transfer)
+        // is valid once the originate call has been answered.
+        self.update_leg_state(&LegId::from("callee"), LegState::Connected);
     }
 
     fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
