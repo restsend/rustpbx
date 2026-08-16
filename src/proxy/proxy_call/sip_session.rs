@@ -379,12 +379,17 @@ const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
 
 impl SipSessionHandle {
     pub fn send_command(&self, cmd: CallCommand) -> anyhow::Result<()> {
-        self.cmd_tx
-            .try_send(cmd)
-            .map_err(|e| {
-                warn!(session_id = %self.session_id.0, "SipSession cmd_tx channel full, cmd dropped: {e}");
-                anyhow::anyhow!("channel error: {}", e)
-            })
+        match self.cmd_tx.try_send(cmd) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(session_id = %self.session_id.0, "SipSession command channel full, command dropped");
+                Err(anyhow::anyhow!("command channel full"))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!(session_id = %self.session_id.0, "SipSession command channel closed, command dropped");
+                Err(anyhow::anyhow!("command channel closed"))
+            }
+        }
     }
 
     pub async fn send_command_async(&self, cmd: CallCommand) -> anyhow::Result<()> {
