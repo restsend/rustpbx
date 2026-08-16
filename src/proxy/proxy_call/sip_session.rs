@@ -39,10 +39,11 @@ use crate::proxy::proxy_call::{
     reporter::CallReporter,
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,
-        SessionRefresher, SessionTimerState, apply_refresh_response, apply_session_timer_headers,
-        build_default_session_timer_headers, build_session_timer_headers,
-        build_session_timer_response_headers, get_header_value, has_timer_support, parse_min_se,
-        parse_session_expires, select_client_timer_refresher, select_server_timer_refresher,
+        SessionExpires, SessionRefresher, SessionTimerState, apply_refresh_response,
+        apply_session_timer_headers, build_default_session_timer_headers,
+        build_session_timer_headers, build_session_timer_response_headers, get_header_value,
+        has_timer_support, parse_min_se, select_client_timer_refresher,
+        select_server_timer_refresher,
     },
     state::{CallContext, CallSessionRecordSnapshot},
 };
@@ -2574,7 +2575,6 @@ enum ConstructMode<'a> {
     }
 
     fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
-        let we_are_uac = self.is_uac_dialog(scheduled);
         self.timer_keys.remove(scheduled);
         let timer = self.timers.get_mut(scheduled)?;
 
@@ -2582,7 +2582,7 @@ enum ConstructMode<'a> {
             return Some(TimerAction::Expired);
         }
 
-        if timer.should_we_refresh(we_are_uac) && timer.should_refresh() && timer.start_refresh() {
+        if timer.should_we_refresh() && timer.should_refresh() && timer.start_refresh() {
             return Some(TimerAction::Refresh);
         }
 
@@ -5591,8 +5591,8 @@ enum ConstructMode<'a> {
                             .map(|header| header.value().to_string())
                     })
                     .as_deref()
-                    .and_then(parse_session_expires)
-                    .map(|(interval, _)| interval)
+                    .and_then(SessionExpires::parse)
+                    .map(|session_expires| session_expires.interval)
                     .unwrap_or_else(|| Duration::from_secs(default_expires));
                 self.init_callee_timer(dialog_id.clone(), response, requested_session_interval);
             }
@@ -6378,7 +6378,8 @@ enum ConstructMode<'a> {
                         if timer.enabled {
                             timer_headers.extend(build_session_timer_response_headers(timer));
                             debug!(session_id = %self.id,
-                                session_expires = %timer.get_session_expires_value(),
+                                session_expires = timer.session_interval.as_secs(),
+                                refresher = ?timer.refresher,
                                 "Session timer negotiated in 200 OK"
                             );
                         }
@@ -7721,8 +7722,8 @@ enum ConstructMode<'a> {
         }
 
         if let Some(value) = session_expires_value {
-            if let Some((interval, refresher)) = parse_session_expires(&value) {
-                if interval < timer.min_se {
+            if let Some(session_expires) = SessionExpires::parse(&value) {
+                if session_expires.interval < timer.min_se {
                     return Err(into_callee_err(
                         &StatusCode::SessionIntervalTooSmall,
                         Some(timer.min_se.as_secs().to_string()),
@@ -7730,9 +7731,13 @@ enum ConstructMode<'a> {
                 }
 
                 timer.enabled = true;
-                timer.session_interval = interval;
+                timer.session_interval = session_expires.interval;
                 timer.active = true;
-                timer.refresher = select_server_timer_refresher(supported, true, refresher);
+                timer.refresher = select_server_timer_refresher(
+                    supported,
+                    true,
+                    session_expires.refresher,
+                );
             }
         } else if session_timer_mode.is_always() {
             timer.enabled = true;
@@ -7758,21 +7763,21 @@ enum ConstructMode<'a> {
 
         let mut timer = SessionTimerState::default();
         timer.mode = self.server.proxy_config.load().session_timer_mode();
-        if let Some((session_interval, refresher)) = session_expires_value
+        if let Some(session_expires) = session_expires_value
             .as_deref()
-            .and_then(parse_session_expires)
+            .and_then(SessionExpires::parse)
         {
             timer.enabled = true;
             timer.active = true;
             timer.last_refresh = Instant::now();
-            timer.session_interval = session_interval;
-            timer.refresher = select_client_timer_refresher(refresher);
+            timer.session_interval = session_expires.interval;
+            timer.refresher = select_client_timer_refresher(session_expires.refresher);
         } else if timer.mode.is_always() {
             timer.enabled = true;
             timer.active = true;
             timer.last_refresh = Instant::now();
             timer.session_interval = requested_session_interval;
-            timer.refresher = SessionRefresher::Uac;
+            timer.refresher = SessionRefresher::Local;
         } else {
             timer.session_interval = requested_session_interval;
         }
@@ -7818,7 +7823,7 @@ enum ConstructMode<'a> {
         let timeout = self
             .timers
             .get(&dialog_id)
-            .and_then(|timer| timer.next_timeout_for_role(self.is_uac_dialog(&dialog_id)));
+            .and_then(SessionTimerState::next_timeout);
         self.schedule_timer_with_timeout(dialog_id, timeout);
     }
 
@@ -7910,9 +7915,8 @@ enum ConstructMode<'a> {
         dialog_id: &DialogId,
         response: &rsipstack::sip::Response,
     ) -> Result<()> {
-        let we_are_uac = self.is_uac_dialog(dialog_id);
         if let Some(timer) = self.timers.get_mut(dialog_id) {
-            apply_refresh_response(timer, &response.headers, we_are_uac)?;
+            apply_refresh_response(timer, &response.headers)?;
         }
         Ok(())
     }
