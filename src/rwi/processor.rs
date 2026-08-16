@@ -1,5 +1,6 @@
 use crate::call::cookie::TransactionCookie;
 use crate::call::domain::{CallCommand, LegId};
+use crate::call::sip::ClientDialogGuard;
 
 use crate::call::runtime::ConferenceId;
 use crate::call::runtime::ConferenceManager;
@@ -1268,6 +1269,12 @@ impl RwiCommandProcessor {
                 {
                     cdr_answered_for_store.store(true, std::sync::atomic::Ordering::Relaxed);
 
+                    // A successful do_invite registers the confirmed client dialog in
+                    // DialogLayer. Keep its guard alive for the entire UAC session so
+                    // every exit path removes that registry entry.
+                    let caller_dialog_guard =
+                        ClientDialogGuard::new(dialog_layer.clone(), dialog.id());
+
                     let sdp_answer = if resp.body().is_empty() {
                         None
                     } else {
@@ -1306,7 +1313,12 @@ impl RwiCommandProcessor {
                     let session_call_id = call_id.clone();
                     crate::utils::spawn(async move {
                         if let Err(e) = session
-                            .process_uac(caller_state_rx, callee_evt_rx, cmd_rx)
+                            .process_uac(
+                                caller_state_rx,
+                                callee_evt_rx,
+                                cmd_rx,
+                                caller_dialog_guard,
+                            )
                             .await
                         {
                             tracing::warn!(call_id = %session_call_id, error = %e, "UAC session loop exited with error");

@@ -2451,6 +2451,7 @@ impl SipSession {
         caller_state_rx: mpsc::UnboundedReceiver<DialogState>,
         callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
         cmd_rx: mpsc::Receiver<CallCommand>,
+        _dialog_guard: ClientDialogGuard,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
 
@@ -11964,6 +11965,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             metadata: None,
         };
+        let dialog_layer = server.dialog_layer.clone();
         let (mut session, _handle, cmd_rx) = SipSession::new_uac(
             server,
             CancellationToken::new(),
@@ -11982,12 +11984,16 @@ mod tests {
         };
 
         caller_tx
-            .send(DialogState::Terminated(dialog_id, TerminatedReason::UasBye))
+            .send(DialogState::Terminated(
+                dialog_id.clone(),
+                TerminatedReason::UasBye,
+            ))
             .expect("caller state receiver must be open");
+        let dialog_guard = ClientDialogGuard::new(dialog_layer, dialog_id);
 
         tokio::time::timeout(
             Duration::from_secs(2),
-            session.process_uac(caller_rx, callee_rx, cmd_rx),
+            session.process_uac(caller_rx, callee_rx, cmd_rx, dialog_guard),
         )
         .await
         .expect("caller BYE must stop the UAC session")
