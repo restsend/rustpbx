@@ -490,6 +490,16 @@ impl SipSession {
                     let result = self
                         .try_single_target(&location, callee_state_rx, None, None)
                         .await;
+                    if result.is_ok() {
+                        // The B2BUA blind-transfer path swaps the B leg
+                        // in-session (no REFER), so the REFER-based emitters
+                        // never fire. Emit the transfer notification here,
+                        // aligned with the inbound-REFER path's payload.
+                        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                            call_id: self.context.session_id.to_string(),
+                            transfer_target: Some(uri.clone()),
+                        });
+                    }
                     return result.map_err(|(code, text, reason)| {
                         self.meta.transfer_return_app = None;
                         anyhow!(

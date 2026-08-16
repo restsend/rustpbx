@@ -1137,6 +1137,19 @@ impl RwiCommandProcessor {
             if let Some(t) = req.trunk.as_ref() {
                 metadata.insert("trunk".to_string(), t.clone());
             }
+            // Attribute the originated call to the originating agent: the CC
+            // call-session hook resolves `resolved_agent_id` first (priority 1),
+            // which fires the full cc_* webhook chain and keeps agent context
+            // through transfers. Only set it when the caller user part IS a
+            // registered agent (the default synthetic "rwi" caller is not, and
+            // an unresolvable id would be attributed as an agent anyway).
+            if let Some(user) = caller_uri.user()
+                && !user.is_empty()
+                && let Some(registry) = server.agent_registry.as_ref()
+                && registry.get_agent(user).await.is_some()
+            {
+                metadata.insert("resolved_agent_id".to_string(), user.to_string());
+            }
             let mut dialplan =
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
                     .with_caller(caller_uri.clone());
