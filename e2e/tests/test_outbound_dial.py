@@ -98,7 +98,7 @@ async def _registered_callee(sipbot_pool, pbx, port, username="1002", **kw):
     )
     defaults.update(kw)
     ua = sipbot_pool.callee(**defaults)
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -113,7 +113,7 @@ async def test_outbound_sip_answer_success(pbx, sipbot_pool):
     pbx.config_builder.outbound_enabled = True
     h.boot_pbx(pbx)
 
-    await _registered_callee(sipbot_pool, pbx, 15200, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15200), "1002")
 
     async with aiohttp.ClientSession() as session:
         events = await _sse_dial(session, pbx.http_url, {
@@ -141,7 +141,7 @@ async def test_outbound_sip_busy_failure(pbx, sipbot_pool):
     h.boot_pbx(pbx)
 
     reject_ua = sipbot_pool.callee(
-        host=pbx.host, port=15201, username="1003", password="123456",
+        host=pbx.host, port=h.ua_port(15201), username="1003", password="123456",
         ring_secs=2, reject_code=486, reject_prob=100,
     )
     await asyncio.sleep(1)
@@ -150,7 +150,7 @@ async def test_outbound_sip_busy_failure(pbx, sipbot_pool):
         events = await _sse_dial(session, pbx.http_url, {
             "call_id": f"ob-busy-{uuid.uuid4().hex[:8]}",
             "caller_id": f"sip:test@{pbx.sip_addr}",
-            "destination": f"sip:1003@127.0.0.1:15201",
+            "destination": f"sip:1003@127.0.0.1:{h.ua_port(15201)}",
             "ring_timeout": 10,
             "on_answer": {"type": "execute_flow"},
         }, timeout=30)
@@ -170,7 +170,7 @@ async def test_outbound_execute_flow(pbx, sipbot_pool):
     pbx.config_builder.outbound_enabled = True
     h.boot_pbx(pbx)
 
-    await _registered_callee(sipbot_pool, pbx, 15202, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15202), "1002")
 
     async with aiohttp.ClientSession() as session:
         events = await _sse_dial(session, pbx.http_url, {
@@ -216,7 +216,7 @@ async def test_outbound_webhook_instruction(pbx, sipbot_pool):
     pbx.config_builder.outbound_enabled = True
     h.boot_pbx(pbx)
 
-    await _registered_callee(sipbot_pool, pbx, 15204, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15204), "1002")
 
     from aiohttp import web
 

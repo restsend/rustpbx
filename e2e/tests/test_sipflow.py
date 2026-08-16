@@ -80,11 +80,11 @@ async def test_sipflow_media_export(pbx, sipbot_pool, sipflow_dir, cdr_dir, tmp_
     sine_path = tmp_path / "tone_440.wav"
     h.generate_sine_wav(sine_path, 440.0, 5.0, sample_rate=8000, amplitude=0.5)
     callee = sipbot_pool.callee(
-        host=pbx.host, port=15140, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15140), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(callee)
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=6, audio_quality=True, play_file=str(sine_path),

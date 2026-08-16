@@ -45,21 +45,42 @@ from .audio_verifier import (  # noqa: F401,E402
 )
 
 
+def ua_port(base: int) -> int:
+    """Map a test's fixed local UA port to a per-worker shifted port.
+
+    xdist workers run concurrently on the same host; each worker is assigned a
+    non-overlapping port range (see `e2e/conftest.py`), so the same hardcoded
+    port in two workers never collides. With a single worker the offset is 0
+    and behaviour is unchanged.
+    """
+    import os
+
+    return base + int(os.environ.get("RUSTPBX_UA_PORT_OFFSET", "0"))
+
+
 def boot_pbx(pbx, webhook_url: str = ""):
     """Build config from the (already-mutated) builder and start rustpbx.
 
     Must be called from the test body after customizing `pbx.config_builder`
     so that routes/queues/IVR/addons take effect before boot.
     """
-    import os
-
-    features = os.environ.get(
-        "RUSTPBX_E2E_FEATURES",
-        "addon-cc,addon-sbc,addon-voicemail,addon-wholesale",
-    ).split(",")
-    pbx.prepare(webhook_url=webhook_url, extra_features=features, build=False)
+    pbx.prepare(webhook_url=webhook_url, build=False)
     pbx.start(timeout=90)
     return pbx
+
+
+async def wait_registered(ua, label: str = "UA", timeout: float = 8):
+    """Poll until a register=True sipbot UA reports REGISTER success.
+
+    sipbot prints `[user] Registered successfully, expires in Ns` (sip.rs), so
+    tests can wait on that instead of a fixed `asyncio.sleep(2)` after spawn.
+    """
+    import asyncio
+    import re
+
+    ok = await ua.wait_output_async(r"Registered successfully", timeout=timeout)
+    if not ok:
+        raise AssertionError(f"{label}: UA did not register within {timeout}s — {ua.output[-800:]}")
 
 
 async def connect_rwi(rwi):

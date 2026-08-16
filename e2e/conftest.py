@@ -35,14 +35,124 @@ PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 REPORT_DIR = Path(os.environ.get("RUSTPBX_E2E_REPORT_DIR", SCRIPT_DIR / "report"))
 
 SIP_HOST = os.environ.get("RUSTPBX_SIP_HOST", "127.0.0.1")
-SIP_PORT = int(os.environ.get("RUSTPBX_SIP_PORT", "15070"))
-HTTP_PORT = int(os.environ.get("RUSTPBX_HTTP_PORT", "18080"))
+
+
+def _worker_index() -> int:
+    """xdist worker index (gw0/gw1/...); 0 when not running under xdist."""
+    wid = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if wid.startswith("gw"):
+        try:
+            return int(wid[2:])
+        except ValueError:
+            pass
+    return 0
+
+
+# Under pytest-xdist each worker needs a non-overlapping port range so its PBX
+# and sipbot UAs never collide with another worker's (or with unrelated
+# services on the host). The UA port space spans ~15070..16920, so each worker
+# probes for a free window of that size (plus its HTTP port) starting at
+# `worker * PORT_STRIDE` and advancing until the whole window is free.
+PORT_STRIDE = int(os.environ.get("RUSTPBX_E2E_PORT_STRIDE", "4000"))
+
+
+def _port_free(port: int) -> bool:
+    """True if 127.0.0.1:port is free on both TCP and UDP."""
+    import socket
+
+    for socktype in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        with socket.socket(socket.AF_INET, socktype) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+    return True
+
+
+def _pick_worker_offset(worker: int) -> int:
+    """Find a free port window for this worker (0 for worker 0).
+
+    Probes every UA port the suite actually uses (shifted by the candidate
+    offset) plus the PBX SIP/HTTP ports, advancing by PORT_STRIDE until the
+    whole set is free. This keeps xdist workers disjoint from each other and
+    from unrelated host services (e.g. a docker port map on 20080).
+    """
+    if worker == 0:
+        return 0
+    base_sip = int(os.environ.get("RUSTPBX_SIP_PORT", "15070"))
+    base_http = int(os.environ.get("RUSTPBX_HTTP_PORT", "18080"))
+    # Every fixed local UA/trunk port used across the test suite.
+    ua_ports = [
+        15080, 15081, 15082, 15083, 15084,
+        15103, 15104, 15110, 15111, 15112, 15113, 15114,
+        15132, 15140, 15141, 15150, 15160,
+        15190, 15191, 15192,
+        15200, 15201, 15202, 15204, 15206, 15210,
+        15220, 15221, 15222, 15223, 15224,
+        15300, 15301,
+        15402, 15410, 15420, 15421, 15422, 15430, 15440, 15442, 15450, 15460, 15470,
+        16700, 16920,
+    ]
+    off = worker * PORT_STRIDE
+    while True:
+        ok = all(_port_free(p + off) for p in ua_ports) and _port_free(
+            base_sip + off
+        ) and _port_free(base_http + off)
+        if ok:
+            return off
+        off += PORT_STRIDE
+
+
+WORKER = _worker_index()
+_UA_OFFSET = _pick_worker_offset(WORKER)
+
+SIP_PORT = int(os.environ.get("RUSTPBX_SIP_PORT", "15070")) + _UA_OFFSET
+HTTP_PORT = int(os.environ.get("RUSTPBX_HTTP_PORT", "18080")) + _UA_OFFSET
+# Make ua_port() in helpers use the same shift as this worker.
+os.environ["RUSTPBX_UA_PORT_OFFSET"] = str(_UA_OFFSET)
+if WORKER:
+    logger.info(
+        "xdist worker %s: SIP_PORT=%d HTTP_PORT=%d UA_OFFSET=%d",
+        WORKER, SIP_PORT, HTTP_PORT, _UA_OFFSET,
+    )
+
 WEBHOOK_HOST = os.environ.get("RUSTPBX_WEBHOOK_HOST", "127.0.0.1")
+
+
+def _artifact_root() -> Path:
+    """Per-worker scratch dir for PBX configs/CDR/sipflow/voicemail/logs.
+
+    xdist workers share the checkout, so each worker gets its own work dir to
+    avoid racing on rustpbx_regression.toml / config/{routes,trunks,queue,ivr}
+    / config/cdr / config/sipflow. Worker 0 keeps PROJECT_ROOT (historical
+    layout) so single-worker runs are unchanged.
+
+    The PBX resolves static assets (console pages, dev consoles, locales,
+    sounds) relative to its cwd, so read-only asset dirs are symlinked into
+    each worker dir to keep them resolvable.
+    """
+    if not WORKER:
+        return PROJECT_ROOT
+    d = PROJECT_ROOT / "e2e-artifacts" / f"worker{WORKER}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config").mkdir(parents=True, exist_ok=True)
+    for rel in ("src", "static", "locales", "templates", "config/sounds"):
+        target = PROJECT_ROOT / rel
+        link = d / rel
+        if target.exists() and not link.exists() and not link.is_symlink():
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except OSError:
+                pass
+    return d
+
+
+ARTIFACT_ROOT = _artifact_root()
 RWI_TOKEN = os.environ.get("RUSTPBX_RWI_TOKEN", "test-api-key-e2e")
 DEFAULT_ADDONS = os.environ.get("RUSTPBX_E2E_ADDONS", "cc").split(",")
-# Features the rustpbx binary must be compiled with (community addons used by
-# wholesale/voicemail/sbc tests). `cargo build --features ...` is incremental:
-# it only rebuilds when the requested feature set differs from the current binary.
+# The full-featured binary is built once (see `FULL_E2E_FEATURES` in
+# helpers.pbx_server) and reused by every session/worker, so no per-run build
+# is needed and no feature plumbing is required beyond that.
 DEFAULT_FEATURES = os.environ.get(
     "RUSTPBX_E2E_FEATURES",
     "addon-cc,addon-sbc,addon-voicemail,addon-wholesale",
@@ -51,19 +161,16 @@ DEFAULT_FEATURES = os.environ.get(
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_rustpbx_binary() -> None:
-    """Build rustpbx once with the full addon feature set (incremental)."""
-    import subprocess
+    """Ensure the rustpbx binary exists, building it once if needed.
 
-    features = ",".join(DEFAULT_FEATURES)
-    logger.info("Ensuring rustpbx binary with features: %s", features)
-    result = subprocess.run(
-        ["cargo", "build", "--features", features],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"cargo build failed:\n{result.stderr[-2000:]}")
+    Reuses the stable, feature-complete `target/debug/rustpbx-cc-e2e` copy when
+    present (avoids recompiling a ~1GB binary on every session). Only when it is
+    missing does it build with the full feature set and copy it to the stable
+    path, so all subsequent sessions reuse the same binary.
+    """
+    from helpers.pbx_server import find_or_build_binary, FULL_E2E_FEATURES
+
+    find_or_build_binary(PROJECT_ROOT, FULL_E2E_FEATURES)
 
 
 @pytest.fixture(scope="session")
@@ -91,7 +198,7 @@ def pbx_config(webhook_server: WebhookServer) -> ConfigBuilder:
     the `pbx` fixture builds and starts rustpbx with it."""
     cb = ConfigBuilder(
         project_root=PROJECT_ROOT,
-        work_dir=PROJECT_ROOT,
+        work_dir=ARTIFACT_ROOT,
         sip_port=SIP_PORT,
         http_port=HTTP_PORT,
         rwi_token=RWI_TOKEN,
@@ -116,18 +223,18 @@ def pbx(pbx_config: ConfigBuilder, webhook_server: WebhookServer) -> PbxServer:
         http_port=HTTP_PORT,
         rwi_token=RWI_TOKEN,
         project_root=PROJECT_ROOT,
-        work_dir=PROJECT_ROOT,
+        work_dir=ARTIFACT_ROOT,
     )
     server._config_builder = pbx_config
     # Build the default config so tests that don't customize can just start().
-    server.prepare(webhook_url=webhook_server.url, extra_features=DEFAULT_FEATURES, build=False)
+    server.prepare(webhook_url=webhook_server.url, build=False)
     yield server
     server.stop()
 
 
 def boot_pbx(pbx: PbxServer, webhook_url: str = "") -> PbxServer:
     """(Re)build config from the mutated builder and start rustpbx."""
-    pbx.prepare(webhook_url=webhook_url, extra_features=DEFAULT_FEATURES, build=False)
+    pbx.prepare(webhook_url=webhook_url, build=False)
     pbx.start(timeout=90)
     return pbx
 
@@ -186,13 +293,13 @@ def event_checker(webhook_session, rwi) -> EventChecker:
 
 @pytest.fixture
 def cdr_dir(pbx: PbxServer) -> Path:
-    d = PROJECT_ROOT / "config" / "cdr"
+    d = ARTIFACT_ROOT / "config" / "cdr"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 @pytest.fixture
 def sipflow_dir(pbx: PbxServer) -> Path:
-    d = PROJECT_ROOT / "config" / "sipflow"
+    d = ARTIFACT_ROOT / "config" / "sipflow"
     d.mkdir(parents=True, exist_ok=True)
     return d

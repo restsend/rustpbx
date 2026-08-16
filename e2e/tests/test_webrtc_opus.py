@@ -49,11 +49,11 @@ async def test_webrtc_to_rtp_opus_relay(pbx, sipbot_pool):
     h.boot_pbx(pbx)
 
     callee = sipbot_pool.callee(
-        host=pbx.host, port=15300, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15300), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True, codecs="opus",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(callee)
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",

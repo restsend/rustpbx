@@ -22,7 +22,7 @@ async def test_queue_sequential_agent_answers(pbx, sipbot_pool):
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:1002@127.0.0.1:15110"],
+        targets=[f"sip:1002@127.0.0.1:{h.ua_port(15110)}"],
         accept_immediately=True,
         wait_timeout_secs=15,
     )
@@ -36,11 +36,11 @@ async def test_queue_sequential_agent_answers(pbx, sipbot_pool):
     h.boot_pbx(pbx)
 
     agent = sipbot_pool.callee(
-        host=pbx.host, port=15110, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15110), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(agent)
     caller = sipbot_pool.caller(
         target=f"sip:support@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
     )
@@ -65,7 +65,7 @@ async def test_queue_hold_music_audio(pbx, sipbot_pool, tmp_path):
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:nobody@127.0.0.1:15111"],  # bogus target -> stays queued
+        targets=[f"sip:nobody@127.0.0.1:{h.ua_port(15111)}"],  # bogus target -> stays queued
         accept_immediately=True,
         hold_audio=str(hold),
         loop_playback=True,
@@ -106,7 +106,7 @@ async def test_queue_transfer_prompt_before_connect_service_after(pbx, sipbot_po
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:1002@127.0.0.1:15113"],
+        targets=[f"sip:1002@127.0.0.1:{h.ua_port(15113)}"],
         accept_immediately=True,
         hold_audio=str(hold),
         loop_playback=True,
@@ -126,11 +126,11 @@ async def test_queue_transfer_prompt_before_connect_service_after(pbx, sipbot_po
     h.boot_pbx(pbx)
 
     agent = sipbot_pool.callee(
-        host=pbx.host, port=15113, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15113), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(agent)
 
     rec = tmp_path / "caller_recording.wav"
     caller = sipbot_pool.caller(
@@ -177,7 +177,7 @@ async def test_queue_transfer_prompt_completes_hold_resumes(pbx, sipbot_pool, tm
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:nobody@127.0.0.1:15114"],  # bogus target -> never answers
+        targets=[f"sip:nobody@127.0.0.1:{h.ua_port(15114)}"],  # bogus target -> never answers
         accept_immediately=True,
         hold_audio=str(hold),
         loop_playback=True,
@@ -227,12 +227,12 @@ async def test_queue_rwi_enqueue_dequeue(pbx, sipbot_pool, rwi):
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
     callee = sipbot_pool.callee(
-        host=pbx.host, port=15112, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15112), username="1002", password="123456",
         register=False, ring_secs=1, answer_mode="echo",
     )
     call_id = f"q-{uuid.uuid4().hex[:8]}"
     resp = await rwi.originate(
-        call_id, f"sip:1002@127.0.0.1:15112", "sip:rwi@pbx", "default",
+        call_id, f"sip:1002@127.0.0.1:{h.ua_port(15112)}", "sip:rwi@pbx", "default",
     )
     assert resp.get("status") == "success", resp
     await rwi.wait_for_event("call_answered", timeout=15)

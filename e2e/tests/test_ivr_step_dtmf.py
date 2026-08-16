@@ -39,7 +39,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username):
         answer_mode="echo",
         audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 

@@ -47,7 +47,7 @@ async def _registered_echo_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -99,7 +99,7 @@ async def test_outbound_transfer_to_voip_bridge(pbx, sipbot_pool, rwi, ws_bridge
     Before the fixes the transfer returned an error (or the PBX crashed) and
     `connect_bridge` was never reached.
     """
-    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, 15110, "obbridge")
+    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, h.ua_port(15110), "obbridge")
 
     rwi.clear_events()
     target = f"voip_bridge:{ws_bridge_server.ws_url}"

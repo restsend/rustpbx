@@ -47,7 +47,7 @@ async def _registered_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -162,7 +162,7 @@ async def test_reinvite_trunk_b2bua_mid_call(pbx_config, pbx, sipbot_pool, cdr_d
     The external (trunk) caller renegotiates mid-call; the PBX B2BUA must keep
     both dialogs alive, media must flow after resume, and a CDR must be written.
     """
-    callee_port = 15402
+    callee_port = h.ua_port(15402)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "mid-reinvite-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",

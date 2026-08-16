@@ -97,7 +97,7 @@ type = "hangup"
 
         # ── 3. Register agent (1002) — plain echo, no special flags.      ─
         agent = sipbot_pool.callee(
-            host=pbx.host, port=16920, username="1002", password="123456",
+            host=pbx.host, port=h.ua_port(16920), username="1002", password="123456",
             register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
             ring_secs=1, answer_mode="echo", hangup_after=60,
         )

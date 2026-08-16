@@ -28,7 +28,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -71,7 +71,7 @@ target = "support"
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:1002@127.0.0.1:15410"],
+        targets=[f"sip:1002@127.0.0.1:{h.ua_port(15410)}"],
         accept_immediately=True,
         wait_timeout_secs=15,
     )
@@ -86,7 +86,7 @@ target = "support"
     )
     h.boot_pbx(pbx)
 
-    agent = await _reg_callee(sipbot_pool, pbx, 15410, "1002")
+    agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15410), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:ivr-queue@{pbx.sip_addr}", username="1001", password="123456",
@@ -130,7 +130,7 @@ target = "slowq"
     pbx.config_builder.add_queue(
         "slowq",
         strategy_mode="sequential",
-        targets=[f"sip:nobody@127.0.0.1:15420"],
+        targets=[f"sip:nobody@127.0.0.1:{h.ua_port(15420)}"],
         accept_immediately=True,
         hold_audio=str(hold),
         loop_playback=True,
@@ -184,7 +184,7 @@ max_retries_action = { type = "hangup" }
     pbx.config_builder.media_proxy = "all"
     h.boot_pbx(pbx)
 
-    callee = await _reg_callee(sipbot_pool, pbx, 15430, "1002")
+    callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15430), "1002")
 
     ivr_exec_body = json.dumps({
         "action": "ivr.exec",
@@ -228,7 +228,7 @@ async def test_queue_no_agent_plays_failure_audio(pbx, sipbot_pool):
     pbx.config_builder.add_queue(
         "empty-q",
         strategy_mode="sequential",
-        targets=[f"sip:nobody@127.0.0.1:15440"],
+        targets=[f"sip:nobody@127.0.0.1:{h.ua_port(15440)}"],
         accept_immediately=True,
         wait_timeout_secs=5,
     )
@@ -529,7 +529,7 @@ return_target = "ivr-return"
     pbx.config_builder.add_queue(
         "returnq",
         strategy_mode="sequential",
-        targets=[f"sip:1002@127.0.0.1:15450"],
+        targets=[f"sip:1002@127.0.0.1:{h.ua_port(15450)}"],
         accept_immediately=True,
         wait_timeout_secs=20,
     )
@@ -546,11 +546,11 @@ return_target = "ivr-return"
 
     # Agent answers briefly then hangs up
     agent = sipbot_pool.callee(
-        host=pbx.host, port=15450, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15450), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", hangup_after=3,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(agent)
 
     caller = sipbot_pool.caller(
         target=f"sip:ivr-return@{pbx.sip_addr}", username="1001", password="123456",
@@ -586,7 +586,7 @@ async def test_queue_early_media_fallback_redirect_completes(pbx, sipbot_pool, t
     pbx.config_builder.set_realms(["127.0.0.1"])
     # Inbound trunk with ringback tone → proactive 183 early media
     pbx.config_builder.add_trunk(
-        "ring-trunk", dest="127.0.0.1:15460", direction="inbound",
+        "ring-trunk", dest=f"127.0.0.1:{h.ua_port(15460)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         ringback={"ring": "tone://440,3000"},
     )
@@ -597,7 +597,7 @@ async def test_queue_early_media_fallback_redirect_completes(pbx, sipbot_pool, t
         targets=[f"sip:nobody@127.0.0.1:19999"],  # nothing listening
         accept_immediately=False,
         wait_timeout_secs=3,
-        fallback_redirect=f"sip:1003@127.0.0.1:15470",
+        fallback_redirect=f"sip:1003@127.0.0.1:{h.ua_port(15470)}",
     )
     pbx.config_builder.add_route(
         "to-early-q",
@@ -610,11 +610,11 @@ async def test_queue_early_media_fallback_redirect_completes(pbx, sipbot_pool, t
 
     # Register the fallback redirect target
     fallback = sipbot_pool.callee(
-        host=pbx.host, port=15470, username="1003", password="123456",
+        host=pbx.host, port=h.ua_port(15470), username="1003", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(fallback)
 
     # Trunk-originated caller (From domain differs → classified as Inbound)
     caller = sipbot_pool.caller(

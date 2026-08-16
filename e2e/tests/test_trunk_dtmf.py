@@ -34,7 +34,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -42,7 +42,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002"):
 async def test_trunk_b2bua_dtmf_rfc2833_passthrough(pbx_config, pbx, sipbot_pool, cdr_dir):
     """Trunk caller sends RFC 2833 DTMF mid-call → the callee must receive it
     through the B2BUA, and the call writes a completed CDR."""
-    callee_port = 15430
+    callee_port = h.ua_port(15430)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "dtmf-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",

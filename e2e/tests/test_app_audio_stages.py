@@ -81,7 +81,7 @@ async def test_stage1_missing_ivr_config_plays_error_tone_early_media(pbx, sipbo
 
     pbx.config_builder.set_realms(["127.0.0.1"])
     pbx.config_builder.add_trunk(
-        "plain-trunk", dest="127.0.0.1:15300", direction="inbound",
+        "plain-trunk", dest=f"127.0.0.1:{h.ua_port(15300)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         # NOTE: no `ringback` here — the global built-in default is exercised.
     )
@@ -144,7 +144,7 @@ async def test_stage1_invalid_ivr_toml_records_parse_error(pbx, sipbot_pool):
 
     pbx.config_builder.set_realms(["127.0.0.1"])
     pbx.config_builder.add_trunk(
-        "parse-trunk", dest="127.0.0.1:15301", direction="inbound",
+        "parse-trunk", dest=f"127.0.0.1:{h.ua_port(15301)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
     )
     pbx.config_builder.add_route(

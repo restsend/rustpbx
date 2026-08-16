@@ -13,6 +13,8 @@
 #   RUSTPBX_E2E_ADDONS   comma-separated addons (default: cc)
 #   RUSTPBX_SIP_PORT     (default 15070)
 #   RUSTPBX_HTTP_PORT    (default 18080)
+#   RUSTPBX_E2E_WORKERS  pytest-xdist workers (>1 runs tests in parallel,
+#                        each worker gets its own port range + artifact dir)
 #   RUSTPBX_E2E_REPORT_DIR
 #   RUSTPBX_E2E_LOG_LEVEL
 
@@ -21,6 +23,7 @@ cd "$(dirname "$0")"
 
 PY="${PYTHON:-python3}"
 TIER="${1:-all}"
+WORKERS="${RUSTPBX_E2E_WORKERS:-1}"
 
 # Everything after an explicit `--` is forwarded to pytest untouched.
 if [[ "$TIER" == "--" ]]; then
@@ -36,6 +39,13 @@ export RUSTPBX_E2E_REPORT_DIR="${RUSTPBX_E2E_REPORT_DIR:-$PWD/report}"
 mkdir -p "$RUSTPBX_E2E_REPORT_DIR"
 
 ARGS=(--tb=short --durations=15)
+if [[ "$WORKERS" -gt 1 ]]; then
+  if "$PY" -c "import xdist" >/dev/null 2>&1; then
+    ARGS+=(-n "$WORKERS")
+  else
+    echo "WARN: RUSTPBX_E2E_WORKERS=$WORKERS but pytest-xdist not installed; running serially" >&2
+  fi
+fi
 case "$TIER" in
   all|"") ;;
   fast) ARGS+=(-m "not slow") ;;

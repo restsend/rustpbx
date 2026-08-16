@@ -49,7 +49,7 @@ async def test_webrtc_183_early_media_then_200ok_gate_opens(pbx_config, pbx, sip
     """WebRTC caller through an inbound trunk hears the 183 early-media ringback
     tone, then the callee answers (200 OK) and audio keeps flowing — proving the
     caller media gate is open after the 183→200-OK sequence."""
-    callee_port = 15410
+    callee_port = h.ua_port(15410)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.media_proxy = "all"
     pbx_config.add_trunk(
@@ -64,7 +64,7 @@ async def test_webrtc_183_early_media_then_200ok_gate_opens(pbx_config, pbx, sip
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(callee)
 
     # External WebRTC caller (From domain differs from the PBX realm → inbound
     # trunk call). WebRTC transport is auto-detected from the offer SDP.

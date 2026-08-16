@@ -55,7 +55,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -64,7 +64,7 @@ async def test_ivr_200_and_dtmf_transfer_sequence(pbx, sipbot_pool):
     """IVR answers (200) -> DTMF '1' -> transfer target answers (200)."""
     _add_ivr_route(pbx.config_builder, _ivr_toml("Press 1 to transfer.", "1002"))
     h.boot_pbx(pbx)
-    await _reg_callee(sipbot_pool, pbx, 15160)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15160))
 
     caller = sipbot_pool.caller(
         target=f"sip:ivr-state@{pbx.sip_addr}", username="1001", password="123456",

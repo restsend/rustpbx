@@ -52,7 +52,7 @@ async def _reg_callee(sipbot_pool, pbx, port, *, username="1002", reject_code=No
         reject_code=reject_code,
         reject_prob=100 if reject_code else None,
     )
-    await asyncio.sleep(2)  # allow REGISTER to complete
+    await h.wait_registered(ua)
     return ua
 
 
@@ -96,13 +96,13 @@ async def test_trunk_ringback_ring_183_early_media(pbx_config, pbx, sipbot_pool)
     then the call answers (200 OK)."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
-        "ring-trunk", dest="127.0.0.1:15200", direction="inbound",
+        "ring-trunk", dest=f"127.0.0.1:{h.ua_port(15200)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         ringback={"ring": "tone://440,3000"},
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15200, username="1002")
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15200), username="1002")
     caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}", hangup=6)
     # Call establishes (200 OK).
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=20), caller.output
@@ -127,13 +127,13 @@ async def test_trunk_busy_tone_183_early_media(pbx_config, pbx, sipbot_pool):
     (the busy tone), then the final 486."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
-        "busy-trunk", dest="127.0.0.1:15201", direction="inbound",
+        "busy-trunk", dest=f"127.0.0.1:{h.ua_port(15201)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         ringback={"busy": "tone://480,3000"},
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15201, username="1002", reject_code=486)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15201), username="1002", reject_code=486)
     caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}")
     assert await caller.wait_output_async(r"Call failed|4[0-9][0-9]|Busy", timeout=20), caller.output
     _wait_call_ended(caller)
@@ -164,13 +164,13 @@ async def test_trunk_failure_tones(pbx_config, pbx, sipbot_pool, tone_field, rej
     the mapped rejection code (603/480/404)."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
-        f"{tone_field}-trunk", dest="127.0.0.1:15210", direction="inbound",
+        f"{tone_field}-trunk", dest=f"127.0.0.1:{h.ua_port(15210)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         ringback={tone_field: "tone://500,3000"},
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15210, username="1002", reject_code=reject_code)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15210), username="1002", reject_code=reject_code)
     caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}")
     assert await caller.wait_output_async(r"Call failed|4[0-9][0-9]|6[0-9][0-9]", timeout=20), caller.output
     _wait_call_ended(caller)
@@ -196,12 +196,12 @@ async def test_trunk_no_ringback_uses_global_default_tone(pbx_config, pbx, sipbo
     failure cue unless explicitly overridden."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
-        "plain-trunk", dest="127.0.0.1:15202", direction="inbound",
+        "plain-trunk", dest=f"127.0.0.1:{h.ua_port(15202)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15202, username="1002", reject_code=486)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15202), username="1002", reject_code=486)
     caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}")
     assert await caller.wait_output_async(r"Call failed|4[0-9][0-9]|Busy", timeout=20), caller.output
     _wait_call_ended(caller)
@@ -222,7 +222,7 @@ async def test_outbound_trunk_busy_tone(pbx_config, pbx, sipbot_pool):
     """Internal registered caller → outbound trunk with ringback.busy: the
     trunk peer rejects 486, caller hears the outbound trunk's busy tone as 183
     early media, then receives 486."""
-    callee_port = 15204
+    callee_port = h.ua_port(15204)
     pbx_config.add_trunk(
         "carrier-trunk", dest=f"127.0.0.1:{callee_port}", direction="outbound",
         ringback={"busy": "tone://480,3000"},
@@ -261,7 +261,7 @@ async def test_trunk_noanswer_tone(pbx_config, pbx, sipbot_pool):
     rejection (408)."""
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
-        "noanswer-trunk", dest="127.0.0.1:15206", direction="inbound",
+        "noanswer-trunk", dest=f"127.0.0.1:{h.ua_port(15206)}", direction="inbound",
         inbound_hosts=["127.0.0.1"],
         ringback={"noanswer": "tone://480,1000"},
         max_ring_time=3,  # short ring timeout keeps the test fast
@@ -270,7 +270,7 @@ async def test_trunk_noanswer_tone(pbx_config, pbx, sipbot_pool):
 
     # Register a callee, then kill it so its contact is stale and the PBX's
     # INVITE gets no response → the call rings out → no-answer rejection.
-    callee = await _reg_callee(sipbot_pool, pbx, 15206, username="1002")
+    callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15206), username="1002")
     callee.terminate()
     await asyncio.sleep(1)
 

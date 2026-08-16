@@ -34,7 +34,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -57,7 +57,7 @@ async def test_rwi_event_sequence_and_cdr_correlation(pbx, sipbot_pool, rwi, cdr
     """RWI-originated call emits full event sequence; CDR callId matches call_id."""
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _reg_callee(sipbot_pool, pbx, 15140)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15140))
 
     call_id = _call_id("rwi-seq")
     since = _time_now()
@@ -95,7 +95,7 @@ async def test_rwi_call_answer_then_hangup_events(pbx, sipbot_pool, rwi):
     """Answered call emits call_answered, then hangup emits call_hangup with the call."""
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _reg_callee(sipbot_pool, pbx, 15141)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15141))
 
     call_id = _call_id("rwi-ans")
     resp = await rwi.originate(
