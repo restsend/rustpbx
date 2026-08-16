@@ -47,6 +47,8 @@ config/
 *.raw
 *.db
 *.toml
+!Cargo.toml
+!crates/*/Cargo.toml
 /archive/
 /storage/
 *.md
