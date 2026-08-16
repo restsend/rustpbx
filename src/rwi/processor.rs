@@ -835,6 +835,13 @@ impl RwiCommandProcessor {
         } else {
             media_track
         };
+        let media_track = if let (Some(start), Some(end)) =
+            (media.rtp_start_port, media.rtp_end_port)
+        {
+            media_track.with_rtp_range(start, end)
+        } else {
+            media_track
+        };
         // If routing out a named carrier trunk, respect the trunk's codec configuration.
         // When no codecs are configured on the trunk, use the default full set (the
         // conference bridge now sends whatever codec was negotiated, so there is no
@@ -1140,7 +1147,8 @@ impl RwiCommandProcessor {
             }
             let mut dialplan =
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
-                    .with_caller(caller_uri.clone());
+                    .with_caller(caller_uri.clone())
+                    .with_media(media.clone());
             if let Some(hints) = routed_hints {
                 dialplan = dialplan.with_hints(hints);
             }
