@@ -1149,18 +1149,27 @@ impl RwiCommandProcessor {
             if let Some(t) = req.trunk.as_ref() {
                 metadata.insert("trunk".to_string(), t.clone());
             }
-            // Attribute the originated call to the originating agent: the CC
-            // call-session hook resolves `resolved_agent_id` first (priority 1),
-            // which fires the full cc_* webhook chain and keeps agent context
-            // through transfers. Only set it when the caller user part IS a
-            // registered agent (the default synthetic "rwi" caller is not, and
-            // an unresolvable id would be attributed as an agent anyway).
+            // Attribute the originated call to the originating agent (CC
+            // click-to-dial): the call-session hook resolves
+            // `resolved_agent_id` first (priority 1), which fires the full
+            // cc_* webhook chain and keeps agent context through transfers.
+            //
+            // Scope: only for true agent→customer dials — the caller user part
+            // IS a registered agent AND the destination is NOT one. When both
+            // parties are agents (internal assist/agent-to-agent), leave
+            // attribution to the existing callee-based heuristics (CDR expects
+            // the callee there).
             if let Some(user) = caller_uri.user()
                 && !user.is_empty()
                 && let Some(registry) = server.agent_registry.as_ref()
                 && registry.get_agent(user).await.is_some()
             {
-                metadata.insert("resolved_agent_id".to_string(), user.to_string());
+                let dest_user = destination_uri.user().unwrap_or_default().to_string();
+                let dest_is_agent = !dest_user.is_empty()
+                    && registry.get_agent(&dest_user).await.is_some();
+                if !dest_is_agent {
+                    metadata.insert("resolved_agent_id".to_string(), user.to_string());
+                }
             }
             let mut dialplan =
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
