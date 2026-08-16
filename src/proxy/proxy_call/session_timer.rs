@@ -6,7 +6,6 @@
 
 use crate::config::SessionTimerMode;
 use anyhow::{Result, anyhow};
-use std::str::FromStr;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -24,51 +23,75 @@ pub const DEFAULT_SESSION_EXPIRES: u64 = 1800;
 /// Minimum acceptable session expiration interval (90 seconds per RFC 4028)
 pub const MIN_MIN_SE: u64 = 90;
 
-/// Refresher role - determines which party is responsible for session refresh
+/// Which endpoint is responsible for refreshing the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRefresher {
-    /// User Agent Client (caller) refreshes
-    Uac,
-    /// User Agent Server (callee) refreshes
-    Uas,
+    Local,
+    Remote,
 }
 
 impl std::fmt::Display for SessionRefresher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionRefresher::Uac => write!(f, "uac"),
-            SessionRefresher::Uas => write!(f, "uas"),
+            SessionRefresher::Local => write!(f, "local"),
+            SessionRefresher::Remote => write!(f, "remote"),
         }
     }
 }
 
-impl FromStr for SessionRefresher {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "uac" => Ok(SessionRefresher::Uac),
-            "uas" => Ok(SessionRefresher::Uas),
-            _ => Err(()),
-        }
-    }
+/// Transaction-relative refresher value in a Session-Expires header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRefresherParam {
+    Uac,
+    Uas,
 }
 
-impl SessionRefresher {
-    pub fn for_local_role(we_are_uac: bool) -> Self {
-        if we_are_uac {
-            SessionRefresher::Uac
-        } else {
-            SessionRefresher::Uas
+/// Parsed and generated Session-Expires header value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionExpires {
+    pub interval: Duration,
+    pub refresher: Option<SessionRefresherParam>,
+}
+
+impl SessionExpires {
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split(';');
+        let interval = Duration::from_secs(parts.next()?.trim().parse::<u64>().ok()?);
+        let mut refresher = None;
+
+        for part in parts {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("refresher") {
+                refresher = match value.trim().to_ascii_lowercase().as_str() {
+                    "uac" => Some(SessionRefresherParam::Uac),
+                    "uas" => Some(SessionRefresherParam::Uas),
+                    _ => None,
+                };
+            }
+        }
+
+        Some(Self {
+            interval,
+            refresher,
+        })
+    }
+
+    pub fn value(self) -> String {
+        match self.refresher {
+            Some(SessionRefresherParam::Uac) => {
+                format!("{};refresher=uac", self.interval.as_secs())
+            }
+            Some(SessionRefresherParam::Uas) => {
+                format!("{};refresher=uas", self.interval.as_secs())
+            }
+            None => self.interval.as_secs().to_string(),
         }
     }
 
-    /// Check if we are the refresher based on our role
-    pub fn is_our_role(&self, we_are_uac: bool) -> bool {
-        matches!(
-            (self, we_are_uac),
-            (SessionRefresher::Uac, true) | (SessionRefresher::Uas, false)
-        )
+    pub fn into_header(self) -> rsipstack::sip::Header {
+        rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), self.value())
     }
 }
 
@@ -83,7 +106,7 @@ pub struct SessionTimerState {
     pub session_interval: Duration,
     /// Minimum session expiration (from Min-SE header)
     pub min_se: Duration,
-    /// Who is responsible for refreshing (UAC or UAS)
+    /// Who is responsible for refreshing (local or remote endpoint)
     pub refresher: SessionRefresher,
     /// Timer is actively running
     pub active: bool,
@@ -107,7 +130,7 @@ impl Default for SessionTimerState {
             enabled: false,
             session_interval: Duration::from_secs(DEFAULT_SESSION_EXPIRES),
             min_se: Duration::from_secs(MIN_MIN_SE),
-            refresher: SessionRefresher::Uac,
+            refresher: SessionRefresher::Local,
             active: false,
             refreshing: false,
             last_refresh: Instant::now(),
@@ -194,17 +217,17 @@ impl SessionTimerState {
     }
 
     /// Check if we are responsible for refreshing this dialog
-    pub fn should_we_refresh(&self, we_are_uac: bool) -> bool {
-        self.refresher.is_our_role(we_are_uac)
+    pub fn should_we_refresh(&self) -> bool {
+        self.refresher == SessionRefresher::Local
     }
 
     /// Get the next wakeup timeout for our role on this dialog
-    pub fn next_timeout_for_role(&self, we_are_uac: bool) -> Option<Duration> {
+    pub fn next_timeout(&self) -> Option<Duration> {
         if !self.active || !self.enabled {
             return None;
         }
 
-        if !self.refreshing && self.should_we_refresh(we_are_uac) {
+        if !self.refreshing && self.should_we_refresh() {
             self.time_until_refresh()
         } else {
             self.time_until_expiration()
@@ -237,15 +260,6 @@ impl SessionTimerState {
     pub fn update_refresh(&mut self) {
         self.last_refresh = Instant::now();
         self.refresh_count += 1;
-    }
-
-    /// Generate Session-Expires header value
-    pub fn get_session_expires_value(&self) -> String {
-        format!(
-            "{};refresher={}",
-            self.session_interval.as_secs(),
-            self.refresher
-        )
     }
 
     /// Generate Min-SE header value
@@ -324,28 +338,6 @@ pub fn get_header_value(headers: &rsipstack::sip::Headers, name: &str) -> Option
         .map(|header| header.value().to_string())
 }
 
-/// Parse Session-Expires header value
-/// Returns (interval, refresher) where refresher is optional
-pub fn parse_session_expires(value: &str) -> Option<(Duration, Option<SessionRefresher>)> {
-    let parts: Vec<&str> = value.split(';').collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    let seconds = parts[0].trim().parse::<u64>().ok()?;
-    let mut refresher = None;
-
-    for part in parts.iter().skip(1) {
-        let part = part.trim();
-        if part.starts_with("refresher=") {
-            let val = part.trim_start_matches("refresher=");
-            refresher = SessionRefresher::from_str(val).ok();
-        }
-    }
-
-    Some((Duration::from_secs(seconds), refresher))
-}
-
 /// Check if the message has timer support (Supported: timer header)
 pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
     headers.iter().any(|h| match h {
@@ -366,21 +358,27 @@ pub fn parse_min_se(value: &str) -> Option<Duration> {
 pub fn select_server_timer_refresher(
     peer_supports_timer: bool,
     session_expires_present: bool,
-    requested_refresher: Option<SessionRefresher>,
+    requested_refresher: Option<SessionRefresherParam>,
 ) -> SessionRefresher {
     if let Some(refresher) = requested_refresher {
-        refresher
+        match refresher {
+            SessionRefresherParam::Uac => SessionRefresher::Remote,
+            SessionRefresherParam::Uas => SessionRefresher::Local,
+        }
     } else if peer_supports_timer && session_expires_present {
-        SessionRefresher::Uac
+        SessionRefresher::Remote
     } else {
-        SessionRefresher::Uas
+        SessionRefresher::Local
     }
 }
 
 pub fn select_client_timer_refresher(
-    requested_refresher: Option<SessionRefresher>,
+    response_refresher: Option<SessionRefresherParam>,
 ) -> SessionRefresher {
-    requested_refresher.unwrap_or(SessionRefresher::Uac)
+    match response_refresher {
+        Some(SessionRefresherParam::Uas) => SessionRefresher::Remote,
+        Some(SessionRefresherParam::Uac) | None => SessionRefresher::Local,
+    }
 }
 
 pub fn apply_session_timer_headers(
@@ -388,19 +386,22 @@ pub fn apply_session_timer_headers(
     headers: &rsipstack::sip::Headers,
 ) -> Result<()> {
     if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES)
-        && let Some((interval, refresher)) = parse_session_expires(&se_value)
+        && let Some(session_expires) = SessionExpires::parse(&se_value)
     {
-        if interval < timer.min_se {
+        if session_expires.interval < timer.min_se {
             return Err(anyhow!(
                 "Session-Expires too small: {} < {}",
-                interval.as_secs(),
+                session_expires.interval.as_secs(),
                 timer.min_se.as_secs()
             ));
         }
 
-        timer.session_interval = interval;
-        if let Some(new_refresher) = refresher {
-            timer.refresher = new_refresher;
+        timer.session_interval = session_expires.interval;
+        if let Some(refresher) = session_expires.refresher {
+            timer.refresher = match refresher {
+                SessionRefresherParam::Uac => SessionRefresher::Remote,
+                SessionRefresherParam::Uas => SessionRefresher::Local,
+            };
         }
     }
 
@@ -410,14 +411,13 @@ pub fn apply_session_timer_headers(
 pub fn apply_refresh_response(
     timer: &mut SessionTimerState,
     headers: &rsipstack::sip::Headers,
-    we_are_uac: bool,
 ) -> Result<()> {
     if get_header_value(headers, HEADER_SESSION_EXPIRES).is_none() {
         timer.complete_refresh();
         if timer.mode.is_always() {
             // Keep the local side responsible for refreshes when always mode is forcing
             // session timers but the peer omits Session-Expires in a successful refresh.
-            timer.refresher = SessionRefresher::for_local_role(we_are_uac);
+            timer.refresher = SessionRefresher::Local;
         } else {
             timer.enabled = false;
             timer.active = false;
@@ -425,9 +425,22 @@ pub fn apply_refresh_response(
         return Ok(());
     }
 
-    if let Err(e) = apply_session_timer_headers(timer, headers) {
-        timer.fail_refresh();
-        return Err(e);
+    if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES)
+        && let Some(session_expires) = SessionExpires::parse(&se_value)
+    {
+        if session_expires.interval < timer.min_se {
+            timer.fail_refresh();
+            return Err(anyhow!(
+                "Session-Expires too small: {} < {}",
+                session_expires.interval.as_secs(),
+                timer.min_se.as_secs()
+            ));
+        }
+
+        timer.session_interval = session_expires.interval;
+        if let Some(refresher) = session_expires.refresher {
+            timer.refresher = select_client_timer_refresher(Some(refresher));
+        }
     }
 
     timer.complete_refresh();
@@ -435,7 +448,7 @@ pub fn apply_refresh_response(
 }
 
 fn build_timer_headers(
-    session_expires: String,
+    session_expires: SessionExpires,
     min_se: String,
     include_content_type: bool,
 ) -> Vec<rsipstack::sip::Header> {
@@ -445,10 +458,7 @@ fn build_timer_headers(
             "application/sdp".into(),
         ));
     }
-    headers.push(rsipstack::sip::Header::Other(
-        HEADER_SESSION_EXPIRES.to_string(),
-        session_expires,
-    ));
+    headers.push(session_expires.into_header());
     headers.push(rsipstack::sip::Header::Other(
         HEADER_MIN_SE.to_string(),
         min_se,
@@ -463,7 +473,14 @@ pub fn build_default_session_timer_headers(
     session_expires: u64,
     min_se: u64,
 ) -> Vec<rsipstack::sip::Header> {
-    build_timer_headers(session_expires.to_string(), min_se.to_string(), false)
+    build_timer_headers(
+        SessionExpires {
+            interval: Duration::from_secs(session_expires),
+            refresher: None,
+        },
+        min_se.to_string(),
+        false,
+    )
 }
 
 pub fn build_session_timer_headers(
@@ -471,7 +488,13 @@ pub fn build_session_timer_headers(
     include_content_type: bool,
 ) -> Vec<rsipstack::sip::Header> {
     build_timer_headers(
-        timer.get_session_expires_value(),
+        SessionExpires {
+            interval: timer.session_interval,
+            refresher: Some(match timer.refresher {
+                SessionRefresher::Local => SessionRefresherParam::Uac,
+                SessionRefresher::Remote => SessionRefresherParam::Uas,
+            }),
+        },
         timer.get_min_se_value(),
         include_content_type,
     )
@@ -480,10 +503,22 @@ pub fn build_session_timer_headers(
 pub fn build_session_timer_response_headers(
     timer: &SessionTimerState,
 ) -> Vec<rsipstack::sip::Header> {
-    vec![rsipstack::sip::Header::Other(
-        HEADER_SESSION_EXPIRES.to_string(),
-        timer.get_session_expires_value(),
-    )]
+    let mut headers = vec![SessionExpires {
+        interval: timer.session_interval,
+        refresher: Some(match timer.refresher {
+            SessionRefresher::Local => SessionRefresherParam::Uas,
+            SessionRefresher::Remote => SessionRefresherParam::Uac,
+        }),
+    }
+    .into_header()];
+
+    if timer.refresher == SessionRefresher::Remote {
+        headers.push(rsipstack::sip::Header::Require(
+            rsipstack::sip::headers::Require::from(TIMER_TAG),
+        ));
+    }
+
+    headers
 }
 
 /// Check if timer is required (Require: timer header)
@@ -502,10 +537,13 @@ pub fn is_timer_required(headers: &rsipstack::sip::Headers) -> bool {
 #[cfg(test)]
 pub fn build_session_expires_header(
     interval: Duration,
-    refresher: SessionRefresher,
+    refresher: SessionRefresherParam,
 ) -> rsipstack::sip::Header {
-    let value = format!("{};refresher={}", interval.as_secs(), refresher);
-    rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), value)
+    SessionExpires {
+        interval,
+        refresher: Some(refresher),
+    }
+    .into_header()
 }
 
 /// Build Min-SE header

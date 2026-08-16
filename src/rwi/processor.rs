@@ -839,6 +839,13 @@ impl RwiCommandProcessor {
         } else {
             media_track
         };
+        let media_track = if let (Some(start), Some(end)) =
+            (media.rtp_start_port, media.rtp_end_port)
+        {
+            media_track.with_rtp_range(start, end)
+        } else {
+            media_track
+        };
         // If routing out a named carrier trunk, respect the trunk's codec configuration.
         // When no codecs are configured on the trunk, use the default full set (the
         // conference bridge now sends whatever codec was negotiated, so there is no
@@ -1108,8 +1115,11 @@ impl RwiCommandProcessor {
                 }
             };
 
-            let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+            let (caller_state_tx, mut caller_state_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let mut invitation = dialog_layer
+                .do_invite(invite_option, caller_state_tx)
+                .boxed();
 
             // Build the media peers (caller = virtual A leg, callee = B leg).
             let caller_media_builder = crate::media::MediaStreamBuilder::new()
@@ -1125,7 +1135,9 @@ impl RwiCommandProcessor {
             let callee_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
                 Arc::new(callee_media_builder.build());
 
-            // Construct an UAC SipSession (virtual caller A leg + real callee B leg).
+            // Construct a UAC SipSession. The first answered outbound INVITE
+            // becomes the caller/A dialog; the callee channel is reserved for
+            // dialogs added later through call.leg_add.
             let synthetic_request = rsipstack::sip::Request {
                 method: rsipstack::sip::Method::Invite,
                 uri: destination_uri.clone(),
@@ -1152,7 +1164,8 @@ impl RwiCommandProcessor {
             }
             let mut dialplan =
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
-                    .with_caller(caller_uri.clone());
+                    .with_caller(caller_uri.clone())
+                    .with_media(media.clone());
             if let Some(hints) = routed_hints {
                 dialplan = dialplan.with_hints(hints);
             }
@@ -1209,7 +1222,7 @@ impl RwiCommandProcessor {
             // session registry (no-op backend in single-node mode).
             session.register_in_session_registry().await;
 
-            // Callee dialog-state channel — fed after the INVITE is answered.
+            // Callee dialog-state channel reserved for later call.leg_add dialogs.
             let (callee_evt_tx, callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
             session.callee_event_tx = Some(callee_evt_tx);
 
@@ -1220,7 +1233,7 @@ impl RwiCommandProcessor {
                     loop {
                         tokio::select! {
                             res = &mut invitation => break res,
-                            state = state_rx.recv() => {
+                            state = caller_state_rx.recv() => {
                                 match state {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
                                         let gw = gateway.read();
@@ -1288,7 +1301,6 @@ impl RwiCommandProcessor {
 
                     // Attach the answered first INVITE as the primary caller
                     // (A leg, MediaBridge A side) before starting the loop.
-                    let callee_evt_fwd = session.callee_event_tx.clone();
                     let callee_sdp_for_b_leg = sdp_answer.clone();
                     session.attach_caller_dialog(dialog, sdp_answer).await;
 
@@ -1303,7 +1315,10 @@ impl RwiCommandProcessor {
                     let session_cancel = cancel_token.clone();
                     let session_call_id = call_id.clone();
                     crate::utils::spawn(async move {
-                        if let Err(e) = session.process_uac(callee_evt_rx, cmd_rx).await {
+                        if let Err(e) = session
+                            .process_uac(caller_state_rx, callee_evt_rx, cmd_rx)
+                            .await
+                        {
                             tracing::warn!(call_id = %session_call_id, error = %e, "UAC session loop exited with error");
                         }
                         session_cancel.cancel();
@@ -1344,16 +1359,6 @@ impl RwiCommandProcessor {
                         }
                     }
 
-                    // Forward subsequent callee dialog-state events (BYE / re-INVITE)
-                    // from the INVITE's state channel into the session loop.
-                    if let Some(fwd_tx) = callee_evt_fwd {
-                        crate::utils::spawn(async move {
-                            while let Some(state) = state_rx.recv().await {
-                                let _ = fwd_tx.send(state);
-                            }
-                        });
-                    }
-
                     use crate::proxy::active_call_registry::ActiveProxyCallStatus;
                     registry.update(&call_id, |entry| {
                         entry.answered_at = Some(chrono::Utc::now());
@@ -1374,15 +1379,6 @@ impl RwiCommandProcessor {
                         _ = tokio::time::sleep(Duration::from_secs(3600)) => {
                             tracing::info!(%call_id, "Call timeout after 1 hour");
                         }
-                    }
-                    {
-                        let gw = gateway.read();
-                        gw.send_to_owner(&crate::rwi::CallHangup {
-                            call_id: call_id.clone(),
-                            reason: Some("normal".to_string()),
-                            hangup_by: None,
-                            sip_status: None,
-                        });
                     }
                     cleanup();
                 }
