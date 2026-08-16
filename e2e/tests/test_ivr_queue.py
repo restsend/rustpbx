@@ -332,8 +332,16 @@ target = "noagent"
     from datetime import datetime
 
     def _ts(line: str):
-        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)\+", line)
-        return datetime.fromisoformat(m.group(1)) if m else None
+        # Log timestamps are UTC and may end with "Z" or a "+00:00" offset
+        # depending on the tracing formatter, and carry nanosecond precision
+        # (9 fractional digits) that datetime.fromisoformat rejects on
+        # Python < 3.11. Parse the wall clock and fold the fraction into
+        # microseconds; comparisons only need a consistent clock.
+        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?", line)
+        if not m:
+            return None
+        micros = int((m.group(2) or "0")[:6].ljust(6, "0"))
+        return datetime.fromisoformat(m.group(1)).replace(microsecond=micros)
 
     play_started = next(
         (_ts(l) for l in log.splitlines() if "Playback started" in l and "busy.wav" in l),
@@ -438,8 +446,16 @@ return_target = "ivr-ret-noagent"
     # 3. The IVR must be restarted AFTER the busy prompt (ordering proves the
     #    queue fallback actually re-entered the IVR rather than dead air).
     def _ts(line: str):
-        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)\+", line)
-        return datetime.fromisoformat(m.group(1)) if m else None
+        # Log timestamps are UTC and may end with "Z" or a "+00:00" offset
+        # depending on the tracing formatter, and carry nanosecond precision
+        # (9 fractional digits) that datetime.fromisoformat rejects on
+        # Python < 3.11. Parse the wall clock and fold the fraction into
+        # microseconds; comparisons only need a consistent clock.
+        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?", line)
+        if not m:
+            return None
+        micros = int((m.group(2) or "0")[:6].ljust(6, "0"))
+        return datetime.fromisoformat(m.group(1)).replace(microsecond=micros)
 
     busy_ts = next(
         (_ts(l) for l in log.splitlines() if "playing busy prompt before fallback" in l),

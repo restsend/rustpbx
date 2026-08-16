@@ -9,6 +9,7 @@ resources, then verifies a call routed through the wholesale profile produces a
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -238,9 +239,25 @@ async def test_wholesale_183_early_media_passthrough(pbx_config, pbx, sipbot_poo
     )
 
     # The caller must receive a 183 Session Progress (early media relayed from
-    # the carrier through the anchored MediaBridge).
-    assert await caller.wait_output_async(r"183", timeout=20), (
-        f"caller did not receive 183 Session Progress:\n{caller.output[-2000:]}"
+    # the carrier through the anchored MediaBridge). sipbot's UAC logs no
+    # dedicated line for provisional responses — the observable real-time
+    # signal is the per-code count in its periodic "Progress:" status lines
+    # ("... 200: 0, 180: 0, 183: 1, ..."). A bare r"183" substring
+    # false-positives on numeric noise (e.g. "1.83", "183.42ms").
+    def _triage():
+        c = carrier.get_status_counts()
+        return (
+            f"caller={caller.get_status_counts()} carrier_sent_183={c.get(183, 0)} "
+            f"carrier_ring_stage={'Stage 1: Ringing with media' in carrier.output}"
+        )
+
+    deadline = asyncio.get_event_loop().time() + 20
+    while asyncio.get_event_loop().time() < deadline:
+        if re.search(r"183: [1-9]", caller.output):
+            break
+        await asyncio.sleep(0.5)
+    assert re.search(r"183: [1-9]", caller.output), (
+        f"caller did not receive 183 Session Progress [{_triage()}]:\n{caller.output[-2000:]}"
     )
 
     # The call must then answer (200 OK).
@@ -256,7 +273,8 @@ async def test_wholesale_183_early_media_passthrough(pbx_config, pbx, sipbot_poo
     # 183 must appear in the caller's status counts.
     codes = caller.get_status_counts()
     assert codes.get(183, 0) >= 1, (
-        f"expected at least one 183 Session Progress, got: {codes}\n{caller.output[-2000:]}"
+        f"expected at least one 183 Session Progress, got: {codes} [{_triage()}]\n"
+        f"{caller.output[-2000:]}"
     )
 
 

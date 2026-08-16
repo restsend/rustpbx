@@ -121,7 +121,11 @@ async def test_trunk_b2bua_call_cdr(pbx_config, pbx, sipbot_pool, cdr_dir):
 
 @pytest.mark.asyncio
 async def test_trunk_b2bua_reject_486_cdr(pbx_config, pbx, sipbot_pool, cdr_dir):
-    """Callee rejects 486 → caller sees 486, no media, CDR status failed."""
+    """Callee rejects 486 → caller sees 486, CDR status failed.
+
+    The caller still receives the zero-config failure cue (default busy tone
+    `tone://480,3000` played as 183 early media before the rejection — same
+    behavior test_trunk_no_ringback_uses_global_default_tone verifies)."""
     callee_port = 15421
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
@@ -135,7 +139,15 @@ async def test_trunk_b2bua_reject_486_cdr(pbx_config, pbx, sipbot_pool, cdr_dir)
     caller = _trunk_caller(sipbot_pool, pbx, target=f"sip:1002@{pbx.sip_addr}", hangup=4)
     assert await caller.wait_output_async(r"4[0-9][0-9]|Busy|Call failed", timeout=20), caller.output
     caller.wait(timeout=15)
-    assert not caller.get_rtp_stats().has_rx, "caller should have no RTP on 486 reject"
+    # Zero-config failure cue: the default busy tone plays as early media
+    # before the 486, so the caller DOES receive RTP (~3 s of tone ≈ 150
+    # packets). Asserting "no RTP" here would contradict the default audio
+    # profile (busy → tone://480,3000) and its dedicated test.
+    stats = caller.get_rtp_stats()
+    assert stats.has_rx, (
+        "caller should receive the default busy-tone early media before the "
+        f"486 rejection: {stats}\n{caller.output[-2000:]}"
+    )
 
     records = await _wait_cdrs(cdr_dir)
     if records:  # CDR may or may not be emitted for a rejected call

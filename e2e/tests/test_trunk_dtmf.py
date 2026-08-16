@@ -77,10 +77,18 @@ async def test_trunk_b2bua_dtmf_rfc2833_passthrough(pbx_config, pbx, sipbot_pool
     deadline = asyncio.get_event_loop().time() + 15
     records: list[dict] = []
     while asyncio.get_event_loop().time() < deadline:
-        records = [
-            json.loads(p.read_text(encoding="utf-8"))
-            for p in sorted(cdr_dir.rglob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
-        ]
+        records = []
+        for p in sorted(
+            cdr_dir.rglob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True
+        ):
+            try:
+                text = p.read_text(encoding="utf-8")
+                if text.strip():
+                    records.append(json.loads(text))
+            except (json.JSONDecodeError, OSError):
+                # The writer may still be mid-flush (file created but empty or
+                # partially written) — skip and let the retry loop pick it up.
+                continue
         if records:
             break
         await asyncio.sleep(0.5)
