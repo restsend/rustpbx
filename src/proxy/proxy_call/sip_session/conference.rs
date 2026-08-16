@@ -31,7 +31,7 @@ impl SipSession {
             info!(session_id = %self.id, conf_id = %conf_id_str, "Conference created");
         }
 
-        let active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
+        let mut active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
             .legs
             .iter()
             .filter(|(_, leg)| leg.is_active())
@@ -41,24 +41,63 @@ impl SipSession {
             })
             .collect();
 
+        // Room dial-in (app=conference): join_conference_mixer runs right
+        // after the app's ctrl.answer() is INITIATED — the caller leg is
+        // typically still negotiating (not yet Connected), so the is_active()
+        // filter alone yields an empty list and the participant never joins.
+        // The caller leg IS the participant for dial-in: always include it.
+        {
+            let caller_leg = LegId::from("caller");
+            if self.legs.get(&caller_leg).is_some()
+                && !active_legs.iter().any(|(id, _)| *id == caller_leg)
+            {
+                let peer = self.legs.get_peer(&caller_leg).cloned();
+                active_legs.insert(0, (caller_leg, peer));
+            }
+        }
+
         for (leg_id, peer) in active_legs {
             // NOTE: the participant is NOT explicitly registered here.
             // `start_conference_media_bridge[_for_peer]` → `start_bridge_full_duplex`
             // registers the participant internally (exactly once). Pre-registering
             // with a different composite leg_id caused a duplicate participant
             // entry (one bridged, one orphaned).
-            if let Some(peer) = peer {
-                if let Err(e) = self
-                    .start_conference_media_bridge_for_peer(conf_id_str, &leg_id, &peer, None, None)
-                    .await
-                {
-                    warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
-                }
+            // The "caller"/"callee" anchor legs must take the dedicated
+            // start_conference_media_bridge path: it resolves the anchor peer
+            // itself AND prefers MediaBridge leg Inject for the output side
+            // (the consult-merge-proven path). The legs-registry peer for an
+            // anchor leg is a bare virtual MediaStreamBuilder with no PC /
+            // tracks, which the _for_peer variant cannot bridge.
+            let is_anchor_leg = leg_id.0 == "caller" || leg_id.0 == "callee"
+                || leg_id.0.ends_with("-caller") || leg_id.0.ends_with("-callee");
+            // Anchor legs register under the session-scoped composite id
+            // (consult-merge convention): every dial-in session's caller is
+            // literally "caller", so the bare id collides across
+            // participants ("Leg caller already in conference").
+            let join_leg = if is_anchor_leg {
+                self.participant_leg(&leg_id)
             } else {
-                if let Err(e) = self
-                    .start_conference_media_bridge(conf_id_str, &leg_id)
+                leg_id.clone()
+            };
+            let joined = if let (false, Some(peer)) = (is_anchor_leg, peer) {
+                self.start_conference_media_bridge_for_peer(conf_id_str, &join_leg, &peer, None, None)
                     .await
-                {
+                    .map(|_| ())
+            } else {
+                self.start_conference_media_bridge(conf_id_str, &join_leg)
+                    .await
+                    .map(|_| ())
+            };
+            match joined {
+                Ok(()) => {
+                    info!(session_id = %self.id, %join_leg, conf_id = %conf_id_str, "Leg joined conference");
+                    self.emit_typed_rwi_event(&crate::rwi::ConferenceJoined {
+                        conf_id: conf_id_str.to_string(),
+                        call_id: self.context.session_id.to_string(),
+                        leg_id: join_leg.0.clone(),
+                    });
+                }
+                Err(e) => {
                     warn!(session_id = %self.id, %leg_id, "Failed to start conference media bridge: {}", e);
                 }
             }

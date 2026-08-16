@@ -318,6 +318,15 @@ pub enum CallCommand {
         leg_id: LegId,
     },
 
+    /// Join the caller leg into a conference room, waiting for the leg to be
+    /// media-ready first (room dial-in via app=conference). Processed after
+    /// any queued Answer command, so the caller leg is Connected by the time
+    /// the join runs.
+    JoinConference {
+        /// Conference room ID
+        conf_id: String,
+    },
+
     /// Leave the current conference mixer
     LeaveMixer,
 

@@ -4194,15 +4194,23 @@ impl SipSession {
                         );
                     }
                     if app_name == "conference" {
-                        // After the conference app starts (which calls
-                        // ctrl.answer()), join all active legs into the
-                        // conference room.
+                        // The conference app calls ctrl.answer() in on_enter,
+                        // which only QUEUES the Answer command. Joining inline
+                        // here would race the answer (no media tracks yet).
+                        // Instead queue a JoinConference command behind it:
+                        // command ordering guarantees the leg is Connected
+                        // when the join runs.
                         let conf_id = app_params
                             .as_ref()
                             .and_then(|p| p.get("id").and_then(|v| v.as_str()))
                             .unwrap_or(&format!("conf-{}", self.id.0))
                             .to_string();
-                        self.join_conference_mixer(&conf_id).await;
+                        Self::send_or_log_cmd(
+                            &self.cmd_tx,
+                            CallCommand::JoinConference { conf_id },
+                            "queue JoinConference",
+                            &self.context.session_id.to_string(),
+                        );
                                     } else {
                                     }
                     Ok(())
@@ -8915,6 +8923,16 @@ impl SipSession {
 
             CallCommand::JoinMixerLeg { mixer_id, leg_id } => {
                 Self::ok_or_failure(self.handle_join_mixer_leg(mixer_id, leg_id).await)
+            }
+
+            CallCommand::JoinConference { conf_id } => {
+                // Room dial-in: by command-ordering, the Answer command that
+                // preceded this one has completed, so the caller leg is
+                // Connected and its media tracks exist — the join below will
+                // find real senders/receivers (unlike joining immediately
+                // after ctrl.answer() merely *initiates* the answer).
+                self.join_conference_mixer(&conf_id).await;
+                CommandResult::success()
             }
 
             CallCommand::LeaveMixer => Self::ok_or_failure(self.handle_leave_mixer().await),

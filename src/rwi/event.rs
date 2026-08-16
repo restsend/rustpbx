@@ -625,6 +625,24 @@ pub struct ConferenceMergeFailed {
 }
 rwi_event!(ConferenceMergeFailed, "conference_merge_failed");
 
+/// A call leg joined a conference room (room dial-in via app=conference).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConferenceJoined {
+    pub conf_id: String,
+    pub call_id: String,
+    pub leg_id: String,
+}
+rwi_event!(ConferenceJoined, "conference_joined");
+
+/// A call leg left a conference room (hangup or room teardown).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConferenceLeft {
+    pub conf_id: String,
+    pub call_id: String,
+    pub leg_id: String,
+}
+rwi_event!(ConferenceLeft, "conference_left");
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConferenceSeatReplaceStarted {
     pub conf_id: String,
