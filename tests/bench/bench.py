@@ -2230,7 +2230,7 @@ class P2PBenchmark:
         """One-shot snapshot of rustpbx RSS + /ami/v1/health sipserver + task stats.
 
         Task reclamation (``tasks.total`` returning to baseline after calls
-        drain) is the reliable leak signal; RSS is unreliable under jemalloc.
+        drain) is the reliable leak signal.
         """
         health_url = f"{self.http_base}/ami/v1/health"
         snap: dict[str, Any] = {
@@ -2489,7 +2489,7 @@ class P2PBenchmark:
         print(f"  Baseline RSS        : {base_rss:.1f} MB")
         print(f"  Final RSS           : {rss_series[-1]:.1f} MB")
         print(f"  Peak RSS            : {peak:.1f} MB  (d {peak_delta:+.1f} MB)")
-        print(f"  RSS slope           : {slope:+.2f} MB/batch  (advisory under jemalloc)")
+        print(f"  RSS slope           : {slope:+.2f} MB/batch")
         print(f"  Calls completed     : {comp_total}")
         print(f"  Calls cancelled(487): {canc_total}  (cancel_prob={cancel_prob}%)")
         print(f"  Final active calls  : {tail.get('calls', 0)}")
@@ -2514,7 +2514,7 @@ class P2PBenchmark:
             bar_len = int(round((v - tlo) / tspan * 30))
             print(f"    {label:>4} {v:>5} {'#' * bar_len}")
 
-        print("\n  RSS trend (advisory under jemalloc):")
+        print("\n  RSS trend:")
         lo = min(rss_series)
         hi = max(rss_series)
         span = max(hi - lo, 1.0)
