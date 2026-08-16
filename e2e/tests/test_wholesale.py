@@ -36,10 +36,10 @@ async def test_wholesale_call_billing(pbx_config, pbx, sipbot_pool, tmp_path):
     pbx_config.database_url = f"sqlite://{db_path}"
     pbx_config.set_wholesale()
     pbx_config.add_trunk(
-        "E2E-Carrier", dest="127.0.0.1:15190", direction="outbound", trunk_id=1001,
+        "E2E-Carrier", dest=f"127.0.0.1:{h.ua_port(15190)}", direction="outbound", trunk_id=1001,
     )
     pbx_config.add_trunk(
-        "E2E-Inbound", dest="127.0.0.1:15190", direction="inbound", trunk_id=1002,
+        "E2E-Inbound", dest=f"127.0.0.1:{h.ua_port(15190)}", direction="inbound", trunk_id=1002,
         inbound_hosts=["127.0.0.1"],
     )
 
@@ -62,7 +62,7 @@ async def test_wholesale_call_billing(pbx_config, pbx, sipbot_pool, tmp_path):
 
     # Carrier UAS answers the outbound trunk; caller dials a wholesale-routed number.
     carrier = sipbot_pool.callee(
-        host=pbx.host, port=15190, username="carrier", password="123456",
+        host=pbx.host, port=h.ua_port(15190), username="carrier", password="123456",
         register=False, ring_secs=1, answer_mode="echo",
     )
     caller = sipbot_pool.caller(
@@ -107,7 +107,7 @@ async def test_wholesale_audio_and_dtmf_passthrough(pbx_config, pbx, sipbot_pool
     anchored-media code path.
     """
     db_path = tmp_path / "wholesale_adtmf.sqlite3"
-    carrier_port = 15191
+    carrier_port = h.ua_port(15191)
     pbx_config.database_url = f"sqlite://{db_path}"
     pbx_config.set_wholesale()
     pbx_config.media_proxy = "all"  # anchor media through the MediaBridge
@@ -200,7 +200,7 @@ async def test_wholesale_183_early_media_passthrough(pbx_config, pbx, sipbot_poo
     tones generated upstream by the carrier.
     """
     db_path = tmp_path / "wholesale_183.sqlite3"
-    carrier_port = 15192
+    carrier_port = h.ua_port(15192)
     pbx_config.database_url = f"sqlite://{db_path}"
     pbx_config.set_wholesale()
     pbx_config.media_proxy = "all"  # anchor media through the MediaBridge
@@ -278,7 +278,7 @@ async def test_wholesale_183_early_media_passthrough(pbx_config, pbx, sipbot_poo
     )
 
 
-def _seed(db: WholesaleDb, carrier_dest: str = "127.0.0.1:15190") -> None:
+def _seed(db: WholesaleDb, carrier_dest: str = f"127.0.0.1:{h.ua_port(15190)}") -> None:
     """Seed a minimal tenant / rate / trunk / routing profile."""
     sell_deck = db.ensure_rate_deck("E2E-Sell", "sell")
     buy_deck = db.ensure_rate_deck("E2E-Buy", "buy")

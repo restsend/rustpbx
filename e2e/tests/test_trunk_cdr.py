@@ -62,7 +62,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username="1002", *, reject_code=No
         reject_code=reject_code, reject_prob=100 if reject_code else None,
         audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -81,7 +81,7 @@ def _trunk_caller(sipbot_pool, pbx, *, target, hangup=6):
 async def test_trunk_b2bua_call_cdr(pbx_config, pbx, sipbot_pool, cdr_dir):
     """Trunk caller → registered callee: RTP flows both ways and the CDR is
     completed with the external caller recorded."""
-    callee_port = 15420
+    callee_port = h.ua_port(15420)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "cdr-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",
@@ -126,7 +126,7 @@ async def test_trunk_b2bua_reject_486_cdr(pbx_config, pbx, sipbot_pool, cdr_dir)
     The caller still receives the zero-config failure cue (default busy tone
     `tone://480,3000` played as 183 early media before the rejection — same
     behavior test_trunk_no_ringback_uses_global_default_tone verifies)."""
-    callee_port = 15421
+    callee_port = h.ua_port(15421)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "reject-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",
@@ -165,7 +165,7 @@ async def test_trunk_b2bua_reject_486_cdr(pbx_config, pbx, sipbot_pool, cdr_dir)
 async def test_trunk_b2bua_no_answer_cdr(pbx_config, pbx, sipbot_pool, cdr_dir):
     """Callee never answers → the trunk rings out (408) and the CDR is not
     completed."""
-    callee_port = 15422
+    callee_port = h.ua_port(15422)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "noanswer-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",

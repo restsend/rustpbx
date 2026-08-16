@@ -63,7 +63,7 @@ async def _reg_callee(sipbot_pool, pbx, port):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -71,11 +71,11 @@ async def _reg_callee(sipbot_pool, pbx, port):
 @pytest.mark.asyncio
 async def test_http_router_forwards_call(pbx, http_router, sipbot_pool):
     """[proxy.http_router] consulted for a call; response routes to the target."""
-    http_router.response = {"action": "forward", "targets": ["sip:1002@127.0.0.1:15160"]}
+    http_router.response = {"action": "forward", "targets": [f"sip:1002@127.0.0.1:{h.ua_port(15160)}"]}
     pbx.config_builder.enable_http_router(f"http://127.0.0.1:{http_router.port}/route")
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15160)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15160))
     caller = sipbot_pool.caller(
         target=f"sip:anyone@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )

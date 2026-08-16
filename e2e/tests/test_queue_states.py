@@ -25,7 +25,7 @@ async def test_queue_180_200_state_sequence(pbx, sipbot_pool, cdr_dir):
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
-        targets=[f"sip:1002@127.0.0.1:15150"],
+        targets=[f"sip:1002@127.0.0.1:{h.ua_port(15150)}"],
         accept_immediately=True,
         wait_timeout_secs=15,
     )
@@ -39,11 +39,11 @@ async def test_queue_180_200_state_sequence(pbx, sipbot_pool, cdr_dir):
     h.boot_pbx(pbx)
 
     agent = sipbot_pool.callee(
-        host=pbx.host, port=15150, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15150), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(agent)
 
     since = _now()
     caller = sipbot_pool.caller(

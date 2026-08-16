@@ -34,7 +34,7 @@ async def _reg_callee(sipbot_pool, pbx, port):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -95,7 +95,7 @@ async def test_rwi_record_start_stop(pbx, sipbot_pool, rwi, tmp_path):
     assert wavs, "no recording WAV produced under config/"
 
     # 2) RWI record command surface on an RWI-originated call.
-    await _reg_callee(sipbot_pool, pbx, 15132)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15132))
     call_id = f"rec-{uuid.uuid4().hex[:8]}"
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:rwi@pbx", "default")
     assert resp.get("status") == "success", resp

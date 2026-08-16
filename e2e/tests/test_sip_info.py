@@ -28,11 +28,11 @@ async def test_sipbot_info_flows_delivered(pbx, sipbot_pool, rwi):
     await h.connect_rwi(rwi)
 
     callee = sipbot_pool.callee(
-        host=pbx.host, port=15200, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15200), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(callee)
 
     info_payload = '{"action":"ivr.exec","params":{"route_point":"test-ivr"}}'
     info_flows_str = f'2s:application/vnd.rustpbx+json:{info_payload}'

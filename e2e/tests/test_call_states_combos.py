@@ -39,7 +39,7 @@ async def _registered_callee(sipbot_pool, pbx, port, username="1002"):
         host=pbx.host, port=port, username=username, password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -108,12 +108,12 @@ async def test_p2p_pre_answer_cancel_cdr(pbx, sipbot_pool, cdr_dir):
     """Caller CANCELs before the callee answers; CDR is still written."""
     h.boot_pbx(pbx)
     # Callee that never answers (long ring), so the caller CANCELs pre-answer.
-    sipbot_pool.callee(
-        host=pbx.host, port=15132, username="1002", password="123456",
+    ua = sipbot_pool.callee(
+        host=pbx.host, port=h.ua_port(15132), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=60, answer_mode="none",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
 
     since = _now()
     caller = sipbot_pool.caller(

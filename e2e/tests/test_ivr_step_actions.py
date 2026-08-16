@@ -83,7 +83,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username):
         answer_mode="echo",
         audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -169,7 +169,7 @@ async def test_step_ivr_route_to_agent_transfers(pbx, sipbot_pool, tmp_path):
         _add_step_route(pbx, "to-ivr-rta", "ivr-rta", url)
         h.boot_pbx(pbx)
 
-        agent = await _reg_callee(sipbot_pool, pbx, 15140, "1002")
+        agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15140), "1002")
         caller = sipbot_pool.caller(
             target=f"sip:ivr-rta@{pbx.sip_addr}",
             username="1001",
@@ -203,14 +203,14 @@ async def test_step_ivr_queue_action_routes_to_agent(pbx, sipbot_pool, tmp_path)
         pbx.config_builder.add_queue(
             "support",
             strategy_mode="sequential",
-            targets=[f"sip:1002@127.0.0.1:15141"],
+            targets=[f"sip:1002@127.0.0.1:{h.ua_port(15141)}"],
             accept_immediately=True,
             wait_timeout_secs=15,
         )
         _add_step_route(pbx, "to-ivr-queue", "ivr-q", url)
         h.boot_pbx(pbx)
 
-        agent = await _reg_callee(sipbot_pool, pbx, 15141, "1002")
+        agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15141), "1002")
         caller = sipbot_pool.caller(
             target=f"sip:ivr-q@{pbx.sip_addr}",
             username="1001",

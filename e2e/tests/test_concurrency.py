@@ -46,7 +46,7 @@ async def _reg_callee(sipbot_pool, pbx, port, username):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -76,7 +76,7 @@ async def test_two_concurrent_p2p_calls(pbx, sipbot_pool, cdr_dir):
     """Two simultaneous P2P calls: both carry bidirectional RTP and each writes a CDR."""
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15440, "1002")
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15440), "1002")
     await _reg_callee(sipbot_pool, pbx, 15441, "1003")
 
     c1 = sipbot_pool.caller(
@@ -97,7 +97,7 @@ async def test_two_concurrent_p2p_calls(pbx, sipbot_pool, cdr_dir):
 @pytest.mark.asyncio
 async def test_two_concurrent_trunk_calls(pbx_config, pbx, sipbot_pool, cdr_dir):
     """Two simultaneous inbound-trunk B2BUA calls, each with its own CDR."""
-    callee_port = 15442
+    callee_port = h.ua_port(15442)
     pbx_config.set_realms(["127.0.0.1"])
     pbx_config.add_trunk(
         "conc-trunk", dest=f"127.0.0.1:{callee_port}", direction="inbound",

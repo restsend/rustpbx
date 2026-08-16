@@ -31,7 +31,7 @@ async def _registered_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)  # allow REGISTER to complete
+    await h.wait_registered(ua)
     return ua
 
 
@@ -54,7 +54,7 @@ async def _wait_rtp(ua, label: str, timeout: float = 20) -> None:
 async def test_p2p_basic_call_cdr(pbx, sipbot_pool, cdr_dir):
     """Caller -> callee(echo) establishes; caller has bidirectional RTP; CDR written."""
     h.boot_pbx(pbx)
-    await _registered_callee(sipbot_pool, pbx, 15080, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15080), "1002")
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )
@@ -77,12 +77,12 @@ async def test_p2p_basic_call_cdr(pbx, sipbot_pool, cdr_dir):
 async def test_p2p_reject_486(pbx, sipbot_pool):
     """Callee rejects -> caller sees a 4xx/5xx termination, no media flows."""
     h.boot_pbx(pbx)
-    sipbot_pool.callee(
-        host=pbx.host, port=15081, username="1002", password="123456",
+    ua = sipbot_pool.callee(
+        host=pbx.host, port=h.ua_port(15081), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         reject_code=486,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=4,
     )
@@ -97,12 +97,12 @@ async def test_p2p_cancel_during_ringing(pbx, sipbot_pool, rwi):
     """Originate to a never-answering callee, cancel while ringing."""
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    sipbot_pool.callee(
-        host=pbx.host, port=15082, username="1002", password="123456",
+    ua = sipbot_pool.callee(
+        host=pbx.host, port=h.ua_port(15082), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=60, answer_mode="none",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     call_id = _call_id("p2p-cancel")
     resp = await rwi.originate(
         call_id, f"sip:1002@{pbx.sip_addr}", "sip:p2p@pbx", "default", timeout_secs=30,
@@ -122,7 +122,7 @@ async def test_p2p_hold_resume_via_rwi(pbx, sipbot_pool, rwi):
     """Originate -> hold -> unhold -> hangup; media events emitted."""
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _registered_callee(sipbot_pool, pbx, 15083, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15083), "1002")
     call_id = _call_id("p2p-hold")
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:p2p@pbx", "default")
     assert resp.get("status") == "success", resp
@@ -154,7 +154,7 @@ async def test_p2p_bidirectional_audio(pbx, sipbot_pool, tmp_path):
     sine = tmp_path / "sine.wav"
     generate_sine_wav(sine, 440.0, 0.5, 8000, 0.5)
 
-    await _registered_callee(sipbot_pool, pbx, 15084, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15084), "1002")
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=12, play_file=str(sine),
@@ -243,12 +243,12 @@ async def test_p2p_max_ring_time_rejects_no_answer(pbx, sipbot_pool, pbx_config)
     """
     pbx_config.set_max_ring_time(4)
     h.boot_pbx(pbx)
-    sipbot_pool.callee(
-        host=pbx.host, port=15224, username="1002", password="123456",
+    ua = sipbot_pool.callee(
+        host=pbx.host, port=h.ua_port(15224), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=60, answer_mode="none",
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=15,

@@ -35,7 +35,7 @@ async def _registered_echo_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -102,7 +102,7 @@ async def test_cng_rtp_flows_during_hold(pbx, sipbot_pool, rwi):
     pbx.config_builder.set_media(comfort_noise=True, level_db=-35.0)
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    callee = await _registered_echo_callee(sipbot_pool, pbx, 15103, "1002")
+    callee = await _registered_echo_callee(sipbot_pool, pbx, h.ua_port(15103), "1002")
 
     call_id = _call_id("cng")
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:rwi@pbx", "default")
@@ -144,12 +144,12 @@ async def test_cng_on_hold_nonzero_rms(pbx, sipbot_pool, rwi, tmp_path):
 
     rec = tmp_path / "callee_cng.wav"
     callee = sipbot_pool.callee(
-        host=pbx.host, port=15104, username="1002", password="123456",
+        host=pbx.host, port=h.ua_port(15104), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
         record_file=str(rec),
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(callee)
 
     call_id = _call_id("cngrms")
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:rwi@pbx", "default")

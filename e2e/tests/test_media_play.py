@@ -34,7 +34,7 @@ async def _registered_echo_callee(sipbot_pool, pbx, port, username="1002"):
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
     )
-    await asyncio.sleep(2)
+    await h.wait_registered(ua)
     return ua
 
 
@@ -72,7 +72,7 @@ async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
     tone = tmp_path / "tone_440.wav"
     generate_sine_wav(tone, 440.0, 2.0, 8000, 0.5)
 
-    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, 15083, "media")
+    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, h.ua_port(15083), "media")
 
     rwi.clear_events()
     resp = await rwi.media_play(call_id, "file", str(tone), loop=True)
@@ -100,7 +100,7 @@ async def test_media_play_natural_finish(pbx, sipbot_pool, rwi, tmp_path):
     short = tmp_path / "short_beep.wav"
     generate_sine_wav(short, 800.0, 0.3, 8000, 0.5)
 
-    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, 15084, "beep")
+    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, h.ua_port(15084), "beep")
 
     rwi.clear_events()
     resp = await rwi.media_play(call_id, "file", str(short), loop=False)
