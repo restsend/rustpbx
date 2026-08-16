@@ -1366,15 +1366,6 @@ impl RwiCommandProcessor {
                             tracing::info!(%call_id, "Call timeout after 1 hour");
                         }
                     }
-                    {
-                        let gw = gateway.read();
-                        gw.send_to_owner(&crate::rwi::CallHangup {
-                            call_id: call_id.clone(),
-                            reason: Some("normal".to_string()),
-                            hangup_by: None,
-                            sip_status: None,
-                        });
-                    }
                     cleanup();
                 }
                 Ok(Ok((_dialog, resp_opt))) => {
