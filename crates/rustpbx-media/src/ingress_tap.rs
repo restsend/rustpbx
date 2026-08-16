@@ -55,9 +55,7 @@ pub struct DtmfEvent {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TapStats {
     pub ingress_packets: u64,
-    pub ingress_bytes: u64,
     pub egress_packets: u64,
-    pub egress_bytes: u64,
 }
 
 /// Plaintext observer for one leg: stats + DTMF detection + recording.
@@ -68,9 +66,7 @@ pub(crate) struct TapStats {
 pub struct IngressTap {
     // ── stats (lock-free) ────────────────────────────────────────────────
     ingress_packets: AtomicU64,
-    ingress_bytes: AtomicU64,
     egress_packets: AtomicU64,
-    egress_bytes: AtomicU64,
     /// Whether to keep populating `ingress_ssrc_pts` on the hot path. The map
     /// exists only to let the RTCP relay rewrite a WebRTC receiver's PLI/NACK
     /// back onto the peer's real sender SSRC; for plain RTP↔RTP bridges (no
@@ -110,16 +106,11 @@ impl IngressTap {
     /// Create a new tap. `dtmf_bus_capacity` bounds the DTMF broadcast
     /// channel (subscribers that lag are dropped, never blocking the tap).
     /// The optional recording sender is fixed for the tap's lifetime.
-    pub fn new(
-        dtmf_bus_capacity: usize,
-        recorder_sender: Option<RecorderSender>,
-    ) -> Arc<Self> {
+    pub fn new(dtmf_bus_capacity: usize, recorder_sender: Option<RecorderSender>) -> Arc<Self> {
         let (dtmf_tx, _) = broadcast::channel(dtmf_bus_capacity.max(1));
         Arc::new(Self {
             ingress_packets: AtomicU64::new(0),
-            ingress_bytes: AtomicU64::new(0),
             egress_packets: AtomicU64::new(0),
-            egress_bytes: AtomicU64::new(0),
             track_ingress_ssrc_pts: AtomicBool::new(true),
             last_ingress_ssrc_pt: AtomicU64::new(u64::MAX),
             ingress_ssrc_pts: DashMap::new(),
@@ -171,9 +162,7 @@ impl IngressTap {
     pub(crate) fn stats(&self) -> TapStats {
         TapStats {
             ingress_packets: self.ingress_packets.load(Ordering::Relaxed),
-            ingress_bytes: self.ingress_bytes.load(Ordering::Relaxed),
             egress_packets: self.egress_packets.load(Ordering::Relaxed),
-            egress_bytes: self.egress_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -198,11 +187,9 @@ impl IngressTap {
     /// Shared processing for both directions: stats + DTMF + record.
     #[inline]
     fn process(&self, direction: PacketDirection, packet: &RtpPacket) {
-        let payload_len = packet.payload.len() as u64;
         match direction {
             PacketDirection::Ingress => {
                 self.ingress_packets.fetch_add(1, Ordering::Relaxed);
-                self.ingress_bytes.fetch_add(payload_len, Ordering::Relaxed);
                 // Remember which SSRC carries which payload type (needed by the
                 // RTCP relay to rewrite PLI/NACK back onto the peer's sender
                 // SSRC). SSRC+PT are stable per stream, so a packed atomic
@@ -210,7 +197,8 @@ impl IngressTap {
                 // steady-state packets; the map is only touched when a new
                 // (ssrc,pt) pair first appears.
                 if self.track_ingress_ssrc_pts.load(Ordering::Relaxed) {
-                    let key = ((packet.header.ssrc as u64) << 8) | packet.header.payload_type as u64;
+                    let key =
+                        ((packet.header.ssrc as u64) << 8) | packet.header.payload_type as u64;
                     if self.last_ingress_ssrc_pt.load(Ordering::Relaxed) != key {
                         self.last_ingress_ssrc_pt.store(key, Ordering::Relaxed);
                         self.ingress_ssrc_pts
@@ -222,7 +210,6 @@ impl IngressTap {
             }
             PacketDirection::Egress => {
                 self.egress_packets.fetch_add(1, Ordering::Relaxed);
-                self.egress_bytes.fetch_add(payload_len, Ordering::Relaxed);
             }
         }
 
@@ -231,9 +218,8 @@ impl IngressTap {
         // the destination leg and could poison this tap's deduplication state.
         // Raw egress telephone-event RTP still falls through to the recorder.
         let pt = packet.header.payload_type;
-        if direction == PacketDirection::Ingress
-            && self.is_dtmf_payload_type(pt)
-        {
+        if direction == PacketDirection::Ingress && self.is_dtmf_payload_type(pt) {
+            let payload_len = packet.payload.len();
             trace!(pt, len = payload_len, "tap: telephone-event packet");
             let digit = self
                 .dtmf_detector
@@ -296,9 +282,7 @@ mod tests {
         }
         let s = tap.stats();
         assert_eq!(s.ingress_packets, 3);
-        assert_eq!(s.ingress_bytes, 3 * 160);
         assert_eq!(s.egress_packets, 2);
-        assert_eq!(s.egress_bytes, 2 * 160);
     }
 
     /// The RTCP relay looks up the peer's real sender SSRC via the ingress
@@ -342,7 +326,10 @@ mod tests {
         let dtmf_payload = vec![1u8, 0x80, 10, 0xA0];
         let dtmf = make_packet(101, 1, 0, 1, dtmf_payload);
         tap.on_egress(&dtmf, test_addr());
-        assert!(rx.try_recv().is_err(), "egress DTMF must not raise an event");
+        assert!(
+            rx.try_recv().is_err(),
+            "egress DTMF must not raise an event"
+        );
 
         tap.on_ingress(&dtmf, test_addr());
         let ev = rx.try_recv().expect("telephone-event PT must raise DTMF");
@@ -402,7 +389,10 @@ mod tests {
             tap.on_ingress(&p, test_addr());
         }
         // Same SSRC, different PT (e.g. telephone-event 101 on the audio SSRC).
-        tap.on_ingress(&make_packet(101, 1, 0, 1001, vec![1u8, 0x80, 10, 0xA0]), test_addr());
+        tap.on_ingress(
+            &make_packet(101, 1, 0, 1001, vec![1u8, 0x80, 10, 0xA0]),
+            test_addr(),
+        );
         // New SSRC entirely (e.g. video).
         tap.on_ingress(&make_packet(96, 1, 3000, 2002, vec![1u8; 200]), test_addr());
 

@@ -91,6 +91,7 @@ pub(crate) struct Recorder {
 
 impl Recorder {
     /// Create a stereo (2-channel) recorder.
+    #[cfg(test)]
     pub async fn new(path: &str, codec: CodecType) -> Result<Self> {
         Self::new_with_channels(path, codec, 2, false).await
     }
@@ -322,9 +323,11 @@ impl Recorder {
 
     fn leg_end_ts(&self, leg: Leg) -> u32 {
         let (samples_per_block, bytes_per_block) = self.block_info();
-        let buffered_end = self.leg_buffer(leg).last_key_value()
-        .map(|(k, v)| k + (v.len() / bytes_per_block) as u32 * samples_per_block)
-        .unwrap_or(self.next_flush_ts);
+        let buffered_end = self
+            .leg_buffer(leg)
+            .last_key_value()
+            .map(|(k, v)| k + (v.len() / bytes_per_block) as u32 * samples_per_block)
+            .unwrap_or(self.next_flush_ts);
 
         buffered_end.max(self.next_flush_ts)
     }
@@ -374,7 +377,11 @@ impl Recorder {
     }
 
     fn overlay_dtmf_range(&mut self, leg: Leg, start_ts: u32, end_ts: u32, encoded: Bytes) {
-        let overlapping_keys: Vec<u32> = self.leg_buffer_mut(leg).range(..end_ts).map(|(k, _)| *k).collect();
+        let overlapping_keys: Vec<u32> = self
+            .leg_buffer_mut(leg)
+            .range(..end_ts)
+            .map(|(k, _)| *k)
+            .collect();
 
         for key in overlapping_keys {
             let data = self.leg_buffer_mut(leg).remove(&key);
@@ -1101,5 +1108,4 @@ mod tests {
             leg_b_started: false,
         }
     }
-
 }

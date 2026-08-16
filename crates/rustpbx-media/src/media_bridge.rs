@@ -27,7 +27,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
 use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -122,12 +122,25 @@ pub struct MediaBridge {
     /// active route is a no-op (avoids rebuilding decoders/relay). The third
     /// element captures the relayed video codec identity (name + PT per leg),
     /// so a mid-call video codec change re-arms the relay rules.
-    last_bridged:
-        Option<(audio_codec::CodecType, audio_codec::CodecType, Option<(String, u8, String, u8)>)>,
+    last_bridged: Option<(
+        audio_codec::CodecType,
+        audio_codec::CodecType,
+        Option<(String, u8, String, u8)>,
+    )>,
     /// Snapshot of the current legs, readable from the background 5s stats
     /// task without borrowing `&mut self`. Kept in sync by `replace_leg` /
     /// `teardown`.
     legs_shared: Arc<parking_lot::Mutex<(Option<Leg>, Option<Leg>)>>,
+    /// Latch fired when a fast-path relay arming attempt fails (e.g. a WebRTC
+    /// leg's DTLS/SRTP transport never became ready). The session monitors it
+    /// via [`Self::relay_arm_failed_rx`] and re-bridges in transcode mode so
+    /// the call keeps media. `watch` persists the latest value, so a
+    /// notification that fires before the session starts waiting is never lost.
+    relay_arm_failed: watch::Sender<bool>,
+    /// Set once the bridge has fallen back to transcoding. Prevents `bridge()`
+    /// from re-selecting the relay for the rest of the session (the relay
+    /// already proved it cannot be armed).
+    force_transcode: bool,
 }
 
 impl MediaBridge {
@@ -137,7 +150,12 @@ impl MediaBridge {
         let cancel = CancellationToken::new();
         let session = session_id.into();
         crate::telemetry::MediaTelemetry::register_bridge();
-        spawn_bridge_stats_task(session.clone(), Arc::clone(&legs_shared), cancel.child_token());
+        spawn_bridge_stats_task(
+            session.clone(),
+            Arc::clone(&legs_shared),
+            cancel.child_token(),
+        );
+        let (relay_arm_failed, _) = watch::channel(false);
         Self {
             session_id: session,
             leg_a: None,
@@ -153,6 +171,8 @@ impl MediaBridge {
             active_play: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             last_bridged: None,
             legs_shared,
+            relay_arm_failed,
+            force_transcode: false,
         }
     }
 
@@ -225,9 +245,7 @@ impl MediaBridge {
                 .ok_or_else(|| anyhow!("recording task is unavailable"))?
                 .stop()?;
         }
-        self.wait_recorder_result()
-            .await
-            .unwrap_or(Ok(None))
+        self.wait_recorder_result().await.unwrap_or(Ok(None))
     }
 
     /// Wait for the task to finish, either through Stop or max-duration expiry.
@@ -294,10 +312,17 @@ impl MediaBridge {
         // Cancel any prior monitor task for this side first (e.g. after a
         // transfer / REFER replaced the leg) so old tasks don't leak and keep
         // the old PeerConnection / IngressTap / RTP timeout state alive.
-        if let Some(old) = self.leg_wire_cancels.insert(side, self.root_cancel.child_token()) {
+        if let Some(old) = self
+            .leg_wire_cancels
+            .insert(side, self.root_cancel.child_token())
+        {
             old.cancel();
         }
-        let cancel = self.leg_wire_cancels.get(&side).cloned().expect("just inserted");
+        let cancel = self
+            .leg_wire_cancels
+            .get(&side)
+            .cloned()
+            .expect("just inserted");
         let mut rx = leg.subscribe_dtmf();
         let tap = leg.ingress_tap().clone();
         let timeout = leg.rtp_timeout_state();
@@ -418,11 +443,13 @@ impl MediaBridge {
     // ── Routing ──────────────────────────────────────────────────────────
 
     /// Bridge A ↔ B. Both legs must exist and be answered (gate open). Selects
-    /// [`EgressSource::RewriteRelay`] when both legs use plain RTP, the
-    /// negotiated audio codecs match, AND the legs share a video codec (or
-    /// neither negotiated video). If either leg uses WebRTC, use
-    /// [`EgressSource::TranscodePeer`] instead (audio-only — video is never
-    /// transcoded).
+    /// [`EgressSource::RewriteRelay`] when the negotiated audio codecs match
+    /// AND the legs share a video codec (or neither negotiated video);
+    /// otherwise [`EgressSource::TranscodePeer`] (audio-only — video cannot be
+    /// relayed without a common codec and is never transcoded). WebRTC legs
+    /// are supported on the fast path: the rewrite bridge runs at the
+    /// plaintext boundary, so SRTP is decrypted/encrypted per leg and
+    /// matching codecs still relay zero-copy.
     pub async fn bridge(&mut self) -> Result<()> {
         let (la, lb) = (self.leg_a.clone(), self.leg_b.clone());
         let (Some(la), Some(lb)) = (la, lb) else {
@@ -451,9 +478,7 @@ impl MediaBridge {
         // may even misroute it onto another track). When both legs negotiated
         // video but share no codec, degrade to the transcoding path: audio
         // still flows (decode → re-encode) and video stops entirely.
-        let video_mismatch = !pa.video.is_empty()
-            && !pb.video.is_empty()
-            && video_match.is_none();
+        let video_mismatch = !pa.video.is_empty() && !pb.video.is_empty() && video_match.is_none();
         let a_transport = la.pc().config().transport_mode.clone();
         let b_transport = lb.pc().config().transport_mode.clone();
         let has_webrtc_leg = a_transport == rustrtc::TransportMode::WebRtc
@@ -464,9 +489,14 @@ impl MediaBridge {
         let bridged_key = (
             ca.codec,
             cb.codec,
-            video_match
-                .as_ref()
-                .map(|(va, vb)| (va.name.clone(), va.payload_type, vb.name.clone(), vb.payload_type)),
+            video_match.as_ref().map(|(va, vb)| {
+                (
+                    va.name.clone(),
+                    va.payload_type,
+                    vb.name.clone(),
+                    vb.payload_type,
+                )
+            }),
         );
         if self.route_active && self.last_bridged.as_ref() == Some(&bridged_key) {
             return Ok(());
@@ -482,7 +512,7 @@ impl MediaBridge {
             );
         }
 
-        if ca.codec == cb.codec && !video_mismatch && !has_webrtc_leg {
+        if ca.codec == cb.codec && !video_mismatch && !self.force_transcode {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
@@ -609,12 +639,14 @@ impl MediaBridge {
                 peer_pc: lb.pc().clone(),
                 options: options_a_to_b,
                 rules: rules_a_to_b,
+                on_arm_failed: Some(self.arm_failed_callback()),
             })
             .await?;
             lb.set_egress_source(EgressSource::RewriteRelay {
                 peer_pc: la.pc().clone(),
                 options: options_b_to_a,
                 rules: rules_b_to_a,
+                on_arm_failed: Some(self.arm_failed_callback()),
             })
             .await?;
             // WebRTC receivers depend on RTCP PLI/NACK to recover lost video
@@ -804,9 +836,7 @@ impl MediaBridge {
         let path = path.into();
         self.play_side_only(
             side,
-            Box::new(
-                crate::audio_source::FileAudioSource::new(path, loop_playback).await?,
-            ),
+            Box::new(crate::audio_source::FileAudioSource::new(path, loop_playback).await?),
             loop_playback,
         )
         .await
@@ -965,9 +995,14 @@ impl MediaBridge {
         side: LegSide,
         sample_rate: u32,
     ) -> Result<tokio::sync::mpsc::Sender<Vec<i16>>> {
-        let leg = self.leg(side).ok_or_else(|| anyhow!("no leg on {side:?}"))?;
+        let leg = self
+            .leg(side)
+            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
         let (tx, rx) = tokio::sync::mpsc::channel(256);
-        let source = Box::new(crate::audio_source::ChannelAudioSource::new(rx, sample_rate));
+        let source = Box::new(crate::audio_source::ChannelAudioSource::new(
+            rx,
+            sample_rate,
+        ));
         leg.play(source, true, None).await?;
         Ok(tx)
     }
@@ -983,6 +1018,36 @@ impl MediaBridge {
         timeout: Duration,
     ) -> Option<oneshot::Receiver<()>> {
         self.leg(side).map(|leg| leg.arm_rtp_timeout(timeout))
+    }
+
+    /// Callback passed to `RewriteRelay` egress sources: fires the relay-arm
+    /// failure latch when a WebRTC leg's transport never becomes ready.
+    fn arm_failed_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let tx = self.relay_arm_failed.clone();
+        Arc::new(move || {
+            let _ = tx.send(true);
+        })
+    }
+
+    /// A receiver that resolves when a fast-path relay arming attempt failed
+    /// (latch value flips to `true`). The session monitors it from a spawned
+    /// task and reacts with [`Self::force_transcode`]. `watch` persists the
+    /// latest value, so a failure that already fired is not missed.
+    pub fn relay_arm_failed_rx(&self) -> watch::Receiver<bool> {
+        self.relay_arm_failed.subscribe()
+    }
+
+    /// Permanently force the transcode path for this session. The relay
+    /// already failed to arm (e.g. WebRTC DTLS never came up), so re-selecting
+    /// it would strand the call with no media. Clears the active route and
+    /// re-bridges so the next activation picks transcoding.
+    pub async fn force_transcode(&mut self) -> Result<()> {
+        self.force_transcode = true;
+        if self.route_active {
+            self.unbridge().await?;
+            self.bridge().await?;
+        }
+        Ok(())
     }
 
     /// Pause a leg's RTP timeout (e.g. during hold).
@@ -1128,7 +1193,9 @@ struct LegSampleDelta {
 }
 
 fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelta {
-    let Some(cur) = cur else { return LegSampleDelta::default() };
+    let Some(cur) = cur else {
+        return LegSampleDelta::default();
+    };
     let prev = prev.cloned().unwrap_or_default();
     // SR packet count is only meaningful once a Sender Report has arrived.
     // If the remote SSRC changed (stream restart / audio↔video SR flip) the
@@ -1376,7 +1443,10 @@ fn video_relay_rules(
         // name-only match when the fmtp differs between legs.
         peer.iter()
             .find(|c| c.name.eq_ignore_ascii_case(&codec.name) && c.fmtp == codec.fmtp)
-            .or_else(|| peer.iter().find(|c| c.name.eq_ignore_ascii_case(&codec.name)))
+            .or_else(|| {
+                peer.iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&codec.name))
+            })
     }
 
     fn is_audio_pt(pt: u8, audio_pt: Option<u8>, dtmf_pts: &std::collections::HashSet<u8>) -> bool {
@@ -1431,7 +1501,10 @@ fn video_relay_rules(
 
 /// The RTP transport used to send RTCP to a leg's remote peer (the PC's
 /// muxed media transport, from the video sender — all media shares it).
-fn leg_send_transport(leg: &Leg, kind: MediaKind) -> Option<Arc<rustrtc::transports::rtp::RtpTransport>> {
+fn leg_send_transport(
+    leg: &Leg,
+    kind: MediaKind,
+) -> Option<Arc<rustrtc::transports::rtp::RtpTransport>> {
     leg.pc()
         .get_transceivers()
         .into_iter()
@@ -1492,7 +1565,14 @@ fn wire_rtcp_relay(
         forwarder_count.clone(),
     );
     let a_audio_pts: Vec<u8> = a_audio_pt.into_iter().collect();
-    wire_rtcp_sender_forward(b.clone(), a.clone(), MediaKind::Audio, a_audio_pts, cancel, forwarder_count);
+    wire_rtcp_sender_forward(
+        b.clone(),
+        a.clone(),
+        MediaKind::Audio,
+        a_audio_pts,
+        cancel,
+        forwarder_count,
+    );
 }
 
 /// Spawn one RTCP-forwarding task: feedback (PLI/NACK) targeting a sender of
@@ -1618,10 +1698,7 @@ mod tests {
         let mut rx = mb.dtmf_bus();
         let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
-        let egress = RtpPacket::new(
-            RtpHeader::new(101, 1, 100, 1234),
-            vec![1, 0x80, 0, 160],
-        );
+        let egress = RtpPacket::new(RtpHeader::new(101, 1, 100, 1234), vec![1, 0x80, 0, 160]);
         leg.ingress_tap().on_egress(&egress, addr);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), rx.recv())
@@ -1630,10 +1707,7 @@ mod tests {
             "egress DTMF must not be published to the session bus"
         );
 
-        let ingress = RtpPacket::new(
-            RtpHeader::new(101, 2, 200, 1234),
-            vec![2, 0x80, 0, 160],
-        );
+        let ingress = RtpPacket::new(RtpHeader::new(101, 2, 200, 1234), vec![2, 0x80, 0, 160]);
         leg.ingress_tap().on_ingress(&ingress, addr);
         let (side, event) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -1701,11 +1775,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webrtc_legs_negotiate_and_bridge_with_transcoding() {
+    async fn webrtc_legs_negotiate_and_bridge_fastpath() {
         use rustrtc::SdpType;
 
         // Two WebRTC (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
-        // other. WebRTC legs deliberately skip the same-codec fast-path.
+        // other. Same codec (opus) → fast-path relay on both legs.
         let cfg = LegConfig {
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
@@ -1747,18 +1821,20 @@ mod tests {
         assert!(mb.is_bridged(), "route should be active after both answer");
         for side in [LegSide::A, LegSide::B] {
             assert!(
-                !mb.leg(side).expect("leg").egress_is_relay(),
-                "WebRTC leg {side:?} should use transcoding"
+                mb.leg(side).expect("leg").egress_is_relay(),
+                "WebRTC leg {side:?} should use fast-path relay"
             );
         }
         mb.close();
     }
 
-    /// WebRTC legs deliberately skip the relay even when their audio and video
-    /// codecs match. The current transcoding path is audio-only, so video is
-    /// not relayed in this mode.
+    /// WebRTC legs with matching audio+video codecs relay on the fast path
+    /// (audio + video rewritten at transport level, RTCP PLI/NACK relayed).
+    /// In the unit-test environment the DTLS transports never come up, so the
+    /// RTCP-forwarding tasks must degrade gracefully (no panic, no spin) while
+    /// the RTP relay rules are still installed and both legs report fast-path.
     #[tokio::test]
-    async fn webrtc_video_legs_skip_fastpath() {
+    async fn webrtc_video_legs_bridge_fastpath_with_rtcp_relay() {
         use rustrtc::SdpType;
 
         let cfg = LegConfig {
@@ -1800,10 +1876,14 @@ mod tests {
         for side in [LegSide::A, LegSide::B] {
             let leg = mb.leg(side).expect("leg");
             assert!(
-                !leg.egress_is_relay(),
-                "WebRTC leg {side:?} should use transcoding"
+                leg.egress_is_relay(),
+                "WebRTC leg {side:?} should use fast-path relay"
             );
         }
+
+        // Give the RTCP-forwarding tasks a moment: with no DTLS transport in
+        // the unit-test env they must time out quietly (never panic/spin).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         mb.close();
     }
 
@@ -1876,10 +1956,11 @@ mod tests {
         mb.close();
     }
 
-    /// A same-codec WebRTC↔RTP bridge uses transcoding and must not wait for
-    /// the WebRTC DTLS/SRTP transport before call setup can continue.
+    /// A same-codec WebRTC↔RTP bridge uses the fast-path relay and must not
+    /// wait for the WebRTC DTLS/SRTP transport before call setup can continue
+    /// (the deferred-arming path arms the rewrite bridge in the background).
     #[tokio::test]
-    async fn same_codec_webrtc_rtp_bridge_uses_transcoding_without_waiting() {
+    async fn fastpath_relay_does_not_block_on_unready_webrtc_transport() {
         use rustrtc::SdpType;
 
         let webrtc_cfg = LegConfig {
@@ -1956,8 +2037,8 @@ mod tests {
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
 
-        // Same codec on both legs would normally qualify for fast-path, but
-        // the WebRTC leg forces the audio transcoding route.
+        // Same codec on both legs → fast-path relay, with arming deferred to a
+        // background task so accept never blocks on the unready WebRTC peer.
         let start = std::time::Instant::now();
         mb.accept(LegSide::A).await;
         mb.accept(LegSide::B).await;
@@ -1967,14 +2048,41 @@ mod tests {
             "accept must not block on the unready WebRTC transport (took {elapsed:?})"
         );
         assert!(mb.is_bridged(), "route should be active after both answer");
+        for side in [LegSide::A, LegSide::B] {
+            assert!(
+                mb.leg(side).unwrap().egress_is_relay(),
+                "leg {side:?} should select the fast-path relay (armed in background)"
+            );
+        }
+
+        // The WebRTC peer never connects → the deferred arming fails and the
+        // bridge must surface it so the session can fall back to transcoding.
+        let fallback = mb.relay_arm_failed_rx();
+        let fired = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let mut rx = fallback;
+            loop {
+                if *rx.borrow_and_update() {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
         assert!(
-            !mb.leg(LegSide::A).unwrap().egress_is_relay(),
-            "WebRTC caller leg should use transcoding"
+            fired.is_ok(),
+            "relay arming failure must be signaled for fallback to transcode"
         );
-        assert!(
-            !mb.leg(LegSide::B).unwrap().egress_is_relay(),
-            "RTP callee leg should use transcoding when its peer is WebRTC"
-        );
+
+        // Fallback must switch the session to transcode (relay un-selected).
+        mb.force_transcode().await.expect("force transcode");
+        for side in [LegSide::A, LegSide::B] {
+            assert!(
+                !mb.leg(side).unwrap().egress_is_relay(),
+                "leg {side:?} should be on transcode after relay-arm fallback"
+            );
+        }
         mb.close();
     }
 
@@ -2115,13 +2223,41 @@ mod tests {
         // VP8 first, then several H264 profiles at preserved PTs (96..=124).
         let a = vec![
             vcap("VP8", 96, None),
-            vcap("H264", 102, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f")),
-            vcap("H264", 104, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f")),
-            vcap("H264", 108, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f")),
-            vcap("H264", 114, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f")),
-            vcap("H264", 116, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f")),
-            vcap("H264", 39, Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f")),
-            vcap("H264", 118, Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f")),
+            vcap(
+                "H264",
+                102,
+                Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"),
+            ),
+            vcap(
+                "H264",
+                104,
+                Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"),
+            ),
+            vcap(
+                "H264",
+                108,
+                Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
+            ),
+            vcap(
+                "H264",
+                114,
+                Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"),
+            ),
+            vcap(
+                "H264",
+                116,
+                Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f"),
+            ),
+            vcap(
+                "H264",
+                39,
+                Some("level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f"),
+            ),
+            vcap(
+                "H264",
+                118,
+                Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f"),
+            ),
         ];
         let b = a.clone();
 
@@ -2150,18 +2286,34 @@ mod tests {
         // Every video PT on leg A must have a relay rule, stamped with leg B's
         // video sender SSRC; mirror for B→A.
         for va in &a {
-            let rule = a_to_b_by_pt.get(&va.payload_type).unwrap_or_else(|| {
-                panic!("no A→B relay rule for video PT {}", va.payload_type)
-            });
-            assert_eq!(rule.fixed_out_ssrc, Some(0xB0B0B0B0), "A→B must use B's video SSRC");
-            assert_eq!(rule.out_payload_type, Some(va.payload_type), "PT preserved across legs");
+            let rule = a_to_b_by_pt
+                .get(&va.payload_type)
+                .unwrap_or_else(|| panic!("no A→B relay rule for video PT {}", va.payload_type));
+            assert_eq!(
+                rule.fixed_out_ssrc,
+                Some(0xB0B0B0B0),
+                "A→B must use B's video SSRC"
+            );
+            assert_eq!(
+                rule.out_payload_type,
+                Some(va.payload_type),
+                "PT preserved across legs"
+            );
         }
         for vb in &b {
-            let rule = b_to_a_by_pt.get(&vb.payload_type).unwrap_or_else(|| {
-                panic!("no B→A relay rule for video PT {}", vb.payload_type)
-            });
-            assert_eq!(rule.fixed_out_ssrc, Some(0xA0A0A0A0), "B→A must use A's video SSRC");
-            assert_eq!(rule.out_payload_type, Some(vb.payload_type), "PT preserved across legs");
+            let rule = b_to_a_by_pt
+                .get(&vb.payload_type)
+                .unwrap_or_else(|| panic!("no B→A relay rule for video PT {}", vb.payload_type));
+            assert_eq!(
+                rule.fixed_out_ssrc,
+                Some(0xA0A0A0A0),
+                "B→A must use A's video SSRC"
+            );
+            assert_eq!(
+                rule.out_payload_type,
+                Some(vb.payload_type),
+                "PT preserved across legs"
+            );
         }
     }
 
@@ -2177,14 +2329,25 @@ mod tests {
         let mut b_dtmf = std::collections::HashSet::new();
         b_dtmf.insert(110);
 
-        let (a_to_b, b_to_a) = video_relay_rules(
-            &a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf, None, None,
-        );
+        let (a_to_b, b_to_a) =
+            video_relay_rules(&a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf, None, None);
 
-        let a_matched: Vec<u8> = a_to_b.iter().map(|r| r.match_payload_type.unwrap()).collect();
-        let b_matched: Vec<u8> = b_to_a.iter().map(|r| r.match_payload_type.unwrap()).collect();
+        let a_matched: Vec<u8> = a_to_b
+            .iter()
+            .map(|r| r.match_payload_type.unwrap())
+            .collect();
+        let b_matched: Vec<u8> = b_to_a
+            .iter()
+            .map(|r| r.match_payload_type.unwrap())
+            .collect();
         // PT 96 (audio) and PT 110 (DTMF) must be excluded from the video rules.
-        assert!(!a_matched.contains(&96) && !a_matched.contains(&110), "A video rules hijack audio/DTMF: {a_matched:?}");
-        assert!(!b_matched.contains(&96) && !b_matched.contains(&110), "B video rules hijack audio/DTMF: {b_matched:?}");
+        assert!(
+            !a_matched.contains(&96) && !a_matched.contains(&110),
+            "A video rules hijack audio/DTMF: {a_matched:?}"
+        );
+        assert!(
+            !b_matched.contains(&96) && !b_matched.contains(&110),
+            "B video rules hijack audio/DTMF: {b_matched:?}"
+        );
     }
 }

@@ -45,7 +45,12 @@ impl TestPeer {
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
         pc.add_track(track, codec.to_params()).unwrap();
-        Self { pc, tx, codec, video_tx: None }
+        Self {
+            pc,
+            tx,
+            codec,
+            video_tx: None,
+        }
     }
 
     /// Build a peer with an explicit media capability list (e.g. to also offer
@@ -60,7 +65,12 @@ impl TestPeer {
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
         pc.add_track(track, codec.to_params()).unwrap();
-        Self { pc, tx, codec, video_tx: None }
+        Self {
+            pc,
+            tx,
+            codec,
+            video_tx: None,
+        }
     }
 
     /// Add a video sender track (so the peer can relay video end-to-end). The
@@ -298,14 +308,7 @@ impl TestMediaHarness {
         codec_b: CodecType,
         recorder: Box<dyn rustpbx_media::media_recorder::MediaRecorder>,
     ) -> Self {
-        Self::create_inner(
-            transport_a,
-            codec_a,
-            transport_b,
-            codec_b,
-            Some(recorder),
-        )
-        .await
+        Self::create_inner(transport_a, codec_a, transport_b, codec_b, Some(recorder)).await
     }
 
     async fn create_inner(
@@ -388,6 +391,18 @@ impl TestMediaHarness {
         );
     }
 
+    /// Assert both legs are (or are not) on the zero-copy fast-path relay.
+    fn assert_relay(&self, expected: bool) {
+        for side in [LegSide::A, LegSide::B] {
+            let leg = self.mb.leg(side).expect("leg");
+            assert_eq!(
+                leg.egress_is_relay(),
+                expected,
+                "leg {side:?} relay mode mismatch (expected relay={expected})"
+            );
+        }
+    }
+
     /// Continuously send real codec frames from test_a and poll test_b for a
     /// non-empty frame until the timeout. WebRTC loopback SRTP/DTLS can take a
     /// moment to stabilize under load, so frames are fed for the whole window.
@@ -442,7 +457,10 @@ impl TestMediaHarness {
         recv_timeout_ms: u64,
     ) -> Option<AudioFrame> {
         let frames = encode_codec_frames(send_codec, 20);
-        assert!(!frames.is_empty(), "must have encoded frames for {send_codec:?}");
+        assert!(
+            !frames.is_empty(),
+            "must have encoded frames for {send_codec:?}"
+        );
         let rate = send_codec.samplerate();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(recv_timeout_ms);
         let mut ts = 0u32;
@@ -521,6 +539,7 @@ async fn fast_path_rtp_pcmu_rtp_pcmu() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::PCMU, 5000)
         .await
@@ -543,6 +562,7 @@ async fn fast_path_rtp_g722_rtp_g722() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::G722, 5000)
         .await
@@ -564,6 +584,7 @@ async fn fast_path_srtp_pcmu_srtp_pcmu() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::PCMU, 5000)
         .await
@@ -586,6 +607,7 @@ async fn fast_path_webrtc_pcmu_webrtc_pcmu() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
         .await
@@ -608,6 +630,7 @@ async fn fast_path_cross_transport_rtp_to_webrtc() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
         .await
@@ -634,8 +657,7 @@ async fn local_playback_to_webrtc_carries_mid() {
     .await;
     h.bridge_and_accept().await;
 
-    h.mb
-        .leg(LegSide::A)
+    h.mb.leg(LegSide::A)
         .unwrap()
         .play(Box::new(TestBeep::new(8000)), true, None)
         .await
@@ -676,6 +698,7 @@ async fn fast_path_webrtc_opus_webrtc_opus() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::Opus, 8000)
         .await
@@ -719,6 +742,20 @@ struct VideoTestHarness {
     test_b: TestPeer,
 }
 
+impl VideoTestHarness {
+    /// Assert both legs are on the zero-copy fast-path relay.
+    fn assert_relay(&self, expected: bool) {
+        for side in [LegSide::A, LegSide::B] {
+            let leg = self.mb.leg(side).expect("leg");
+            assert_eq!(
+                leg.egress_is_relay(),
+                expected,
+                "leg {side:?} relay mode mismatch (expected relay={expected})"
+            );
+        }
+    }
+}
+
 async fn create_video_harness(
     transport_a: TransportMode,
     transport_b: TransportMode,
@@ -740,8 +777,18 @@ async fn create_video_harness(
     negotiate(&test_b, &leg_b).await;
 
     // Both legs must have negotiated video (a common codec) for relay to arm.
-    assert!(!leg_a.negotiated().map(|p| p.video.is_empty()).unwrap_or(true));
-    assert!(!leg_b.negotiated().map(|p| p.video.is_empty()).unwrap_or(true));
+    assert!(
+        !leg_a
+            .negotiated()
+            .map(|p| p.video.is_empty())
+            .unwrap_or(true)
+    );
+    assert!(
+        !leg_b
+            .negotiated()
+            .map(|p| p.video.is_empty())
+            .unwrap_or(true)
+    );
 
     // Ensure both legs' RTP transports (and DTLS for WebRTC) are ready before
     // bridging so the deferred relay arming succeeds promptly.
@@ -772,7 +819,12 @@ impl VideoTestHarness {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(8000);
         let mut ts = 1000u32;
         while tokio::time::Instant::now() < deadline {
-            sender.send_video(vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x00, 0x00, 0x00], ts);
+            sender.send_video(
+                vec![
+                    0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x00, 0x00, 0x00,
+                ],
+                ts,
+            );
             ts = ts.wrapping_add(3000);
             if let Some(frame) = receiver.recv_video(100).await {
                 return !frame.data.is_empty();
@@ -847,8 +899,15 @@ async fn fast_path_rtp_h264_rtp_h264_video_relay() {
         h264_caps(96),
     )
     .await;
-    assert!(h.relay_video(&h.test_a, &h.test_b).await, "B must receive A's video");
-    assert!(h.relay_video(&h.test_b, &h.test_a).await, "A must receive B's video");
+    h.assert_relay(true);
+    assert!(
+        h.relay_video(&h.test_a, &h.test_b).await,
+        "B must receive A's video"
+    );
+    assert!(
+        h.relay_video(&h.test_b, &h.test_a).await,
+        "A must receive B's video"
+    );
     h.close();
     // Let background tasks (ICE/DTLS/sender loops) drain before the test
     // runtime drops — sync close() cannot await task completion.
@@ -867,8 +926,15 @@ async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
         h264_caps(96),
     )
     .await;
-    assert!(h.relay_video(&h.test_a, &h.test_b).await, "B must receive A's WebRTC video");
-    assert!(h.relay_video(&h.test_b, &h.test_a).await, "A must receive B's WebRTC video");
+    h.assert_relay(true);
+    assert!(
+        h.relay_video(&h.test_a, &h.test_b).await,
+        "B must receive A's WebRTC video"
+    );
+    assert!(
+        h.relay_video(&h.test_b, &h.test_a).await,
+        "A must receive B's WebRTC video"
+    );
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
@@ -885,8 +951,15 @@ async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
         h264_caps(96),
     )
     .await;
-    assert!(h.relay_video(&h.test_a, &h.test_b).await, "RTP peer must receive WebRTC peer's video");
-    assert!(h.relay_video(&h.test_b, &h.test_a).await, "WebRTC peer must receive RTP peer's video");
+    h.assert_relay(true);
+    assert!(
+        h.relay_video(&h.test_a, &h.test_b).await,
+        "RTP peer must receive WebRTC peer's video"
+    );
+    assert!(
+        h.relay_video(&h.test_b, &h.test_a).await,
+        "WebRTC peer must receive RTP peer's video"
+    );
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
@@ -923,6 +996,7 @@ async fn transcode_rtp_pcmu_to_rtp_pcma() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
         .await
@@ -948,6 +1022,7 @@ async fn transcode_rtp_pcmu_to_webrtc_opus() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
         .await
@@ -974,6 +1049,7 @@ async fn transcode_webrtc_opus_to_rtp_pcmu() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::Opus, 8000)
         .await
@@ -996,6 +1072,7 @@ async fn transcode_rtp_g722_to_webrtc_opus() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::G722, 8000)
         .await
@@ -1022,6 +1099,7 @@ async fn fast_path_rtp_g729_rtp_g729() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::G729, 8000)
         .await
@@ -1042,6 +1120,7 @@ async fn transcode_rtp_g729_to_rtp_pcmu() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::G729, 8000)
         .await
@@ -1062,6 +1141,7 @@ async fn transcode_rtp_g729_to_webrtc_opus() {
     )
     .await;
     h.bridge_and_accept().await;
+    h.assert_relay(false);
     let frame = h
         .send_and_receive(CodecType::G729, 8000)
         .await
@@ -1082,18 +1162,18 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
         CodecType::PCMU,
     )
     .await;
-    let playback_ssrc = h
-        .mb
-        .leg(LegSide::B)
-        .unwrap()
-        .pc()
-        .get_transceivers()
-        .into_iter()
-        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-        .and_then(|t| t.sender())
-        .map(|s| s.ssrc())
-        .expect("leg B audio sender");
+    let playback_ssrc =
+        h.mb.leg(LegSide::B)
+            .unwrap()
+            .pc()
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .and_then(|t| t.sender())
+            .map(|s| s.ssrc())
+            .expect("leg B audio sender");
     h.bridge_and_accept().await;
+    h.assert_relay(true);
     let frame = h
         .send_and_receive(CodecType::PCMU, 8000)
         .await
@@ -1102,7 +1182,10 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
         .raw_packet
         .as_ref()
         .expect("received frame must carry the raw RTP packet");
-    assert_ne!(raw.header.ssrc, playback_ssrc, "playback uses a separate SSRC");
+    assert_ne!(
+        raw.header.ssrc, playback_ssrc,
+        "playback uses a separate SSRC"
+    );
     assert_eq!(raw.header.payload_type, 0);
     h.close();
 }
@@ -1131,23 +1214,34 @@ async fn relay_full_duplex_rtp_rtp() {
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
+    h.assert_relay(true);
 
     // A→B: caller voice → agent
-    let a_to_b = h.send_and_receive(CodecType::PCMU, 8000).await.expect("A→B");
+    let a_to_b = h
+        .send_and_receive(CodecType::PCMU, 8000)
+        .await
+        .expect("A→B");
     assert!(!a_to_b.data.is_empty(), "A→B: agent must receive audio");
     let raw_a_b = a_to_b.raw_packet.as_ref().expect("raw packet");
     assert_eq!(raw_a_b.header.payload_type, 0, "A→B: PT must be PCMU");
-    assert_ne!(raw_a_b.header.ssrc, b_playback,
-        "RTP destination: relay SSRC must be distinct from playback SSRC");
+    assert_ne!(
+        raw_a_b.header.ssrc, b_playback,
+        "RTP destination: relay SSRC must be distinct from playback SSRC"
+    );
     assert_no_mid(raw_a_b);
 
     // B→A: agent voice → caller
-    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 8000).await.expect("B→A");
+    let b_to_a = h
+        .send_b_to_a_receive(CodecType::PCMU, 8000)
+        .await
+        .expect("B→A");
     assert!(!b_to_a.data.is_empty(), "B→A: caller must receive audio");
     let raw_b_a = b_to_a.raw_packet.as_ref().expect("raw packet");
     assert_eq!(raw_b_a.header.payload_type, 0, "B→A: PT must be PCMU");
-    assert_ne!(raw_b_a.header.ssrc, a_playback,
-        "RTP destination: relay SSRC must be distinct from playback SSRC");
+    assert_ne!(
+        raw_b_a.header.ssrc, a_playback,
+        "RTP destination: relay SSRC must be distinct from playback SSRC"
+    );
     assert_no_mid(raw_b_a);
 
     h.close();
@@ -1169,6 +1263,7 @@ async fn relay_full_duplex_webrtc_webrtc() {
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
+    h.assert_relay(true);
 
     let a_to_b = h
         .send_and_receive(CodecType::PCMU, 10000)
@@ -1176,8 +1271,14 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, b_playback, "WebRTC destination: relay SSRC must be distinct");
-    assert_has_mid(raw, "WebRTC destination: relay must stamp MID for browser attribution");
+    assert_ne!(
+        raw.header.ssrc, b_playback,
+        "WebRTC destination: relay SSRC must be distinct"
+    );
+    assert_has_mid(
+        raw,
+        "WebRTC destination: relay must stamp MID for browser attribution",
+    );
 
     let b_to_a = h
         .send_b_to_a_receive(CodecType::PCMU, 10000)
@@ -1185,8 +1286,14 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, a_playback, "WebRTC destination: relay SSRC must be distinct");
-    assert_has_mid(raw, "WebRTC destination: relay must stamp MID for browser attribution");
+    assert_ne!(
+        raw.header.ssrc, a_playback,
+        "WebRTC destination: relay SSRC must be distinct"
+    );
+    assert_has_mid(
+        raw,
+        "WebRTC destination: relay must stamp MID for browser attribution",
+    );
 
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1207,20 +1314,36 @@ async fn relay_full_duplex_webrtc_rtp() {
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
+    h.assert_relay(true);
 
     // A→B: WebRTC caller → plain RTP agent
-    let a_to_b = h.send_and_receive(CodecType::PCMU, 10000).await.expect("A→B");
+    let a_to_b = h
+        .send_and_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, b_playback, "RTP destination: relay SSRC must be distinct");
+    assert_ne!(
+        raw.header.ssrc, b_playback,
+        "RTP destination: relay SSRC must be distinct"
+    );
     assert_no_mid(raw);
 
     // B→A: plain RTP agent → WebRTC caller (original bug direction)
-    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 10000).await.expect("B→A");
+    let b_to_a = h
+        .send_b_to_a_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, a_playback, "WebRTC destination: relay SSRC must be distinct");
-    assert_has_mid(raw, "WebRTC destination: relay must stamp MID (the original 'bitrate but no audio' bug)");
+    assert_ne!(
+        raw.header.ssrc, a_playback,
+        "WebRTC destination: relay SSRC must be distinct"
+    );
+    assert_has_mid(
+        raw,
+        "WebRTC destination: relay must stamp MID (the original 'bitrate but no audio' bug)",
+    );
 
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1241,19 +1364,32 @@ async fn relay_full_duplex_rtp_webrtc() {
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
+    h.assert_relay(true);
 
     // A→B: plain RTP caller → WebRTC agent
-    let a_to_b = h.send_and_receive(CodecType::PCMU, 10000).await.expect("A→B");
+    let a_to_b = h
+        .send_and_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, b_playback, "WebRTC destination: relay SSRC must be distinct");
+    assert_ne!(
+        raw.header.ssrc, b_playback,
+        "WebRTC destination: relay SSRC must be distinct"
+    );
     assert_has_mid(raw, "WebRTC destination: relay must stamp MID");
 
     // B→A: WebRTC agent → plain RTP caller
-    let b_to_a = h.send_b_to_a_receive(CodecType::PCMU, 10000).await.expect("B→A");
+    let b_to_a = h
+        .send_b_to_a_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, a_playback, "RTP destination: relay SSRC must be distinct");
+    assert_ne!(
+        raw.header.ssrc, a_playback,
+        "RTP destination: relay SSRC must be distinct"
+    );
     assert_no_mid(raw);
 
     h.close();
@@ -1327,8 +1463,7 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
     };
     let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
     leg_cfg.media_capabilities = Some(leg_caps);
-    let leg =
-        LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None).unwrap();
+    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None).unwrap();
 
     // Peer: offer PCMU + telephone-event so the leg's DTMF PT gets negotiated.
     let mut caps = rustrtc::config::MediaCapabilities::default();
@@ -1691,11 +1826,10 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
 
     // Locally-generated playback must be encoded with the NEW codec (PCMA) —
     // observed as PT 8 on the wire, not stale PCMU (PT 0).
-    let _handle = h
-        .mb
-        .play(LegSide::A, Box::new(TestBeep::new(8000)), true)
-        .await
-        .expect("play");
+    let _handle =
+        h.mb.play(LegSide::A, Box::new(TestBeep::new(8000)), true)
+            .await
+            .expect("play");
     let captured = drain_sipflow_items(&mut rx, 600).await;
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;

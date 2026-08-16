@@ -231,7 +231,10 @@ impl LegInner {
         // sender interceptor, then subscribe the audio/video senders' RTCP to
         // extract jitter / fraction lost / remote SR packet count.
         let sr_times = SrTimeTracker::new();
-        rtc_config.recorder_interceptors.senders.push(sr_times.clone());
+        rtc_config
+            .recorder_interceptors
+            .senders
+            .push(sr_times.clone());
         let rtcp_stats = LegRtcpStats::new();
 
         let pc = {
@@ -594,7 +597,7 @@ impl LegInner {
 
     /// Whether the leg's egress source is the fast-path relay (vs the paced
     /// egress pipeline: silence / media / transcode).
-    pub(crate) fn egress_is_relay(&self) -> bool {
+    pub fn egress_is_relay(&self) -> bool {
         self.was_relay.load(Ordering::SeqCst)
     }
 
@@ -611,6 +614,7 @@ impl LegInner {
                 peer_pc,
                 options,
                 rules,
+                on_arm_failed,
             } => {
                 // The rewrite bridge needs both RTP transports ready (they are
                 // created during SDP negotiation / DTLS start). Block until
@@ -633,6 +637,7 @@ impl LegInner {
                     let peer = peer_pc.clone();
                     let options = options.clone();
                     let rules = rules.clone();
+                    let on_arm_failed = on_arm_failed.clone();
                     let handle = tokio::spawn(async move {
                         let result =
                             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -644,14 +649,16 @@ impl LegInner {
                             })
                             .await;
                         match result {
-                            Ok(Ok(())) => {
-                                info!("deferred fast-path relay armed successfully");
-                            }
+                            Ok(Ok(())) => {}
                             Ok(Err(e)) => {
-                                warn!(error = %e, "deferred fast-path relay arming failed");
+                                if let Some(cb) = on_arm_failed.as_ref() {
+                                    cb();
+                                }
                             }
                             Err(_) => {
-                                warn!("deferred fast-path relay arming timed out");
+                                if let Some(cb) = on_arm_failed.as_ref() {
+                                    cb();
+                                }
                             }
                         }
                     });

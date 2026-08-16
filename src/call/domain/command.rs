@@ -390,6 +390,11 @@ pub enum CallCommand {
     /// playback handle's `done` resolves.
     ResumeMedia,
 
+    /// Fast-path relay arming failed (e.g. a WebRTC leg's DTLS/SRTP transport
+    /// never became ready). Fall back to transcoding so the call keeps media.
+    /// Issued by the relay-arm-failure monitor spawned alongside the bridge.
+    RelayArmFailure,
+
     /// Send a SIP INFO request to a specific dialog with a custom body and
     /// content-type.  Used by the IVR-exec flow to deliver the result back
     /// to the cc-phone agent.
@@ -549,7 +554,6 @@ impl CallCommand {
                 | CallCommand::Trace { .. }
         )
     }
-
 }
 
 #[cfg(test)]
@@ -585,5 +589,4 @@ mod tests {
         };
         assert!(!play.is_signaling_only());
     }
-
 }

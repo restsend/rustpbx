@@ -73,10 +73,16 @@ pub enum EgressSource {
     ///
     /// The relay is payload-type-aware: `rules` may include audio (catch-all),
     /// DTMF and video rules, each rewriting to its own destination SSRC / PT.
+    ///
+    /// `on_arm_failed` fires (once) if the rewrite bridge cannot be armed —
+    /// e.g. a WebRTC leg's DTLS/SRTP transport never becomes ready. The owner
+    /// (MediaBridge) uses it to fall back to transcoding so the call keeps
+    /// media instead of silently going silent.
     RewriteRelay {
         peer_pc: PeerConnection,
         options: RtpRewriteBridgeOptions,
         rules: Vec<RtpRewriteRule>,
+        on_arm_failed: Option<Arc<dyn Fn() + Send + Sync>>,
     },
     /// Emit silence frames (mute / hold placeholder / idle).
     Silence,
@@ -174,7 +180,6 @@ impl EgressPipeline {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
-            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, ptime)],
             noise_state: 0x9E37_79B9,
@@ -251,7 +256,6 @@ struct EgressTask {
     playback_started_at: Instant,
     sequence_number: u16,
     marker_pending: bool,
-    tick_count: u64,
     /// Source DTMF event timestamp and its timestamp on the output timeline.
     /// Every packet belonging to one event keeps the same RTP timestamp.
     dtmf_event_timestamp: Option<(u32, u32)>,
@@ -368,14 +372,6 @@ impl EgressTask {
                 },
                 _ = tick => {
                     if let Some(frame) = self.next_frame().await {
-                        self.tick_count = self.tick_count.wrapping_add(1);
-                        if self.tick_count <= 5 || self.tick_count % 100 == 0 {
-                            tracing::info!(tick = self.tick_count, pt = frame.payload_type,
-                                "egress tick: produced frame");
-                        }
-                        // DropOldest semantics: if the PC sender is saturated
-                        // (slow remote), drop the oldest rather than block the
-                        // pacing task. try_send never awaits.
                         let clear_marker = self.marker_pending;
                         if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
                             trace!("egress: sender full, dropping frame to keep cadence");
@@ -490,8 +486,11 @@ impl EgressTask {
                         self.build_frame(encoded)
                     }
                     Ok(Ok(MediaSample::Audio(input))) => {
-                        tracing::trace!(pt = input.payload_type, expected_pt = *source_audio_payload_type,
-                            "transcode: non-audio PT frame (telephone-event?)");
+                        tracing::trace!(
+                            pt = input.payload_type,
+                            expected_pt = *source_audio_payload_type,
+                            "transcode: non-audio PT frame (telephone-event?)"
+                        );
                         match self.build_dtmf_frame(&input) {
                             Some(frame) => frame,
                             None => {
@@ -506,7 +505,9 @@ impl EgressTask {
                         self.build_frame(encoded)
                     }
                     Err(_) => {
-                        tracing::trace!("transcode: peer.recv() timeout (no audio yet), emitting silence");
+                        tracing::trace!(
+                            "transcode: peer.recv() timeout (no audio yet), emitting silence"
+                        );
                         let encoded = self.encode_silence();
                         self.build_frame(encoded)
                     }
@@ -659,7 +660,13 @@ mod tests {
     #[tokio::test]
     async fn silence_pipeline_emits_frames_at_ptime() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start_with_gate(sender, pcmu_codec(), EgressSource::Silence, Some(20), None);
+        let pipe = EgressPipeline::start_with_gate(
+            sender,
+            pcmu_codec(),
+            EgressSource::Silence,
+            Some(20),
+            None,
+        );
 
         // Let a few ticks elapse, then stop and inspect via the shared sender
         // drop_count isn't exposed; instead we just assert the task runs and
@@ -692,7 +699,6 @@ mod tests {
             playback_timestamp_base: 0,
             playback_started_at: Instant::now(),
             sequence_number: 0,
-            tick_count: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
@@ -715,7 +721,13 @@ mod tests {
     #[tokio::test]
     async fn switch_source_from_silence_to_media() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start_with_gate(sender, pcmu_codec(), EgressSource::Silence, Some(20), None);
+        let pipe = EgressPipeline::start_with_gate(
+            sender,
+            pcmu_codec(),
+            EgressSource::Silence,
+            Some(20),
+            None,
+        );
         // Switch to a looping media source mid-stream.
         pipe.set_source(EgressSource::Media {
             audio: Box::new(LoopingBeep { rate: 8000, pos: 0 }),
@@ -739,6 +751,7 @@ mod tests {
                 peer_pc: peer_pc.clone(),
                 options: RtpRewriteBridgeOptions::default(),
                 rules: Vec::new(),
+                on_arm_failed: None,
             },
             Some(20),
             None,
@@ -759,7 +772,10 @@ mod tests {
         let MediaSample::Audio(first) = first else {
             panic!("expected audio");
         };
-        assert!(first.marker, "first local packet after relay must be marked");
+        assert!(
+            first.marker,
+            "first local packet after relay must be marked"
+        );
 
         let second = tokio::time::timeout(Duration::from_secs(1), track.recv())
             .await
@@ -774,6 +790,7 @@ mod tests {
             peer_pc: peer_pc.clone(),
             options: RtpRewriteBridgeOptions::default(),
             rules: Vec::new(),
+            on_arm_failed: None,
         })
         .await
         .unwrap();
@@ -793,7 +810,10 @@ mod tests {
             panic!("expected audio");
         };
 
-        assert!(third.marker, "playback after relay must mark the SSRC switch");
+        assert!(
+            third.marker,
+            "playback after relay must mark the SSRC switch"
+        );
         assert!(
             third.rtp_timestamp.wrapping_sub(second.rtp_timestamp) >= 480,
             "playback timestamp must include the relay gap"
@@ -851,7 +871,8 @@ mod tests {
             comfort_noise_level_db: -35.0,
         };
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
-        let pipe = EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
+        let pipe =
+            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
 
         let consumed = Arc::new(AtomicUsize::new(0));
         pipe.set_source(EgressSource::Media {
@@ -910,7 +931,6 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
-            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
@@ -990,7 +1010,6 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
-            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,
@@ -1061,7 +1080,6 @@ mod tests {
             playback_started_at: Instant::now(),
             sequence_number: 0,
             marker_pending: false,
-            tick_count: 0,
             dtmf_event_timestamp: None,
             pcm_buf: vec![0i16; spf],
             noise_state: 0x9E37_79B9,

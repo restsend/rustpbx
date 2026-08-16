@@ -1870,6 +1870,35 @@ impl SipSession {
         }
     }
 
+    /// Spawn a monitor for fast-path relay arming failure. When the relay
+    /// cannot be armed (e.g. a WebRTC leg's DTLS/SRTP transport never becomes
+    /// ready), the bridge latch flips and the monitor sends
+    /// `CallCommand::RelayArmFailure` so the session re-bridges in transcode
+    /// mode instead of going silently dead.
+    fn arm_relay_arm_failure_monitor(
+        mb: &crate::media::media_bridge::MediaBridge,
+        cmd_tx: Option<mpsc::Sender<CallCommand>>,
+        session_id: &str,
+    ) {
+        let mut rx = mb.relay_arm_failed_rx();
+        let cmd_tx = cmd_tx.clone();
+        let sid = session_id.to_string();
+        crate::utils::spawn(async move {
+            loop {
+                if *rx.borrow_and_update() {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+            warn!(session_id = %sid, "fast-path relay arming failed");
+            if let Some(tx) = cmd_tx {
+                let _ = tx.try_send(CallCommand::RelayArmFailure);
+            }
+        });
+    }
+
     /// Reconcile the RTP-inactivity watchdog suppression against the current
     /// session state. Apps (IVR / voicemail / queue / conference) keep the
     /// watchdog active so a caller that drops media without a BYE is still
@@ -1886,6 +1915,15 @@ impl SipSession {
         let should_pause = self.meta.transfer_in_progress;
         mb.set_app_paused(crate::media::media_bridge::LegSide::A, should_pause);
         mb.set_app_paused(crate::media::media_bridge::LegSide::B, should_pause);
+    }
+
+    /// Fast-path relay arming failed (e.g. a WebRTC leg's DTLS/SRTP transport
+    /// never became ready). Fall back to transcoding so the call keeps media.
+    async fn handle_relay_arm_failure(&mut self) -> Result<()> {
+        let Some(mb) = self.media.bridge.as_mut() else {
+            return Ok(());
+        };
+        mb.force_transcode().await
     }
 
     /// Human-readable label for the leg that stopped sending RTP: the session
@@ -5769,8 +5807,9 @@ impl SipSession {
                 mb.accept(crate::media::media_bridge::LegSide::B).await;
                 mb.accept(crate::media::media_bridge::LegSide::A).await;
                 if !is_early_media {
-                    Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx, &session_id);
+                    Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
                 }
+                Self::arm_relay_arm_failure_monitor(mb, cmd_tx, &session_id);
 
                 // A real callee answered — any in-progress transfer is over.
                 self.meta.transfer_in_progress = false;
@@ -6454,7 +6493,8 @@ impl SipSession {
         let session_id = self.context.session_id.clone();
         if let Some(mb) = self.media.bridge.as_mut() {
             let _ = mb.accept(crate::media::media_bridge::LegSide::A).await;
-            Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx, &session_id);
+            Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
+            Self::arm_relay_arm_failure_monitor(mb, cmd_tx, &session_id);
         }
 
         // A call has been answered (real callee or app) — any in-progress
@@ -7763,11 +7803,8 @@ impl SipSession {
                 timer.enabled = true;
                 timer.session_interval = session_expires.interval;
                 timer.active = true;
-                timer.refresher = select_server_timer_refresher(
-                    supported,
-                    true,
-                    session_expires.refresher,
-                );
+                timer.refresher =
+                    select_server_timer_refresher(supported, true, session_expires.refresher);
             }
         } else if session_timer_mode.is_always() {
             timer.enabled = true;
@@ -8608,6 +8645,11 @@ impl SipSession {
                 } else {
                     CommandResult::success()
                 }
+            }
+
+            CallCommand::RelayArmFailure => {
+                info!(session_id = %self.id, "fast-path relay arming failed — falling back to transcoding");
+                Self::ok_or_failure(self.handle_relay_arm_failure().await)
             }
 
             CallCommand::Hold { leg_id, music } => {
@@ -11851,10 +11893,7 @@ mod tests {
         };
 
         caller_tx
-            .send(DialogState::Terminated(
-                dialog_id,
-                TerminatedReason::UasBye,
-            ))
+            .send(DialogState::Terminated(dialog_id, TerminatedReason::UasBye))
             .expect("caller state receiver must be open");
 
         tokio::time::timeout(

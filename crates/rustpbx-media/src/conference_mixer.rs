@@ -19,14 +19,10 @@ pub use crate::AudioFrame;
 /// Conference participant audio interface
 #[derive(Debug)]
 pub(crate) struct ConferenceParticipantAudio {
-    /// Participant ID (LegId)
-    pub leg_id: LegId,
     /// Input channel from participant (decoded PCM)
     pub input_rx: mpsc::Receiver<AudioFrame>,
     /// Output channel to participant (mixed PCM for encoding)
     pub output_tx: mpsc::Sender<AudioFrame>,
-    /// Codec preference
-    pub codec: CodecType,
     /// Whether participant is muted
     pub muted: bool,
 }
@@ -106,7 +102,7 @@ impl ConferenceAudioMixer {
     pub async fn add_participant(
         &self,
         leg_id: LegId,
-        codec: CodecType,
+        _codec: CodecType,
     ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
         // Reject duplicate participants
         if self.participants.contains_key(&leg_id) {
@@ -120,10 +116,8 @@ impl ConferenceAudioMixer {
         let (output_tx, output_rx) = mpsc::channel::<AudioFrame>(100);
 
         let participant = ConferenceParticipantAudio {
-            leg_id: leg_id.clone(),
             input_rx,
             output_tx,
-            codec,
             muted: false,
         };
 

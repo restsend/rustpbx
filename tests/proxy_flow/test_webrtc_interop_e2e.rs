@@ -18,6 +18,17 @@ fn rtp_pcmu_sdp(port: u16) -> String {
     )
 }
 
+fn rtp_opus_sdp(port: u16) -> String {
+    format!(
+        "v=0\r\no=- 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio {port} RTP/AVP 111 101\r\n\
+         a=rtpmap:111 opus/48000/2\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n\
+         a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+         a=sendrecv\r\n"
+    )
+}
+
 fn webrtc_pcmu_sdp(port: u16) -> String {
     format!(
         "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
@@ -31,10 +42,7 @@ fn webrtc_pcmu_sdp(port: u16) -> String {
     )
 }
 
-async fn exchange_rtp(
-    callee_port: u16,
-    pt: u8,
-) -> Result<()> {
+async fn exchange_rtp(callee_port: u16, pt: u8) -> Result<()> {
     let sender = RtpSender::bind().await?;
     let packets = RtpPacket::create_sequence(50, 1000, 50000, 0x11111111, pt, 160, 160);
     sender.start_sending(
@@ -110,7 +118,10 @@ async fn test_rtp_pcmu_to_webrtc_pcmu_fastpath_impl() -> Result<()> {
     exchange_rtp(callee_port, 0).await?;
 
     let stats = callee_receiver.get_stats().await;
-    assert!(stats.packets_received > 0, "Should receive RTP across RTP→WebRTC fastpath");
+    assert!(
+        stats.packets_received > 0,
+        "Should receive RTP across RTP→WebRTC fastpath"
+    );
     assert!(
         stats.payload_types.contains(&0),
         "Same codec (PCMU) should fastpath with PT=0 preserved, got {:?}",
@@ -182,7 +193,10 @@ async fn test_webrtc_to_rtp_codec_mismatch_transcodes_impl() -> Result<()> {
         Ok(Ok(Ok(id))) => Some(id),
         _ => None,
     };
-    assert!(alice_dialog_id.is_some(), "WebRTC→RTP transcode call should establish");
+    assert!(
+        alice_dialog_id.is_some(),
+        "WebRTC→RTP transcode call should establish"
+    );
 
     // WebRTC→RTP 转码场景：由于 TestUa 不做真正的 DTLS-SRTP，无法从 WebRTC 侧
     // 注入 Opus 编码音频做内容级转码验证。此处验证：呼叫建立 + SDP 协商正确。
@@ -250,10 +264,7 @@ impl RtpMediaEndpoint {
     }
 
     fn port(&self) -> u16 {
-        self.socket
-            .local_addr()
-            .map(|a| a.port())
-            .unwrap_or(0)
+        self.socket.local_addr().map(|a| a.port()).unwrap_or(0)
     }
 
     fn start_receiving(&self) {
@@ -278,7 +289,12 @@ impl RtpMediaEndpoint {
         });
     }
 
-    async fn send_sequence(&self, target: std::net::SocketAddr, packets: &[RtpPacket], interval_ms: u64) {
+    async fn send_sequence(
+        &self,
+        target: std::net::SocketAddr,
+        packets: &[RtpPacket],
+        interval_ms: u64,
+    ) {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
         for packet in packets {
             interval.tick().await;
@@ -328,6 +344,16 @@ async fn establish_webrtc_to_rtp_call(
     bob: &TestUa,
     bob_media_port: u16,
 ) -> Result<(rsipstack::dialog::DialogId, String)> {
+    establish_webrtc_call_with_answer(alice, bob, rtp_pcmu_sdp(bob_media_port)).await
+}
+
+/// Drive alice (WebRTC caller) → bob (plain callee answering with the given
+/// SDP). Returns (alice dialog id, offer SDP as seen by bob).
+async fn establish_webrtc_call_with_answer(
+    alice: Arc<TestUa>,
+    bob: &TestUa,
+    answer_sdp: String,
+) -> Result<(rsipstack::dialog::DialogId, String)> {
     let caller_handle = tokio::spawn({
         let a = alice.clone();
         async move { a.make_call("bob", None).await }
@@ -341,8 +367,7 @@ async fn establish_webrtc_to_rtp_call(
             if let TestUaEvent::IncomingCall(id, sdp) = event {
                 bob_dialog_id = Some(id.clone());
                 received_sdp = sdp;
-                let answer = rtp_pcmu_sdp(bob_media_port);
-                bob.answer_call(&id, Some(answer)).await?;
+                bob.answer_call(&id, Some(answer_sdp.clone())).await?;
                 break;
             }
         }
@@ -351,15 +376,68 @@ async fn establish_webrtc_to_rtp_call(
         }
         sleep(Duration::from_millis(25)).await;
     }
-    assert!(bob_dialog_id.is_some(), "Bob should receive the incoming call");
+    assert!(
+        bob_dialog_id.is_some(),
+        "Bob should receive the incoming call"
+    );
 
     let alice_dialog_id = match tokio::time::timeout(Duration::from_secs(20), caller_handle).await {
         Ok(Ok(Ok(id))) => id,
         Ok(Ok(Err(e))) => return Err(anyhow::anyhow!("alice call failed: {}", e)),
-        _ => return Err(anyhow::anyhow!("call setup timeout (ICE/DTLS negotiation too slow)")),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "call setup timeout (ICE/DTLS negotiation too slow)"
+            ));
+        }
     };
     let _ = bob_dialog_id;
     Ok((alice_dialog_id, received_sdp.unwrap_or_default()))
+}
+
+/// Drive a WebRTC caller → WebRTC callee call (both real DTLS-SRTP, callee
+/// answers via its PeerConnection). Returns (alice dialog id, bob dialog id).
+async fn establish_webrtc_to_webrtc_call(
+    alice: Arc<TestUa>,
+    bob: Arc<TestUa>,
+    callee_username: &str,
+) -> Result<(rsipstack::dialog::DialogId, rsipstack::dialog::DialogId)> {
+    let callee_username = callee_username.to_string();
+    let caller_handle = tokio::spawn({
+        let a = alice.clone();
+        let callee_username = callee_username.clone();
+        async move { a.make_call(&callee_username, None).await }
+    });
+
+    let mut bob_dialog_id = None;
+    for _ in 0..600 {
+        let events = bob.process_dialog_events().await?;
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _sdp) = event {
+                bob_dialog_id = Some(id.clone());
+                bob.answer_call(&id, None).await?; // real DTLS-SRTP answer
+                break;
+            }
+        }
+        if bob_dialog_id.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        bob_dialog_id.is_some(),
+        "Bob should receive the incoming call"
+    );
+
+    let alice_dialog_id = match tokio::time::timeout(Duration::from_secs(20), caller_handle).await {
+        Ok(Ok(Ok(id))) => id,
+        Ok(Ok(Err(e))) => return Err(anyhow::anyhow!("alice call failed: {}", e)),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "call setup timeout (ICE/DTLS negotiation too slow)"
+            ));
+        }
+    };
+    Ok((alice_dialog_id, bob_dialog_id.expect("bob dialog")))
 }
 
 /// 20 ms PCMU payloads with a recognizable per-packet fill pattern.
@@ -405,7 +483,10 @@ fn rms(samples: &[i16]) -> f64 {
 fn split_stereo_g711_wav(path: &std::path::Path) -> Result<(Vec<u8>, Vec<u8>, u16, u32)> {
     let data = std::fs::read(path)?;
     anyhow::ensure!(data.len() > 44, "wav too small: {} bytes", data.len());
-    anyhow::ensure!(&data[0..4] == b"RIFF" && &data[8..12] == b"WAVE", "not a RIFF/WAVE file");
+    anyhow::ensure!(
+        &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE",
+        "not a RIFF/WAVE file"
+    );
     // Walk chunks to find fmt + data.
     let mut pos = 12;
     let mut channels = 0u16;
@@ -444,7 +525,9 @@ fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio() {
 }
 
 async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Result<()> {
-    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
 
     use rustpbx::config::{ProxyConfig, RecordingPolicy};
 
@@ -466,10 +549,9 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
         ..Default::default()
     };
 
-    let server = Arc::new(crate::common::e2e_test_server::E2eTestServer::start_with_config(
-        proxy_config,
-    )
-    .await?);
+    let server = Arc::new(
+        crate::common::e2e_test_server::E2eTestServer::start_with_config(proxy_config).await?,
+    );
 
     // Mirror a real JsSIP/Chrome caller: offer [opus, PCMU, telephone-event]
     // (opus first). The plain callee answers PCMU-only, so the proxy must
@@ -520,8 +602,8 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
 
     bob.send_ringing(&bob_dialog_id, Some(answer_sdp.clone()))
         .await?; // 183 Session Progress with early-media SDP (skip the 180:
-                 // rsipstack drops the second Early→Early state transition,
-                 // which would swallow the 183 body on the harness side)
+    // rsipstack drops the second Early→Early state transition,
+    // which would swallow the 183 body on the harness side)
 
     // JsSIP applies the 183 SDP as pranswer; wait for it on alice.
     for _ in 0..200 {
@@ -561,7 +643,13 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            RtpPacket::new(0, 100u16.wrapping_add(i as u16), 1000u32 + (i as u32) * 160, 0x60606060, p.clone())
+            RtpPacket::new(
+                0,
+                100u16.wrapping_add(i as u16),
+                1000u32 + (i as u32) * 160,
+                0x60606060,
+                p.clone(),
+            )
         })
         .collect();
     bob_media
@@ -610,9 +698,7 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
             )
         })
         .collect();
-    bob_media
-        .send_sequence(proxy_media, &bob_packets, 20)
-        .await;
+    bob_media.send_sequence(proxy_media, &bob_packets, 20).await;
     sleep(Duration::from_millis(1500)).await;
 
     // Hang up and let the recording finalize.
@@ -626,7 +712,11 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
         .find(|r| !r.recorder.is_empty())
         .ok_or_else(|| anyhow::anyhow!("no CDR record with a recorder entry"))?;
     let wav_path = std::path::PathBuf::from(&record.recorder[0].path);
-    assert!(wav_path.exists(), "recording file missing: {}", wav_path.display());
+    assert!(
+        wav_path.exists(),
+        "recording file missing: {}",
+        wav_path.display()
+    );
 
     let (leg_a, leg_b, channels, sample_rate) = split_stereo_g711_wav(&wav_path)?;
     assert_eq!(channels, 2);
@@ -702,12 +792,8 @@ async fn test_webrtc_pcmu_to_rtp_pcmu_real_srtp_bidir_audio_impl() -> Result<()>
     let bob_media = RtpMediaEndpoint::bind().await?;
     bob_media.start_receiving();
 
-    let (dialog_id, offer_to_bob) = establish_webrtc_to_rtp_call(
-        alice.clone(),
-        &bob,
-        bob_media.port(),
-    )
-    .await?;
+    let (dialog_id, offer_to_bob) =
+        establish_webrtc_to_rtp_call(alice.clone(), &bob, bob_media.port()).await?;
 
     // SRTP aspect 1: ICE + DTLS-SRTP must actually connect.
     alice.wait_webrtc_connected(Duration::from_secs(15)).await?;
@@ -718,7 +804,7 @@ async fn test_webrtc_pcmu_to_rtp_pcmu_real_srtp_bidir_audio_impl() -> Result<()>
     assert!(
         offer_to_bob.contains("RTP/AVP"),
         "forwarded offer must downgrade transport to RTP/AVP for the plain leg"
-        );
+    );
 
     alice.attach_webrtc_rx_tap().await?;
 
@@ -766,9 +852,7 @@ async fn test_webrtc_pcmu_to_rtp_pcmu_real_srtp_bidir_audio_impl() -> Result<()>
             )
         })
         .collect();
-    bob_media
-        .send_sequence(proxy_media, &bob_packets, 20)
-        .await;
+    bob_media.send_sequence(proxy_media, &bob_packets, 20).await;
     sleep(Duration::from_millis(1000)).await;
 
     // SRTP aspect 2+3: inbound packets must pass SRTP auth + decrypt, and the
@@ -905,11 +989,13 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
     // callee's 183 early-media SDP to the caller. The parallel-fork path only
     // sends a bare 180 and swallows the 183.
     let server = Arc::new(
-        crate::common::e2e_test_server::E2eTestServer::start_with_config(rustpbx::config::ProxyConfig {
-            media_proxy: MediaProxyMode::All,
-            parallel_fork: false,
-            ..Default::default()
-        })
+        crate::common::e2e_test_server::E2eTestServer::start_with_config(
+            rustpbx::config::ProxyConfig {
+                media_proxy: MediaProxyMode::All,
+                parallel_fork: false,
+                ..Default::default()
+            },
+        )
         .await?,
     );
 
@@ -955,15 +1041,17 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
         }
         sleep(Duration::from_millis(25)).await;
     }
-    let bob_dialog_id =
-        bob_dialog_id.ok_or_else(|| anyhow::anyhow!("bob never got the INVITE"))?;
+    let bob_dialog_id = bob_dialog_id.ok_or_else(|| anyhow::anyhow!("bob never got the INVITE"))?;
     let offer_to_bob = offer_to_bob.unwrap_or_default();
     let proxy_media = crate::common::rtp_utils::extract_media_endpoint(&offer_to_bob)
         .ok_or_else(|| anyhow::anyhow!("no media endpoint in forwarded offer"))?;
-    let dtmf_pt = crate::common::rtp_utils::extract_dtmf_payload_type(&offer_to_bob)
-        .ok_or_else(|| {
-            anyhow::anyhow!("forwarded offer has no telephone-event PT, offer:
-{}", offer_to_bob)
+    let dtmf_pt =
+        crate::common::rtp_utils::extract_dtmf_payload_type(&offer_to_bob).ok_or_else(|| {
+            anyhow::anyhow!(
+                "forwarded offer has no telephone-event PT, offer:
+{}",
+                offer_to_bob
+            )
         })?;
 
     // ── 1. 180 Ringing ──
@@ -996,7 +1084,13 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            RtpPacket::new(0, 100u16.wrapping_add(i as u16), 1000u32 + (i as u32) * 160, 0x1B1B1B1B, p.clone())
+            RtpPacket::new(
+                0,
+                100u16.wrapping_add(i as u16),
+                1000u32 + (i as u32) * 160,
+                0x1B1B1B1B,
+                p.clone(),
+            )
         })
         .collect();
     bob_media_a
@@ -1040,7 +1134,13 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            RtpPacket::new(0, 4000u16.wrapping_add(i as u16), 60000u32 + (i as u32) * 160, 0x2C2C2C2C, p.clone())
+            RtpPacket::new(
+                0,
+                4000u16.wrapping_add(i as u16),
+                60000u32 + (i as u32) * 160,
+                0x2C2C2C2C,
+                p.clone(),
+            )
         })
         .collect();
     bob_media_b
@@ -1124,7 +1224,13 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            RtpPacket::new(0, 7000u16.wrapping_add(i as u16), 120000u32 + (i as u32) * 160, 0x2C2C2C2C, p.clone())
+            RtpPacket::new(
+                0,
+                7000u16.wrapping_add(i as u16),
+                120000u32 + (i as u32) * 160,
+                0x2C2C2C2C,
+                p.clone(),
+            )
         })
         .collect();
     bob_media_b
@@ -1134,7 +1240,11 @@ async fn test_webrtc_to_baresip_flow_ring_answer_sdp_change_dtmf_impl() -> Resul
     let (tail_matched, _) = {
         let set: std::collections::HashSet<&Vec<u8>> = tail_payloads.iter().collect();
         let mut m = 0;
-        for p in alice.webrtc_rx_packets().iter().filter(|p| p.payload_type == 0) {
+        for p in alice
+            .webrtc_rx_packets()
+            .iter()
+            .filter(|p| p.payload_type == 0)
+        {
             if set.contains(&p.payload) {
                 m += 1;
             }
@@ -1171,12 +1281,8 @@ async fn test_webrtc_opus_to_rtp_pcmu_real_srtp_transcode_bidir_audio_impl() -> 
     let bob_media = RtpMediaEndpoint::bind().await?;
     bob_media.start_receiving();
 
-    let (dialog_id, offer_to_bob) = establish_webrtc_to_rtp_call(
-        alice.clone(),
-        &bob,
-        bob_media.port(),
-    )
-    .await?;
+    let (dialog_id, offer_to_bob) =
+        establish_webrtc_to_rtp_call(alice.clone(), &bob, bob_media.port()).await?;
 
     alice.wait_webrtc_connected(Duration::from_secs(15)).await?;
     let proxy_media = crate::common::rtp_utils::extract_media_endpoint(&offer_to_bob)
@@ -1258,9 +1364,7 @@ async fn test_webrtc_opus_to_rtp_pcmu_real_srtp_transcode_bidir_audio_impl() -> 
             payload,
         ));
     }
-    bob_media
-        .send_sequence(proxy_media, &bob_packets, 20)
-        .await;
+    bob_media.send_sequence(proxy_media, &bob_packets, 20).await;
     sleep(Duration::from_millis(1500)).await;
 
     let alice_opus_rx: Vec<_> = alice
@@ -1288,6 +1392,252 @@ async fn test_webrtc_opus_to_rtp_pcmu_real_srtp_transcode_bidir_audio_impl() -> 
 
     alice.hangup(&dialog_id).await.ok();
     bob_media.stop();
+    alice.stop();
+    bob.stop();
+    server.stop();
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Same-codec Opus fast-path: WebRTC(opus) caller ↔ plain-RTP(opus) callee.
+//
+// Opus re-encoding is lossy, so byte-identical payloads in both directions
+// PROVE the zero-copy relay ran (transcode would change every opus frame).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_webrtc_opus_to_rtp_opus_fastpath_bidir_audio() {
+    run_with_big_stack(test_webrtc_opus_to_rtp_opus_fastpath_bidir_audio_impl());
+}
+
+async fn test_webrtc_opus_to_rtp_opus_fastpath_bidir_audio_impl() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
+    // Opus-only caller (PT 111).
+    let alice = create_webrtc_caller(
+        &server,
+        "alice",
+        "password123",
+        Some(vec![rustrtc::config::AudioCapability::opus()]),
+    )
+    .await?;
+    let bob = server.create_ua("bob").await?;
+    sleep(Duration::from_millis(100)).await;
+
+    let bob_media = RtpMediaEndpoint::bind().await?;
+    bob_media.start_receiving();
+
+    let (dialog_id, offer_to_bob) =
+        establish_webrtc_call_with_answer(alice.clone(), &bob, rtp_opus_sdp(bob_media.port()))
+            .await?;
+
+    alice.wait_webrtc_connected(Duration::from_secs(15)).await?;
+    let proxy_media = crate::common::rtp_utils::extract_media_endpoint(&offer_to_bob)
+        .ok_or_else(|| anyhow::anyhow!("no media endpoint in forwarded offer"))?;
+    alice.attach_webrtc_rx_tap().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // ── Direction A: WebRTC(opus) → RTP(opus), byte-identical payloads ──
+    let ssrc = alice.webrtc_sender_ssrc();
+    let sent_payloads = patterned_pcmu_payloads(150, 0x40);
+    for (i, payload) in sent_payloads.iter().enumerate() {
+        alice
+            .send_webrtc_rtp(
+                111,
+                3000u16.wrapping_add(i as u16),
+                60000u32 + (i as u32) * 960,
+                ssrc,
+                false,
+                payload.clone(),
+            )
+            .await?;
+        sleep(Duration::from_millis(20)).await;
+    }
+    sleep(Duration::from_millis(1000)).await;
+
+    let bob_received = bob_media.received_packets();
+    let (bob_matched, bob_distinct) = count_payload_matches(&bob_received, 111, &sent_payloads);
+    assert!(
+        bob_matched >= 40,
+        "WebRTC→RTP opus fastpath: bob should receive ≥40 byte-identical opus packets, \
+         got {} matched of {} received (transcode would alter every payload)",
+        bob_matched,
+        bob_received.len()
+    );
+    assert!(
+        bob_distinct >= 20,
+        "matched opus payloads should span many seqs"
+    );
+
+    // ── Direction B: RTP(opus) → WebRTC(opus), byte-identical payloads ──
+    let bob_sent_payloads = patterned_pcmu_payloads(150, 0x80);
+    let bob_packets: Vec<RtpPacket> = bob_sent_payloads
+        .iter()
+        .enumerate()
+        .map(|(i, payload)| {
+            RtpPacket::new(
+                111,
+                7000u16.wrapping_add(i as u16),
+                90000u32 + (i as u32) * 960,
+                0x51515151,
+                payload.clone(),
+            )
+        })
+        .collect();
+    bob_media.send_sequence(proxy_media, &bob_packets, 20).await;
+    sleep(Duration::from_millis(1000)).await;
+
+    let alice_rx = alice.webrtc_rx_packets();
+    let (alice_matched, alice_distinct) = {
+        let sent_set: std::collections::HashSet<&Vec<u8>> = bob_sent_payloads.iter().collect();
+        let mut matched = 0;
+        let mut distinct = std::collections::HashSet::new();
+        for p in alice_rx.iter().filter(|p| p.payload_type == 111) {
+            if sent_set.contains(&p.payload) {
+                matched += 1;
+                distinct.insert(p.payload.clone());
+            }
+        }
+        (matched, distinct.len())
+    };
+    assert!(
+        alice_matched >= 40,
+        "RTP→WebRTC opus fastpath: alice should receive ≥40 byte-identical opus packets, \
+         got {} matched of {} observed",
+        alice_matched,
+        alice_rx.len()
+    );
+    assert!(alice_distinct >= 20);
+
+    alice.hangup(&dialog_id).await.ok();
+    bob_media.stop();
+    alice.stop();
+    bob.stop();
+    server.stop();
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Same-codec WebRTC↔WebRTC fast-path (PCMU): two real DTLS-SRTP legs. Byte-
+// identical payloads both ways plus distinct relay SSRC prove the relay.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_webrtc_pcmu_to_webrtc_pcmu_fastpath_bidir_audio() {
+    run_with_big_stack(test_webrtc_pcmu_to_webrtc_pcmu_fastpath_bidir_audio_impl());
+}
+
+async fn test_webrtc_pcmu_to_webrtc_pcmu_fastpath_bidir_audio_impl() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
+    let alice = create_webrtc_caller(
+        &server,
+        "alice",
+        "password123",
+        Some(vec![
+            rustrtc::config::AudioCapability::pcmu(),
+            rustrtc::config::AudioCapability::telephone_event(),
+        ]),
+    )
+    .await?;
+    let bob = create_webrtc_caller(
+        &server,
+        "charlie",
+        "password789",
+        Some(vec![
+            rustrtc::config::AudioCapability::pcmu(),
+            rustrtc::config::AudioCapability::telephone_event(),
+        ]),
+    )
+    .await?;
+    sleep(Duration::from_millis(100)).await;
+
+    let (alice_dialog_id, _bob_dialog_id) =
+        establish_webrtc_to_webrtc_call(alice.clone(), bob.clone(), "charlie").await?;
+
+    alice.wait_webrtc_connected(Duration::from_secs(15)).await?;
+    bob.wait_webrtc_connected(Duration::from_secs(15)).await?;
+    alice.attach_webrtc_rx_tap().await?;
+    bob.attach_webrtc_rx_tap().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // ── Direction A: alice(WebRTC) → bob(WebRTC) ──
+    let ssrc = alice.webrtc_sender_ssrc();
+    let sent_payloads = patterned_pcmu_payloads(150, 0x30);
+    for (i, payload) in sent_payloads.iter().enumerate() {
+        alice
+            .send_webrtc_rtp(
+                0,
+                3000u16.wrapping_add(i as u16),
+                60000u32 + (i as u32) * 160,
+                ssrc,
+                false,
+                payload.clone(),
+            )
+            .await?;
+        sleep(Duration::from_millis(20)).await;
+    }
+    sleep(Duration::from_millis(1000)).await;
+
+    let bob_rx = bob.webrtc_rx_packets();
+    let (bob_matched, _) = {
+        let sent_set: std::collections::HashSet<&Vec<u8>> = sent_payloads.iter().collect();
+        let mut m = 0;
+        for p in bob_rx.iter().filter(|p| p.payload_type == 0) {
+            if sent_set.contains(&p.payload) {
+                m += 1;
+            }
+        }
+        (m, 0)
+    };
+    assert!(
+        bob_matched >= 40,
+        "WebRTC→WebRTC PCMU fastpath: bob should receive ≥40 byte-identical PCMU packets, \
+         got {} matched of {} observed",
+        bob_matched,
+        bob_rx.len()
+    );
+
+    // ── Direction B: bob(WebRTC) → alice(WebRTC) ──
+    let bob_ssrc = bob.webrtc_sender_ssrc();
+    let bob_sent_payloads = patterned_pcmu_payloads(150, 0x90);
+    for (i, payload) in bob_sent_payloads.iter().enumerate() {
+        bob.send_webrtc_rtp(
+            0,
+            8000u16.wrapping_add(i as u16),
+            120000u32 + (i as u32) * 160,
+            bob_ssrc,
+            false,
+            payload.clone(),
+        )
+        .await?;
+        sleep(Duration::from_millis(20)).await;
+    }
+    sleep(Duration::from_millis(1000)).await;
+
+    let alice_rx = alice.webrtc_rx_packets();
+    let (alice_matched, alice_distinct) = {
+        let sent_set: std::collections::HashSet<&Vec<u8>> = bob_sent_payloads.iter().collect();
+        let mut matched = 0;
+        let mut distinct = std::collections::HashSet::new();
+        for p in alice_rx.iter().filter(|p| p.payload_type == 0) {
+            if sent_set.contains(&p.payload) {
+                matched += 1;
+                distinct.insert(p.payload.clone());
+            }
+        }
+        (matched, distinct.len())
+    };
+    assert!(
+        alice_matched >= 40,
+        "WebRTC→WebRTC PCMU fastpath: alice should receive ≥40 byte-identical PCMU packets, \
+         got {} matched of {} observed",
+        alice_matched,
+        alice_rx.len()
+    );
+    assert!(alice_distinct >= 20);
+
+    alice.hangup(&alice_dialog_id).await.ok();
     alice.stop();
     bob.stop();
     server.stop();
