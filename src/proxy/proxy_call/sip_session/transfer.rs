@@ -1068,19 +1068,37 @@ impl SipSession {
         let forward_sink = forward_sink.ok_or_else(|| anyhow!("No forward sink for Bridge"))?;
         let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
 
-        // ── 3. Create audio decoder (call → raw PCM) ────────────────
-        // The decoder lives inside the reverse loop; we read from the
-        // PeerConnection's track directly so we can also detect RFC 2833 DTMF.
-        let mut decoder = self
-            .create_audio_decoder()
-            .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
-        let dec_sample_rate = decoder.sample_rate();
+        // MediaBridge legs are authoritative for app-anchored calls because
+        // apply_sdp() stores the actual negotiated codec/PT/DTMF profile there.
+        // Keep the session SDP caches as a fallback for legacy peer paths.
+        let negotiated_profile = self
+            .media_side_for_leg(&leg_id)
+            .and_then(|side| {
+                self.media
+                    .bridge
+                    .as_ref()
+                    .and_then(|bridge| bridge.leg(side))
+                    .and_then(|leg| leg.negotiated())
+            })
+            .or_else(|| {
+                self.legs
+                    .get_answer(&leg_id)
+                    .or_else(|| {
+                        if leg_id.as_str() == "caller" {
+                            self.media.answer.as_deref()
+                        } else if leg_id.as_str() == "callee" {
+                            self.media.callee_answer_sdp.as_deref()
+                        } else {
+                            None
+                        }
+                    })
+                    .map(MediaNegotiator::extract_leg_profile)
+            });
 
-        // ── 4. Determine codec type + payload type for the forward encoder ──
-        // Prefer the caller-leg *negotiated* codec and PT (from the answer SDP)
-        // so the injected audio is decodable by the caller and carries the PT
-        // the caller actually offered. The bridge URL `codec` query param is
-        // only a fallback when no SDP is available.
+        // ── 3. Determine codec type + payload type ───────────────────────
+        // Prefer the selected leg's negotiated codec and PT so the injected
+        // audio and reverse decoder use the profile that leg actually accepted.
+        // The bridge URL `codec` query param is only a fallback.
         //
         // The forward loop used to encode the `codec` param and tag frames with
         // `codec_type.payload_type()` — the codec's STATIC default PT (Opus=111,
@@ -1088,26 +1106,17 @@ impl SipSession {
         // negotiated at 96, or a PCMU caller bridged with codec=opus), the
         // forward frames carry a PT the caller never offered, which on the same
         // SSRC as the IVR greeting shows up as a PT 0↔96/111 toggle.
-        let (codec_type, payload_type) = if let Some(audio) = self
-            .legs
-            .get_answer(&leg_id)
-            .or_else(|| {
-                if leg_id.as_str() == "caller" {
-                    self.media.answer.as_deref()
-                } else if leg_id.as_str() == "callee" {
-                    self.media.callee_answer_sdp.as_deref()
-                } else {
-                    None
-                }
-            })
-            .and_then(|s| MediaNegotiator::extract_leg_profile(s).audio)
+        let (codec_type, payload_type) = if let Some(audio) = negotiated_profile
+            .as_ref()
+            .and_then(|profile| profile.audio.as_ref())
         {
             info!(
                 %leg_id,
                 negotiated_codec = ?audio.codec,
                 negotiated_pt = audio.payload_type,
+                negotiated_clock_rate = audio.clock_rate,
                 bridge_codec = %codec,
-                "voip_bridge forward loop using leg-negotiated codec/PT"
+                "voip_bridge using leg-negotiated codec/PT"
             );
             (audio.codec, audio.payload_type)
         } else {
@@ -1120,31 +1129,24 @@ impl SipSession {
             };
             (fallback, fallback.payload_type())
         };
+
+        // Decode the reverse RTP stream with the same codec selected for this
+        // leg. Using the session-level decoder here defaulted RWI calls to PCMU
+        // even after the real MediaBridge leg had negotiated Opus.
+        let mut decoder = audio_codec::create_decoder(codec_type);
+        let dec_sample_rate = decoder.sample_rate();
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
 
         // ── 5. Cancellation token (parent = session cancel) ──────────
         let cancel_token = self.cancel_token.child_token();
 
         // ── 5b. DTMF payload types (from answer SDP) ─────────────────
-        let dtmf_payload_types: Vec<u8> = self
-            .media
-            .answer
-            .as_deref()
-            .map(|answer_sdp| {
-                let mut pts: Vec<u8> = MediaNegotiator::extract_dtmf_codecs(answer_sdp)
-                    .into_iter()
-                    .map(|c| c.payload_type)
-                    .collect();
-                if pts.is_empty() {
-                    if let Some(dtmf) = MediaNegotiator::extract_leg_profile(answer_sdp).dtmf {
-                        pts.push(dtmf.payload_type);
-                    }
-                }
-                pts.sort_unstable();
-                pts.dedup();
-                pts
-            })
+        let mut dtmf_payload_types: Vec<u8> = negotiated_profile
+            .as_ref()
+            .map(|profile| profile.dtmf_pts().into_iter().collect())
             .unwrap_or_default();
+        dtmf_payload_types.sort_unstable();
+        dtmf_payload_types.dedup();
 
         // ── 5c. DTMF JSON text-frame channel ─────────────────────────
         let (dtmf_json_tx, mut dtmf_json_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
