@@ -67,6 +67,7 @@ RustPBX interacts with external systems in two ways:
   ],
   "strategy": "parallel",         // parallel (Ring All) | sequential (Failover)
   "record": true,                 // Enable recording for this call
+  "record_start_at": "media",    // media (includes early media) | answer (wait for 200)
   "timeout": 30,                  // Ring timeout in seconds
   "media_proxy": "auto",          // all | auto | nat | none | bypass
   "headers": {                    // Inject custom SIP headers into the INVITE sent to B
@@ -74,6 +75,11 @@ RustPBX interacts with external systems in two ways:
   }
 }
 ```
+
+`record_start_at` overrides `[recording].auto_start_at` for this call.
+When omitted, the global value is inherited; if neither is set, `media` is the
+default. The field may also be returned without `record` to override the timing
+while retaining the global recording enablement policy.
 
 ### 1.2 User Backend (SIP Authentication)
 Delegate SIP registration password checking to your external DB or API.

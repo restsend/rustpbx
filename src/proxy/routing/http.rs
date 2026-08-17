@@ -3,7 +3,9 @@ use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
     TrunkContext,
 };
-use crate::config::{HttpRouterConfig, MediaProxyMode, RecordingPolicy, RtpConfig};
+use crate::config::{
+    HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
+};
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
@@ -91,6 +93,9 @@ struct HttpResponsePayload {
     pub status: Option<u16>,
     pub reason: Option<String>,
     pub record: Option<bool>,
+    /// Per-call override for when automatic recording starts. When omitted,
+    /// the global recording policy is inherited.
+    pub record_start_at: Option<RecordingAutoStartAt>,
     /// Maximum call duration (in seconds)
     pub timeout: Option<u32>,
     /// Max ring time for call setup/ringback phase (in seconds)
@@ -303,10 +308,13 @@ impl CallRouter for HttpCallRouter {
 
                 dialplan = dialplan.with_targets(strategy);
 
-                if let Some(record) = result.record {
-                    dialplan.recording.enabled = record;
+                if result.record.is_some() {
+                    if let Some(record) = result.record {
+                        dialplan.recording.enabled = record;
+                    }
                     dialplan.recording_policy = Some(RecordingPolicy {
-                        enabled: Some(record),
+                        enabled: result.record,
+                        auto_start_at: result.record_start_at,
                         ..Default::default()
                     });
                 }
