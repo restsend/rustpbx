@@ -1879,7 +1879,7 @@ fn extract_tags(tags: &Option<Value>) -> Vec<String> {
 /// Aggregate summary counts for the call record list (applies the same
 /// filter condition as the list itself).
 async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
-    use sea_orm::sea_query::{Alias, Expr, Func, IntoCondition, SimpleExpr};
+    use sea_orm::sea_query::{Expr, Func, IntoCondition, SimpleExpr};
     use sea_orm::{DatabaseBackend, ExprTrait, QuerySelect};
 
     fn count_when<C: IntoCondition>(cond: C) -> SimpleExpr {
@@ -1919,12 +1919,12 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         .column_as(count_when(CallRecordColumn::HasTranscript.eq(true)), "transcribed")
         .column_as(
             SimpleExpr::from(Func::sum(Expr::col(CallRecordColumn::DurationSecs)))
-                .cast_as(Alias::new(sum_cast)),
+                .cast_as(sum_cast),
             "total_secs",
         )
         .column_as(
             SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs)))
-                .cast_as(Alias::new(avg_cast)),
+                .cast_as(avg_cast),
             "avg_secs",
         )
         .column_as(

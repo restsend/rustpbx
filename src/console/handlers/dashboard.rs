@@ -32,7 +32,7 @@ where
     };
 
     sea_query::SimpleExpr::from(sea_query::Func::sum(expr))
-        .cast_as(sea_query::Alias::new(cast_type))
+        .cast_as(cast_type)
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
