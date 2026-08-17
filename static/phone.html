@@ -1163,7 +1163,7 @@
             return `${base}${normalizedPath}`;
         }
 
-        let _phoneConfig = { wsPath: '/ws', iceServersPath: '/iceservers', amiPath: '/ami/v1', staticPath: '/static' };
+        let _phoneConfig = { ws_handler: '/ws', ice_servers_path: '/iceservers', ami_path: '/ami/v1', static_path: '/static' };
         async function detectServerConfig() {
             try {
                 const response = await fetch(withApiBase('/api/config/phone'));
@@ -1182,7 +1182,7 @@
             const urlParams = new URLSearchParams(window.location.search);
             const customWsPath = urlParams.get('ws') || localStorage.getItem('phone_ws_path');
             if (customWsPath && /^wss?:\/\//i.test(customWsPath)) return customWsPath;
-            const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || _phoneConfig.wsPath;
+            const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || _phoneConfig.ws_handler;
             const path = withApiBase(pathRaw);
             return `${protocol}//${host}${path}`;
         })();
@@ -1242,7 +1242,7 @@
         if (ccWsUrlInput) {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host || 'localhost:8080';
-            ccWsUrlInput.value = `${protocol}//${host}${withApiBase(_phoneConfig.wsPath + '/ccphone')}`;
+            ccWsUrlInput.value = `${protocol}//${host}${withApiBase(_phoneConfig.ws_handler + '/ccphone')}`;
         }
 
         function formatMs(ms) {
@@ -1422,7 +1422,7 @@
         async function loadDefaultIceServers() {
             if (!iceServersInput || iceServersManuallyEdited) return;
             try {
-                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                const icePath = _phoneConfig.ice_servers_path || '/iceservers';
                 const response = await fetch(withApiBase(icePath), { cache: 'no-store' });
                 if (!response.ok) throw new Error(`status ${response.status}`);
                 const payload = await response.json();
@@ -1433,7 +1433,7 @@
                 if (iceEnable) iceEnable.checked = true;
                 log(`Loaded ICE servers from ${withApiBase(icePath)}`);
             } catch (error) {
-                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                const icePath = _phoneConfig.ice_servers_path || '/iceservers';
                 log(`Failed to load ${withApiBase(icePath)}: ${error.message}`);
             }
         }

@@ -887,14 +887,34 @@ async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse 
     Json(ice_servers).into_response()
 }
 
-// Phone config handler (exposes proxy paths for static HTML clients)
+// Phone config handler (exposes proxy paths for static HTML clients and the
+// cc-phone/cc-desk discovery source). Field names mirror the [proxy] config
+// keys (ws_handler / ice_servers_path / ami_path) plus the console api/base
+// prefixes — no duplicates. cc-desk fetches these and assembles cc-phone.
 async fn phone_config_handler(State(state): State<AppState>) -> impl IntoResponse {
     let proxy_cfg = &state.config().proxy;
+    let ws_path = proxy_cfg
+        .ws_handler
+        .clone()
+        .unwrap_or_else(|| crate::config::DEFAULT_WS_PATH.to_string());
+    let ice_path = proxy_cfg
+        .ice_servers_path
+        .clone()
+        .unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string());
+    #[cfg(feature = "console")]
+    let (api_prefix, console_base_path) = match state.console.as_ref() {
+        Some(c) => (c.api_prefix().to_string(), c.base_path().to_string()),
+        None => ("/api".to_string(), "/console".to_string()),
+    };
+    #[cfg(not(feature = "console"))]
+    let (api_prefix, console_base_path) = ("/api".to_string(), "/console".to_string());
     let config = serde_json::json!({
-        "wsPath": proxy_cfg.ws_handler.clone().unwrap_or_else(|| crate::config::DEFAULT_WS_PATH.to_string()),
-        "iceServersPath": proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()),
-        "amiPath": proxy_cfg.ami_path.clone().unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string()),
-        "staticPath": state.config().static_path(),
+        "ws_handler": ws_path,
+        "ice_servers_path": ice_path,
+        "ami_path": proxy_cfg.ami_path.clone().unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string()),
+        "api_prefix": api_prefix,
+        "static_path": state.config().static_path(),
+        "base_path": console_base_path,
     });
     Json(config).into_response()
 }
