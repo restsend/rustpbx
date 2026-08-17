@@ -73,6 +73,7 @@
 //! 4. Each handler returns an `AppAction` directing the loop what to do next
 //! 5. When `AppAction::Exit` or `AppAction::Hangup` is returned, `on_exit()` is called
 
+use crate::call::domain::TransferOutcome;
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,8 @@ pub enum AppEvent {
     ParticipantLeft { room_id: String, count: usize },
     /// Conference ended by moderator
     ConferenceEnded { room_id: String },
+    /// A transfer retained by this application reached a terminal outcome.
+    TransferResult { outcome: TransferOutcome },
     /// Custom event with arbitrary JSON data
     Custom {
         name: String,

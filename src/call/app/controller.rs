@@ -77,6 +77,9 @@ pub enum ControllerEvent {
     /// Recording finished.
     RecordingComplete(RecordingInfo),
 
+    /// An application-owned transfer reached a terminal outcome.
+    TransferResult(crate::call::domain::TransferOutcome),
+
     /// Call hung up.
     Hangup(Option<CallRecordHangupReason>),
 
@@ -160,6 +163,18 @@ impl CallController {
             target,
             attended: false,
         })?;
+        Ok(())
+    }
+
+    pub(crate) async fn transfer_await_result(
+        &self,
+        target: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::TransferAwaitResult {
+                leg_id: LegId::from("caller"),
+                target: target.into(),
+            })?;
         Ok(())
     }
 

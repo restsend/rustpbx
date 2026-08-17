@@ -12,6 +12,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod call_meta;
+#[cfg(test)]
 pub(crate) mod dtmf;
 pub(crate) mod error_catalog;
 pub(crate) mod ivr_exec_hook;

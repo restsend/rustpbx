@@ -3219,6 +3219,7 @@ impl SipSession {
             }
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
+                self.meta.pending_transfer_outcome = None;
 
                 // Our own teardown BYE also emits a Terminated event. Keep an
                 // earlier root cause (for example RTP timeout or autohangup).
@@ -4364,7 +4365,7 @@ impl SipSession {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
             match self
-                .try_single_target(target, callee_state_rx, None, None)
+                .try_single_target(target, callee_state_rx, None, None, None)
                 .await
             {
                 Ok(()) => {
@@ -5278,6 +5279,7 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
         no_trying_timeout: Option<std::time::Duration>,
+        caller: Option<rsipstack::sip::Uri>,
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
 
@@ -5305,6 +5307,9 @@ impl SipSession {
 
         let (mut invite_option, callee_uri, callee_call_id) =
             self.build_target_invite_option(target, None).await?;
+        if let Some(caller) = caller {
+            invite_option.caller = caller;
+        }
 
         self.meta.routed_caller = Some(invite_option.caller.to_string());
         self.meta.routed_callee = Some(target.aor.to_string());
@@ -8902,9 +8907,36 @@ impl SipSession {
                     );
                 };
                 Self::ok_or_failure(
-                    self.handle_transfer(leg_id, target, attended, callee_state_rx)
-                        .await,
+                    self.handle_transfer(
+                        leg_id,
+                        target,
+                        attended,
+                        transfer::TransferDisposition::Detach,
+                        callee_state_rx,
+                    )
+                    .await,
                 )
+            }
+
+            CallCommand::TransferAwaitResult { leg_id, target } => {
+                let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
+                    self.meta.pending_transfer_outcome =
+                        Some(crate::call::domain::TransferOutcome::NotConnected);
+                    self.deliver_pending_transfer_result();
+                    return CommandResult::failure(
+                        "No callee state receiver available for transfer".to_string(),
+                    );
+                };
+                let result = self
+                    .handle_transfer(
+                        leg_id,
+                        target,
+                        false,
+                        transfer::TransferDisposition::AwaitResult,
+                        callee_state_rx,
+                    )
+                    .await;
+                Self::ok_or_failure(result)
             }
 
             CallCommand::TransferComplete { consult_leg } => {
@@ -9402,6 +9434,11 @@ impl SipSession {
             .is_none_or(|d| d.state().is_terminated());
 
         if !caller_alive {
+            self.meta.pending_transfer_outcome = None;
+            return CommandResult::success();
+        }
+
+        if self.deliver_pending_transfer_result() {
             return CommandResult::success();
         }
 
@@ -9439,6 +9476,25 @@ impl SipSession {
         // 3. Neither hook nor return app — hang up the caller.
         self.pending_hangup.insert(self.caller_dialog_id());
         CommandResult::success()
+    }
+
+    fn deliver_pending_transfer_result(&mut self) -> bool {
+        let caller_alive = !self
+            .caller_dialog
+            .as_ref()
+            .is_none_or(|dialog| dialog.state().is_terminated());
+        if !caller_alive {
+            self.meta.pending_transfer_outcome = None;
+            return false;
+        }
+        let Some(outcome) = self.meta.pending_transfer_outcome.take() else {
+            return false;
+        };
+        if outcome == crate::call::domain::TransferOutcome::TargetEnded {
+            self.bridge.clear();
+        }
+        self.app_event_bridge
+            .send_app_event(crate::call::app::ControllerEvent::TransferResult(outcome))
     }
 
     /// Send a SIP INFO request to the dialog identified by the given leg.
@@ -9497,6 +9553,7 @@ impl SipSession {
     }
 
     async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
+        self.meta.pending_transfer_outcome = None;
         let cascade = &cmd.cascade;
 
         // Record the system hangup reason (e.g. RtpTimeout from the RTP
@@ -10043,10 +10100,8 @@ impl SipSession {
                                             info!(%leg_id, "Early media remote description set");
                                         }
                                     }
-                                } else {
-                                    // 180 Ringing (provisional response with no
-                                    // SDP) — notify the session so `on_call_ringing`
-                                    // hooks fire (cc_ringing for queue-dialed agents).
+                                }
+                                if resp.status_code == rsipstack::sip::StatusCode::Ringing {
                                     info!(session_id = %session_id, %leg_id, "SIP leg ringing (180)");
                                     let _ = cmd_tx.send(CallCommand::LegRinging {
                                         leg_id: leg_id.clone(),
@@ -12162,6 +12217,7 @@ mod tests {
             .handle_blind_transfer(
                 LegId::from("caller"),
                 "queue:test-queue".to_string(),
+                transfer::TransferDisposition::Detach,
                 &mut callee_rx,
             )
             .await;
@@ -12233,6 +12289,7 @@ mod tests {
             .handle_blind_transfer(
                 LegId::from("caller"),
                 "queue:nonexistent".to_string(),
+                transfer::TransferDisposition::Detach,
                 &mut callee_rx,
             )
             .await;

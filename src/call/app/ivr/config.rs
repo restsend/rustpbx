@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::collections::HashMap;
 
 /// Top-level wrapper for the TOML file (`[ivr]` table).
@@ -186,6 +186,7 @@ pub enum EntryAction {
         prompt_voice: Option<String>,
     },
     Repeat,
+    Exit,
     Hangup {
         #[serde(default)]
         prompt: Option<String>,
@@ -309,6 +310,21 @@ pub enum EntryAction {
         min_digits: usize,
         #[serde(default = "default_phone_digits")]
         max_digits: usize,
+        #[serde(
+            default = "default_input_phone_timeout_ms",
+            deserialize_with = "deserialize_input_phone_timeout_ms"
+        )]
+        timeout_ms: u64,
+        #[serde(
+            default = "default_input_phone_inter_digit_timeout_ms",
+            deserialize_with = "deserialize_input_phone_inter_digit_timeout_ms"
+        )]
+        inter_digit_timeout_ms: u64,
+        #[serde(
+            default = "default_input_phone_terminator",
+            deserialize_with = "deserialize_input_phone_terminator"
+        )]
+        terminator: String,
     },
 
     InputVoice {
@@ -389,6 +405,8 @@ impl EntryAction {
 pub struct ActionNode {
     #[serde(flatten)]
     pub action: EntryAction,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wait_for_result: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Box<ActionNode>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,6 +421,7 @@ impl ActionNode {
     pub fn new(action: EntryAction) -> Self {
         Self {
             action,
+            wait_for_result: false,
             next: None,
             step_id: None,
             step_name: None,
@@ -413,6 +432,7 @@ impl ActionNode {
     pub fn with_next(action: EntryAction, next: ActionNode) -> Self {
         Self {
             action,
+            wait_for_result: false,
             next: Some(Box::new(next)),
             step_id: None,
             step_name: None,
@@ -624,6 +644,9 @@ fn default_timeout_ms() -> u64 {
 fn default_max_retries() -> u32 {
     3
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 fn default_min_digits() -> usize {
     3
 }
@@ -638,6 +661,71 @@ fn default_webhook_timeout() -> u64 {
 }
 fn default_phone_digits() -> usize {
     11
+}
+const MAX_INPUT_PHONE_TIMEOUT_MS: u64 = 300_000;
+const MAX_INPUT_PHONE_INTER_DIGIT_TIMEOUT_MS: u64 = 60_000;
+
+fn default_input_phone_timeout_ms() -> u64 {
+    10_000
+}
+fn default_input_phone_inter_digit_timeout_ms() -> u64 {
+    3_000
+}
+fn default_input_phone_terminator() -> String {
+    "#".to_string()
+}
+
+fn deserialize_input_phone_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_u64(deserializer, MAX_INPUT_PHONE_TIMEOUT_MS, "input_phone timeout_ms")
+}
+
+fn deserialize_input_phone_inter_digit_timeout_ms<'de, D>(
+    deserializer: D,
+) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_u64(
+        deserializer,
+        MAX_INPUT_PHONE_INTER_DIGIT_TIMEOUT_MS,
+        "input_phone inter_digit_timeout_ms",
+    )
+}
+
+fn deserialize_bounded_u64<'de, D>(
+    deserializer: D,
+    max: u64,
+    field: &str,
+) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if (1..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(format!("{field} must be between 1 and {max}")))
+    }
+}
+
+fn deserialize_input_phone_terminator<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let mut chars = value.chars();
+    let Some(terminator) = chars.next() else {
+        return Err(D::Error::custom("input_phone terminator must not be empty"));
+    };
+    if chars.next().is_some() || !matches!(terminator, '0'..='9' | '*' | '#' | 'A'..='D') {
+        return Err(D::Error::custom(
+            "input_phone terminator must be one DTMF character",
+        ));
+    }
+    Ok(value)
 }
 
 impl EntryAction {
@@ -878,8 +966,9 @@ action = { type = "menu", menu = "root" }
 
     #[test]
     fn test_transfer_return_to_ivr_alias_deserialize() {
-        let json = r#"{"type":"transfer","target":"1001","return_to_ivr":"step-ivr"}"#;
+        let json = r#"{"type":"transfer","target":"1001","return_to_ivr":"step-ivr","wait_for_result":true}"#;
         let node: ActionNode = serde_json::from_str(json).unwrap();
+        assert!(node.wait_for_result);
         match node.action {
             EntryAction::Transfer { return_target, .. } => {
                 assert_eq!(return_target.as_deref(), Some("step-ivr"));
@@ -1041,9 +1130,29 @@ action = { type = "menu", menu = "root" }
         ));
 
         // input_phone
-        let node: ActionNode =
-            serde_json::from_str(r#"{"type":"input_phone","prompt":"input_phone.wav"}"#).unwrap();
-        assert!(matches!(node.action, EntryAction::InputPhone { .. }));
+        let node: ActionNode = serde_json::from_str(
+            r##"{"type":"input_phone","prompt":"input_phone.wav","timeout_ms":25000,"inter_digit_timeout_ms":4000,"terminator":"#"}"##,
+        )
+        .unwrap();
+        assert!(matches!(
+            node.action,
+            EntryAction::InputPhone {
+                timeout_ms: 25_000,
+                inter_digit_timeout_ms: 4_000,
+                ref terminator,
+                ..
+            } if terminator == "#"
+        ));
+        for invalid in [
+            r##"{"type":"input_phone","timeout_ms":0}"##,
+            r##"{"type":"input_phone","inter_digit_timeout_ms":0}"##,
+            r##"{"type":"input_phone","terminator":"X"}"##,
+        ] {
+            assert!(serde_json::from_str::<ActionNode>(invalid).is_err());
+        }
+
+        let node: ActionNode = serde_json::from_str(r#"{"type":"exit"}"#).unwrap();
+        assert!(matches!(node.action, EntryAction::Exit));
     }
 
     #[test]

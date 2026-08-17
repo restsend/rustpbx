@@ -407,6 +407,7 @@ impl StepIvrApp {
             EntryAction::Voicemail { .. } => "Voicemail",
             EntryAction::Play { .. } => "Play",
             EntryAction::Repeat => "Repeat",
+            EntryAction::Exit => "Exit",
             EntryAction::Hangup { .. } => "Hangup",
             EntryAction::CollectExtension { .. } => "CollectExtension",
             EntryAction::Collect { .. } => "Collect",
@@ -668,17 +669,16 @@ impl StepIvrApp {
         &mut self,
         mut event: Option<ProviderEvent>,
     ) -> anyhow::Result<ActionNode> {
-        // A digit buffered during a non-interruptible step (or while the
-        // previous provider response was in flight) is delivered before the
-        // natural event, so caller input is never silently lost. An explicit
-        // in-band DTMF (interruptible barge-in / provider-driven menu) always
-        // wins; the buffered digit stays queued for a later step.
+        // Buffered DTMF may replace only prompt completion. Typed results from
+        // later steps are authoritative and discard stale buffered digits.
         if let Some(digit) = self.pending_dtmf.pop_front() {
-            if matches!(event, Some(ProviderEvent::Dtmf { .. })) {
-                self.pending_dtmf.push_front(digit);
-            } else {
+            if matches!(&event, Some(ProviderEvent::AudioComplete { .. }) | None) {
                 tracing::info!(digit = %digit, "StepIvrApp: delivering buffered DTMF to provider");
                 event = Some(ProviderEvent::Dtmf { digit });
+            } else if matches!(&event, Some(ProviderEvent::Dtmf { .. })) {
+                self.pending_dtmf.push_front(digit);
+            } else {
+                self.pending_dtmf.clear();
             }
         }
 
@@ -852,6 +852,12 @@ impl StepIvrApp {
             Some(ProviderEvent::DtmfMenuTimeout) => {
                 crate::rwi::TriggerInfo::new("dtmf_menu_timeout")
             }
+            Some(ProviderEvent::TransferResult { outcome }) => {
+                crate::rwi::TriggerInfo::with_detail(
+                    "transfer_result",
+                    serde_json::json!({ "outcome": outcome }),
+                )
+            }
             None => crate::rwi::TriggerInfo::new("unknown"),
         });
 
@@ -894,6 +900,7 @@ impl StepIvrApp {
     ) -> anyhow::Result<ActionResult> {
         let result = common::execute_action(
             &node.action,
+            node.wait_for_result,
             ctrl,
             ctx,
             &mut self.sess,
@@ -1291,6 +1298,13 @@ impl CallApp for StepIvrApp {
                     self.current_node = Some(self.request_next(Some(event)).await?);
                     return self.__exec_node(ctrl, context).await;
                 }
+            }
+            AppEvent::TransferResult { outcome } => {
+                self.current_node = Some(
+                    self.request_next(Some(ProviderEvent::TransferResult { outcome }))
+                        .await?,
+                );
+                return self.__exec_node(ctrl, context).await;
             }
             AppEvent::Custom { name, data: _ } => {
                 tracing::debug!(event = %name, "StepIvrApp custom event");
@@ -4005,6 +4019,9 @@ mod tests {
             prompt_voice: None,
             min_digits: 11,
             max_digits: 11,
+            timeout_ms: 10_000,
+            inter_digit_timeout_ms: 3_000,
+            terminator: "#".into(),
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
@@ -4026,8 +4043,10 @@ mod tests {
                 matches!(
                     c,
                     CallCommand::Play {
-                        source: crate::call::domain::MediaSource::File { path }, ..
-                    } if path == "enter_phone.wav"
+                        source: crate::call::domain::MediaSource::File { path },
+                        options: Some(options),
+                        ..
+                    } if path == "enter_phone.wav" && options.interrupt_on_dtmf
                 )
             })
             .await;
@@ -4043,6 +4062,27 @@ mod tests {
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn typed_result_discards_stale_buffered_dtmf() {
+        let provider = EventCapturingProvider::new();
+        provider.first_call.store(true, Ordering::SeqCst);
+        let events = provider.captured_events.clone();
+        let mut app = StepIvrApp::with_provider(Box::new(provider));
+        app.pending_dtmf.push_back("1".to_string());
+
+        app.request_next(Some(ProviderEvent::PhoneCollected {
+            number: "10000000000".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        assert!(app.pending_dtmf.is_empty());
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [Some(ProviderEvent::PhoneCollected { number })] if number == "10000000000"
+        ));
     }
 
     // ── Bug 8: Torecord forwards recording complete to provider ──────────

@@ -45,6 +45,7 @@ pub enum WaitEvent {
         text: String,
         confidence: f32,
     },
+    TransferResult,
     /// Audio source was requested (e.g. via tts_text) but no TTS service is available.
     /// The caller should inform the provider and request a fallback action.
     NoAudio,
@@ -224,6 +225,7 @@ fn extract_tts_text(value: &serde_json::Value) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_action(
     action: &EntryAction,
+    wait_for_result: bool,
     ctrl: &mut CallController,
     ctx: &ApplicationContext,
     sess: &mut SessionData,
@@ -256,6 +258,10 @@ pub async fn execute_action(
             if !query.is_empty() {
                 t.push('?');
                 t.push_str(&query);
+            }
+            if wait_for_result {
+                ctrl.transfer_await_result(t).await?;
+                return Ok(ActionResult::WaitFor(WaitEvent::TransferResult));
             }
             Ok(ActionResult::Terminal(TerminalAction::Transfer(t)))
         }
@@ -447,6 +453,9 @@ pub async fn execute_action(
             prompt_voice,
             min_digits,
             max_digits,
+            timeout_ms,
+            inter_digit_timeout_ms,
+            terminator,
         } => {
             let audio = resolve_audio(
                 prompt.as_deref(),
@@ -456,15 +465,15 @@ pub async fn execute_action(
             )
             .await;
             if let Some(a) = audio {
-                ctrl.play_audio(a, false).await?;
+                ctrl.play_audio(a, true).await?;
             }
             let config = DtmfCollectConfig {
                 min_digits: *min_digits,
                 max_digits: *max_digits,
-                timeout: Duration::from_millis(10000),
-                terminator: Some('#'),
+                timeout: Duration::from_millis(*timeout_ms),
+                terminator: terminator.chars().next(),
                 play_prompt: None,
-                inter_digit_timeout: Some(Duration::from_millis(3000)),
+                inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
             };
             let digits = ctrl.collect_dtmf(config).await?;
             sess.variables.insert("phone_number".into(), digits.clone());
@@ -661,6 +670,8 @@ pub async fn execute_action(
                 confidence: 0.0,
             }))
         }
+
+        EntryAction::Exit => Ok(ActionResult::Terminal(TerminalAction::Exit)),
 
         EntryAction::Play { .. }
         | EntryAction::Menu { .. }

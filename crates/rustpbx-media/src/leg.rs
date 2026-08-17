@@ -865,6 +865,9 @@ impl Drop for LegInner {
 fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
+        external_ip: cfg.external_ip.clone(),
+        rtp_start_port: cfg.rtp_port_range.map(|(start, _)| start),
+        rtp_end_port: cfg.rtp_port_range.map(|(_, end)| end),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
         // ICE pre-ready buffering: packets are buffered only until the RTP
         // transport is set up, and DropOldest means depth stays tiny in steady
@@ -1028,6 +1031,19 @@ mod tests {
         // Observer is installed: stats start at zero.
         assert_eq!(a.stats().ingress_packets, 0);
         a.stop();
+    }
+
+    #[test]
+    fn rtp_leg_uses_configured_network_constraints() {
+        let mut cfg = LegConfig::rtp_pcmu();
+        cfg.external_ip = Some("203.0.113.10".to_string());
+        cfg.rtp_port_range = Some((20000, 20100));
+
+        let rtc = build_rtc_config(&cfg);
+
+        assert_eq!(rtc.external_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(rtc.rtp_start_port, Some(20000));
+        assert_eq!(rtc.rtp_end_port, Some(20100));
     }
 
     #[tokio::test]

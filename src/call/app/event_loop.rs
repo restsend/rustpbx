@@ -158,6 +158,19 @@ impl AppEventLoop {
                             }
                         }
                     }
+                    Some(ControllerEvent::TransferResult(outcome)) => {
+                        match Self::await_or_cancel(&self.cancel_token, self.app.on_external_event(
+                            AppEvent::TransferResult { outcome },
+                            &mut self.controller,
+                            &self.context
+                        )).await {
+                            WaitResult::Completed(res) => res,
+                            WaitResult::Cancelled => {
+                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                Ok(AppAction::Exit)
+                            }
+                        }
+                    }
                     Some(ControllerEvent::Custom(name, data)) => {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_external_event(
                             AppEvent::Custom { name, data },

@@ -1,7 +1,6 @@
 use super::SipSession;
 use crate::call::domain::{CallCommand, LegId, LegState, ReturnAppSpec};
 use crate::media::negotiate::MediaNegotiator;
-use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use rsipstack::dialog::dialog::DialogState;
@@ -14,6 +13,51 @@ use rustrtc::PeerConnection;
 use rustrtc::media::SampleStreamSource;
 use std::collections::HashMap;
 use std::time::Duration;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TransferDisposition {
+    Detach,
+    AwaitResult,
+}
+
+fn use_b2bua(blind_transfer_use_refer: bool, disposition: TransferDisposition) -> bool {
+    !blind_transfer_use_refer || disposition == TransferDisposition::AwaitResult
+}
+
+async fn wait_for_bridge_disconnect(
+    session_cancel: tokio_util::sync::CancellationToken,
+    bridge_cancel: tokio_util::sync::CancellationToken,
+    mut forward_handle: tokio::task::JoinHandle<()>,
+    mut reverse_handle: tokio::task::JoinHandle<()>,
+) -> bool {
+    enum CompletedTask {
+        Session,
+        Forward,
+        Reverse,
+    }
+
+    let completed = tokio::select! {
+        biased;
+        _ = session_cancel.cancelled() => CompletedTask::Session,
+        _ = &mut forward_handle => CompletedTask::Forward,
+        _ = &mut reverse_handle => CompletedTask::Reverse,
+    };
+
+    bridge_cancel.cancel();
+    match completed {
+        CompletedTask::Session => {
+            let _ = forward_handle.await;
+            let _ = reverse_handle.await;
+        }
+        CompletedTask::Forward => {
+            let _ = reverse_handle.await;
+        }
+        CompletedTask::Reverse => {
+            let _ = forward_handle.await;
+        }
+    }
+    !session_cancel.is_cancelled()
+}
 
 /// Unified forward sink for the bridge: WS PCM16 → call. Two backing paths:
 /// - [`BridgeForwardSink::Track`]: a `VoiceEnginePeer` track sender (non-app
@@ -107,6 +151,7 @@ pub(crate) enum TransferTarget {
     Sip {
         uri: String,
         return_app: Option<ReturnTargetSpec>,
+        from_user: Option<String>,
     },
 }
 
@@ -206,6 +251,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     TransferTarget::Sip {
                         uri: format!("sip:{}", target),
                         return_app: None,
+                        from_user: None,
                     }
                 } else {
                     let mut return_query: Vec<(&str, String)> = Vec::new();
@@ -275,6 +321,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     format!("sip:{}", uri)
                 };
                 let mut return_query: Vec<(&str, String)> = Vec::new();
+                let mut from_user = None;
                 let clean_uri = if let Some(qpos) = sip.find('?') {
                     let base = &sip[..qpos];
                     let qs = &sip[qpos + 1..];
@@ -287,7 +334,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                         let key = parts.next().unwrap_or("");
                         let value = parts.next().unwrap_or("");
                         let decoded = super::pct_decode_query(value);
-                        if key == "return_app" || key == "return_target" {
+                        if key == "from_user" {
+                            from_user = (!decoded.is_empty()).then_some(decoded);
+                        } else if key == "return_app" || key == "return_target" {
                             return_query.push((key, decoded));
                         } else if key.starts_with("return_") {
                             return_query.push((key, decoded));
@@ -306,6 +355,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 TransferTarget::Sip {
                     uri: clean_uri,
                     return_app: ReturnTargetSpec::from_query_pairs(return_query.into_iter()),
+                    from_user,
                 }
             }
         };
@@ -315,6 +365,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
     TransferTarget::Sip {
         uri: format!("sip:{}", target),
         return_app: None,
+        from_user: None,
     }
 }
 
@@ -324,6 +375,34 @@ impl SipSession {
         leg_id: LegId,
         target: String,
         attended: bool,
+        disposition: TransferDisposition,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Result<()> {
+        if disposition == TransferDisposition::AwaitResult {
+            self.meta.pending_transfer_outcome =
+                Some(crate::call::domain::TransferOutcome::NotConnected);
+        }
+
+        let result = self
+            .handle_transfer_inner(leg_id, target, attended, disposition, callee_state_rx)
+            .await;
+        if disposition == TransferDisposition::AwaitResult {
+            if result.is_err() {
+                self.deliver_pending_transfer_result();
+            } else {
+                self.meta.pending_transfer_outcome =
+                    Some(crate::call::domain::TransferOutcome::TargetEnded);
+            }
+        }
+        result
+    }
+
+    async fn handle_transfer_inner(
+        &mut self,
+        leg_id: LegId,
+        target: String,
+        attended: bool,
+        disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         let leg = self.require_leg(&leg_id)?;
@@ -346,7 +425,7 @@ impl SipSession {
                 );
             }
         } else {
-            self.handle_blind_transfer(leg_id, target, callee_state_rx)
+            self.handle_blind_transfer(leg_id, target, disposition, callee_state_rx)
                 .await?;
         }
 
@@ -362,13 +441,14 @@ impl SipSession {
         &mut self,
         leg_id: LegId,
         target: String,
+        disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         self.meta.transfer_in_progress = true;
         self.sync_rtp_timeout_pause();
 
         let result = self
-            .handle_blind_transfer_inner(leg_id, target, callee_state_rx)
+            .handle_blind_transfer_inner(leg_id, target, disposition, callee_state_rx)
             .await;
 
         if result.is_err() {
@@ -384,9 +464,17 @@ impl SipSession {
         &mut self,
         leg_id: LegId,
         target: String,
+        disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
-        match parse_transfer_target(&target) {
+        let target = parse_transfer_target(&target);
+        if disposition == TransferDisposition::AwaitResult
+            && !matches!(target, TransferTarget::Sip { .. })
+        {
+            return Err(anyhow!("wait_for_result requires a SIP transfer target"));
+        }
+
+        match target {
             TransferTarget::Queue {
                 name,
                 return_app,
@@ -428,7 +516,11 @@ impl SipSession {
                 )
                 .await
             }
-            TransferTarget::Sip { uri, return_app } => {
+            TransferTarget::Sip {
+                uri,
+                return_app,
+                from_user,
+            } => {
                 self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
 
                 let realm = self.server.proxy_config.load().select_realm("");
@@ -436,7 +528,10 @@ impl SipSession {
                 let refer_to_uri = rsipstack::sip::Uri::try_from(normalized.as_str())
                     .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
-                if !self.server.proxy_config.load().blind_transfer_use_refer {
+                if use_b2bua(
+                    self.server.proxy_config.load().blind_transfer_use_refer,
+                    disposition,
+                ) {
                     info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
                     // The transfer target is a NEW peer — invalidate the cached
                     // callee offer so `prepare_callee_media_offer` creates a
@@ -445,6 +540,12 @@ impl SipSession {
                     // apply_sdp(answer) for the transferred-to endpoint.
                     self.media.callee_offer = None;
                     self.media.callee_offer_cached_webrtc = None;
+                    let caller = from_user
+                        .map(|user| {
+                            format!("sip:{}@{}", user, refer_to_uri.host_with_port).parse()
+                        })
+                        .transpose()
+                        .map_err(|e| anyhow!("Invalid transfer caller URI: {}", e))?;
                     let mut location = crate::call::Location {
                         aor: refer_to_uri.clone(),
                         ..Default::default()
@@ -488,7 +589,7 @@ impl SipSession {
                         }
                     }
                     let result = self
-                        .try_single_target(&location, callee_state_rx, None, None)
+                        .try_single_target(&location, callee_state_rx, None, None, caller)
                         .await;
                     if result.is_ok() {
                         // The B2BUA blind-transfer path swaps the B leg
@@ -1105,9 +1206,15 @@ impl SipSession {
                                         let chunk: Vec<i16> = buf.drain(..samples_per_frame).collect();
 
                                         if let BridgeForwardSink::Pcm(tx) = &forward_sink {
-                                            if tx.send(chunk).await.is_err() {
-                                                info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
-                                                return;
+                                            tokio::select! {
+                                                biased;
+                                                _ = forward_cancel.cancelled() => return,
+                                                result = tx.send(chunk) => {
+                                                    if result.is_err() {
+                                                        info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
+                                                        return;
+                                                    }
+                                                }
                                             }
                                         } else if let BridgeForwardSink::Track(sender) = &forward_sink {
                                             let chunk = if ws_sample_rate != enc_sample_rate {
@@ -1150,9 +1257,15 @@ impl SipSession {
                                                         leg_id: leg_id.clone(),
                                                         digits: digits.to_string(),
                                                     };
-                                                    if tx.send(cmd).await.is_err() {
-                                                        warn!(session_id = %session_id, %leg_id, "Bridge forward: cmd_tx closed");
-                                                        break;
+                                                    tokio::select! {
+                                                        biased;
+                                                        _ = forward_cancel.cancelled() => return,
+                                                        result = tx.send(cmd) => {
+                                                            if result.is_err() {
+                                                                warn!(session_id = %session_id, %leg_id, "Bridge forward: cmd_tx closed");
+                                                                break;
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1177,16 +1290,13 @@ impl SipSession {
         };
 
         // ── 7. Reverse loop: call audio → raw PCM16 → WS + DTMF JSON ─
-        //     Reads from the PeerConnection's audio track directly so we
-        //     can detect RFC 2833 telephone-event DTMF alongside audio.
+        //     DTMF JSON comes from the session-level deduplicated event channel.
         let reverse_cancel = cancel_token.child_token();
         let reverse_handle = {
             let leg_id = leg_id.clone();
             let session_id = session_id.clone();
             crate::utils::spawn(async move {
                 use rustrtc::media::MediaSample;
-
-                let mut det = RtpDtmfDetector::default();
 
                 // Capture audio track from PeerConnection
                 let track = loop {
@@ -1209,9 +1319,15 @@ impl SipSession {
                         json = dtmf_json_rx.recv() => {
                             match json {
                                 Some(json) => {
-                                    if ws_write.send(Message::Text(json.into())).await.is_err() {
-                                        warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF json write failed");
-                                        break;
+                                    tokio::select! {
+                                        biased;
+                                        _ = reverse_cancel.cancelled() => break,
+                                        result = ws_write.send(Message::Text(json.into())) => {
+                                            if result.is_err() {
+                                                warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF json write failed");
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                                 None => break,
@@ -1223,21 +1339,7 @@ impl SipSession {
                                     let is_dtmf = frame.payload_type
                                         .map_or(false, |pt| dtmf_payload_types.contains(&pt));
 
-                                    if is_dtmf {
-                                        // RFC 2833 telephone-event → detect digit
-                                        if let Some(digit) = det.observe(&frame.data, frame.rtp_timestamp) {
-                                            let json = serde_json::json!({
-                                                "type": "dtmf",
-                                                "digit": digit.to_string(),
-                                                "leg_id": leg_id,
-                                            });
-                                            info!(session_id = %session_id, %leg_id, digit = %digit.to_string(), "Bridge reverse DTMF detected");
-                                            if ws_write.send(Message::Text(json.to_string().into())).await.is_err() {
-                                                warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF write failed");
-                                                break;
-                                            }
-                                        }
-                                    } else {
+                                    if !is_dtmf {
                                         // Regular audio frame — decode to PCM, resample, send as binary
                                         let pcm = decoder.decode(&frame.data);
                                         let samples = if dec_sample_rate != ws_sample_rate {
@@ -1251,9 +1353,15 @@ impl SipSession {
                                         for s in &samples {
                                             bytes.extend_from_slice(&s.to_ne_bytes());
                                         }
-                                        if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
-                                            warn!(session_id = %session_id, %leg_id, "Bridge reverse audio write failed");
-                                            break;
+                                        tokio::select! {
+                                            biased;
+                                            _ = reverse_cancel.cancelled() => break,
+                                            result = ws_write.send(Message::Binary(bytes.into())) => {
+                                                if result.is_err() {
+                                                    warn!(session_id = %session_id, %leg_id, "Bridge reverse audio write failed");
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1276,7 +1384,7 @@ impl SipSession {
         self.conference_bridge = crate::call::runtime::SessionConferenceBridge {
             bridge_handle: Some(crate::call::runtime::ConferenceBridgeHandle {
                 _tasks: vec![],
-                cancel_token,
+                cancel_token: cancel_token.clone(),
             }),
             conf_id: Some(format!("bridge-{}", self.id.0)),
         };
@@ -1286,30 +1394,30 @@ impl SipSession {
         //    handler reads `meta.transfer_return_app` (written here).
         let has_return_app = return_app.is_some();
         self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
-        if has_return_app {
-            if let Some(ref cmd_tx) = self.cmd_tx {
-                let cancel = self.cancel_token.child_token();
-                let tx = cmd_tx.clone();
-                let mon_session_id = session_id.clone();
-                let mon = crate::utils::spawn(async move {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {}
-                        _ = async {
-                            let _ = forward_handle.await;
-                            let _ = reverse_handle.await;
-                        } => {
-                            if !cancel.is_cancelled() {
-                                info!(session_id = %mon_session_id, "Bridge disconnected; starting return app");
-                                let cmd = CallCommand::StartReturnApp;
-                                let _ = tx.send(cmd).await;
-                            }
+        let cancel = self.cancel_token.child_token();
+        let tx = self.cmd_tx.clone();
+        let mon_session_id = session_id.clone();
+        let mon = crate::utils::spawn(async move {
+            let bridge_disconnected = wait_for_bridge_disconnect(
+                cancel.clone(),
+                cancel_token,
+                forward_handle,
+                reverse_handle,
+            )
+            .await;
+            if bridge_disconnected && has_return_app && let Some(tx) = tx {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {}
+                    result = tx.send(CallCommand::StartReturnApp) => {
+                        if result.is_ok() {
+                            info!(session_id = %mon_session_id, "Bridge disconnected; starting return app");
                         }
                     }
-                });
-                self.legs.push_task(leg_id.clone(), mon);
+                }
             }
-        }
+        });
+        self.legs.push_task(leg_id.clone(), mon);
 
         info!(session_id = %self.id, %leg_id, endpoint = %endpoint, "Bridge established");
         // A real media bridge is now active between caller and endpoint — the
@@ -1353,8 +1461,13 @@ impl SipSession {
             format!("{}?Replaces={}", target, encoded_replaces)
         };
 
-        self.handle_blind_transfer(leg_id, refer_target, callee_state_rx)
-            .await
+        self.handle_blind_transfer(
+            leg_id,
+            refer_target,
+            TransferDisposition::Detach,
+            callee_state_rx,
+        )
+        .await
     }
 
     pub(super) async fn emit_refer_event(
@@ -1589,6 +1702,32 @@ impl SipSession {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn bridge_disconnect_cancels_blocked_peer_task() {
+        let session_cancel = tokio_util::sync::CancellationToken::new();
+        let bridge_cancel = session_cancel.child_token();
+        let forward = crate::utils::spawn(async {});
+        let reverse_cancel = bridge_cancel.child_token();
+        let reverse = crate::utils::spawn(async move {
+            reverse_cancel.cancelled().await;
+        });
+
+        let disconnected = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_bridge_disconnect(session_cancel, bridge_cancel, forward, reverse),
+        )
+        .await
+        .expect("bridge monitor must cancel the blocked peer task");
+
+        assert!(disconnected);
+    }
+
+    #[test]
+    fn await_result_forces_b2bua() {
+        assert!(use_b2bua(true, TransferDisposition::AwaitResult));
+        assert!(!use_b2bua(true, TransferDisposition::Detach));
+    }
+
     // -------------------------------------------------------------------------
     // parse_transfer_target — pure-function dispatch tests
     //
@@ -1785,6 +1924,20 @@ mod tests {
             TransferTarget::Sip {
                 uri: "sip:1001@pbx.local".to_string(),
                 return_app: None,
+                from_user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_extracts_from_user() {
+        let t = parse_transfer_target("sip:room-123@pbx.example?from_user=relay-caller");
+        assert_eq!(
+            t,
+            TransferTarget::Sip {
+                uri: "sip:room-123@pbx.example".to_string(),
+                return_app: None,
+                from_user: Some("relay-caller".to_string()),
             }
         );
     }
@@ -1797,6 +1950,7 @@ mod tests {
             TransferTarget::Sip {
                 uri: "tel:+15551234567".to_string(),
                 return_app: None,
+                from_user: None,
             }
         );
     }
@@ -1809,6 +1963,7 @@ mod tests {
             TransferTarget::Sip {
                 uri: "sip:1001".to_string(),
                 return_app: None,
+                from_user: None,
             }
         );
     }
