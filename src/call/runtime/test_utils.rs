@@ -28,12 +28,6 @@ impl MockAudioSender {
     pub async fn get_samples(&self) -> Vec<MediaSample> {
         self.samples.lock().await.clone()
     }
-
-    pub fn clone_with_shared(&self) -> Self {
-        Self {
-            samples: self.samples.clone(),
-        }
-    }
 }
 
 impl Default for MockAudioSender {
