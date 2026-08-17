@@ -2151,11 +2151,11 @@ impl SipSession {
         }
     }
 
-    async fn wait_recorder_result(
+    async fn recv_recorder_finished(
         bridge: &mut Option<crate::media::media_bridge::MediaBridge>,
     ) -> Option<crate::media::media_recorder::RecordingCompletion> {
         let result = match bridge.as_mut() {
-            Some(bridge) => bridge.wait_recorder_result().await,
+            Some(bridge) => bridge.recv_recorder_finished().await,
             None => return std::future::pending().await,
         };
         match result {
@@ -2251,7 +2251,7 @@ impl SipSession {
                     }
                 }
 
-                Some(result) = Self::wait_recorder_result(&mut self.media.bridge) => {
+                Some(result) = Self::recv_recorder_finished(&mut self.media.bridge) => {
                     match result {
                         Ok(Some(result)) => {
                             self.publish_recording_complete(result);

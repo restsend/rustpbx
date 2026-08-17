@@ -216,7 +216,9 @@ enum RecorderCommand {
     },
     Pause,
     Resume,
-    Stop,
+    StopRecorder {
+        reply: oneshot::Sender<RecordingCompletion>,
+    },
 }
 
 /// Control handle owned by [`crate::media_bridge::MediaBridge`].
@@ -236,19 +238,18 @@ impl RecorderHandle {
     pub(crate) fn new() -> (
         Self,
         RecorderSender,
-        tokio::task::JoinHandle<RecordingCompletion>,
+        mpsc::UnboundedReceiver<RecordingCompletion>,
     ) {
         let (rtp_tx, rtp_rx) = mpsc::channel(DEFAULT_CAPTURE_QUEUE_CAPACITY);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let join = tokio::spawn(async move {
-            let result = RecorderTask::new(rtp_rx, command_rx).run().await;
-            if let Err(error) = &result {
-                warn!(%error, "recording task failed");
-            }
-            result
+        let (recorder_finished_tx, recorder_finished_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            RecorderTask::new(rtp_rx, command_rx, recorder_finished_tx)
+                .run()
+                .await;
         });
         let sender = RecorderSender::new(rtp_tx);
-        (Self { tx: command_tx }, sender, join)
+        (Self { tx: command_tx }, sender, recorder_finished_rx)
     }
 
     pub(crate) async fn has_recorder(&self) -> bool {
@@ -293,10 +294,14 @@ impl RecorderHandle {
             .map_err(|_| anyhow!("recording task stopped"))
     }
 
-    pub(crate) fn stop(&self) -> Result<()> {
+    pub(crate) async fn stop_recorder(&self) -> RecordingCompletion {
+        let (reply, response) = oneshot::channel();
         self.tx
-            .send(RecorderCommand::Stop)
-            .map_err(|_| anyhow!("recording task stopped"))
+            .send(RecorderCommand::StopRecorder { reply })
+            .map_err(|_| anyhow!("recording task stopped"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("recording task stopped"))?
     }
 }
 
@@ -337,34 +342,36 @@ impl RecorderSender {
 struct RecorderTask {
     rtp_rx: mpsc::Receiver<CapturedRtp>,
     command_rx: mpsc::UnboundedReceiver<RecorderCommand>,
+    recorder_finished_tx: mpsc::UnboundedSender<RecordingCompletion>,
     recorder: Option<Box<dyn MediaRecorder>>,
     paused: bool,
     deadline: Option<tokio::time::Instant>,
-    rtp_open: bool,
 }
 
 impl RecorderTask {
     fn new(
         rtp_rx: mpsc::Receiver<CapturedRtp>,
         command_rx: mpsc::UnboundedReceiver<RecorderCommand>,
+        recorder_finished_tx: mpsc::UnboundedSender<RecordingCompletion>,
     ) -> Self {
         Self {
             rtp_rx,
             command_rx,
+            recorder_finished_tx,
             recorder: None,
             paused: false,
             deadline: None,
-            rtp_open: true,
         }
     }
 
-    async fn run(mut self) -> RecordingCompletion {
+    async fn run(mut self) {
         loop {
             tokio::select! {
                 biased;
                 command = self.command_rx.recv() => {
                     let Some(command) = command else {
-                        return self.finalize_recorder().await;
+                        self.finish_recorder().await;
+                        return;
                     };
                     match command {
                         RecorderCommand::SetRecorder {
@@ -380,20 +387,33 @@ impl RecorderTask {
                         }
                         RecorderCommand::Pause => self.paused = true,
                         RecorderCommand::Resume => self.paused = false,
-                        RecorderCommand::Stop => return self.finalize_recorder().await,
+                        RecorderCommand::StopRecorder { reply } => {
+                            let _ = reply.send(self.finalize_recorder().await);
+                        }
                     }
                 }
                 _ = wait_for_deadline(self.deadline), if self.deadline.is_some() => {
-                    return self.finalize_recorder().await;
+                    self.finish_recorder().await;
                 }
-                captured = self.rtp_rx.recv(), if self.rtp_open => {
+                captured = self.rtp_rx.recv() => {
                     match captured {
                         Some(captured) => self.write_rtp(&captured).await,
-                        None => self.rtp_open = false,
+                        None => {
+                            self.finish_recorder().await;
+                            return;
+                        }
                     }
                 }
             }
         }
+    }
+
+    async fn finish_recorder(&mut self) {
+        let result = self.finalize_recorder().await;
+        if let Err(error) = &result {
+            warn!(%error, "recording task failed to finalize recorder");
+        }
+        let _ = self.recorder_finished_tx.send(result);
     }
 
     async fn set_recorder(
@@ -401,10 +421,10 @@ impl RecorderTask {
         mut recorder: Box<dyn MediaRecorder>,
         max_duration: Option<Duration>,
     ) -> Result<()> {
-        recorder.initialize().await?;
-        if let Some(previous) = self.recorder.take() {
-            previous.finalize().await?;
+        if self.recorder.is_some() {
+            return Err(anyhow!("recording_already_active"));
         }
+        recorder.initialize().await?;
         self.recorder = Some(recorder);
         self.paused = false;
         self.deadline = max_duration.map(|duration| tokio::time::Instant::now() + duration);
@@ -494,6 +514,25 @@ mod tests {
         }
     }
 
+    async fn recv_recorder_finished(
+        rx: &mut mpsc::UnboundedReceiver<RecordingCompletion>,
+    ) -> Option<RecordingResult> {
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recorder did not finish")
+            .expect("recorder-finished channel closed without a result")
+            .expect("recorder finalization failed")
+    }
+
+    async fn assert_recorder_task_stopped(
+        rx: &mut mpsc::UnboundedReceiver<RecordingCompletion>,
+    ) {
+        let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recorder task did not stop");
+        assert!(result.is_none(), "recorder-finished channel remains open");
+    }
+
     struct CountingBackend {
         recorded: AtomicUsize,
         flushed: AtomicBool,
@@ -549,8 +588,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_stop_returns_task_result() {
-        let (handle, sender, join) = RecorderHandle::new();
+    async fn file_stop_returns_recorder_result() {
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
         assert!(!handle.has_recorder().await);
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
@@ -565,19 +604,21 @@ mod tests {
             .unwrap();
         assert!(handle.has_recorder().await);
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
-        handle.stop().unwrap();
-        let result = join.await.unwrap().unwrap().unwrap();
+        let result = handle.stop_recorder().await.unwrap().unwrap();
         assert!(!handle.has_recorder().await);
+        assert!(handle.pause().is_ok(), "stopping a recorder must keep its task alive");
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 
         drop(handle);
+        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
-    async fn max_duration_returns_task_result() {
-        let (handle, sender, join) = RecorderHandle::new();
+    async fn max_duration_returns_recorder_result() {
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -591,16 +632,64 @@ mod tests {
             .unwrap();
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
 
-        let result = tokio::time::timeout(Duration::from_secs(1), join)
+        let result = recv_recorder_finished(&mut recorder_finished_rx)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
             .unwrap();
         assert!(!handle.has_recorder().await);
+        assert!(handle.pause().is_ok(), "max duration must not stop the capture task");
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 
+        drop(handle);
+        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn dropping_command_handle_stops_task_and_finalizes_recorder() {
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_string_lossy().into_owned();
+        drop(temp);
+        handle
+            .set_recorder(
+                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        drop(handle);
+        let result = recv_recorder_finished(&mut recorder_finished_rx)
+            .await
+            .unwrap();
+        assert_eq!(result.path, path);
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
+        drop(sender);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn dropping_rtp_sender_stops_task_and_finalizes_recorder() {
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_string_lossy().into_owned();
+        drop(temp);
+        handle
+            .set_recorder(
+                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        drop(sender);
+        let result = recv_recorder_finished(&mut recorder_finished_rx)
+            .await
+            .unwrap();
+        assert_eq!(result.path, path);
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         drop(handle);
         let _ = std::fs::remove_file(path);
     }
@@ -609,8 +698,11 @@ mod tests {
     async fn sipflow_does_not_flush_shared_backend_when_handle_is_dropped() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, sender, _join) = RecorderHandle::new();
-        handle.set_recorder(Box::new(initial), None).await.unwrap();
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -620,6 +712,8 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         assert_eq!(backend.recorded.load(Ordering::SeqCst), 1);
         assert!(!backend.flushed.load(Ordering::SeqCst));
     }
@@ -628,8 +722,11 @@ mod tests {
     async fn stop_without_file_recorder_finishes_with_no_file_result() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, sender, join) = RecorderHandle::new();
-        handle.set_recorder(Box::new(initial), None).await.unwrap();
+        let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
 
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -640,20 +737,36 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(backend.recorded.load(Ordering::SeqCst), 1);
-        handle.stop().unwrap();
-        assert!(join.await.unwrap().unwrap().is_none());
+        assert!(handle.stop_recorder().await.unwrap().is_none());
+        assert!(handle.pause().is_ok());
+        drop(handle);
+        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         assert!(!backend.flushed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn setting_file_recorder_finalizes_previous_sipflow_recorder() {
+    async fn stop_then_set_another_recorder_keeps_task_alive() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, _sender, join) = RecorderHandle::new();
-        handle.set_recorder(Box::new(initial), None).await.unwrap();
+        let (handle, _sender, mut recorder_finished_rx) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
+
+        let error = handle
+            .set_recorder(
+                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("recording_already_active"));
+        assert!(handle.stop_recorder().await.unwrap().is_none());
 
         handle
             .set_recorder(
@@ -664,10 +777,11 @@ mod tests {
             .unwrap();
         assert!(!backend.flushed.load(Ordering::SeqCst));
 
-        handle.stop().unwrap();
-        let result = join.await.unwrap().unwrap().unwrap();
+        let result = handle.stop_recorder().await.unwrap().unwrap();
         assert_eq!(result.path, path);
         drop(handle);
+        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         let _ = std::fs::remove_file(path);
     }
 

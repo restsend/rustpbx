@@ -27,7 +27,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
 use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -97,7 +97,7 @@ pub struct MediaBridge {
     /// Control half of the call-scoped recording task, installed only when
     /// recording setup is enabled for the caller-facing A leg.
     recorder_handle: Option<RecorderHandle>,
-    recorder_join: Option<tokio::task::JoinHandle<RecordingCompletion>>,
+    recorder_finished_rx: Option<mpsc::UnboundedReceiver<RecordingCompletion>>,
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
@@ -162,7 +162,7 @@ impl MediaBridge {
             leg_b: None,
             route_active: false,
             recorder_handle: None,
-            recorder_join: None,
+            recorder_finished_rx: None,
             dtmf_bus,
             root_cancel: cancel,
             leg_wire_cancels: HashMap::new(),
@@ -190,9 +190,9 @@ impl MediaBridge {
         if self.recorder_handle.is_some() {
             return Err(anyhow!("recording task is already started"));
         }
-        let (handle, sender, join) = RecorderHandle::new();
+        let (handle, sender, recorder_finished_rx) = RecorderHandle::new();
         self.recorder_handle = Some(handle);
-        self.recorder_join = Some(join);
+        self.recorder_finished_rx = Some(recorder_finished_rx);
         Ok(sender)
     }
 
@@ -254,33 +254,20 @@ impl MediaBridge {
             .resume()
     }
 
-    /// Ask the recorder task to stop, then return its final result.
+    /// Finalize only the current recorder. The call-scoped capture task stays
+    /// alive and can accept another recorder later.
     pub async fn stop_recording(&mut self) -> RecordingCompletion {
-        let Some(join) = self.recorder_join.as_ref() else {
-            return Ok(None);
-        };
-        if !join.is_finished() {
-            self.recorder_handle
-                .as_ref()
-                .ok_or_else(|| anyhow!("recording task is unavailable"))?
-                .stop()?;
-        }
-        self.wait_recorder_result().await.unwrap_or(Ok(None))
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .stop_recorder()
+            .await
     }
 
-    /// Wait for the task to finish, either through Stop or max-duration expiry.
-    pub async fn wait_recorder_result(&mut self) -> Option<RecordingCompletion> {
-        let join = match self.recorder_join.as_mut() {
-            Some(join) => join,
-            None => return std::future::pending().await,
-        };
-        let result = join.await;
-        self.recorder_join = None;
-        self.recorder_handle = None;
-        Some(match result {
-            Ok(result) => result,
-            Err(error) => Err(anyhow!("recording task failed: {error}")),
-        })
+    /// Wait for a recorder completion reported independently of a control
+    /// command, such as max-duration expiry.
+    pub async fn recv_recorder_finished(&mut self) -> Option<RecordingCompletion> {
+        self.recorder_finished_rx.as_mut()?.recv().await
     }
 
     /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
