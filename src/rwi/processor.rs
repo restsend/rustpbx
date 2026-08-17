@@ -824,41 +824,24 @@ impl RwiCommandProcessor {
 
         let media = server.default_media_config();
 
-        // If routing out a named carrier trunk, respect the trunk's codec configuration.
-        // When no codecs are configured on the trunk, use the default full set (the
-        // conference bridge now sends whatever codec was negotiated, so there is no
-        // need to restrict to PCMU-only).
-        let originate_codec_types = if let Some(trunk_name) = req
+        // If routing out a named carrier trunk, respect its audio codec policy.
+        // Invalid or empty policies fall back to the default audio codec set.
+        let configured_audio_codecs = req
             .trunk
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            if let Ok(trunk) = Self::resolve_originate_trunk(&server, trunk_name) {
-                if !trunk.codec.is_empty() {
-                    let codecs: Vec<audio_codec::CodecType> = trunk
-                        .codec
-                        .iter()
-                        .filter_map(|c| audio_codec::CodecType::try_from(c.as_str()).ok())
-                        .collect();
-                    if !codecs.is_empty() {
-                        codecs
-                    } else {
-                        crate::media::MediaNegotiator::default_rtp_codecs()
-                    }
-                } else {
-                    crate::media::MediaNegotiator::default_rtp_codecs()
-                }
-            } else {
-                crate::media::MediaNegotiator::default_rtp_codecs()
-            }
-        } else {
-            crate::media::MediaNegotiator::default_rtp_codecs()
-        };
-        let originate_codecs: Vec<crate::media::CodecInfo> = originate_codec_types
-            .into_iter()
-            .map(crate::media::MediaNegotiator::codec_info_for_type)
-            .collect();
+            .and_then(|trunk_name| Self::resolve_originate_trunk(&server, trunk_name).ok())
+            .map(|trunk| {
+                trunk
+                    .codec
+                    .iter()
+                    .filter_map(|codec| audio_codec::CodecType::try_from(codec.as_str()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| crate::media::MediaNegotiator::default_rtp_codecs());
+        let originate_codecs =
+            crate::media::MediaNegotiator::build_local_rtp_codec_offer(&configured_audio_codecs);
 
         let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
@@ -1171,10 +1154,7 @@ impl RwiCommandProcessor {
 
             // Build the real A leg first and send its exact local description
             // in the INVITE. The answer will be applied back to this same leg.
-            let sdp_offer = match session
-                .prepare_originate_caller_leg(originate_codecs)
-                .await
-            {
+            let sdp_offer = match session.prepare_originate_caller_leg(originate_codecs).await {
                 Ok(offer) => offer,
                 Err(e) => {
                     tracing::warn!(call_id = %call_id, error = %e, "failed to prepare originate media");
@@ -1192,8 +1172,7 @@ impl RwiCommandProcessor {
             };
             invite_option.offer = Some(sdp_offer.into_bytes());
 
-            let (caller_state_tx, mut caller_state_rx) =
-                tokio::sync::mpsc::unbounded_channel();
+            let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut invitation = dialog_layer
                 .do_invite(invite_option, caller_state_tx)
                 .boxed();

@@ -376,6 +376,26 @@ impl MediaNegotiator {
         }
     }
 
+    /// Build the codec capabilities for a locally generated RTP offer.
+    ///
+    /// Codec policy entries describe audio codecs only. Telephone-event is
+    /// derived from the resulting audio clock rates so an Opus offer gets
+    /// telephone-event/48000 while narrowband codecs get telephone-event/8000.
+    pub fn build_local_rtp_codec_offer(codec_types: &[CodecType]) -> Vec<CodecInfo> {
+        let mut result = Vec::new();
+        for codec_type in codec_types.iter().copied().filter(CodecType::is_audio) {
+            if !result
+                .iter()
+                .any(|codec: &CodecInfo| codec.codec == codec_type)
+            {
+                result.push(Self::codec_info_for_type(codec_type));
+            }
+        }
+
+        Self::append_telephone_events_for_audio(&mut result, &[], true);
+        result
+    }
+
     fn codec_info_rtpmap(info: &CodecInfo) -> String {
         let codec_name = info.codec_name();
 
