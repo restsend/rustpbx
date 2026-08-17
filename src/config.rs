@@ -138,6 +138,18 @@ pub enum RecordingType {
     S3,
 }
 
+/// Signaling point at which `auto_start` installs the selected recorder.
+#[derive(Debug, Clone, Deserialize, Serialize, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingAutoStartAt {
+    /// Start as soon as the caller media connection is set up, whether that
+    /// connection is exposed through a provisional or final response.
+    #[default]
+    Media,
+    /// Wait until caller media is ready for the final 200 response.
+    Answer,
+}
+
 /// `[proxy.transcript]` section. Only the `remote` sub-table is typed; the
 /// offline sensevoice fields (`command`, `models_path`, ...) live in the raw
 /// TOML and are parsed ad-hoc by the transcript addon.
@@ -165,6 +177,7 @@ pub struct RecordingPolicy {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callee_deny: Vec<String>,
     pub auto_start: Option<bool>,
+    pub auto_start_at: Option<RecordingAutoStartAt>,
     pub filename_pattern: Option<String>,
     pub samplerate: Option<u32>,
     pub ptime: Option<u32>,
@@ -193,6 +206,7 @@ impl RecordingPolicy {
         crate::call::CallRecordingConfig {
             enabled: self.enabled.unwrap_or(false),
             auto_start: self.auto_start.unwrap_or(true),
+            auto_start_at: self.auto_start_at.unwrap_or_default(),
             force_file: self.force_file.unwrap_or(false),
             stereo_swap: self.stereo_swap.unwrap_or(false),
             option: None,

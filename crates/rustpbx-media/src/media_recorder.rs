@@ -213,6 +213,9 @@ enum RecorderCommand {
         max_duration: Option<Duration>,
         reply: oneshot::Sender<Result<()>>,
     },
+    HasRecorder {
+        reply: oneshot::Sender<bool>,
+    },
     Pause,
     Resume,
     Stop,
@@ -248,6 +251,18 @@ impl RecorderHandle {
         });
         let sender = RecorderSender::new(rtp_tx);
         (Self { tx: command_tx }, sender, join)
+    }
+
+    pub(crate) async fn has_recorder(&self) -> bool {
+        let (reply, response) = oneshot::channel();
+        if self
+            .tx
+            .send(RecorderCommand::HasRecorder { reply })
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
     }
 
     pub(crate) async fn set_recorder(
@@ -361,6 +376,9 @@ impl RecorderTask {
                         } => {
                             let result = self.set_recorder(recorder, max_duration).await;
                             let _ = reply.send(result);
+                        }
+                        RecorderCommand::HasRecorder { reply } => {
+                            let _ = reply.send(self.recorder.is_some());
                         }
                         RecorderCommand::Pause => self.paused = true,
                         RecorderCommand::Resume => self.paused = false,
@@ -535,6 +553,7 @@ mod tests {
     #[tokio::test]
     async fn file_stop_returns_task_result() {
         let (handle, sender, join) = RecorderHandle::new();
+        assert!(!handle.has_recorder().await);
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -546,9 +565,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(handle.has_recorder().await);
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         handle.stop().unwrap();
         let result = join.await.unwrap().unwrap().unwrap();
+        assert!(!handle.has_recorder().await);
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 
@@ -578,6 +599,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        assert!(!handle.has_recorder().await);
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 

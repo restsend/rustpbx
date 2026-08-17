@@ -1596,6 +1596,8 @@ pub(crate) struct RecordingPolicyPayload {
     #[serde(default)]
     auto_start: Option<bool>,
     #[serde(default)]
+    auto_start_at: Option<crate::config::RecordingAutoStartAt>,
+    #[serde(default)]
     filename_pattern: Option<Option<String>>,
     #[serde(default)]
     samplerate: Option<Option<u32>>,

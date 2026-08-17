@@ -510,6 +510,7 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
         enabled: true,
         option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
         auto_start: false,
+        auto_start_at: crate::config::RecordingAutoStartAt::Media,
         force_file: true,
         stereo_swap: false,
     };
@@ -540,13 +541,14 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
 }
 
 #[tokio::test]
-async fn file_recording_auto_starts_at_media_setup() {
+async fn file_recording_default_starts_at_media_setup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("auto.wav").to_string_lossy().into_owned();
     let recording = crate::call::CallRecordingConfig {
         enabled: true,
         option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
         auto_start: true,
+        auto_start_at: crate::config::RecordingAutoStartAt::Media,
         force_file: true,
         stereo_swap: false,
     };
@@ -556,10 +558,20 @@ async fn file_recording_auto_starts_at_media_setup() {
     let mut session = build_session(dialplan).await;
 
     setup_recording_test_media(&mut session).await;
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .expect("media bridge")
+            .has_recorder()
+            .await,
+        "caller media setup must install the recorder implementation"
+    );
 
     assert!(
         std::path::Path::new(&path).exists(),
-        "file recorder must be initialized as soon as caller media setup completes"
+        "media timing must initialize the file recorder during caller media setup"
     );
     if let Some(mut bridge) = session.media.bridge.take() {
         assert!(
@@ -575,7 +587,68 @@ async fn file_recording_auto_starts_at_media_setup() {
 }
 
 #[tokio::test]
-async fn sipflow_recording_auto_starts_at_media_setup() {
+async fn file_recording_answer_timing_waits_after_media_setup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("answer-only.wav")
+        .to_string_lossy()
+        .into_owned();
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
+        auto_start: true,
+        auto_start_at: crate::config::RecordingAutoStartAt::Answer,
+        force_file: true,
+        stereo_swap: false,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "answer timing must not install the recorder during caller media setup"
+    );
+    assert!(
+        !session
+            .media
+            .bridge
+            .as_ref()
+            .expect("media bridge")
+            .has_recorder()
+            .await,
+        "the recording task must remain implementation-free until answer"
+    );
+
+    session
+        .set_auto_recorder()
+        .await
+        .expect("start recorder at final answer");
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .expect("media bridge")
+            .has_recorder()
+            .await,
+        "the recording task must report the final-answer implementation"
+    );
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "answer timing must install the recorder at the final answer"
+    );
+    if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.stop_recording().await.expect("stop file recorder");
+        bridge.close();
+    }
+}
+
+#[tokio::test]
+async fn sipflow_recording_default_starts_at_media_setup() {
     use rustrtc::peer_connection::RtpObserver;
 
     let backend = Arc::new(CountingSipflowBackend {
@@ -590,6 +663,7 @@ async fn sipflow_recording_auto_starts_at_media_setup() {
         enabled: true,
         option: None,
         auto_start: true,
+        auto_start_at: crate::config::RecordingAutoStartAt::Media,
         force_file: false,
         stereo_swap: false,
     };
@@ -643,6 +717,7 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
         enabled: true,
         option: None,
         auto_start: false,
+        auto_start_at: crate::config::RecordingAutoStartAt::Media,
         force_file: false,
         stereo_swap: false,
     };

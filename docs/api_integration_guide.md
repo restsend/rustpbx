@@ -182,6 +182,7 @@ Push call details immediately after a call ends. Recording media upload is confi
   [recording]
   enabled = true
   auto_start = true
+  auto_start_at = "media"
   type = "http"
   path = "./config/recorders"
   url = "https://your-api.com/pbx/recording"
@@ -332,7 +333,7 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 
 ### Scenario D: Compliance Recording
 
-Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). `[recording].enabled` controls RTP capture for both backends. When `auto_start = true`, the selected backend starts after caller media negotiation completes. When both sections are configured, sipflow takes precedence unless `force_file = true`, avoiding duplicate media capture.
+Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). `[recording].enabled` controls RTP capture for both backends. When `auto_start = true`, `auto_start_at = "media"` (the default) installs the selected backend immediately after the first caller-media connection is set up. That connection may be exposed through a provisional response or directly through the final 200 response. Set `auto_start_at = "answer"` to delay installation until caller media is ready for the final 200 response. When both sections are configured, sipflow takes precedence unless `force_file = true`, avoiding duplicate media capture.
 
 #### Option 1: SipFlow recording (recommended)
 
@@ -342,6 +343,7 @@ SipFlow captures raw RTP packets and SIP messages, then generates WAV / JSONL on
 [recording]
 enabled = true
 auto_start = true
+auto_start_at = "media"
 
 [sipflow]
 type = "local"
@@ -366,6 +368,7 @@ When the sipflow backend is present, `[recording].enabled` enables both media an
 [recording]
 enabled = true
 auto_start = true
+auto_start_at = "media"
 # No [sipflow] section — falls back to local .wav file
 ```
 

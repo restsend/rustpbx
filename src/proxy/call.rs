@@ -1025,6 +1025,9 @@ impl CallModule {
                 if overrides.auto_start.is_some() {
                     merged.auto_start = overrides.auto_start;
                 }
+                if overrides.auto_start_at.is_some() {
+                    merged.auto_start_at = overrides.auto_start_at;
+                }
                 if overrides.filename_pattern.is_some() {
                     merged.filename_pattern = overrides.filename_pattern.clone();
                 }
@@ -1163,6 +1166,7 @@ impl CallModule {
 
         dialplan.recording.enabled = true;
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
+        dialplan.recording.auto_start_at = policy.auto_start_at.unwrap_or_default();
         dialplan.recording.force_file = force_file;
         dialplan
     }
@@ -3008,6 +3012,7 @@ mod tests {
             secret_key: Some("secret".to_string()),
             path: Some("/tmp/rustpbx-main-recordings".to_string()),
             auto_start: Some(true),
+            auto_start_at: Some(crate::config::RecordingAutoStartAt::Answer),
             force_file: Some(true),
             ..Default::default()
         });
@@ -3060,6 +3065,10 @@ mod tests {
 
         assert!(dialplan.recording.enabled);
         assert!(!dialplan.recording.auto_start);
+        assert_eq!(
+            dialplan.recording.auto_start_at,
+            crate::config::RecordingAutoStartAt::Answer
+        );
         assert!(dialplan.recording.force_file);
         let option = dialplan
             .recording

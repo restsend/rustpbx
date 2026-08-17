@@ -1,5 +1,5 @@
 use crate::{
-    config::{MediaProxyMode, RecordingPolicy, RouteResult},
+    config::{MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RouteResult},
     media::recorder::RecorderOption,
     proxy::routing::VideoPolicy,
 };
@@ -638,8 +638,10 @@ pub struct CallRecordingConfig {
     pub enabled: bool,
     /// Recording configuration
     pub option: Option<RecorderOption>,
-    /// Auto start the selected recorder when caller media setup completes.
+    /// Automatically install the selected recorder at `auto_start_at`.
     pub auto_start: bool,
+    /// Signaling point at which automatic recording installs its backend.
+    pub auto_start_at: RecordingAutoStartAt,
     /// When true, use the legacy WAV file recorder instead of SipFlow for
     /// media capture. SipFlow captures SIP signalling only.
     pub force_file: bool,
@@ -654,6 +656,7 @@ impl CallRecordingConfig {
             enabled: false,
             option: None,
             auto_start: true,
+            auto_start_at: RecordingAutoStartAt::default(),
             force_file: false,
             stereo_swap: false,
         }

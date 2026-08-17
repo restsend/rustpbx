@@ -1086,11 +1086,13 @@ impl SipSession {
         Ok(Some(sender))
     }
 
-    /// Once caller media is negotiated, install the recorder implementation
-    /// selected by routing when automatic recording is enabled.
-    async fn set_auto_recorder(&mut self) -> Result<()> {
-        let recording = &self.context.dialplan.recording;
-        if !recording.enabled || !recording.auto_start {
+    /// Install the recorder implementation selected for this call. Signaling
+    /// call sites decide when automatic installation is allowed.
+    pub(crate) async fn set_auto_recorder(&mut self) -> Result<()> {
+        let recording = self.context.dialplan.recording.clone();
+        if let Some(bridge) = self.bridge()
+            && bridge.has_recorder().await
+        {
             return Ok(());
         }
 
@@ -1107,7 +1109,7 @@ impl SipSession {
                 .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
                 .start_recording(path, 2, false, None)
                 .await?;
-            debug!(session_id = %self.id, backend = "file", "auto recorder activated at media setup");
+            debug!(session_id = %self.id, backend = "file", "auto recorder installed");
             return Ok(());
         }
 
@@ -1125,7 +1127,7 @@ impl SipSession {
             .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
             .set_recorder(Box::new(recorder), None)
             .await?;
-        debug!(session_id = %self.id, backend = "sipflow", "auto recorder activated at media setup");
+        debug!(session_id = %self.id, backend = "sipflow", "auto recorder installed");
         Ok(())
     }
 
@@ -2581,9 +2583,12 @@ impl SipSession {
         // here ensures LegSide::A represents the internal/PBX side, while
         // LegSide::B (created by ensure_originate_callee_leg) represents the
         // external SIP callee.
+        let mut caller_media_ready = false;
         if self.media.bridge.is_some() && self.media.caller_offer.is_some() {
             if let Err(e) = self.ensure_caller_leg().await {
                 warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge A leg");
+            } else {
+                caller_media_ready = true;
             }
         } else if let Some(sdp) = caller_sdp {
             // Fallback: no caller_offer available — apply callee SDP directly
@@ -2599,7 +2604,6 @@ impl SipSession {
                 warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge leg");
                 return;
             }
-            let mut caller_media_ready = false;
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
                     if leg.negotiated().is_none() {
@@ -2614,11 +2618,16 @@ impl SipSession {
                     }
                 }
             }
-            if caller_media_ready
-                && let Err(error) = self.set_auto_recorder().await
-            {
-                warn!(session_id = %self.id, %error, "Auto recorder activation at media setup failed");
-            }
+        }
+        let auto_start_on_answer = {
+            let recording = &self.context.dialplan.recording;
+            recording.enabled && recording.auto_start
+        };
+        if caller_media_ready
+            && auto_start_on_answer
+            && let Err(error) = self.set_auto_recorder().await
+        {
+            warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
 
         // The caller dialog is already answered when it is attached. Its
@@ -4998,10 +5007,6 @@ impl SipSession {
         mb.replace_leg(crate::media::media_bridge::LegSide::A, leg)
             .await;
 
-        if let Err(error) = self.set_auto_recorder().await {
-            warn!(session_id = %self.id, %error, "Auto recorder activation at media setup failed");
-        }
-
         // Video policy = strip: disable video on the media path — the answer's
         // video m-line is forced inactive (port 0) so the caller can't send
         // video the proxy won't relay.
@@ -5023,6 +5028,18 @@ impl SipSession {
                 rustrtc::TransportMode::WebRtc
             },
         );
+
+        let auto_start_on_media_setup = {
+            let recording = &self.context.dialplan.recording;
+            recording.enabled
+                && recording.auto_start
+                && recording.auto_start_at == crate::config::RecordingAutoStartAt::Media
+        };
+        if auto_start_on_media_setup
+            && let Err(error) = self.set_auto_recorder().await
+        {
+            warn!(session_id = %self.id, %error, "Auto recorder installation after caller media setup failed");
+        }
 
         Ok(())
     }
@@ -5841,22 +5858,25 @@ impl SipSession {
                 };
                 self.media.answer = caller_answer.clone();
 
+                {
+                    let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
+                    if let Some(callee_leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
+                        let sdp_type = callee_sdp_type;
+                        callee_leg.apply_sdp(callee_sdp_value, sdp_type).await?;
+                    }
+
+                    // Keep the actual sender, egress codec, bridge profile and
+                    // recorder profile aligned with the SDP returned to caller.
+                    // This must happen before accept() activates the route.
+                    if let (Some(leg), Some(answer)) = (
+                        mb.leg(crate::media::media_bridge::LegSide::A),
+                        caller_answer.as_deref(),
+                    ) {
+                        leg.apply_profile_from_sdp(answer).await?;
+                    }
+                }
+
                 let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-                if let Some(callee_leg) = mb.leg(crate::media::media_bridge::LegSide::B) {
-                    let sdp_type = callee_sdp_type;
-                    callee_leg.apply_sdp(callee_sdp_value, sdp_type).await?;
-                }
-
-                // Keep the actual sender, egress codec, bridge profile and
-                // recorder profile aligned with the SDP returned to caller.
-                // This must happen before accept() activates the route.
-                if let (Some(leg), Some(answer)) = (
-                    mb.leg(crate::media::media_bridge::LegSide::A),
-                    caller_answer.as_deref(),
-                ) {
-                    leg.apply_profile_from_sdp(answer).await?;
-                }
-
                 mb.accept(crate::media::media_bridge::LegSide::B).await;
                 mb.accept(crate::media::media_bridge::LegSide::A).await;
                 if !is_early_media {
@@ -6522,6 +6542,20 @@ impl SipSession {
         } else {
             self.ensure_caller_answer_sdp().await
         };
+
+        // Caller media setup is complete and the final response is ready.
+        // The answer timing installs its recorder immediately before 200 OK.
+        let auto_start_on_answer = {
+            let recording = &self.context.dialplan.recording;
+            recording.enabled
+                && recording.auto_start
+                && recording.auto_start_at == crate::config::RecordingAutoStartAt::Answer
+        };
+        if auto_start_on_answer
+            && let Err(error) = self.set_auto_recorder().await
+        {
+            warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
+        }
 
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();

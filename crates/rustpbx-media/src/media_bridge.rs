@@ -232,6 +232,15 @@ impl MediaBridge {
         self.recorder_handle.is_some()
     }
 
+    /// Whether the recording task currently owns an initialized recorder
+    /// implementation.
+    pub async fn has_recorder(&self) -> bool {
+        match self.recorder_handle.as_ref() {
+            Some(handle) => handle.has_recorder().await,
+            None => false,
+        }
+    }
+
     pub fn pause_recording(&self) -> Result<()> {
         self.recorder_handle
             .as_ref()
