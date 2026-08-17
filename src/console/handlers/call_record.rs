@@ -1888,7 +1888,7 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
 
     let (sum_cast, avg_cast) = match db.get_database_backend() {
         DatabaseBackend::Sqlite => ("INTEGER", "REAL"),
-        DatabaseBackend::MySql => ("SIGNED", "DOUBLE"),
+        DatabaseBackend::MySql => ("SIGNED", "REAL"),
         DatabaseBackend::Postgres => ("BIGINT", "FLOAT8"),
         _ => ("BIGINT", "FLOAT8"),
     };
