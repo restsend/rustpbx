@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 LABEL maintainer="shenjindi@miuda.ai"
 LABEL org.opencontainers.image.source="https://github.com/restsend/rustpbx"

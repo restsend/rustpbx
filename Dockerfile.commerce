@@ -1,4 +1,4 @@
-FROM docker.m.daocloud.io/library/debian:bookworm
+FROM docker.m.daocloud.io/library/debian:trixie
 
 LABEL maintainer="shenjindi@miuda.ai"
 LABEL org.opencontainers.image.source="https://github.com/restsend/rustpbx"
